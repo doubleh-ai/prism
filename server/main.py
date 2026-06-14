@@ -211,7 +211,15 @@ async def api_view_report(conv_id: str, filename: str, request: Request):
     Reports are stored under the skill's directory:
     ~/.claude/skills/{skill_dir}/reports/{filename}
     """
-    u = require_auth(request)
+    from urllib.parse import unquote
+
+    u = require_auth(request, optional=True)
+    if not u:
+        # Redirect to login page for browser access
+        return RedirectResponse("/login")
+
+    # URL-decode the filename (FastAPI's path converter may keep it encoded)
+    filename = unquote(filename)
 
     # Prevent path traversal
     if ".." in filename or filename.startswith("/"):
@@ -228,15 +236,20 @@ async def api_view_report(conv_id: str, filename: str, request: Request):
             [conv_id, u]
         ).fetchone()
     if not row:
-        raise HTTPException(404, "对话不存在")
+        return HTMLResponse("<h1>404</h1><p>对话不存在或已删除</p>", status_code=404)
 
     skill_info = SKILL_MAP.get(row["skill"])
     if not skill_info:
-        raise HTTPException(404, "技能未注册")
+        return HTMLResponse("<h1>404</h1><p>技能未注册</p>", status_code=404)
 
     file_path = SKILLS_HOME / skill_info["dir"] / "reports" / filename
+    log.info(f"Report request: conv={conv_id} skill={row['skill']} path={file_path} exists={file_path.exists()}")
+
     if not file_path.exists():
-        raise HTTPException(404, "报告文件不存在")
+        return HTMLResponse(
+            f"<h1>404</h1><p>报告文件不存在</p><pre>{filename}</pre>",
+            status_code=404,
+        )
 
     # Determine MIME type
     mime_map = {
@@ -247,11 +260,11 @@ async def api_view_report(conv_id: str, filename: str, request: Request):
         ".md": "text/markdown; charset=utf-8",
         ".json": "application/json",
     }
-    return FileResponse(
-        str(file_path),
-        media_type=mime_map.get(ext, "application/octet-stream"),
-        filename=filename,
-    )
+    mime = mime_map.get(ext, "application/octet-stream")
+    # Don't set filename for HTML (avoids Content-Disposition encoding issues with Chinese chars)
+    if ext in (".html", ".htm"):
+        return FileResponse(str(file_path), media_type=mime)
+    return FileResponse(str(file_path), media_type=mime, filename=filename)
 
 
 if __name__ == "__main__":

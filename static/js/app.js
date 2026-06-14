@@ -709,7 +709,8 @@ var App = {
     // Auto-link report file paths like reports/xxx.html
     if (!this.convId || !html) return html;
     return html.replace(/(?<!["'=>])(reports\/[^\s<>"')]+?\.(?:html|htm|pdf|csv|md))/gi, function(match) {
-      return '<a href="/api/reports/' + App.convId + '/' + match.replace(/^reports\//, '') + '" target="_blank" class="report-link" title="在新标签页打开报告">' + match + '</a>';
+      var fname = match.replace(/^reports\//, '');
+      return '<a href="/api/reports/' + App.convId + '/' + encodeURIComponent(fname) + '" target="_blank" class="report-link" title="在新标签页打开报告">' + match + '</a>';
     });
   },
 
