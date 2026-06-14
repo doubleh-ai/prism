@@ -1,0 +1,36 @@
+# Secrets & environment
+.env
+*.pem
+*.key
+secret_key
+config/claude-settings.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+data/
+*.db
+app.log
+*.log
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Skills — tracking data is runtime-generated, should not be committed
+skills/*/tracking/*.json
+skills/*/tracking/*.csv
+skills/*/__pycache__/

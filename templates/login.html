@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Prism · 登录</title>
+<link rel="stylesheet" href="/static/css/app.css?v=21">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%233b5d8a'/><stop offset='100%' stop-color='%236b95c8'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='%231c1a16'/><circle cx='16' cy='16' r='9' fill='none' stroke='url(%23g)' stroke-width='1.8'/><circle cx='16' cy='16' r='3.5' fill='url(%23g)' opacity='.9'/></svg>">
+</head><body>
+
+<div class="login-card">
+  <h1>Prism</h1>
+  <p>AI 投资分析 · 私人研究助手</p>
+  <form onsubmit="event.preventDefault(); doLogin()">
+    <input id="username" placeholder="用户名" autocomplete="username" required>
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <div class="login-error" id="loginError"></div>
+    <button type="submit">登 录</button>
+  </form>
+</div>
+
+<script>
+async function doLogin() {
+  var u = document.getElementById('username').value.trim();
+  var p = document.getElementById('password').value;
+  var err = document.getElementById('loginError');
+  err.style.display = 'none';
+  try {
+    var r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: u, password: p})
+    });
+    if (r.ok) { window.location.href = '/'; return false; }
+    if (r.status === 403) { err.textContent = '用户名或密码错误'; }
+    else if (r.status === 429) { err.textContent = '请求过于频繁，请稍后再试'; }
+    else { err.textContent = '登录失败 (' + r.status + ')'; }
+  } catch(e) { err.textContent = '网络连接失败'; }
+  err.style.display = 'block';
+  return false;
+}
+document.getElementById('password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+</script>
+</body></html>
