@@ -155,6 +155,55 @@ async def api_chat_cancel(request: Request):
 
 # ── Report viewer ──
 _REPORT_ALLOWED_EXT = {".html", ".htm", ".pdf", ".csv", ".md", ".json"}
+_REPORT_KIND = {".html": "html", ".htm": "html", ".pdf": "pdf", ".csv": "csv", ".md": "md", ".json": "json"}
+
+
+@app.get("/api/convs/{conv_id}/reports")
+async def api_list_reports(conv_id: str, request: Request):
+    """List all report files generated for a conversation's skill.
+
+    Reports are scanned from ~/.claude/skills/{skill_dir}/reports/ — the
+    same directory served by /api/reports/. The list is filtered to
+    extensions the viewer can render inline (HTML/MD) plus PDF.
+    """
+    u = require_auth(request)
+    with get_db() as db:
+        row = db.execute(
+            "SELECT skill FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+            [conv_id, u]
+        ).fetchone()
+    if not row:
+        return {"reports": []}
+
+    skill_info = SKILL_MAP.get(row["skill"])
+    if not skill_info:
+        return {"reports": []}
+
+    reports_dir = SKILLS_HOME / skill_info["dir"] / "reports"
+    if not reports_dir.exists():
+        return {"reports": []}
+
+    out = []
+    try:
+        for p in sorted(reports_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if not p.is_file():
+                continue
+            ext = os.path.splitext(p.name)[1].lower()
+            if ext not in _REPORT_ALLOWED_EXT:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            out.append({
+                "filename": p.name,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "kind": _REPORT_KIND.get(ext, "file"),
+            })
+    except OSError:
+        pass
+    return {"reports": out}
 
 # ── Term explanation cache ──
 import asyncio

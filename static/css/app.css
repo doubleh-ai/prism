@@ -410,13 +410,52 @@ pre:hover .copy-btn,.copy-btn:hover{opacity:1}
 .dark .error-banner .retry-btn{background:#2a1a20;border-color:#3a2028;color:#fca5a5}
 .error-banner .retry-btn:hover{background:#fef2f2}
 
+/* ═══ Reports panel & inline viewer ═══ */
+.reports-card{max-width:560px}
+.reports-empty{text-align:center;color:var(--text3);font-size:13px;padding:32px}
+.reports-list{display:flex;flex-direction:column}
+.reports-item{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--border);font-size:13px;transition:background .1s;cursor:pointer}
+.reports-item:last-child{border-bottom:none}
+.reports-item:hover{background:var(--bg2)}
+.reports-kind{flex-shrink:0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;background:var(--accent-bg);color:var(--accent);font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.5px;border:1px solid var(--accent-dim)}
+.reports-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.reports-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.reports-sub{color:var(--text3);font-size:11px;font-family:var(--mono)}
+.reports-open{flex-shrink:0;font-size:11px;color:var(--accent);font-family:var(--mono);padding:4px 10px;border:1px solid var(--accent-dim);border-radius:var(--r);background:var(--accent-bg)}
+.reports-item:hover .reports-open{background:var(--accent);color:#fff;border-color:var(--accent)}
+.reports-trigger{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;margin:6px 0 0;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-dim);border-radius:var(--r);font-size:12px;font-family:var(--mono);cursor:pointer;transition:all var(--dur-fast)}
+.reports-trigger:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.reports-trigger::before{content:'';width:6px;height:6px;background:currentColor;border-radius:50%;opacity:.7}
+
+/* Inline report viewer — pinned above the input, scrolls with messages */
+.report-viewer{position:absolute;left:0;right:0;bottom:0;top:0;background:var(--bg);z-index:50;display:flex;flex-direction:column;animation:reportIn .25s var(--ease-out) both}
+@keyframes reportIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.report-viewer-bar{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:12px;gap:12px;flex-shrink:0}
+.report-viewer-title{font-family:var(--mono);color:var(--text);font-size:12px;letter-spacing:.3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.report-viewer-actions{display:flex;gap:6px;flex-shrink:0}
+.report-viewer-act{background:var(--bg3);color:var(--text2);border:1px solid var(--border);padding:4px 12px;border-radius:var(--r);cursor:pointer;font-family:var(--mono);font-size:11px;transition:all .15s}
+.report-viewer-act:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.report-viewer-frame{flex:1;width:100%;border:none;background:#fff}
+
+/* Inline "📊 查看报告" pill that appears at the bottom of an assistant
+   message after streaming finishes — gives a clear "report is ready" cue. */
+.report-ready{display:inline-flex;align-items:center;gap:6px;margin:10px 0 0;padding:6px 12px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-dim);border-radius:var(--r);font-size:12px;font-family:var(--mono);cursor:pointer;transition:all var(--dur-fast);user-select:none}
+.report-ready:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.report-ready::before{content:'';width:5px;height:5px;background:currentColor;border-radius:50%}
+
+/* Reports button (file-cabinet icon) in the input zone */
+.reports-zone-btn{background:var(--bg3);color:var(--text2);width:34px;height:34px}
+.reports-zone-btn:hover{background:var(--accent-bg);color:var(--accent)}
+.reports-zone-btn.has-reports{color:var(--accent);background:var(--accent-bg);border:1px solid var(--accent-dim)}
+
 /* ═══ Responsive ═══ */
 @media(max-width:768px){
   .sidebar{display:none}
   .msg-inner{padding:0 16px}
-  .input-zone{padding:0 12px 20px}
+  .input-zone{padding:14px 12px 20px}
   .topbar{padding:8px 12px}
   .topbar select{font-size:11px}
+  .report-viewer-bar{padding:8px 12px}
 }
 @media(max-width:480px){
   :root{--msg-w:100%}

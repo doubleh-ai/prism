@@ -197,6 +197,7 @@ var App = {
     this.convId = c.id; this.msgs = [];
     if (!skipWelcome) this.showWelcome();
     await this.loadConvs();
+    this._refreshReportsButton();
   },
 
   openConv: async function(id) {
@@ -208,6 +209,7 @@ var App = {
       this.renderAll(); this.loadConvs();
       // Re-attach to the in-flight stream so the typewriter effect resumes.
       this._reattachStream();
+      this._refreshReportsButton();
       return;
     }
     var r = await this.api('/api/convs/'+id);
@@ -219,6 +221,27 @@ var App = {
     }
     var c = await r.json(); this.msgs = c.messages; this.skill = c.skill || 'bottleneck-hunter';
     this.renderAll(); this.loadConvs();
+    this._refreshReportsButton();
+  },
+
+  /* Show/hide the reports button in the input zone based on what reports
+     are available for the current conversation. */
+  _refreshReportsButton: async function() {
+    var btn = document.getElementById('reportsBtn');
+    if (!btn) return;
+    if (!this.convId) { btn.style.display = 'none'; btn.classList.remove('has-reports'); return; }
+    var r = await this.api('/api/convs/' + this.convId + '/reports');
+    if (!r.ok) { btn.style.display = 'none'; return; }
+    var data = await r.json();
+    var n = (data.reports || []).length;
+    if (n > 0) {
+      btn.style.display = 'flex';
+      btn.classList.add('has-reports');
+      btn.title = '本对话有 ' + n + ' 份报告，点击查看';
+    } else {
+      btn.style.display = 'none';
+      btn.classList.remove('has-reports');
+    }
   },
 
   delConv: async function(id) {
@@ -289,6 +312,14 @@ var App = {
         self._handleGlossClick(term, termEl);
       } else if (!e.target.closest('#glossPanel')) {
         document.getElementById('glossPanel').style.display = 'none';
+      }
+      // Report links: open in inline viewer by default, new tab on shift/cmd/ctrl.
+      var reportEl = e.target.closest('.report-link');
+      if (reportEl) {
+        e.preventDefault();
+        var fname = reportEl.getAttribute('data-report') || '';
+        var newTab = e.shiftKey || e.metaKey || e.ctrlKey;
+        self.openReport(fname, { newTab: newTab });
       }
     });
   },
@@ -755,10 +786,74 @@ var App = {
   _linkifyReports: function(html) {
     // Auto-link report file paths like reports/xxx.html
     if (!this.convId || !html) return html;
+    var self = this;
     return html.replace(/(?<!["'=>])(reports\/[^\s<>"')]+?\.(?:html|htm|pdf|csv|md))/gi, function(match) {
       var fname = match.replace(/^reports\//, '');
-      return '<a href="/api/reports/' + App.convId + '/' + encodeURIComponent(fname) + '" target="_blank" class="report-link" title="在新标签页打开报告">' + match + '</a>';
+      var url = '/api/reports/' + App.convId + '/' + encodeURIComponent(fname);
+      return '<a href="' + url + '" class="report-link" title="点击内嵌查看报告 (Shift+点击 在新标签页打开)" data-report="' + escAttr(fname) + '">' + match + '</a>';
     });
+  },
+
+  /* ═══ Inline report viewer ═══ */
+  _currentReportUrl: '',
+
+  openReport: function(fname, opts) {
+    if (!this.convId) return;
+    opts = opts || {};
+    var url = '/api/reports/' + this.convId + '/' + encodeURIComponent(fname);
+    if (opts.newTab) { window.open(url, '_blank'); return; }
+    var frame = document.getElementById('reportFrame');
+    var title = document.getElementById('reportViewerTitle');
+    this._currentReportUrl = url;
+    frame.src = url;
+    title.textContent = fname;
+    document.getElementById('reportViewer').style.display = 'flex';
+  },
+
+  openReportInNewTab: function() {
+    if (this._currentReportUrl) window.open(this._currentReportUrl, '_blank');
+  },
+
+  closeReportViewer: function() {
+    var viewer = document.getElementById('reportViewer');
+    viewer.style.display = 'none';
+    // Clear the iframe so a stale document doesn't keep running.
+    document.getElementById('reportFrame').src = 'about:blank';
+    this._currentReportUrl = '';
+  },
+
+  /* List all reports for the current conversation. */
+  openReports: async function() {
+    if (!this.convId) return;
+    var r = await this.api('/api/convs/' + this.convId + '/reports');
+    if (!r.ok) return;
+    var data = await r.json();
+    var body = document.getElementById('reportsList');
+    if (!data.reports || !data.reports.length) {
+      body.innerHTML = '<div class="reports-empty">该对话还没有生成报告</div>';
+    } else {
+      body.innerHTML = '<div class="reports-list">' + data.reports.map(function(rep) {
+        var sz = rep.size < 1024 ? (rep.size + 'B')
+                : rep.size < 1024 * 1024 ? (Math.round(rep.size/1024) + 'KB')
+                : (Math.round(rep.size/1024/1024 * 10) / 10) + 'MB';
+        var d = new Date(rep.mtime * 1000);
+        var ds = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+
+                 String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+        return '<div class="reports-item" onclick="App.openReport(\'' + escAttr(rep.filename) + '\')">' +
+          '<div class="reports-kind">' + esc(rep.kind.toUpperCase().slice(0, 4)) + '</div>' +
+          '<div class="reports-meta">' +
+            '<div class="reports-name">' + esc(rep.filename) + '</div>' +
+            '<div class="reports-sub">' + ds + ' · ' + sz + '</div>' +
+          '</div>' +
+          '<span class="reports-open">查看</span>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+    document.getElementById('reportsModal').style.display = 'flex';
+  },
+
+  closeReports: function() {
+    document.getElementById('reportsModal').style.display = 'none';
   },
 
   /* ═══ Send & Stream ═══ */
@@ -927,6 +1022,12 @@ var App = {
     if (App.convId === sid) {
       App._buildTOC();
       App.loadConvs();
+      // Reports may have been generated during this stream — refresh the button.
+      App._refreshReportsButton();
+    } else {
+      // Even if the user is on a different conv, refresh anyway so when they
+      // switch back the button state is current.
+      self._refreshReportsButton();
     }
   },
 
@@ -973,6 +1074,7 @@ var App = {
     var loadingBar = document.getElementById('loadingBar');
     if (loadingBar) loadingBar.classList.remove('active');
     this.loadConvs();
+    this._refreshReportsButton();
   },
 
   /* ═══ Logout ═══ */
