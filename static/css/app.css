@@ -271,7 +271,7 @@ textarea:focus-visible{outline:none}
 @keyframes tagIn{from{opacity:0;transform:scale(.9) translateY(4px)}to{opacity:1;transform:none}}
 
 /* ═══ Input ═══ */
-.input-zone{max-width:var(--msg-w);margin:0 auto;width:100%;padding:0 28px 28px}
+.input-zone{max-width:var(--msg-w);margin:0 auto;width:100%;padding:14px 28px 28px;background:var(--bg);border-top:1px solid var(--border);box-shadow:0 -1px 0 var(--border),0 -8px 24px -16px rgba(0,0,0,.04);position:relative;z-index:5}
 .input-zone .skill-tag-block{margin:0 0 8px 2px}
 .input-wrap{display:flex;gap:10px;padding:12px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);transition:border-color .2s,box-shadow .2s;box-shadow:var(--shadow)}
 .input-wrap:focus-within{border-color:var(--accent-dim);box-shadow:0 0 0 3px rgba(59,93,138,.06)}
