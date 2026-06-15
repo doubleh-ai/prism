@@ -205,7 +205,10 @@ var App = {
     var s = Streams[id];
     if (s && s.active) {
       this.msgs = s.msgs; this.skill = s.skill || 'bottleneck-hunter';
-      this.renderAll(); this.loadConvs(); return;
+      this.renderAll(); this.loadConvs();
+      // Re-attach to the in-flight stream so the typewriter effect resumes.
+      this._reattachStream();
+      return;
     }
     var r = await this.api('/api/convs/'+id);
     if (!r.ok) {
@@ -305,24 +308,31 @@ var App = {
     var self = this;
     function tick() {
       var anyActive = false;
-      for (var sid in Streams) {
-        if (!Streams[sid].active) continue;
+      // Only advance the typewriter for the currently-active conversation.
+      // Background streams should keep their _displayLen untouched so that
+      // when the user switches back, the typewriter picks up where it left off.
+      var sid = App.convId;
+      var s = sid ? Streams[sid] : null;
+      if (s && s.active) {
         anyActive = true;
-        var s = Streams[sid];
         var m = s.msgs[s.msgIdx];
-        if (!m || m.role !== 'assistant') continue;
-        if (m._displayLen === undefined) m._displayLen = 0;
-        // Calculate total text length from chunks
-        var total = 0;
-        (m._chunks || []).forEach(function(c) { if (c.t === 'text') total += c.c.length; });
-        if (m._displayLen < total) {
-          // Reveal 2-5 chars per frame for natural reading pace
-          m._displayLen = Math.min(total, m._displayLen + 2 + Math.floor(Math.random() * 4));
-          if (App.convId === sid) {
+        if (m && m.role === 'assistant') {
+          if (m._displayLen === undefined) m._displayLen = 0;
+          // Calculate total text length from chunks
+          var total = 0;
+          (m._chunks || []).forEach(function(c) { if (c.t === 'text') total += c.c.length; });
+          if (m._displayLen < total) {
+            // Reveal 2-5 chars per frame for natural reading pace
+            m._displayLen = Math.min(total, m._displayLen + 2 + Math.floor(Math.random() * 4));
             var curMsgIdx = App.msgs.length - 1;
             if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') App.renderOne(curMsgIdx);
           }
         }
+      }
+      // Also keep the timer alive if any stream is still active elsewhere,
+      // so the loop can pick up when the user switches back.
+      for (var otherSid in Streams) {
+        if (Streams[otherSid].active && otherSid !== App.convId) { anyActive = true; break; }
       }
       if (anyActive) {
         self._twTimer = requestAnimationFrame(tick);
@@ -333,16 +343,31 @@ var App = {
     this._twTimer = requestAnimationFrame(tick);
   },
 
-  _stopTypewriter: function() {
+  _stopTypewriter: function(sid) {
     if (this._twTimer) {
       cancelAnimationFrame(this._twTimer);
       this._twTimer = null;
     }
-    // Clear displayLens so next renderAll shows full content
-    for (var sid in Streams) {
-      var m = Streams[sid].msgs[Streams[sid].msgIdx];
+    // Clear _displayLen only on the named stream (or the current conv if no sid).
+    var targetSid = sid || this.convId;
+    if (targetSid && Streams[targetSid]) {
+      var m = Streams[targetSid].msgs[Streams[targetSid].msgIdx];
       if (m) m._displayLen = undefined;
     }
+  },
+
+  /* Re-render any in-flight stream when the user switches to its conv.
+     The stream keeps its _displayLen so the typewriter effect resumes
+     from where it was left off. */
+  _reattachStream: function() {
+    var s = Streams[this.convId];
+    if (s && s.active) {
+      var m = s.msgs[s.msgIdx];
+      if (m && m.role === 'assistant' && m._chunks) {
+        this.renderOne(this.msgs.length - 1);
+      }
+    }
+    if (!this._twTimer) this._startTypewriter();
   },
 
   /* ═══ Rendering ═══ */
@@ -438,18 +463,31 @@ var App = {
     var el = document.getElementById('msgList');
     if (!this.msgs.length) { this.showWelcome(); return; }
     var self = this;
-    el.innerHTML = this.msgs.map(function(m) {
+    // Snapshot which message is currently being streamed on this conv.
+    // During streaming, m.content is plain text (not JSON) and m._chunks holds
+    // the live structure. We must render from _chunks to preserve tool steps,
+    // think blocks, and references.
+    var stream = Streams[this.convId];
+    var streamingLastIdx = (stream && stream.active) ? stream.msgIdx : -1;
+    el.innerHTML = this.msgs.map(function(m, idx) {
       if (m.role === 'user') return '<div class="msg user"><div class="msg-inner"><div class="msg-byline">You</div><div class="bubble">'+esc(m.content)+'</div></div></div>';
       try {
-        var text = m.content || '', chunks = [];
-        if (typeof text === 'string' && text.startsWith('{"text":')) {
-          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; } catch(e) {}
+        var text = m.content || '', chunks = null;
+        // Prefer the live _chunks array for the currently-streaming message;
+        // for any other message fall back to parsing the stored JSON content.
+        if (idx === streamingLastIdx && m._chunks && m._chunks.length) {
+          chunks = m._chunks;
+          text = m.content || '';
+        } else if (typeof text === 'string' && text.startsWith('{"text":')) {
+          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; } catch(e) { chunks = []; }
+        } else {
+          chunks = [];
         }
         // Pass refs through for final render
-        if (!m._refs && m._chunks) {
+        if (!m._refs && chunks) {
           m._refs = [];
-          for (var ci = 0; ci < m._chunks.length; ci++) {
-            if (m._chunks[ci].t === 'ref') m._refs.push(m._chunks[ci]);
+          for (var ci = 0; ci < chunks.length; ci++) {
+            if (chunks[ci].t === 'ref') m._refs.push(chunks[ci]);
           }
         }
         // Attach refs to the plain msg object so _renderMsg can see them
@@ -472,6 +510,15 @@ var App = {
     if (!m || m.role !== 'assistant') return;
     var chunks = m._chunks || [];
     var streaming = !!(Streams[this.convId] && Streams[this.convId].active);
+
+    // Ensure _refs is populated from _chunks when missing — renderOne can be
+    // called on completion before renderAll has had a chance to build _refs.
+    if (!m._refs && chunks.length) {
+      m._refs = [];
+      for (var rci = 0; rci < chunks.length; rci++) {
+        if (chunks[rci].t === 'ref') m._refs.push(chunks[rci]);
+      }
+    }
 
     if (chunks.length === 0 && !m.content) {
       bubbles[idx].innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
@@ -888,9 +935,12 @@ var App = {
     var loadingBar = document.getElementById('loadingBar');
     if (loadingBar) loadingBar.classList.remove('active');
     this._activeReader = null;
-    this._stopTypewriter();
+    this._stopTypewriter(sid);
     // Final full render for the completed message
     if (App.convId === sid) {
+      // Clear _displayLen so the final render shows the complete text.
+      var s = Streams[sid];
+      if (s && s.msgIdx != null && s.msgs && s.msgs[s.msgIdx]) s.msgs[s.msgIdx]._displayLen = undefined;
       var curMsgIdx = App.msgs.length - 1;
       if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') App.renderOne(curMsgIdx);
     }
@@ -902,11 +952,22 @@ var App = {
       try { this._activeReader.cancel(); } catch(e) {}
       this._activeReader = null;
     }
-    if (this.convId) {
-      await this.api('/api/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:this.convId})});
+    var sid = this.convId;
+    if (sid) {
+      await this.api('/api/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:sid})});
     }
-    delete Streams[this.convId];
-    this._stopTypewriter();
+    // Clear _displayLen on the stopped stream so the final render shows the
+    // full text we already have, not whatever the typewriter had reached.
+    if (sid && Streams[sid] && Streams[sid].msgs && Streams[sid].msgIdx != null) {
+      Streams[sid].msgs[Streams[sid].msgIdx]._displayLen = undefined;
+    }
+    delete Streams[sid];
+    this._stopTypewriter(sid);
+    // Re-render the message that was being generated.
+    if (this.msgs.length) {
+      var lastIdx = this.msgs.length - 1;
+      if (this.msgs[lastIdx] && this.msgs[lastIdx].role === 'assistant') this.renderOne(lastIdx);
+    }
     var btn = document.getElementById('sendBtn');
     btn.disabled = false; btn.classList.remove('stop-mode'); btn.onclick = App.send; btn.title = '发送 (Enter)';
     var loadingBar = document.getElementById('loadingBar');
