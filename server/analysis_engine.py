@@ -73,11 +73,14 @@ def _build_config() -> dict:
     return cfg
 
 
-async def start_analysis(ticker: str, name: str = "", date: str = "") -> str:
+async def start_analysis(ticker: str, name: str = "", date: str = "",
+                        username: str = "") -> str:
     """Launch an astock analysis in a background thread.
 
     Returns an *analysis_id* that can be used to stream progress via
     :func:`stream_events` or fetch the final report via :func:`get_report`.
+
+    *username* is stored so stream/report endpoints can enforce ownership.
     """
     _ensure_astock()
     from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -88,6 +91,7 @@ async def start_analysis(ticker: str, name: str = "", date: str = "") -> str:
         "id": aid,
         "ticker": ticker,
         "name": name,
+        "username": username,
         "status": "starting",
         "queue": queue,
         "report": None,

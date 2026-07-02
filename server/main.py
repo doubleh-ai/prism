@@ -390,7 +390,7 @@ async def api_explain_term(request: Request):
 
 
 # ── Astock Analysis Engine ──
-from .analysis_engine import start_analysis, stream_events, get_report
+from .analysis_engine import start_analysis, stream_events, get_report, _store, _sse as _analysis_sse
 from starlette.responses import StreamingResponse
 
 
@@ -407,7 +407,7 @@ async def api_analysis_start(request: Request):
     if not ticker:
         return JSONResponse({"error": "请提供股票代码"}, status_code=400)
     try:
-        aid = await start_analysis(ticker, name)
+        aid = await start_analysis(ticker, name, username=u)
         return {"analysis_id": aid, "status": "started"}
     except Exception as e:
         logging.getLogger("prism").exception("Failed to start analysis for %s: %s", ticker, e)
@@ -415,8 +415,15 @@ async def api_analysis_start(request: Request):
 
 
 @app.get("/api/analysis/{analysis_id}/stream")
-async def api_analysis_stream(analysis_id: str):
+async def api_analysis_stream(analysis_id: str, request: Request):
     """SSE stream of analysis progress events."""
+    u = require_auth(request)
+    entry = _store.get(analysis_id)
+    if not entry or entry.get("username") != u:
+        return StreamingResponse(
+            iter([_analysis_sse({"type": "error", "message": "分析不存在或无权访问"})]),
+            media_type="text/event-stream",
+        )
     async def _generate():
         async for event in stream_events(analysis_id):
             yield event
@@ -426,8 +433,12 @@ async def api_analysis_stream(analysis_id: str):
 
 
 @app.get("/api/analysis/{analysis_id}/report")
-async def api_analysis_report(analysis_id: str):
+async def api_analysis_report(analysis_id: str, request: Request):
     """Return the final structured analysis report."""
+    u = require_auth(request)
+    entry = _store.get(analysis_id)
+    if not entry or entry.get("username") != u:
+        return JSONResponse({"error": "分析不存在或无权访问"}, status_code=404)
     report = get_report(analysis_id)
     if report is None:
         return JSONResponse({"error": "分析尚未完成或不存在"}, status_code=404)

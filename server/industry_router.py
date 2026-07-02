@@ -179,7 +179,10 @@ async def node_detail(node_id: str):
 @router.post("/seed")
 async def reseed(request: Request):
     """Reload curated seed chains (admin). Clears existing seed rows first."""
-    require_auth(request)
+    u = require_auth(request)
+    from .config import ADMIN_USERS
+    if ADMIN_USERS and u not in ADMIN_USERS:
+        raise HTTPException(403, "仅管理员可执行此操作")
     from .industry_seed import seed_all
     with get_db() as db:
         db.execute("DELETE FROM industry_edges WHERE evidence = 'seed'")

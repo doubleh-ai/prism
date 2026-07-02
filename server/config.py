@@ -90,6 +90,13 @@ RATE_CHAT_PER_MIN = int(os.environ.get("RATE_CHAT_PER_MIN", "20"))
 RATE_LOGIN_PER_MIN = int(os.environ.get("RATE_LOGIN_PER_MIN", "10"))
 RATE_EXPLAIN_PER_MIN = int(os.environ.get("RATE_EXPLAIN_PER_MIN", "10"))
 
+# ── Admin ──
+# Comma-separated list of admin usernames (e.g. "alice,bob"). When set,
+# only these users can call /api/industry/seed. Leave empty for single-user
+# mode where any authenticated user is effectively admin.
+_ADMIN_RAW = os.environ.get("ADMIN_USERS", "")
+ADMIN_USERS = {u.strip() for u in _ADMIN_RAW.split(",") if u.strip()}
+
 # ── SQLite ──
 SQLITE_MMAP_SIZE = int(os.environ.get("PRISM_SQLITE_MMAP_SIZE", "268435456"))  # 256 MiB
 
