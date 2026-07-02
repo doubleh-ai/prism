@@ -50,7 +50,7 @@ class TestErrorHandling:
     async def test_empty_question_rejected(self, client, auth_cookies):
         r = await client.post("/api/chat/stream", cookies=auth_cookies,
                               json={"question": "", "skill": "bottleneck-hunter"})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     async def test_invalid_json_body(self, client):
         # Sending non-JSON with JSON content-type — FastAPI rejects before our handler
@@ -241,9 +241,9 @@ class TestImportSanity:
         assert server.config.MODELS["minimax-m3"]["model"] == "MiniMax-M3"
         assert server.config.MODELS["minimax-m2.7-fast"]["model"] == "MiniMax-M2.7-highspeed"
 
-    def test_default_model_is_deepseek(self):
+    def test_default_model_is_minimax(self):
         import server.config
-        assert server.config.DEFAULT_MODEL == "deepseek-v4"
+        assert server.config.DEFAULT_MODEL == "minimax-m3"
 
     def test_import_main(self):
         import server.main

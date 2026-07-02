@@ -23,6 +23,7 @@ Thumbs.db
 data/
 *.db
 app.log
+app.log.*
 *.log
 
 # Test
@@ -34,3 +35,9 @@ htmlcov/
 skills/*/tracking/*.json
 skills/*/tracking/*.csv
 skills/*/__pycache__/
+
+# Superpowers — brainstorming artifacts are runtime-generated
+.superpowers/
+
+# Accidental root-level files
+=*

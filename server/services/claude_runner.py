@@ -65,6 +65,17 @@ async def run_claude_stream(
             except Exception:
                 pass
 
+    # v0.6 market-tag directive: tell the model to embed [[quote:TICKER]]
+    # tokens in its output so the frontend can render live price chips.
+    MARKET_TAG_PROMPT = (
+        "When you mention a specific A-share, HK, or US ticker in your "
+        "response, include the literal token [[quote:TICKER]] inline "
+        "right after the company or ticker name, using the canonical "
+        "ticker code (e.g. 600519, 00700, AAPL). Do not invent tickers. "
+        "One token per distinct ticker."
+    )
+    append_prompts.append(MARKET_TAG_PROMPT)
+
     # Build command — clean question, system instructions via --append-system-prompt
     cmd = [
         CLAUDE_BIN,
@@ -81,15 +92,22 @@ async def run_claude_stream(
 
     # Dynamic proxy config
     proxy_config = await get_proxy_config()
+    # Build env: never inherit API key/sensitive vars from parent unless
+    # explicitly allowed. The Claude CLI subprocess should only see the
+    # credentials we deliberately pass to it — not anything else sitting
+    # in os.environ.
+    sensitive_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
+                      "MINIMAX_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}
     env = {
-        **os.environ,
+        k: v for k, v in os.environ.items()
+        if k not in sensitive_keys
+    }
+    env.update({
         "HOME": str(Path.home()),
         "NO_COLOR": "1",
         "ANTHROPIC_BASE_URL": model_cfg.get("base_url", ""),
         "ANTHROPIC_AUTH_TOKEN": model_cfg.get("api_key", ""),
-        # 抑制 SSL 警告（实际 SSL 处理由 patch_ssl.py auto-fallback 负责）
-        "PYTHONWARNINGS": "ignore::urllib3.exceptions.InsecureRequestWarning",
-    }
+    })
     if proxy_config:
         env.update(proxy_config)
 

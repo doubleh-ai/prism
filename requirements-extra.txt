@@ -1,0 +1,5 @@
+# Prism — 可选依赖（行情数据源）
+# 这些包体积大或仅在启用对应 provider 时才需要。
+# 安装：pip install -r requirements-extra.txt
+akshare>=1.13,<2
+baostock>=0.8.11,<1

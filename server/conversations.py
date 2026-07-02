@@ -3,7 +3,9 @@ import secrets
 import json
 import re
 from pathlib import Path
+from typing import Optional
 from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse
 from .database import get_db
 from .auth import require_auth
 
@@ -105,7 +107,7 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
 # Conversation CRUD
 # ═══════════════════════════════════════
 
-def list_convs(request: Request):
+def list_convs(request: Request) -> list[dict]:
     """GET /api/convs — list active (non-deleted) conversations."""
     u = require_auth(request)
     with get_db() as db:
@@ -127,7 +129,7 @@ def list_convs(request: Request):
     return result
 
 
-def get_conv(cid: str, request: Request):
+def get_conv(cid: str, request: Request) -> dict:
     """GET /api/convs/{cid} — get a single conversation with messages."""
     u = require_auth(request)
     with get_db() as db:
@@ -154,7 +156,7 @@ def get_conv(cid: str, request: Request):
     }
 
 
-def delete_conv(cid: str, request: Request):
+def delete_conv(cid: str, request: Request) -> dict:
     """DELETE /api/convs/{cid} — soft delete (move to trash)."""
     u = require_auth(request)
     import time
@@ -186,7 +188,7 @@ def delete_conv(cid: str, request: Request):
     return {"ok": True}
 
 
-def restore_conv(cid: str, request: Request):
+def restore_conv(cid: str, request: Request) -> dict:
     """POST /api/convs/{cid}/restore — restore from trash."""
     u = require_auth(request)
     with get_db() as db:
@@ -197,7 +199,7 @@ def restore_conv(cid: str, request: Request):
     return {"ok": True}
 
 
-def permanent_delete_conv(cid: str, request: Request):
+def permanent_delete_conv(cid: str, request: Request) -> dict:
     """DELETE /api/convs/{cid}/permanent — permanently delete conversation and messages."""
     u = require_auth(request)
     with get_db() as db:
@@ -206,7 +208,7 @@ def permanent_delete_conv(cid: str, request: Request):
     return {"ok": True}
 
 
-def list_trash(request: Request):
+def list_trash(request: Request) -> list[dict]:
     """GET /api/trash — list deleted (trashed) conversations."""
     u = require_auth(request)
     with get_db() as db:
@@ -221,24 +223,32 @@ def list_trash(request: Request):
     ]
 
 
-async def update_skill(cid: str, request: Request):
+async def update_skill(cid: str, request: Request) -> dict:
     """PUT /api/convs/{cid}/skill — update conversation skill."""
+    from .models import UpdateSkillRequest, validation_error_message
     u = require_auth(request)
     body = await request.json()
+    try:
+        req = UpdateSkillRequest(**(body or {}))
+    except Exception as e:
+        raise HTTPException(422, validation_error_message(e))
     with get_db() as db:
         db.execute("UPDATE conversations SET skill=? WHERE id=? AND username=?",
-                   [body["skill"], cid, u])
+                   [req.skill, cid, u])
     return {"ok": True}
 
 
-async def batch_delete_convs(request: Request):
+async def batch_delete_convs(request: Request) -> dict:
     """POST /api/convs/batch-delete — soft delete multiple conversations at once."""
+    from .models import BatchDeleteRequest, validation_error_message
     u = require_auth(request)
     import time
     body = await request.json()
-    ids = body.get("ids", [])
-    if not ids or not isinstance(ids, list):
-        return {"ok": False, "error": "缺少 ids 列表"}
+    try:
+        req = BatchDeleteRequest(**(body or {}))
+    except Exception as e:
+        raise HTTPException(422, validation_error_message(e))
+    ids = req.ids
     now = int(time.time())
     with get_db() as db:
         for cid in ids:
@@ -249,12 +259,17 @@ async def batch_delete_convs(request: Request):
     return {"ok": True, "count": len(ids)}
 
 
-async def create_conv(request: Request):
+async def create_conv(request: Request) -> dict:
     """POST /api/convs — create new conversation."""
+    from .models import CreateConvRequest, validation_error_message
     u = require_auth(request)
     body = await request.json()
+    try:
+        req = CreateConvRequest(**(body or {}))
+    except Exception as e:
+        raise HTTPException(422, validation_error_message(e))
     cid = secrets.token_hex(12)
-    skill = body.get("skill", "bottleneck-hunter")
+    skill = req.skill or "bottleneck-hunter"
     with get_db() as db:
         db.execute("INSERT INTO conversations (id, username, title, skill) VALUES (?,?,?,?)",
                    [cid, u, "新对话", skill])

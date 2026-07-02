@@ -1,0 +1,60 @@
+# Prism — tool configuration
+#
+# Single source of truth for ruff, mypy, and pytest settings.
+# Run `make lint` / `make format` / `make type-check` / `make test`.
+
+[tool.ruff]
+# Match the Python versions we support
+target-version = "py312"
+line-length = 110
+extend-exclude = ["data", "static/lib", "htmlcov"]
+
+[tool.ruff.lint]
+# Sensible default rule set. Override per-file below.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import order)
+    "B",   # bugbear (common pitfalls)
+    "UP",  # pyupgrade (modern syntax)
+    "SIM", # simplify
+]
+ignore = [
+    "E501",   # line too long — we use formatter + length cap, OK to exceed in strings
+    "B008",   # do not perform function calls in argument defaults — FastAPI uses Depends()
+    "B904",   # raise from — handled by global exception middleware
+    "SIM108", # use ternary — readability wins
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are allowed to be loose
+"tests/**/*.py" = ["B", "SIM", "E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+no_strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# Pydantic models are validated at runtime; mypy struggles with decorators
+module = "server.models"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+addopts = ["-v", "--tb=short", "--strict-markers"]
+markers = [
+    "integration: marks tests as integration (deselect with -m 'not integration')",
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+]

@@ -1,9 +1,29 @@
 # Prism — AI Investment Analysis (Python dependencies)
-fastapi>=0.115
-uvicorn[standard]>=0.34
-bcrypt>=4.2
+#
+# Versions are pinned to minor: the API surface these packages expose is
+# stable, but we lock at the minor level to get reproducible installs and
+# reproducible CI. For exact reproducible builds, run:
+#   pip install pip-compile
+#   pip-compile requirements.in
+#
+# In production deployments, prefer running with a lock file:
+#   pip install --require-hashes -r requirements.lock
 
-# dev/test
-pytest>=8.0
-pytest-asyncio>=0.24
-httpx>=0.27
+# ── Runtime ──
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+bcrypt==4.2.*
+pydantic==2.13.*
+aiofiles>=23.2          # async file I/O for jsonl reads (chat.py)
+lru-dict>=1.2           # O(1) LRU for in-memory caches (proxy.py, main.py)
+
+# ── dev / test ──
+pytest==8.0.*
+pytest-asyncio==0.24.*
+pytest-cov==5.0.*
+httpx==0.27.*
+
+# ── Optional: market data providers ──
+# akshare / baostock live in requirements-extra.txt because they pull in
+# many large dependencies. Install them only if you want live market data:
+#   pip install -r requirements-extra.txt

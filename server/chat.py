@@ -11,6 +11,7 @@ from .config import RATE_CHAT_PER_MIN, MODELS, DEFAULT_MODEL
 from .database import get_db, check_rate_limit
 from .auth import require_auth
 from .services.claude_runner import run_claude_stream, respond_to_question, cancel_process
+from .analysis_graph import persist_graph
 
 log = logging.getLogger("stock-app")
 
@@ -63,12 +64,17 @@ def _extract_refs_from_tool_result(content_text: str) -> list[dict]:
     return refs
 
 
-def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
+async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
     """Read Claude Code JSONL, merging consecutive assistant events into single turns.
 
-    Returns list of {role, content} dicts where content is JSON string with {text, chunks, refs}.
-    Also captures WebSearch/WebFetch tool results as 'ref' chunks.
+    Async (uses aiofiles) so it doesn't block the event loop when called
+    from inside the SSE generator in chat_stream.
+
+    Returns list of {role, content} dicts where content is JSON string with
+    {text, chunks, refs}. Also captures WebSearch/WebFetch tool results
+    as 'ref' chunks.
     """
+    import aiofiles
     jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
@@ -76,8 +82,8 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
     messages = []
     collected_refs = []  # Accumulate refs across the conversation
 
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
+    async with aiofiles.open(jsonl_path, encoding="utf-8") as f:
+        async for line in f:
             try:
                 ev = json.loads(line)
             except json.JSONDecodeError:
@@ -116,7 +122,6 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                             collected_refs.extend(refs)
                             continue  # Skip tool_result — don't add as user message
 
-                # Skip tool_result injection messages
                 content_str = str(content_blocks) if not isinstance(content_blocks, str) else content_blocks
                 if content_str and not content_str.startswith("[{'type':") and not content_str.startswith("[{'tool_use_id':"):
                     messages.append({"role": "user", "content": content_str})
@@ -134,7 +139,7 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                         detail = str(list(inp.values())[:1]) if inp else ""
                         chunks.append({"t": "tool", "c": name, "d": detail})
                     elif bt == "thinking":
-                        chunks.append({"t": "think", "c": b.get("thinking", "")})
+                        chunks.append({"t": "think", "c": str(b.get("thinking", ""))})
 
                 if not chunks:
                     continue
@@ -165,17 +170,24 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
 
 
 async def chat_stream(request: Request):
-    """POST /api/chat/stream — Claude Code CLI streaming with SSE + reference citations."""
+    """POST /api/chat/stream — Claude Code CLI streaming with SSE + reference citations.
+    Returns: ``StreamingResponse`` with the SSE stream, or ``JSONResponse`` for
+    early validation/rate-limit errors."""
+    from .models import ChatStreamRequest, validation_error_message
     user = require_auth(request)
     if not check_rate_limit(f"chat:{user}", RATE_CHAT_PER_MIN, 60):
         return JSONResponse({"error": "请求太频繁"}, status_code=429)
 
     body = await request.json()
-    question = body.get("question", "").strip()
-    skill_name = body.get("skill", "bottleneck-hunter")
-    extra_skills = body.get("extra_skills", None)  # Additional skills via --append-system-prompt
-    conv_id = body.get("conv_id", "")
-    model_id = body.get("model", DEFAULT_MODEL)
+    try:
+        req = ChatStreamRequest(**(body or {}))
+    except Exception as e:
+        return JSONResponse({"error": validation_error_message(e)}, status_code=422)
+    question = req.question.strip()
+    skill_name = req.skill
+    extra_skills = req.extra_skills  # Additional skills via --append-system-prompt
+    conv_id = req.conv_id or ""
+    model_id = req.model or DEFAULT_MODEL
     model_cfg = MODELS.get(model_id, MODELS[DEFAULT_MODEL])
     if not question:
         return JSONResponse({"error": "空问题"}, status_code=400)
@@ -205,12 +217,22 @@ async def chat_stream(request: Request):
     async def generate():
         session_id = resume_session_id  # May be None for first message
         project_dir = None
+        def _emit(event):
+            """Force all SSE event values to strings — NEVER let an object reach the frontend."""
+            clean = {}
+            for k, v in event.items():
+                if isinstance(v, str): clean[k] = v
+                elif isinstance(v, (int, float, bool)): clean[k] = v
+                elif v is None: clean[k] = ""
+                else: clean[k] = str(v)
+            return f"data: {json.dumps(clean, ensure_ascii=False)}\n\n"
+
         full_text = ""
         step_num = 0
-        collected_refs = []  # References from WebSearch/WebFetch tool results
+        collected_refs = []
         seen_ref_urls = set()
 
-        yield f"data: {json.dumps({'pulse': 'start'}, ensure_ascii=False)}\n\n"
+        yield _emit({'pulse': 'start'})
 
         async for ev in run_claude_stream(
             question, skill_name, user=user, model_cfg=model_cfg,
@@ -256,7 +278,7 @@ async def chat_stream(request: Request):
                                 if ref["url"] not in seen_ref_urls:
                                     seen_ref_urls.add(ref["url"])
                                     collected_refs.append(ref)
-                                    yield f"data: {json.dumps({'ref': ref}, ensure_ascii=False)}\n\n"
+                                    yield _emit({'ref': ref})
 
             # tool_use event (top-level)
             if t == "tool_use":
@@ -265,10 +287,10 @@ async def chat_stream(request: Request):
                 inp = tool.get("input", {})
                 step_num += 1
                 if name == "AskUserQuestion":
-                    yield f"data: {json.dumps({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])}, ensure_ascii=False)}\n\n"
+                    yield _emit({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])})
                 else:
                     detail = str(list(inp.values())[:1]) if inp else ""
-                    yield f"data: {json.dumps({'tool': name, 'n': step_num, 'd': detail}, ensure_ascii=False)}\n\n"
+                    yield _emit({'tool': name, 'n': step_num, 'd': detail})
 
             # assistant message
             elif t == "assistant":
@@ -277,23 +299,23 @@ async def chat_stream(request: Request):
                     if bt == "text":
                         txt = b["text"]
                         full_text += txt
-                        yield f"data: {json.dumps({'text': txt}, ensure_ascii=False)}\n\n"
+                        yield _emit({'text': txt})
                     elif bt == "tool_use":
                         step_num += 1
                         name = b.get("name", "?")
                         inp = b.get("input", {})
                         if name == "AskUserQuestion":
-                            yield f"data: {json.dumps({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])}, ensure_ascii=False)}\n\n"
+                            yield _emit({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])})
                         else:
                             detail = str(list(inp.values())[:1]) if inp else ""
-                            yield f"data: {json.dumps({'tool': name, 'n': step_num, 'd': detail}, ensure_ascii=False)}\n\n"
+                            yield _emit({'tool': name, 'n': step_num, 'd': detail})
                     elif bt == "thinking":
-                        yield f"data: {json.dumps({'think': b.get('thinking', '')}, ensure_ascii=False)}\n\n"
+                        yield _emit({'think': str(b.get('thinking', ''))})
 
             # Error from Claude
             elif t == "error":
                 log.error(f"[{user}] Claude error: {ev.get('message', '')}")
-                yield f"data: {json.dumps({'error': ev.get('message', 'AI引擎异常')}, ensure_ascii=False)}\n\n"
+                yield _emit({'error': ev.get('message', 'AI引擎异常')})
 
             elif t == "result":
                 log.info(f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}")
@@ -307,7 +329,7 @@ async def chat_stream(request: Request):
             with get_db() as db:
                 db.execute("UPDATE conversations SET session_id=?, project_dir=? WHERE id=?",
                            [session_id, project_dir, conv_id])
-            jsonl_msgs = _read_jsonl_messages(session_id, project_dir)
+            jsonl_msgs = await _read_jsonl_messages(session_id, project_dir)
             with get_db() as db:
                 for m in jsonl_msgs:
                     if m["role"] == "assistant":
@@ -322,15 +344,42 @@ async def chat_stream(request: Request):
                                    [conv_id, "assistant", payload])
             log.info(f"[{user}] Saved {len(jsonl_msgs)} messages + {len(collected_refs)} refs from JSONL")
 
+        # Auto-extract analysis graph from saved messages
+        if conv_id:
+            try:
+                skill = ""
+                with get_db() as db:
+                    row = db.execute("SELECT skill FROM conversations WHERE id=?", [conv_id]).fetchone()
+                    if row:
+                        skill = row["skill"]
+                with get_db() as db:
+                    rows = db.execute("SELECT content, role FROM messages WHERE conv_id=? ORDER BY id", [conv_id]).fetchall()
+                    messages_json = []
+                    for r in rows:
+                        try:
+                            parsed = json.loads(r["content"])
+                        except Exception:
+                            parsed = {"text": r["content"]}
+                        parsed["role"] = r["role"]
+                        messages_json.append(parsed)
+                persist_graph(conv_id, messages_json, skill)
+            except Exception as e:
+                log.warning(f"[{user}] Failed to extract analysis graph: {e}")
+
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 async def chat_respond(request: Request):
     """POST /api/chat/respond — Send user's answer to a running AskUserQuestion."""
+    from .models import ChatRespondRequest, validation_error_message
     user = require_auth(request)
     body = await request.json()
-    conv_id = body.get("conv_id", "")
-    answer = body.get("answer", "").strip()
+    try:
+        req = ChatRespondRequest(**(body or {}))
+    except Exception as e:
+        return JSONResponse({"error": validation_error_message(e)}, status_code=422)
+    conv_id = req.conv_id
+    answer = req.answer.strip()
     if not conv_id or not answer:
         return JSONResponse({"error": "缺少 conv_id 或 answer"}, status_code=400)
 
@@ -343,9 +392,14 @@ async def chat_respond(request: Request):
 
 async def chat_cancel(request: Request):
     """POST /api/chat/cancel — Cancel a running Claude process."""
+    from .models import ChatCancelRequest, validation_error_message
     user = require_auth(request)
     body = await request.json()
-    conv_id = body.get("conv_id", "")
+    try:
+        req = ChatCancelRequest(**(body or {}))
+    except Exception as e:
+        return JSONResponse({"error": validation_error_message(e)}, status_code=422)
+    conv_id = req.conv_id
     if not conv_id:
         return JSONResponse({"error": "缺少 conv_id"}, status_code=400)
 

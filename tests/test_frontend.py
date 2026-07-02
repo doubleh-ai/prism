@@ -348,38 +348,34 @@ class TestSmartScroll:
         assert "stream-cursor" not in html
 
     def test_user_scrolled_up_flag_in_js(self):
-        """The smart scroll flag (_userScrolledUp) must be in app.js."""
+        """Smart scroll flag lives across app.core.js + app.chat.js (v0.8 split)."""
         import os
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js_path = os.path.join(project_root, "static", "js", "app.js")
-        if os.path.exists(js_path):
-            with open(js_path, encoding="utf-8") as f:
-                js_content = f.read()
-            assert "_userScrolledUp" in js_content
-            assert "_scrollToBottom" in js_content
-            assert "dist > 80" in js_content  # scroll threshold
+        js_content = ""
+        for f in ("app.core.js", "app.chat.js"):
+            with open(os.path.join(project_root, "static", "js", f), encoding="utf-8") as fh:
+                js_content += fh.read()
+        assert "_userScrolledUp" in js_content
+        assert "_scrollToBottom" in js_content
+        assert "dist > 80" in js_content  # scroll threshold
 
     def test_stop_button_in_js(self):
-        """Stop generation button logic must be in app.js."""
+        """Stop generation logic lives in app.chat.js (v0.8 split)."""
         import os
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js_path = os.path.join(project_root, "static", "js", "app.js")
-        if os.path.exists(js_path):
-            with open(js_path, encoding="utf-8") as f:
-                js_content = f.read()
-            assert "stopStream" in js_content
-            assert "stopBtn" in js_content or "AbortError" in js_content
+        with open(os.path.join(project_root, "static", "js", "app.chat.js"), encoding="utf-8") as f:
+            js_content = f.read()
+        assert "stopStream" in js_content
+        assert "AbortError" in js_content  # stop generation path
 
     def test_error_classification_in_js(self):
-        """Error classification (AbortError, TypeError, timeout) must be in app.js."""
+        """Error classification lives in app.chat.js (v0.8 split)."""
         import os
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js_path = os.path.join(project_root, "static", "js", "app.js")
-        if os.path.exists(js_path):
-            with open(js_path, encoding="utf-8") as f:
-                js_content = f.read()
-            assert "AbortError" in js_content, "Must handle AbortError (stop generation)"
-            assert "网络连接失败" in js_content, "Must show network error message"
+        with open(os.path.join(project_root, "static", "js", "app.chat.js"), encoding="utf-8") as f:
+            js_content = f.read()
+        assert "AbortError" in js_content, "Must handle AbortError (stop generation)"
+        assert "网络连接失败" in js_content, "Must show network error message"
 
 
 class TestReferencesRendering:
@@ -431,23 +427,23 @@ class TestNoFlickerStable:
     """Verify removal of stable/live split prevents flicker."""
 
     def test_no_stable_key_in_js(self):
-        """The _stableKey / _stableHtml split logic should be removed from app.js."""
+        """The _stableKey/_stableHtml split logic must be removed (check all v0.8 modules)."""
         import os
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js_path = os.path.join(project_root, "static", "js", "app.js")
-        if os.path.exists(js_path):
-            with open(js_path, encoding="utf-8") as f:
-                js_content = f.read()
-            assert "_stableKey" not in js_content, "stable/live split should be removed to prevent flicker"
-            assert "_stableHtml" not in js_content, "stable/live split should be removed to prevent flicker"
+        js_content = ""
+        for f in ("app.util.js", "app.core.js", "app.chat.js", "app.market.js"):
+            with open(os.path.join(project_root, "static", "js", f), encoding="utf-8") as fh:
+                js_content += fh.read()
+        assert "_stableKey" not in js_content, "stable/live split should be removed to prevent flicker"
+        assert "_stableHtml" not in js_content, "stable/live split should be removed to prevent flicker"
 
     def test_prism_byline_in_js(self):
-        """The assistant byline must use 'Prism' branding."""
+        """The assistant byline must use 'Prism' branding (not CapitalLens). Check all v0.8 modules."""
         import os
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js_path = os.path.join(project_root, "static", "js", "app.js")
-        if os.path.exists(js_path):
-            with open(js_path, encoding="utf-8") as f:
-                js_content = f.read()
-            assert "Prism" in js_content, "JS must use Prism branding"
-            assert "CapitalLens" not in js_content, "JS must not contain old CapitalLens branding"
+        js_content = ""
+        for f in ("app.util.js", "app.core.js", "app.chat.js", "app.market.js"):
+            with open(os.path.join(project_root, "static", "js", f), encoding="utf-8") as fh:
+                js_content += fh.read()
+        assert "Prism" in js_content, "JS must use Prism branding"
+        assert "CapitalLens" not in js_content, "JS must not contain old CapitalLens branding"

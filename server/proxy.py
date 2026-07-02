@@ -3,10 +3,11 @@ import asyncio
 import logging
 import os
 from typing import Dict
+from lru import LRU
 
 log = logging.getLogger("stock-app")
 
-_CACHE: Dict[str, dict] = {}
+_CACHE: LRU = LRU(1024)  # O(1) LRU, max 1024 entries
 _CACHE_TTL = 30  # seconds between re-checks
 
 

@@ -22,8 +22,14 @@ def temp_data_dir(monkeypatch):
         # Reset DB_PATH
         import server.database
         server.database.DB_PATH = Path(td) / "chat.db"
+        # Reset thread-local connection (Task 4) — without this, the
+        # previous test's connection (pointing to a deleted tempdir)
+        # would be reused.
+        server.database.reset_connection()
         server.database.init_db()
         yield td
+        # Teardown: close the connection to the temp DB
+        server.database.reset_connection()
 
 
 @pytest.fixture
@@ -48,13 +54,43 @@ def auth_cookies(test_user):
     return {"token": token}
 
 
+# CSRF header — every state-changing test request must include this.
+# Mirrors what the real frontend does.
+CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
+
+
 @pytest.fixture
 async def client():
-    """Async HTTP test client for FastAPI."""
+    """Async HTTP test client for FastAPI with CSRF headers pre-injected."""
     from httpx import ASGITransport, AsyncClient
     from server.main import app
     transport = ASGITransport(app=app)
+
+    async def _send(method, url, **kw):
+        # Auto-merge CSRF header onto all mutating requests
+        headers = dict(kw.pop("headers", {}) or {})
+        if method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
+            for k, v in CSRF_HEADERS.items():
+                headers.setdefault(k, v)
+        return await _client.request(method, url, headers=headers, **kw)
+
     async with AsyncClient(transport=transport, base_url="http://test") as c:
+        _client = c
+        # Wrap with a helper that auto-injects CSRF headers
+        class CSRFClient:
+            def __getattr__(self, name):
+                return getattr(c, name)
+        # Simpler: monkey-patch the request method
+        orig_request = c.request
+
+        async def patched_request(method, url, **kw):
+            headers = dict(kw.pop("headers", {}) or {})
+            if method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
+                for k, v in CSRF_HEADERS.items():
+                    headers.setdefault(k, v)
+            return await orig_request(method, url, headers=headers, **kw)
+
+        c.request = patched_request
         yield c
 
 

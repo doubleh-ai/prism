@@ -214,11 +214,11 @@ class TestChatControl:
 
     async def test_chat_respond_missing_fields(self, client, auth_cookies):
         r = await client.post("/api/chat/respond", cookies=auth_cookies, json={})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     async def test_chat_cancel_missing_fields(self, client, auth_cookies):
         r = await client.post("/api/chat/cancel", cookies=auth_cookies, json={})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     async def test_chat_cancel_no_process(self, client, auth_cookies):
         """Cancel returns ok even when no process running."""

@@ -18,6 +18,13 @@ if SECRET_KEY_FILE.exists():
 else:
     SECRET_KEY = secrets.token_hex(32)
     SECRET_KEY_FILE.write_text(SECRET_KEY)
+    # Restrict permissions: only the owner can read the secret. This
+    # is best-effort on POSIX; ignored on Windows. In containers,
+    # run as a non-root user so the file isn't world-readable.
+    try:
+        os.chmod(SECRET_KEY_FILE, 0o600)
+    except OSError:
+        pass
 
 # ── LLM API Keys（每个平台独立配置）──
 # 兼容旧变量 LLM_API_KEY 作为 fallback
@@ -81,6 +88,68 @@ SKILL_MAP = {
 # ── 速率限制 ──
 RATE_CHAT_PER_MIN = int(os.environ.get("RATE_CHAT_PER_MIN", "20"))
 RATE_LOGIN_PER_MIN = int(os.environ.get("RATE_LOGIN_PER_MIN", "10"))
+RATE_EXPLAIN_PER_MIN = int(os.environ.get("RATE_EXPLAIN_PER_MIN", "10"))
+
+# ── SQLite ──
+SQLITE_MMAP_SIZE = int(os.environ.get("PRISM_SQLITE_MMAP_SIZE", "268435456"))  # 256 MiB
+
+# ── Cookie 安全 ──
+# secure=True 要求 HTTPS 才会发送 cookie。生产环境必须开启。
+# COOKIE_SAMESITE 默认为 "strict"（最强 CSRF 防护）。开发环境可设 "lax"。
+COOKIE_SECURE = os.environ.get("PRISM_COOKIE_SECURE", "0").lower() in ("1", "true", "yes")
+COOKIE_SAMESITE = os.environ.get("PRISM_COOKIE_SAMESITE", "strict").lower()
+# CSRF 防护 — 状态变更请求必须带 X-Requested-With: XMLHttpRequest 头。
+# 浏览器跨站请求不会自动加这个头，所以可以有效阻断 CSRF。
+CSRF_REQUIRED_HEADER = "X-Requested-With"
+CSRF_HEADER_VALUE = "XMLHttpRequest"
+
+# ── 允许的源（CSRF Origin 校验）──
+# 留空表示不做 Origin 校验（仅靠 samesite + X-Requested-With）。
+# 部署时建议填具体域名，如 "https://prism.example.com,https://www.example.com"
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("PRISM_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+
+# ── CORS ──
+# Same-origin deployments don't need CORS, but enable it here for
+# reverse-proxy frontends and development with a separate origin.
+# PRISM_CORS_ORIGINS is a comma-separated list of allowed origins;
+# empty disables CORS (the browser will block cross-origin requests).
+CORS_ORIGINS = [o.strip() for o in os.environ.get("PRISM_CORS_ORIGINS", "").split(",") if o.strip()]
+CORS_ALLOW_CREDENTIALS = os.environ.get("PRISM_CORS_CREDENTIALS", "0").lower() in ("1", "true", "yes")
 
 # ── 日志 ──
 LOG_FILE = os.environ.get("STOCK_LOG_FILE", str(PROJECT_ROOT / "app.log"))
+
+# ── 行情数据源 ──
+# 逗号分隔的 provider 优先级队列，缺包的 provider 自动跳过。
+# akshare 在前：实测它在当前部署网络里最稳（走 sina，hq/finance.sina
+# 均可达，且能穿透本地代理）；baostock 的自有 TCP 端口 baostock.com:10087
+# 在本机被拦，作为兜底，待其可达时自动顶上。
+# 链路对单个 provider 的任意异常都做 failover，故顺序只影响首试延迟。
+MARKET_PROVIDERS = [
+    p.strip() for p in
+    os.environ.get("PRISM_MARKET_PROVIDERS", "tencent,akshare,baostock").split(",")
+    if p.strip()
+]
+# 各数据类型的 TTL（秒）。QUOTE 短、KLINE 中、FUNDAMENTALS 长。
+QUOTE_TTL = int(os.environ.get("PRISM_QUOTE_TTL", "60"))
+KLINE_TTL = int(os.environ.get("PRISM_KLINE_TTL", "300"))
+FUNDAMENTALS_TTL = int(os.environ.get("PRISM_FUNDAMENTALS_TTL", "86400"))
+# Provider 失败后的失败缓存窗口（秒），避免反复重试死掉的源。
+PROVIDER_FAIL_CACHE_SECONDS = int(os.environ.get("PRISM_PROVIDER_FAIL_CACHE", "30"))
+# Provider 单次调用超时（秒）。
+AKSHARE_TIMEOUT = int(os.environ.get("PRISM_AKSHARE_TIMEOUT", "10"))
+BAOSTOCK_TIMEOUT = int(os.environ.get("PRISM_BAOSTOCK_TIMEOUT", "10"))
+
+# ── astock 分析引擎 ──
+# TradingAgents-astock 项目路径（默认与本项目同级）
+ASTOCK_PROJECT = os.environ.get("PRISM_ASTOCK_PROJECT", str(PROJECT_ROOT.parent / "TradingAgents-astock"))
+# LLM 配置：quick 用于分析师/辩论，deep 用于研判/决策
+ASTOCK_LLM_QUICK = os.environ.get("ASTOCK_LLM_QUICK", "deepseek-v4-pro")
+ASTOCK_LLM_DEEP = os.environ.get("ASTOCK_LLM_DEEP", "deepseek-v4-pro")
+ASTOCK_LLM_PROVIDER = os.environ.get("ASTOCK_LLM_PROVIDER", "deepseek")
+ASTOCK_LLM_BASE_URL = os.environ.get("ASTOCK_LLM_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", ""))
+ASTOCK_LLM_API_KEY = os.environ.get("ASTOCK_LLM_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
+ASTOCK_DATA_VENDOR = os.environ.get("ASTOCK_DATA_VENDOR", "a_stock")
+ASTOCK_MAX_DEBATE_ROUNDS = int(os.environ.get("ASTOCK_MAX_DEBATE_ROUNDS", "1"))
+ASTOCK_OUTPUT_LANGUAGE = os.environ.get("ASTOCK_OUTPUT_LANGUAGE", "Chinese")
+ASTOCK_RESULTS_DIR = os.environ.get("ASTOCK_RESULTS_DIR", str(DATA_DIR / "analysis_reports"))

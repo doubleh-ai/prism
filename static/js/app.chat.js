@@ -1,51 +1,53 @@
 /* ═══════════════════════════════════════
-   Prism — Application Logic
+   Prism — Application Logic (v0.8 split)
    ═══════════════════════════════════════ */
 
-var Streams = {}; // Active SSE streams keyed by convId
-
-var App = {
-  user: '', skill: '', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
-  model: 'minimax-m3',
-  _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
-  _activeReader: null,    // AbortController for stop button
-  _bulkMode: false,       // Bulk select mode — true when checkboxes are visible
-  _bulkChecked: {},       // {convId: true} for checked items
-  _activeSkills: new Set(['cn']), // Multi-select skills; 'cn' (force-chinese) always pre-selected
-
-  /* ═══ Init ═══ */
-  init: async function() {
-    var r = await this.api('/api/me'); if (!r.ok) return;
-    this.user = (await r.json()).user;
-    document.getElementById('userBadge').textContent = this.user;
-    // Theme & width
-    var saved = localStorage.getItem('cl-theme');
-    if (saved === 'dark') document.documentElement.className = 'dark';
-    else if (saved === 'light') document.documentElement.className = 'light';
-    else { var h = new Date().getHours(); document.documentElement.className = (h >= 7 && h < 19) ? 'light' : 'dark'; }
-    if (localStorage.getItem('cl-wide') === 'true') document.documentElement.classList.add('wide');
-    this.loadSkills(); this.loadModels(); this.loadConvs(); this.showWelcome();
-    this.renderSkillsBar();
-    this._bindScroll();
-    this._bindGlossClicks();
-  },
-
+Object.assign(App, {
   loadSkills: async function() {
     var r = await fetch('/api/skills');
     if (r.ok) { this.skills = await r.json(); this.renderSkillsBar(); }
   },
 
-  /* ═══ Skills bar ═══ */
+  /* ═══ Skills (composer chips + drawer) ═══ */
   renderSkillsBar: function() {
-    var bar = document.getElementById('skillsBar');
-    if (!bar || !this.skills.length) return;
+    // v0.8: 已选工具渲染为 composer 顶部 chip（非默认 'cn'）；抽屉里增删。
+    var box = document.getElementById('composerChips');
+    if (!box) return;
+    if (!this.skills.length) { box.innerHTML = ''; return; }
     var self = this;
-    bar.innerHTML = '<span class="skills-bar-label">工具</span>' +
-      this.skills.map(function(s) {
-        var active = self._activeSkills.has(s.id);
-        var locked = s.id === 'cn'; // force-chinese always on
-        return '<span class="skill-chip' + (active ? ' active' : '') + (locked ? ' locked' : '') + '" data-skill="' + s.id + '" onclick="App.selectSkillChip(\'' + s.id + '\')">' + esc(s.name) + (locked ? ' ·' : '') + '<span class="chip-kbd">' + esc(s.shortcut) + '</span></span>';
+    box.innerHTML = this.skills.filter(function(s){ return self._activeSkills.has(s.id) && s.id !== 'cn'; })
+      .map(function(s){ return '<span class="cmp-chip">'+esc(s.name)+'<span class="cmp-chip__x" onclick="App._toggleSkill(\''+escAttr(s.id)+'\')">×</span></span>'; }).join('');
+  },
+  _toggleSkillDrawer: function() {
+    var d = document.getElementById('skillDrawer');
+    if (!d) {
+      d = document.createElement('div');
+      d.id = 'skillDrawer';
+      d.className = 'skill-drawer';
+      // 锚定到 composer（.composer{position:relative}），抽屉就近贴在 🛠 按钮上方
+      var host = document.getElementById('composer') || document.body;
+      host.appendChild(d);
+    }
+    if (d.style.display === 'block') { d.style.display = 'none'; return; }
+    this._renderSkillDrawerItems(d);
+    d.style.display = 'block';
+  },
+  _renderSkillDrawerItems: function(d) {
+    var self = this;
+    d.innerHTML = '<div class="skill-drawer-hd">工具</div>' +
+      this.skills.map(function(s){
+        var on = self._activeSkills.has(s.id);
+        var locked = s.id === 'cn';
+        return '<div class="skill-drawer-item' + (on ? ' on' : '') + (locked ? ' locked' : '') + '" onclick="App._toggleSkill(\'' + escAttr(s.id) + '\')">' + esc(s.name) + (locked ? ' ·' : '') + '</div>';
       }).join('');
+  },
+  _toggleSkill: function(id) {
+    if (id === 'cn') return; // 强制中文不可关
+    if (this._activeSkills.has(id)) this._activeSkills.delete(id);
+    else this._activeSkills.add(id);
+    this.renderSkillsBar();
+    var d = document.getElementById('skillDrawer');
+    if (d && d.style.display === 'block') this._renderSkillDrawerItems(d);
   },
 
   selectSkillChip: function(skillId) {
@@ -67,24 +69,6 @@ var App = {
     // No longer used — skills shown in bar only
   },
 
-  api: async function(url, opts) {
-    opts = opts || {}; var r = await fetch(url, opts);
-    if (r.status === 401) window.location.href = '/login'; return r;
-  },
-
-  /* ═══ Theme ═══ */
-  toggleTheme: function() {
-    var c = document.documentElement.className.replace('wide','').trim();
-    var n = (c === 'dark') ? 'light' : 'dark';
-    document.documentElement.className = n + (document.documentElement.classList.contains('wide') ? ' wide' : '');
-    localStorage.setItem('cl-theme', n);
-  },
-  toggleWidth: function() {
-    document.documentElement.classList.toggle('wide');
-    localStorage.setItem('cl-wide', document.documentElement.classList.contains('wide'));
-  },
-
-  /* ═══ Welcome ═══ */
   showWelcome: function() {
     document.getElementById('msgList').innerHTML = '<div class="welcome"><h2>Prism</h2><p>聚焦 AI 数据中心 · 半导体 · 新能源 · 机器人</p><div class="qa-row"><span class="qa-chip" onclick="App.quickAsk(\'AI数据中心液冷供应链上游瓶颈\')">液冷供应链</span><span class="qa-chip" onclick="App.quickAsk(\'光模块有哪些被低估的上游标的？\')">光模块上游</span><span class="qa-chip" onclick="App.quickAsk(\'HBM4钼替代钨，上游有什么被低估的标的？\')">HBM4·钼替钨</span><span class="qa-chip" onclick="App.quickAsk(\'800VDC车载电源器件卡脖子环节\')">800VDC电源</span><span class="qa-chip" onclick="App.quickAsk(\'人形机器人减速器投资机会\')">机器人减速器</span><span class="qa-chip" onclick="App.quickAsk(\'铜连接产业链上游瓶颈\')">铜连接</span></div></div>';
   },
@@ -98,134 +82,6 @@ var App = {
   setModel: function(m) { this.model = m; },
 
   /* ═══ Conversations ═══ */
-  loadConvs: async function() {
-    var r = await this.api('/api/convs'); if (!r.ok) return;
-    var convs = await r.json(), el = document.getElementById('convList');
-    var badge = document.getElementById('convBadge');
-    if (!convs.length) {
-      el.innerHTML = '<div class="conv-empty">暂无分析</div>'; badge.textContent = '';
-      this._bulkChecked = {};
-      this._renderBulkBar();
-    } else {
-      var self = this;
-      el.innerHTML = convs.map(function(c){
-        var checked = self._bulkChecked[c.id] ? ' checked' : '';
-        return '<div class="conv-item'+(c.id===self.convId?' active':'')+'" data-id="'+escAttr(c.id)+'" onclick="App.openConv(\''+c.id+'\')" title="'+escAttr(c.title)+'">' +
-          '<input type="checkbox" class="conv-cb'+(self._bulkMode?' visible':'')+'" ' + checked +
-          ' onclick="event.stopPropagation();App._toggleCheck(\''+c.id+'\',event)" title="选择">' +
-          esc(c.title) +
-          '<span class="del" onclick="event.stopPropagation();App.delConv(\''+c.id+'\')">×</span></div>';
-      }).join('');
-      badge.textContent = convs.length;
-    }
-    this._updateTrashLink();
-    this._renderBulkBar();
-  },
-
-  _toggleCheck: function(id, ev) {
-    if (ev.target.checked) this._bulkChecked[id] = true;
-    else delete this._bulkChecked[id];
-    this._renderBulkBar();
-  },
-
-  _selectAll: function() {
-    var self = this;
-    var cbs = document.querySelectorAll('#convList .conv-cb');
-    var allChecked = cbs.length > 0 && Object.keys(this._bulkChecked).length >= cbs.length;
-    cbs.forEach(function(cb) {
-      cb.checked = !allChecked;
-      var id = cb.parentElement.getAttribute('data-id');
-      if (!allChecked) self._bulkChecked[id] = true; else delete self._bulkChecked[id];
-    });
-    this._renderBulkBar();
-  },
-
-  _renderBulkBar: function() {
-    var bar = document.getElementById('bulkBar');
-    if (!bar) return;
-    var count = Object.keys(this._bulkChecked).length;
-    if (this._bulkMode) {
-      bar.className = 'bulk-bar show';
-      bar.innerHTML = '<span class="bulk-bar-count">' + count + ' 项</span>' +
-        '<div class="bulk-bar-actions">' +
-        '<button class="bulk-act" onclick="App._selectAll()">全选</button>' +
-        '<button class="bulk-act danger" onclick="App._bulkDelete()">删除</button>' +
-        '<button class="bulk-act" onclick="App._toggleBulkMode()">完成</button>' +
-        '</div>';
-    } else {
-      bar.className = 'bulk-bar show';
-      bar.innerHTML = '<button class="bulk-act" onclick="App._toggleBulkMode()">选择</button>';
-    }
-  },
-
-  _toggleBulkMode: function() {
-    this._bulkMode = !this._bulkMode;
-    this._bulkChecked = {};
-    this.loadConvs();
-  },
-
-  _bulkDelete: async function() {
-    var ids = Object.keys(this._bulkChecked);
-    if (!ids.length) return;
-    if (!confirm('将 ' + ids.length + ' 个分析移到回收站？')) return;
-    var self = this;
-    var r = await this.api('/api/convs/batch-delete', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ids: ids})
-    });
-    if (r.ok) {
-      this._bulkChecked = {};
-      // If current conversation was deleted, reset
-      if (ids.indexOf(this.convId) >= 0) { this.convId = ''; this.msgs = []; this.showWelcome(); }
-      this.loadConvs();
-    }
-  },
-
-  _updateTrashLink: async function() {
-    var r = await this.api('/api/trash'); if (!r.ok) return;
-    var trash = await r.json();
-    var link = document.getElementById('trashLink');
-    if (trash.length) { link.textContent = '回收站 ' + trash.length; link.classList.remove('hidden'); }
-    else { link.classList.add('hidden'); }
-  },
-
-  newConv: async function(skipWelcome) {
-    var skillForNew = this.skill || 'bottleneck-hunter';
-    var r = await this.api('/api/convs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({skill: skillForNew})});
-    if (!r.ok) return; var c = await r.json();
-    this.convId = c.id; this.msgs = [];
-    if (!skipWelcome) this.showWelcome();
-    await this.loadConvs();
-    this._refreshReportsButton();
-  },
-
-  openConv: async function(id) {
-    var prevId = this.convId, prevMsgs = this.msgs, prevSkill = this.skill;
-    this.convId = id;
-    var s = Streams[id];
-    if (s && s.active) {
-      this.msgs = s.msgs; this.skill = s.skill || 'bottleneck-hunter';
-      this.renderAll(); this.loadConvs();
-      // Re-attach to the in-flight stream so the typewriter effect resumes.
-      this._reattachStream();
-      this._refreshReportsButton();
-      return;
-    }
-    var r = await this.api('/api/convs/'+id);
-    if (!r.ok) {
-      // Restore previous state on failure
-      this.convId = prevId; this.msgs = prevMsgs; this.skill = prevSkill;
-      console.error('openConv failed: ' + r.status + ' for ' + id);
-      return;
-    }
-    var c = await r.json(); this.msgs = c.messages; this.skill = c.skill || 'bottleneck-hunter';
-    this.renderAll(); this.loadConvs();
-    this._refreshReportsButton();
-  },
-
-  /* Show/hide the reports button in the input zone based on what reports
-     are available for the current conversation. */
   _refreshReportsButton: async function() {
     var btn = document.getElementById('reportsBtn');
     if (!btn) return;
@@ -244,55 +100,6 @@ var App = {
     }
   },
 
-  delConv: async function(id) {
-    if (!confirm('将对话移到回收站？')) return;
-    try {
-      var r = await this.api('/api/convs/'+id, {method:'DELETE'});
-      if (!r.ok) {
-        var err = '删除失败 (' + r.status + ')';
-        try { var b = await r.json(); err = b.detail || b.error || err; } catch(e) {}
-        alert(err); return;
-      }
-      if (this.convId===id) { this.convId=''; this.msgs=[]; this.showWelcome(); }
-    } catch(e) {
-      console.error('delConv error:', e);
-      alert('删除失败：网络异常，请检查网络后重试');
-    } finally {
-      this.loadConvs();
-    }
-  },
-
-  /* ═══ Trash ═══ */
-  openTrash: async function() {
-    var r = await this.api('/api/trash'); if (!r.ok) return;
-    var trash = await r.json();
-    var body = document.getElementById('trashList');
-    if (!trash.length) { body.innerHTML = '<div class="trash-empty">回收站为空</div>'; }
-    else {
-      var self = this;
-      body.innerHTML = trash.map(function(t) {
-        var d = new Date(t.deleted_at * 1000);
-        var ds = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-        return '<div class="trash-item"><span class="trash-title">'+esc(t.title)+'</span><span class="trash-date">'+ds+'</span><div class="trash-acts"><button onclick="App.restoreConv(\''+t.id+'\')">恢复</button><button class="danger" onclick="App.permDeleteConv(\''+t.id+'\')">永久删除</button></div></div>';
-      }).join('');
-    }
-    document.getElementById('trashModal').style.display = 'flex';
-  },
-  closeTrash: function() { document.getElementById('trashModal').style.display = 'none'; },
-  restoreConv: async function(id) {
-    await this.api('/api/convs/'+id+'/restore', {method:'POST'});
-    this.openTrash(); this.loadConvs();
-  },
-  permDeleteConv: async function(id) {
-    if (!confirm('永久删除后无法恢复，确定？')) return;
-    await this.api('/api/convs/'+id+'/permanent', {method:'DELETE'});
-    this.openTrash(); this.loadConvs();
-  },
-
-  /* ═══ Skill ═══ */
-  setSkill: function(s) { this.skill = s; },
-
-  /* ═══ Smart Scroll ═══ */
   _bindScroll: function() {
     var self = this;
     var el = document.getElementById('msgList');
@@ -401,93 +208,89 @@ var App = {
     if (!this._twTimer) this._startTypewriter();
   },
 
+  /* ═══ Quote tags ([[quote:TICKER]]) ═══
+     v0.6 — the chat pipeline may emit [[quote:600519]] tokens inline.
+     We rewrite them into a placeholder chip and then async-fill each
+     chip with a live price fetched from /api/quote/{ticker}. */
+  _QUOTE_TAG_RE: /\[\[quote:([A-Za-z0-9.\-]{1,16})\]\]/g,
+  _fillQuoteChipsSeq: 0, // monotonic seq so only the latest fill wins per chip
+
+  renderQuoteTags: function(html) {
+    if (!html) return html;
+    var self = this;
+    return html.replace(this._QUOTE_TAG_RE, function(_, ticker) {
+      // Defensive esc — ticker is already constrained by the regex.
+      return '<span class="quote-chip" data-ticker="'+escAttr(ticker)+'">'+
+             '<span class="quote-chip__code">'+esc(ticker)+'</span>'+
+             '<span class="quote-chip__price">…</span>'+
+             '<span class="quote-chip__pct"></span>'+
+             '</span>';
+    });
+  },
+
+  fillQuoteChips: function(root) {
+    if (!root) return;
+    var chips = root.querySelectorAll ? root.querySelectorAll('.quote-chip:not([data-filled])') : [];
+    if (!chips.length) return;
+    var self = this;
+    var mySeq = ++this._fillQuoteChipsSeq;
+    // Collect unique tickers and batch-fetch in one request
+    var tickers = [];
+    var chipMap = {}; // ticker → [chips]
+    for (var i = 0; i < chips.length; i++) {
+      var t = chips[i].dataset.ticker;
+      chips[i].dataset.filled = '1';
+      if (!chipMap[t]) { chipMap[t] = []; tickers.push(t); }
+      chipMap[t].push(chips[i]);
+    }
+    self.api('/api/quotes?tickers=' + encodeURIComponent(tickers.join(','))).then(function(r) {
+      if (mySeq !== self._fillQuoteChipsSeq) return;
+      if (!r.ok) return;
+      return r.json().then(function(data) {
+        if (mySeq !== self._fillQuoteChipsSeq) return;
+        var quotes = data.quotes || {};
+        for (var t in quotes) {
+          var q = quotes[t];
+          if (q.error) { _markChipsErr(chipMap[t]); continue; }
+          var price = (q.price == null) ? null : Number(q.price);
+          var pct = (q.change_pct == null) ? null : Number(q.change_pct);
+          var chipList = chipMap[t] || [];
+          for (var ci = 0; ci < chipList.length; ci++) {
+            var chip = chipList[ci];
+            var priceEl = chip.querySelector('.quote-chip__price');
+            var pctEl = chip.querySelector('.quote-chip__pct');
+            if (price != null && !isNaN(price)) {
+              if (priceEl) priceEl.textContent = price.toFixed(price >= 100 ? 2 : 3);
+            } else if (priceEl) {
+              priceEl.textContent = '—';
+            }
+            if (pct != null && !isNaN(pct)) {
+              if (pctEl) pctEl.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+              chip.classList.add(pct >= 0 ? 'quote-chip--up' : 'quote-chip--down');
+            }
+            chip.classList.add(q.stale ? 'quote-chip--stale' : 'quote-chip--live');
+          }
+        }
+      });
+    }).catch(function() {});
+    function _markChipsErr(list) { if (list) for (var ei = 0; ei < list.length; ei++) { list[ei].classList.add('quote-chip--err'); } }
+  },
+
   /* ═══ Rendering ═══ */
   _renderMsg: function(chunks, fullText, streaming, msgObj) {
-    if (!chunks || !chunks.length) return render(fullText || '');
-    try {
-      var html = '', pendingTools = [];
-
-      function cleanDetail(d) {
-        if (!d) return '';
-        return d.replace(/^\['/, '').replace(/'\]$/, '').replace(/^\["/, '').replace(/"\]$/, '');
-      }
-
-      function flushTools(lastIsNow) {
-        if (!pendingTools.length) return;
-        var n = pendingTools.length;
-        if (lastIsNow && streaming) {
-          // Streaming: show fold + current step prominently
-          html += '<div class="step-bar"><details class="step-fold"><summary>已完成 '+n+' 步</summary>';
-          for (var i = 0; i < n; i++) {
-            var td = pendingTools[i];
-            html += '<span class="step-tag"><b>'+esc(td.name)+'</b>'+(td.detail?' <i title="'+escAttr(td.detail)+'">'+esc(td.detail)+'</i>':'')+'</span>';
-          }
-          html += '</details>';
-          var last = pendingTools[n-1];
-          html += '<span class="step-tag now step-now"><b>'+esc(last.name)+'</b>'+(last.detail?' <i title="'+escAttr(last.detail)+'">'+esc(last.detail)+'</i>':'')+'</span></div>';
-        } else {
-          // Non-streaming or completed: fold all steps
-          html += '<div class="step-bar stable"><details class="step-fold"><summary>已完成 '+n+' 步</summary>';
-          for (var i = 0; i < n; i++) {
-            var td = pendingTools[i];
-            html += '<span class="step-tag"><b>'+esc(td.name)+'</b>'+(td.detail?' <i title="'+escAttr(td.detail)+'">'+esc(td.detail)+'</i>':'')+'</span>';
-          }
-          html += '</details></div>';
-        }
-        pendingTools = [];
-      }
-
-      // Build references from tool results collected during streaming
-      var refs = (msgObj && msgObj._refs) || [];
-
-      for (var ci = 0; ci < chunks.length; ci++) {
-        var c = chunks[ci];
-        if (c.t === 'tool') {
-          pendingTools.push({name: c.c, detail: cleanDetail(c.d || '')});
-        } else if (c.t === 'think') {
-          // Render immediately — interleave with tools, don't defer
-          flushTools(false);
-          html += '<details class="think-box" open><summary>Thinking</summary><div class="think-content">'+render(c.c)+'</div></details>';
-        } else if (c.t === 'ask') {
-          flushTools(false);
-          html += '<div class="ask-card"><div class="ask-q">'+esc(c.q)+'</div><div class="ask-opts">';
-          for (var oi = 0; oi < (c.opts || []).length; oi++) {
-            html += '<button class="ask-opt" onclick="App.answerAsk(\''+escAttr(c.opts[oi])+'\')">'+esc(c.opts[oi])+'</button>';
-          }
-          html += '</div></div>';
-        } else if (c.t === 'ref') {
-          refs.push({url: c.url, title: c.title || c.url, snippet: c.snippet || ''});
-        } else {
-          var isLastText = streaming && ci === chunks.length - 1;
-          flushTools(false);
-          html += render(c.c) + (isLastText ? '<span class="stream-cursor"></span>' : '');
-        }
-      }
-
-      if (streaming) {
-        flushTools(true);
-        if (html === '') html = '<div class="shimmer-bar" style="width:60%"></div>';
-      } else {
-        flushTools(false);
-      }
-
-      // Append reference section if we have refs and this is the final render
-      if (refs.length && !streaming) {
-        html += '<div class="ref-section"><div class="ref-title">参考来源 ('+refs.length+')</div><div class="ref-list">';
-        for (var ri = 0; ri < refs.length; ri++) {
-          var ref = refs[ri];
-          html += '<div class="ref-item"><span class="ref-idx">'+(ri+1)+'</span><div><a class="ref-link" href="'+escAttr(ref.url)+'" target="_blank" rel="noopener">'+esc(ref.title)+'</a>';
-          if (ref.snippet) html += '<div class="ref-snippet">'+esc(ref.snippet)+'</div>';
-          html += '</div></div>';
-        }
-        html += '</div></div>';
-      }
-
-      return html;
-    } catch(e) {
-      console.error('_renderMsg error:', e);
-      return render(fullText || '');
+    if (!chunks || !chunks.length) return ChatRender.renderContent(fullText);
+    try { var html = '', pending = [], refs = (msgObj && msgObj._refs) || [];
+    for (var _i=0;_i<chunks.length;_i++) { var _c=chunks[_i]; for (var _k in _c) { _c[_k]=ChatRender.stringify(_c[_k]); } }
+    for (var ci=0; ci<chunks.length; ci++) { var c = chunks[ci];
+      if (c.t === 'tool') { pending.push(c); }
+      else if (c.t === 'think') { html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderChunk(c); }
+      else if (c.t === 'ask' || c.t === 'ref') { if (c.t==='ref') refs.push(c); else html += ChatRender.renderChunk(c); }
+      else { html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderContent(c.c) + (streaming && ci===chunks.length-1 ? '<span class="stream-cursor"></span>' : ''); }
     }
+    html += ChatRender.renderSteps(pending, streaming);
+    if (streaming && html==='') html = '<div class="shimmer-bar" style="width:60%"></div>';
+    if (refs.length && !streaming) { html += '<div class="ref-section"><div class="ref-title">参考来源 ('+refs.length+')</div>'; for (var ri=0;ri<refs.length;ri++) html += ChatRender.renderChunk(refs[ri]); html += '</div>'; }
+    return html; } catch(e) { console.error('_renderMsg:',e); return ChatRender.renderContent(fullText); }
   },
 
   renderAll: function() {
@@ -501,7 +304,7 @@ var App = {
     var stream = Streams[this.convId];
     var streamingLastIdx = (stream && stream.active) ? stream.msgIdx : -1;
     el.innerHTML = this.msgs.map(function(m, idx) {
-      if (m.role === 'user') return '<div class="msg user"><div class="msg-inner"><div class="msg-byline">You</div><div class="bubble">'+esc(m.content)+'</div></div></div>';
+      if (m.role === 'user') return '<div class="msg user"><div class="msg-inner"><div class="bubble">'+esc(m.content)+'</div></div></div>';
       try {
         var text = m.content || '', chunks = null;
         // Prefer the live _chunks array for the currently-streaming message;
@@ -523,15 +326,23 @@ var App = {
         }
         // Attach refs to the plain msg object so _renderMsg can see them
         var bubble = self._renderMsg(chunks, text, false, m);
+        bubble = self.renderQuoteTags(bubble);
         bubble = self._glossifyTerms(self._linkifyReports(bubble));
-        return '<div class="msg assistant"><div class="msg-inner"><div class="msg-byline">Prism</div><div class="bubble">'+bubble+'</div></div></div>';
+        var htmlOut = '<div class="msg assistant"><div class="msg-inner"><div class="msg-card">' +
+          '<div class="msg-card__hd"><span class="msg-card__who">PRISM</span>' +
+          '<span class="msg-card__acts"><span onclick="App._copyMsg(this)">复制</span><span onclick="App._regenMsg(this)">重生成</span><span onclick="App._exportMsg(this)">导出报告</span></span>' +
+          '</div><div class="bubble">'+bubble+'</div></div></div></div>';
+        // Fill quote chips async after attaching to DOM — schedule for after this innerHTML assignment.
+        return htmlOut;
       } catch(e) {
-        return '<div class="msg assistant"><div class="msg-inner"><div class="msg-byline">Prism</div><div class="bubble">'+render(m.content||'')+'</div></div></div>';
+        return '<div class="msg assistant"><div class="msg-inner"><div class="msg-card"><div class="msg-card__hd"><span class="msg-card__who">PRISM</span><span class="msg-card__acts"></span></div><div class="bubble">'+ChatRender.renderContent(m.content)+'</div></div></div></div>';
       }
     }).join('');
     this._addCopyButtons(el);
     el.scrollTop = el.scrollHeight;
     this._buildTOC();
+    // v0.6 — fill any [[quote:TICKER]] chips with live prices
+    this.fillQuoteChips(el);
   },
 
   renderOne: function(idx) {
@@ -556,7 +367,7 @@ var App = {
       this._scrollToBottom(false); return;
     }
     if (chunks.length === 0 && m.content) {
-      bubbles[idx].innerHTML = this._glossifyTerms(this._linkifyReports(render(m.content)));
+      bubbles[idx].innerHTML = this.renderQuoteTags(this._glossifyTerms(this._linkifyReports(ChatRender.renderContent(m.content))));
       this._scrollToBottom(false); return;
     }
 
@@ -584,7 +395,13 @@ var App = {
       }
     }
 
-    var chunkSig = JSON.stringify(chunks);
+    // O(1) chunk signature — avoid expensive JSON.stringify on large arrays.
+    // Captures: chunk count, last chunk type, and last text-chunk length.
+    var chunkSig = chunks.length;
+    if (chunks.length > 0) {
+      var lc = chunks[chunks.length - 1];
+      chunkSig += ':' + lc.t + ':' + (lc.c ? lc.c.length : 0);
+    }
     if (!streaming || displayLen === undefined) {
       if (m._lastSig === chunkSig) return;
     }
@@ -595,13 +412,15 @@ var App = {
     if (bubbles[idx]) {
       bubbles[idx].querySelectorAll('.step-fold[open]').forEach(function(f, i) { openFolds.push(i); });
     }
-    bubbles[idx].innerHTML = this._glossifyTerms(this._linkifyReports(this._renderMsg(displayChunks, displayContent || m.content, streaming, m)));
+    bubbles[idx].innerHTML = this.renderQuoteTags(this._glossifyTerms(this._linkifyReports(this._renderMsg(displayChunks, displayContent || m.content, streaming, m))));
     // Restore open state
     if (openFolds.length) {
       var newFolds = bubbles[idx].querySelectorAll('.step-fold');
       openFolds.forEach(function(i) { if (newFolds[i]) newFolds[i].setAttribute('open', ''); });
     }
     this._addCopyButtons(bubbles[idx]);
+    // v0.6 — fill any [[quote:TICKER]] chips with live prices
+    this.fillQuoteChips(bubbles[idx]);
     this._scrollToBottom(false);
     if (this.msgs.filter(function(m){return m.role==='user'}).length > 0) this._buildTOC();
   },
@@ -627,6 +446,26 @@ var App = {
       };
       pre.appendChild(btn);
     });
+  },
+
+  // ── Message card actions (v0.8) ──
+  _copyMsg: function(el) {
+    var card = el.closest('.msg-card');
+    var bubble = card && card.querySelector('.bubble');
+    if (!bubble) return;
+    var txt = bubble.innerText;
+    navigator.clipboard.writeText(txt).then(function(){
+      var o = el.textContent; el.textContent = '已复制'; setTimeout(function(){ el.textContent = o; }, 1200);
+    }).catch(function(){});
+  },
+  _regenMsg: function(el) {
+    var msg = el.closest('.msg');
+    var prev = msg && msg.previousElementSibling;
+    var ub = prev && prev.querySelector('.bubble');
+    if (ub) { document.getElementById('input').value = ub.innerText; this.send(); }
+  },
+  _exportMsg: function() {
+    if (typeof this.openReports === 'function') this.openReports();
   },
 
   // ── Financial Glossary (built-in definitions for instant hover) ──
@@ -719,17 +558,21 @@ var App = {
   _glossifyTerms: function(html) {
     if (!html) return html;
     var self = this;
-    // 1. Process ==term== explicit markup from AI (most reliable, preferred)
-    html = html.replace(/==([^=]+?)==/g, function(m, term) {
-      var def = self._glossary[term.trim()] || '';
-      return '<span class="gloss-term gloss-explicit" data-term="'+escAttr(term.trim())+'" title="'+escAttr(def || '点击查看AI解释')+'">'+esc(term.trim())+'</span>';
-    });
-    // 2. Scan for glossary terms only in visible text segments (between > and <)
-    html = html.replace(/>([^<]+)</g, function(match, text) {
+    // Step 1 (==term==) is now handled by _preGlossify() in render(),
+    // BEFORE marked.parse — so it runs on raw text and doesn't corrupt
+    // already-rendered HTML tags like <strong>.
+    //
+    // Step 2: scan for glossary terms only in text between > and < bounds
+    // (visible text, not inside HTML attributes).  The regex intentionally
+    // skips <script>, <style>, and other raw-text containers — marked.parse
+    // never emits those in normal prose output.
+    html = html.replace(/>([^<]{1,2000})</g, function(match, text) {
+      // Guard: skip text that looks like partial HTML to avoid corrupting
+      // attribute boundaries or nested tag structures.
+      if (/<[a-z/]|^\s*(?:href|src|class|id|style|alt|title|data-)\s*=/.test(text)) return match;
       var terms = Object.keys(self._glossary).sort(function(a,b){return b.length-a.length;});
       for (var ti = 0; ti < terms.length; ti++) {
         var t = terms[ti];
-        // Only match whole words for short English acronyms (<5 chars), any occurrence for Chinese
         var re;
         if (/^[A-Za-z]+$/.test(t) && t.length <= 4) {
           re = new RegExp('\\b(' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')\\b', 'gi');
@@ -742,7 +585,9 @@ var App = {
       }
       return '>' + text + '<';
     });
-    return html;
+    // Final safety pass: remove any orphaned attribute-fragment patterns
+    // that might have leaked through (e.g. stray `">` from truncated markup).
+    return sanitizeHtml(html);
   },
 
   _handleGlossClick: function(term, el) {
@@ -768,7 +613,11 @@ var App = {
     try {
       var r = await fetch('/api/explain-term', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-CSRF-Token': self._getCookie('csrf_token'),
+        },
         body: JSON.stringify({term: term, context: ''})
       });
       if (r.ok) {
@@ -790,7 +639,7 @@ var App = {
     return html.replace(/(?<!["'=>])(reports\/[^\s<>"')]+?\.(?:html|htm|pdf|csv|md))/gi, function(match) {
       var fname = match.replace(/^reports\//, '');
       var url = '/api/reports/' + App.convId + '/' + encodeURIComponent(fname);
-      return '<a href="' + url + '" class="report-link" title="点击内嵌查看报告 (Shift+点击 在新标签页打开)" data-report="' + escAttr(fname) + '">' + match + '</a>';
+      return '<a href="' + escAttr(url) + '" class="report-link" title="点击内嵌查看报告 (Shift+点击 在新标签页打开)" data-report="' + escAttr(fname) + '">' + match + '</a>';
     });
   },
 
@@ -858,8 +707,21 @@ var App = {
 
   /* ═══ Send & Stream ═══ */
   quickAsk: function(q) { document.getElementById('input').value = q; this.send(); },
-  answerAsk: function(answer) {
-    var inp = document.getElementById('input'); inp.value = answer; inp.focus();
+  answerAsk: async function(answer) {
+    // Send answer back to the Claude subprocess via the backend,
+    // then disable all ask buttons so the user can't double-click.
+    var cards = document.querySelectorAll('.ask-card');
+    for (var ci = 0; ci < cards.length; ci++) {
+      cards[ci].classList.add('ask-answered');
+      var btns = cards[ci].querySelectorAll('.ask-opt');
+      for (var bi = 0; bi < btns.length; bi++) btns[bi].disabled = true;
+    }
+    // Write answer to Claude's stdin so it resumes streaming
+    await this.api('/api/chat/respond', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({conv_id: this.convId, answer: answer})
+    });
   },
 
   showAC: function() {
@@ -946,18 +808,27 @@ var App = {
     // Activate loading bar
     var loadingBar = document.getElementById('loadingBar');
     if (loadingBar) loadingBar.classList.add('active');
-    var msgIdx = this.msgs.length-1, full = '', chunks = [], self = this;
+    var msgIdx = this.msgs.length-1, full = '', chunks = [];
     var sid = this.convId;
 
-    var stream = {msgs: this.msgs, msgIdx: msgIdx, chunks: chunks, full: '', skill: skillForReq, active: true};
-    Streams[sid] = stream;
-    // Initialize typewriter display length and start animation loop
-    this.msgs[msgIdx]._displayLen = 0;
-    this._startTypewriter();
+    // Inner stream runner so SSE reconnect can re-invoke without code duplication (P5)
+    var _runStream = async function(_full, _chunks) {
+      full = _full; chunks = _chunks;
+      var stream = {msgs: self.msgs, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, active: true};
+      Streams[sid] = stream;
+      self.msgs[msgIdx]._displayLen = 0;
+      if (!_full) self._startTypewriter();
 
-    try {
-      var resp = await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({question:q,skill:skillForReq,conv_id:sid,model:self.model,extra_skills:extraSkills})});
+      try {
+      var resp = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-CSRF-Token': self._getCookie('csrf_token'),
+        },
+        body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: self.model, extra_skills: extraSkills})
+      });
       if (resp.status===401){window.location.href='/login'; delete Streams[sid]; self._streamDone(sid, btn); return;}
       if (!resp.ok){
         var errText = '服务异常 (' + resp.status + ')';
@@ -980,12 +851,13 @@ var App = {
             }
             if (p.pulse) { /* loading pulse */ }
             if (p.tool) {
-              if (p.tool==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:p.tool,q:p.ask,opts:p.opts||[]});
-              else chunks.push({t:'tool',c:p.tool,n:p.n||'',d:p.d||''});
+              var toolName = typeof p.tool==='object' ? JSON.stringify(p.tool) : String(p.tool||'');
+              if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
+              else { var td = p.d; if (td && typeof td==='object') td = JSON.stringify(td); chunks.push({t:'tool',c:toolName,n:String(p.n||''),d:td||''}); }
             }
-            if (p.think) chunks.push({t:'think',c:p.think});
+            if (p.think) { var tc = p.think; if (tc && typeof tc==='object') tc = JSON.stringify(tc); chunks.push({t:'think',c:tc||''}); }
             if (p.text) {
-              var pt = fixPunct(p.text);
+              var pt = fixPunct(String(p.text||''));
               full += pt;
               var last = chunks[chunks.length-1];
               if (last&&last.t==='text') last.c+=pt; else chunks.push({t:'text',c:pt});
@@ -998,7 +870,7 @@ var App = {
             }
           } catch(e) { /* skip malformed JSON */ }
         }
-        stream.msgs[msgIdx].content = full; stream.msgs[msgIdx]._chunks = chunks;
+        stream.msgs[msgIdx].content = String(full||''); stream.msgs[msgIdx]._chunks = chunks;
         stream.full = full; stream.chunks = chunks;
         if (App.convId === sid) {
           var curMsgIdx = App.msgs.length - 1;
@@ -1010,15 +882,41 @@ var App = {
       if (e.name === 'AbortError') {
         errorMsg = '已停止生成';
       } else if (e.name === 'TypeError' && e.message.indexOf('fetch') >= 0) {
-        errorMsg = '⚠ 网络连接失败，请检查网络后重试';
+        // Transient network error — attempt SSE reconnect with backoff (P5)
+        var curStream = Streams[sid];
+        var retries = (curStream ? curStream._reconnectRetries : 0) || 0;
+        if (retries < 5) {
+          if (curStream) curStream._reconnectRetries = retries + 1;
+          var delay = Math.min(1000 * Math.pow(2, retries), 30000);
+          self.msgs[msgIdx].content = full + '\n\n⚠ 网络中断，' + (delay/1000).toFixed(0) + 's 后重连 (' + (retries+1) + '/5)…';
+          if (App.convId === sid) App.renderAll();
+          await new Promise(function(r) { setTimeout(r, delay); });
+          self._activeReader = null;
+          await _runStream(full, chunks);
+          return;
+        }
+        errorMsg = '⚠ 网络连接失败，多次重试无效，请检查网络后重试';
       } else if (e.message && e.message.indexOf('timeout') >= 0) {
         errorMsg = '⚠ 响应超时，请重试';
       }
-      stream.msgs[msgIdx].content = errorMsg;
+      self.msgs[msgIdx].content = errorMsg;
       if (App.convId === sid) App.renderAll();
     }
-    delete Streams[sid];
-    self._streamDone(sid, btn);
+  }; // end _runStream
+
+  await _runStream('', []);
+
+  // Clear typewriter state before deleting the stream so the final
+  // renderOne (called from _streamDone) shows full content, not a
+  // truncated typewriter view. Also reset _lastSig so the dedup check
+  // in renderOne doesn't block the final render.
+  var s = Streams[sid];
+  if (s && s.msgIdx != null && s.msgs && s.msgs[s.msgIdx]) {
+    s.msgs[s.msgIdx]._displayLen = undefined;
+    s.msgs[s.msgIdx]._lastSig = null;
+  }
+  delete Streams[sid];
+  self._streamDone(sid, btn);
     if (App.convId === sid) {
       App._buildTOC();
       App.loadConvs();
@@ -1037,13 +935,15 @@ var App = {
     if (loadingBar) loadingBar.classList.remove('active');
     this._activeReader = null;
     this._stopTypewriter(sid);
-    // Final full render for the completed message
+    // Final full render for the completed message.
+    // Access msg via App.msgs (Streams[sid] may have been deleted already).
     if (App.convId === sid) {
-      // Clear _displayLen so the final render shows the complete text.
-      var s = Streams[sid];
-      if (s && s.msgIdx != null && s.msgs && s.msgs[s.msgIdx]) s.msgs[s.msgIdx]._displayLen = undefined;
       var curMsgIdx = App.msgs.length - 1;
-      if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') App.renderOne(curMsgIdx);
+      if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') {
+        App.msgs[curMsgIdx]._displayLen = undefined;
+        App.msgs[curMsgIdx]._lastSig = null;
+        App.renderOne(curMsgIdx);
+      }
     }
   },
 
@@ -1078,9 +978,6 @@ var App = {
   },
 
   /* ═══ Logout ═══ */
-  logout: function() { document.cookie = 'token=;path=/;max-age=0'; window.location.href = '/login'; },
-
-  /* ═══ Scroll TOC ═══ */
   _buildTOC: function() {
     var track = document.getElementById('scrollTrack');
     var list = document.getElementById('msgList');
@@ -1121,41 +1018,57 @@ var App = {
     });
     track.querySelectorAll('.scroll-mark').forEach(function(d, i) { d.classList.toggle('active', i === active); });
     track.querySelectorAll('.scroll-toc-item').forEach(function(d, i) { d.classList.toggle('active', i === active); });
-  }
-};
+  },
 
-/* ═══ Utilities ═══ */
-function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function escAttr(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
-function render(t) { try { return marked.parse(t); } catch(e) { return t; } }
+  /* ═══ Analysis Graph ═══ */
+  openGraph: async function() {
+    if (!this.convId) return;
+    var modal = document.getElementById('graphModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    document.getElementById('graphModalTitle').textContent = '分析关系图';
+    var container = document.getElementById('graphChart');
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:500px;color:var(--text3)">加载中…</div>';
+    try {
+      var r = await this.api('/api/convs/' + this.convId + '/graph');
+      if (!r.ok) { container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:500px;color:var(--text3)">暂无关系图数据</div>'; return; }
+      var data = await r.json();
+      if (!data.nodes || !data.nodes.length) { container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:500px;color:var(--text3)">暂无关系图数据</div>'; return; }
+      this._renderGraph(container, data);
+    } catch(e) {
+      container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:500px;color:var(--text3)">加载失败</div>';
+    }
+  },
+  closeGraph: function() {
+    var modal = document.getElementById('graphModal');
+    if (modal) modal.style.display = 'none';
+  },
+  _renderGraph: function(container, data) {
+    if (typeof echarts === 'undefined') { container.innerHTML = '图表库未加载'; return; }
+    container.innerHTML = '';
+    var chart = echarts.init(container);
+    var nodes = data.nodes.map(function(n) {
+      var colors = {question:'#6b95c8',tool_call:'#d97706',think:'#706c64',analysis:'#3b5d8a',reference:'#7c5fd0'};
+      var c = colors[n.node_type] || '#706c64';
+      return {id:n.id, name:n.label, category:n.node_type, symbolSize:14,
+        itemStyle:{color:c,borderColor:'rgba(255,255,255,.15)',borderWidth:1}};
+    });
+    var edges = data.edges.map(function(e) {
+      return {source:e.source_node_id, target:e.target_node_id,
+        lineStyle:{color:'rgba(255,255,255,.12)',width:1,curveness:0.2}};
+    });
+    chart.setOption({
+      animation:true, backgroundColor:'transparent', tooltip:{},
+      series:[{type:'graph', layout:'force', roam:true, draggable:true,
+        force:{repulsion:200, edgeLength:[80,200]},
+        data:nodes, links:edges,
+        lineStyle:{color:'rgba(255,255,255,.12)',curveness:0.2},
+        label:{show:true, position:'right', fontSize:10, color:'#b8b2a6',
+          formatter:function(p){return p.name.length>30?p.name.substring(0,28)+'…':p.name;}},
+      }],
+    });
+    var self = this;
+    window.addEventListener('resize', function(){try{chart.resize();}catch(e){}});
+  },
 
-/* Normalize English punctuation to Chinese in Chinese text context */
-function fixPunct(t) {
-  if (!t) return t;
-  // English comma/period before or between Chinese characters → Chinese comma/period
-  t = t.replace(/([一-鿿㐀-䶿]),(\s*)([一-鿿㐀-䶿])/g, '$1，$3');
-  t = t.replace(/([一-鿿㐀-䶿])\.(\s*)([一-鿿㐀-䶿])/g, '$1。$3');
-  // Semicolons and colons between Chinese
-  t = t.replace(/([一-鿿㐀-䶿]);(\s*)([一-鿿㐀-䶿])/g, '$1；$3');
-  t = t.replace(/([一-鿿㐀-䶿]):(\s*)([一-鿿㐀-䶿])/g, '$1：$3');
-  // End of Chinese sentence: English period → Chinese period
-  t = t.replace(/([一-鿿㐀-䶿])\.(\s|$)/g, '$1。$2');
-  t = t.replace(/([一-鿿㐀-䶿]),(\s|$)/g, '$1，$2');
-  return t;
-}
-
-/* ═══ Event Bindings ═══ */
-document.addEventListener('DOMContentLoaded', function() { App.init(); });
-document.getElementById('msgList').addEventListener('scroll', function() { App._updateTOC(); });
-window.addEventListener('resize', function() { App._buildTOC(); });
-document.addEventListener('click', function(e) { if (!e.target.closest('#acDropdown')&&!e.target.closest('#input')) App.hideAC(); });
-document.getElementById('input').addEventListener('keydown', function(e) {
-  var key = e.key||e.code||'';
-  if (key==='Enter'&&!e.shiftKey) { e.preventDefault(); if (App.selectAC()) return; App.send(); return; }
-  if (key==='Tab'||e.keyCode===9) { e.preventDefault(); var dd=document.getElementById('acDropdown'); if (dd.style.display!=='none') { if (App.acIdx<0) { App.moveAC(1); } else { App.selectAC(); } return; } App.showAC(); return; }
-  if (key==='ArrowDown'||e.keyCode===40) { e.preventDefault(); App.moveAC(1); return; }
-  if (key==='ArrowUp'||e.keyCode===38) { e.preventDefault(); App.moveAC(-1); return; }
-  if (key==='Escape'||e.keyCode===27) { App.hideAC(); return; }
 });
-document.getElementById('input').addEventListener('input', function() { App.showAC(); this.style.height='auto'; this.style.height=Math.min(140,Math.max(24,this.scrollHeight))+'px'; });
