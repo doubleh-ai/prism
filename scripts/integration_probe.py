@@ -13,6 +13,7 @@ import contextlib
 import errno
 import hashlib
 import importlib
+import importlib.machinery
 import json
 import os
 import pwd
@@ -34,6 +35,10 @@ RELEASE_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
 OPERATIONS = Path("/var/lib/prism-operations/integration")
 STARTUP_NAMES = ("sitecustomize", "usercustomize", "patch_ssl")
 TLS_CLIENTS = ("urllib", "requests", "httpx")
+ENGINE_NAMESPACES = frozenset(
+    "tradingagents.agents." + name
+    for name in ("analysts", "managers", "researchers", "risk_mgmt", "trader", "utils")
+)
 ERROR_DETAILS = frozenset(
     {
         "astock_import_contract_rejected",
@@ -390,6 +395,37 @@ def audit_policy(work, state):
     return guard
 
 
+def module_from_root(name, module, root):
+    """Accept regular files or the six PEP 420 packages in the sealed engine."""
+    filename = getattr(module, "__file__", None)
+    if filename:
+        return Path(filename).resolve().is_relative_to(root)
+    if name not in ENGINE_NAMESPACES:
+        return False
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(module, "__loader__", None)
+    if (
+        not isinstance(loader, importlib.machinery.NamespaceLoader)
+        or spec is None
+        or spec.name != name
+        or spec.loader is not loader
+        or spec.origin is not None
+        or spec.has_location
+    ):
+        return False
+    locations = tuple(getattr(module, "__path__", ()))
+    expected = root.joinpath(*name.split("."))
+    if (
+        locations != (str(expected),)
+        or tuple(spec.submodule_search_locations or ()) != locations
+        or not expected.is_dir()
+        or expected.resolve() != expected
+    ):
+        return False
+    root_locked(expected)
+    return True
+
+
 def import_engine(candidate, engine, work):
     sites = startup_clean(candidate)
     import site
@@ -436,7 +472,7 @@ def import_engine(candidate, engine, work):
             root = engine
         else:
             continue
-        if not getattr(module, "__file__", None) or not Path(module.__file__).resolve().is_relative_to(root):
+        if not module_from_root(name, module, root):
             raise ProbeError("module_source_mismatch")
     config = analysis._build_config("fast", analysis_id="0" * 32)
     for key in ("results_dir", "data_cache_dir"):

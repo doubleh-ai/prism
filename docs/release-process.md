@@ -133,3 +133,7 @@ Mac 必须提供两个已批准的公开 helper 的固定摘要；远端再次�
 合成服务有 45 秒自然退出期限，子任务有固定自然期限，父控制器最多观察 55 秒清理；失败不强杀、不重试信号、不向生产发信号。仅在 MainPID 为零且递归 cgroup 已空后停止该空合成 unit。未观察到清理完成会阻止成功，不能将 SSH 断开或一次退出码视为已清理。
 
 即便 7 项全部通过，回执仍明确 `production_quiescence_proven=false`、`systemctl_stop_end_to_end_proven=false`、`task_census_still_required=true`。通过的反例表示已实际观察到相应任务可能丢失，不表示允许直接退役生产。此动作不写 admission、不更改 switch 门禁，也不证明真实会话或研究已安全完成；生产任务排空必须使用另行审查的实际清点和状态机。
+
+实际 Linux 首轮合成服务因不存在的必需屏蔽子目录，在 Python 启动前以 226/NAMESPACE 失败。后续描述符改用实际存在的 `/var/lib` 与 `/etc` 祖先遮罩，限制更严格，不创建那些生产目录。命名空间启动失败只有在原 Invocation/ExecMainPID、退出码 226、无存活 PID、空运行目录及空或不存在的递归 cgroup 一致时，才可记录无工作负载；原失败 unit 与回执保留，不发送清理信号，也不将失败改成通过。
+
+Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth 执行，结束后恢复 site 函数。来源核验只额外接受封存引擎内六个实际存在的 PEP 420 命名空间包：必须具有真正的 NamespaceLoader，唯一搜索目录与 spec 一致，且该目录为无链接、root 锁定的预期路径。混合路径、引擎外目录、任意无文件模块均拒绝。安全结果只增加固定枚举 error_detail，绝不记录原异常文本、模块名称或配置；真实 Linux 通过仍须单独取得新 attempt 的实际回执。

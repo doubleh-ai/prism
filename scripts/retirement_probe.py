@@ -442,7 +442,9 @@ def descriptor(request, *, nonce=None):
             "IPAddressDeny": "any",
             "ReadOnlyPaths": str(immutable),
             "ReadWritePaths": str(runtime),
-            "InaccessiblePaths": "/home /root /var/lib/prism /opt/prism/releases /etc/prism",
+            # Mask existing ancestors as well as future children; optional '-'
+            # paths would expose a later-created production directory.
+            "InaccessiblePaths": "/home /root /var/lib /etc /opt/prism/releases",
             "NoExecPaths": "/run /tmp /var/tmp /home /root",
             "UMask": "0077",
             "CapabilityBoundingSet": "",

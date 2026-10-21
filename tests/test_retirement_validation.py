@@ -83,7 +83,16 @@ def test_launch_only_targets_one_fixed_synthetic_unit_with_a_private_run(case_id
     assert properties["PrivateNetwork"] == properties["NoNewPrivileges"] == "yes"
     assert properties["ProtectProc"] == "invisible"
     assert properties["RestrictAddressFamilies"] == "AF_UNIX"
-    assert "/var/lib/prism-operations" in properties["InaccessiblePaths"].split()
+    assert properties["InaccessiblePaths"].split() == [
+        "/home",
+        "/root",
+        "/var/lib",
+        "/etc",
+        "/opt/prism/releases",
+    ]
+    # No mandatory child path can fail merely because production has not
+    # created it yet; the existing ancestors also conceal future children.
+    assert "/etc/prism" not in properties["InaccessiblePaths"].split()
     assert str(validation.wrapper_directory() / "wrapper.py") in command
 
 
@@ -393,6 +402,141 @@ def test_zero_pid_during_start_is_not_an_empty_stable_unit_for_cleanup(monkeypat
     with pytest.raises(validation.RetirementValidationError, match="empty_unit_required"):
         controller._retire_empty_unit(case, "a" * 32)
     runner.assert_not_called()
+
+
+def namespace_failure_fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe, "RUNTIME_ROOT", tmp_path.resolve() / "runtime")
+    monkeypatch.setattr(probe, "CGROUP_ROOT", tmp_path.resolve() / "cgroup")
+    monkeypatch.setattr(validation, "PROC_ROOT", tmp_path.resolve() / "proc")
+    probe.CGROUP_ROOT.mkdir()
+    (probe.CGROUP_ROOT / "cgroup.controllers").write_text("cpu memory")
+    controller = validation.Validation(REQUEST, boundary=mock.Mock(), run=mock.Mock(), record=mock.Mock())
+    case = controller.plan["cases"][0]
+    Path(case["runtime_directory"]).mkdir(parents=True, mode=0o700)
+    controller.active_case = case
+    controller.start_intents[case["case_id"]] = 100
+    state = {
+        "LoadState": "loaded",
+        "Transient": "yes",
+        "ActiveState": "failed",
+        "SubState": "failed",
+        "MainPID": "0",
+        "ExecMainPID": "123",
+        "ExecMainCode": "1",
+        "ExecMainStatus": "226",
+        "Result": "exit-code",
+        "InvocationID": "a" * 32,
+        "ControlGroup": "",
+        "ExecMainExitTimestampMonotonic": "101",
+    }
+    monkeypatch.setattr(controller, "show", lambda *_: dict(state))
+    return controller, case, state
+
+
+def test_namespace_setup_failure_can_prove_no_resident_work_without_clearing_failed_unit(
+    tmp_path, monkeypatch
+):
+    controller, case, _ = namespace_failure_fixture(tmp_path, monkeypatch)
+    assert controller.cleanup() is True
+    assert controller.namespace_setup_failed is True
+    controller.run.assert_not_called()
+    controller.record.assert_called_once_with(
+        "synthetic_exit_observed",
+        {"case_id": case["case_id"], "recursive_member_count": 0, "exit_code": 1, "exit_status": 226},
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("LoadState", "not-found"),
+        ("Transient", "no"),
+        ("ActiveState", "activating"),
+        ("MainPID", "123"),
+        ("ExecMainPID", "0"),
+        ("ExecMainCode", "2"),
+        ("ExecMainStatus", "0"),
+        ("Result", "success"),
+        ("InvocationID", ""),
+        ("ControlGroup", "/system.slice/stock-app.service"),
+        ("ExecMainExitTimestampMonotonic", "99"),
+    ],
+)
+def test_namespace_failure_witness_rejects_unknown_or_mismatched_manager_state(
+    tmp_path, monkeypatch, field, value
+):
+    controller, case, state = namespace_failure_fixture(tmp_path, monkeypatch)
+    state[field] = value
+    assert controller._namespace_failed_no_work(case) is False
+    controller.run.assert_not_called()
+    controller.record.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "obstacle", ["pid", "marker", "group_link", "no_intent", "signal", "changed_invocation"]
+)
+def test_no_work_witness_rejects_pid_reuse_markers_links_and_unbound_attempts(
+    tmp_path, monkeypatch, obstacle
+):
+    controller, case, state = namespace_failure_fixture(tmp_path, monkeypatch)
+    if obstacle == "pid":
+        (validation.PROC_ROOT / "123").mkdir(parents=True)
+    elif obstacle == "marker":
+        (Path(case["runtime_directory"]) / "fixture_ready.json").write_text("{}")
+    elif obstacle == "group_link":
+        group = probe.CGROUP_ROOT / case["control_group"].lstrip("/")
+        group.parent.mkdir(parents=True)
+        group.symlink_to(tmp_path.resolve())
+    elif obstacle == "no_intent":
+        controller.start_intents.clear()
+    elif obstacle == "signal":
+        controller.signals.add(case["case_id"])
+    else:
+        count = 0
+
+        def changed(_):
+            nonlocal count
+            count += 1
+            return dict(state, InvocationID=("a" if count == 1 else "b") * 32)
+
+        monkeypatch.setattr(controller, "show", changed)
+    assert controller._namespace_failed_no_work(case) is False
+    controller.run.assert_not_called()
+    controller.record.assert_not_called()
+
+
+def test_namespace_failure_requires_recursive_cgroup_empty_if_group_still_exists(tmp_path, monkeypatch):
+    controller, case, _ = namespace_failure_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(probe, "_require_linux", lambda: None)
+    group = probe.CGROUP_ROOT / case["control_group"].lstrip("/")
+    child = group / "nested"
+    child.mkdir(parents=True)
+    (group / "cgroup.procs").write_text("")
+    (child / "cgroup.procs").write_text("456\n")
+    assert controller._namespace_failed_no_work(case) is False
+    (child / "cgroup.procs").write_text("")
+    assert controller._namespace_failed_no_work(case) is True
+    controller.run.assert_not_called()
+
+
+def test_failed_namespace_remains_a_failed_validation_even_when_no_work_is_verified(monkeypatch):
+    monkeypatch.setattr(probe, "_require_linux", lambda: None)
+    monkeypatch.setattr(validation.Validation, "production_identity", lambda *_: {})
+    monkeypatch.setattr(validation, "no_existing_synthetic_workloads", lambda *_: None)
+    monkeypatch.setattr(validation, "install_bundles", lambda *_: None)
+    monkeypatch.setattr(validation.Validation, "case", mock.Mock(side_effect=RuntimeError("not emitted")))
+
+    def failed_cleanup(self):
+        self.namespace_setup_failed = True
+        return True
+
+    monkeypatch.setattr(validation.Validation, "cleanup", failed_cleanup)
+    summary = validation.run_validation(REQUEST, boundary=mock.Mock(), run=mock.Mock(), record=mock.Mock())
+    assert summary["error_code"] == "retirement_namespace_setup_failed"
+    assert summary["synthetic_cleanup_verified"] is True
+    assert summary["retirement_validation_passed"] is False
+    assert summary["production_quiescence_proven"] is False
+    assert summary["cases"] == []
 
 
 def test_unknown_exception_text_is_never_in_safe_failure_result(monkeypatch):

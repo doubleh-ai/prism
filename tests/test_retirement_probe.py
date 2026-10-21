@@ -121,6 +121,11 @@ def test_descriptor_cannot_choose_a_host_unit_uid_or_executable():
         assert properties["Restart"] == "no"
         assert properties["TimeoutStopSec"] == properties["RuntimeMaxSec"] == "infinity"
         assert case["signal"] == ("SIGTERM" if case["case_id"] == "term-control" else "SIGINT")
+        masks = properties["InaccessiblePaths"].split()
+        assert "/etc" in masks and "/var/lib" in masks
+        assert not any(path.startswith("-") for path in masks)
+        for protected in ("/etc/prism", "/var/lib/prism", "/var/lib/prism-operations"):
+            assert any(Path(mask) in Path(protected).parents for mask in masks)
 
 
 def test_manifest_only_binds_public_runtime_bytes_without_startup_hooks():

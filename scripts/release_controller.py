@@ -43,7 +43,7 @@ MAX_EXECUTOR_SOURCE = 512 * 1024
 INTEGRATION_PROBES = {
     "integration_astock": (
         "integration_probe.py",
-        "996224f01f3cef5da20237c2936fd9910b389419a7e97af853fc67de0913972a",
+        "612d7194b63e16b7ffd1e9badaa483da1f09a4a270670df8f950628d968a9184",
     ),
     "integration_cli": (
         "cli_protocol_probe.py",
@@ -51,8 +51,8 @@ INTEGRATION_PROBES = {
     ),
 }
 RETIREMENT_HELPERS = {
-    "retirement_probe.py": "1e70d84879e9b217bb7b83ba5ece8947b4f11b201a48ef33976ed6207c423971",
-    "retirement_validation.py": "d96f4ea8262b70f1974b1613f2b8441363c8c25af56ad017078daedc3c2e77e9",
+    "retirement_probe.py": "ed09ba0a6a587231a3a63f4de3753885107e1f38f799ddb1d6b16a21beb674bd",
+    "retirement_validation.py": "d142f8bb58092e0e61e422b32191762debe0ad7dc6c0d517f639f116d392b722",
 }
 
 # This small stdlib loader stays below Linux's single-argument limit. The

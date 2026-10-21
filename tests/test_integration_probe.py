@@ -441,6 +441,55 @@ def test_astock_wrong_module_origin_is_not_treated_as_success(work, tmp_path, mo
         probe.import_engine(candidate, engine, work)
 
 
+@pytest.mark.parametrize("case", ["sealed", "outside", "mixed", "no_loader", "unknown", "fileless"])
+def test_engine_namespace_packages_require_the_single_sealed_source(work, tmp_path, monkeypatch, case):
+    from importlib.machinery import ModuleSpec, NamespaceLoader, PathFinder
+
+    candidate, engine = tmp_path / "candidate", tmp_path / "engine"
+    modules = fake_imports(candidate, engine, work, monkeypatch)
+    name = "tradingagents.agents.analysts"
+    expected = engine.joinpath(*name.split("."))
+    expected.mkdir(parents=True)
+    locations = [str(expected)]
+    if case == "outside":
+        locations = ["/home/ubuntu/old-engine/tradingagents/agents/analysts"]
+    elif case == "mixed":
+        locations.append("/home/ubuntu/old-engine/tradingagents/agents/analysts")
+    elif case == "unknown":
+        name = "tradingagents.unreviewed_namespace"
+    elif case == "fileless":
+        name = "server.analysis_engine"
+    parent_name = name.rsplit(".", 1)[0]
+    if parent_name not in sys.modules:
+        parent = types.ModuleType(parent_name)
+        parent.__file__ = str(engine.joinpath(*parent_name.split("."), "__init__.py"))
+        monkeypatch.setitem(sys.modules, parent_name, parent)
+    parent = sys.modules[parent_name]
+    parent.__path__ = [
+        str((candidate if parent_name == "server" else engine).joinpath(*parent_name.split(".")))
+    ]
+    assert modules["tradingagents"] is sys.modules["tradingagents"]
+    module = types.ModuleType(name)
+    module.__file__ = None
+    module.__path__ = locations
+    loader = NamespaceLoader(name, locations, PathFinder)
+    module.__loader__ = loader if case != "no_loader" else None
+    module.__spec__ = ModuleSpec(name, loader, origin=None, is_package=True)
+    module.__spec__.submodule_search_locations = locations
+    monkeypatch.setitem(sys.modules, name, module)
+    # The runtime validates root ownership; this test uses a user-owned fixture
+    # and asserts that the accepted namespace reaches that same ownership gate.
+    locked = mock.Mock()
+    monkeypatch.setattr(probe, "root_locked", locked)
+    if case == "sealed":
+        probe.import_engine(candidate, engine, work)
+        locked.assert_called_once_with(expected)
+    else:
+        with pytest.raises(probe.ProbeError, match="module_source_mismatch"):
+            probe.import_engine(candidate, engine, work)
+        locked.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "event,args",
     [

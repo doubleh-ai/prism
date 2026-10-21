@@ -21,7 +21,7 @@ from pathlib import Path
 
 from scripts import retirement_probe as probe
 
-PROBE_SOURCE_SHA256 = "1e70d84879e9b217bb7b83ba5ece8947b4f11b201a48ef33976ed6207c423971"
+PROBE_SOURCE_SHA256 = "ed09ba0a6a587231a3a63f4de3753885107e1f38f799ddb1d6b16a21beb674bd"
 PRODUCTION_UNIT = "stock-app.service"
 PROPERTIES = (
     "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,"
@@ -29,6 +29,7 @@ PROPERTIES = (
 )
 NATURAL_DEADLINE_SECONDS = 45
 CLEANUP_SECONDS = 55
+PROC_ROOT = Path("/proc")
 
 
 class RetirementValidationError(RuntimeError):
@@ -311,7 +312,6 @@ def launch_command(plan, case_id):
         TemporaryFileSystem="/run:ro",
         BindPaths=runtime + ":" + runtime,
         ReadOnlyPaths=properties["ReadOnlyPaths"] + " " + str(wrapper_directory()),
-        InaccessiblePaths=properties["InaccessiblePaths"] + " /var/lib/prism-operations",
     )
     command = list(case["command"])
     expected = str(Path(plan["bundle_directory"]) / "fixture.py")
@@ -519,6 +519,8 @@ class Validation:
         self.production = None
         self.active_case = None
         self.signals = set()
+        self.start_intents = {}
+        self.namespace_setup_failed = False
 
     def fixed_case(self, case):
         if type(case) is not dict or case != probe._case(self.plan, case.get("case_id")):
@@ -676,6 +678,7 @@ class Validation:
         if runtime.exists() or runtime.is_symlink():
             reject("retirement_runtime_already_exists")
         self.record("synthetic_start_intent", {"case_id": case_id, "nonce": self.plan["nonce"]})
+        self.start_intents[case_id] = int(self.monotonic() * 1_000_000)
         self.active_case = case
         self.run(launch_command(self.plan, case_id), timeout=15)
         live = self.poll(lambda: self._ready(case), 5)
@@ -800,6 +803,54 @@ class Validation:
         self.active_case = None
         return result
 
+    def _namespace_failed_no_work(self, case):
+        """Attest only an exited 226 setup failure; retain its failed unit.
+
+        A missing cgroup alone is never an observed workload exit. Here the
+        fixed manager unit must identify its failed ExecMainPID/invocation and
+        an exit after this process's start intent; that PID and the complete
+        expected cgroup must both have no live processes. No success marker
+        may exist and no stop/kill/reset-failed command is dispatched.
+        """
+        self.fixed_case(case)
+        start = self.start_intents.get(case["case_id"])
+        if start is None or case["case_id"] in self.signals:
+            return False
+        before = self.show(case["unit"])
+        if (
+            before.get("LoadState") != "loaded"
+            or before.get("Transient") != "yes"
+            or (before.get("ActiveState"), before.get("SubState")) != ("failed", "failed")
+            or _number(before.get("MainPID")) != 0
+            or _number(before.get("ExecMainPID")) <= 1
+            or before.get("ExecMainCode") != "1"
+            or before.get("ExecMainStatus") != "226"
+            or before.get("Result") != "exit-code"
+            or not re.fullmatch(r"[0-9a-f]{32}", before.get("InvocationID", ""))
+            or before.get("ControlGroup") not in {"", case["control_group"]}
+            or _number(before.get("ExecMainExitTimestampMonotonic")) < start
+        ):
+            return False
+        process = PROC_ROOT / before["ExecMainPID"]
+        if process.exists() or process.is_symlink():
+            return False
+        root = Path(case["runtime_directory"])
+        if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
+            return False
+        group = probe.CGROUP_ROOT / case["control_group"].lstrip("/")
+        if not (probe.CGROUP_ROOT / "cgroup.controllers").is_file() or group.is_symlink():
+            return False
+        if group.exists() and not probe.recursive_cgroup_state(self.plan, case["case_id"])["empty"]:
+            return False
+        if self.show(case["unit"]) != before or process.exists() or process.is_symlink():
+            return False
+        self.record(
+            "synthetic_exit_observed",
+            {"case_id": case["case_id"], "recursive_member_count": 0, "exit_code": 1, "exit_status": 226},
+        )
+        self.namespace_setup_failed = True
+        return True
+
     def cleanup(self):
         """Release synthetic work; never kill, restart, or retry a signal."""
         case = self.active_case
@@ -807,6 +858,8 @@ class Validation:
             return True
         try:
             self.fixed_case(case)
+            if self._namespace_failed_no_work(case):
+                return True
             # Startup can fail before publishing its isolation marker. Do not
             # abandon read-only observation of the bounded wrapper.
             with suppress(Exception):
@@ -867,6 +920,8 @@ def run_validation(request, *, boundary, run, record):
         )
     finally:
         cleanup = validator.cleanup()
+        if validator.namespace_setup_failed:
+            error = "retirement_namespace_setup_failed"
         if error in {"retirement_previous_workload_active", "retirement_unknown_synthetic_group"}:
             cleanup = False
     if error is None and cleanup:
