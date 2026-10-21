@@ -259,12 +259,15 @@ Object.assign(App, {
   },
 
   _startMarketScan: async function() {
+    if (this._scanCreateBusy) return;
     var select = document.getElementById("marketScanIndicator");
     var id = select ? select.value : "";
     if (!id) { this._toast("请先选择一个指标"); return; }
     var payload = this._scanPayload();
     if (payload.scope === "watchlist" && !payload.tickers.length) { this._toast("自选为空，无法扫描"); return; }
     if (!payload.markets.length || !payload.boards.length) { this._toast("请至少选择一个市场和一个板块"); return; }
+    var sequence = this._scanSelectionSeq = (this._scanSelectionSeq || 0) + 1;
+    this._scanCreateBusy = true;
     this._setScanBusy(true);
     this._setScanStatus("正在创建后台扫描任务", "running");
     try {
@@ -274,6 +277,7 @@ Object.assign(App, {
         body: JSON.stringify(payload)
       });
       var data = await r.json().catch(function() { return {}; });
+      if (sequence !== this._scanSelectionSeq) { this._loadRecentScans(); return; }
       if (r.status === 409 && data.job) {
         this._scanJobId = data.job.id;
         this._renderScanJob(data.job);
@@ -288,9 +292,10 @@ Object.assign(App, {
       this._loadRecentScans();
       if (this._trackUiEvent) this._trackUiEvent("market", "screener_start", "indicator", id, payload.scope);
     } catch (e) {
+      if (sequence !== this._scanSelectionSeq) return;
       this._setScanBusy(false);
-      this._setScanStatus(e.message || "创建任务失败", "failed");
-    }
+      this._setScanStatus("创建请求未确认，请先刷新历史核对后再重试", "unavailable");
+    } finally { this._scanCreateBusy = false; }
   },
 
   _setScanBusy: function(busy) {
@@ -310,35 +315,49 @@ Object.assign(App, {
 
   _scheduleScanPoll: function(delay) {
     clearTimeout(this._scanPollTimer);
-    var self = this;
-    this._scanPollTimer = setTimeout(function() { self._pollScanJob(); }, delay == null ? 1500 : delay);
+    var self = this, id = this._scanJobId, sequence = this._scanSelectionSeq;
+    this._scanPollTimer = setTimeout(function() {
+      if (id === self._scanJobId && sequence === self._scanSelectionSeq) self._pollScanJob();
+    }, delay == null ? 1500 : delay);
   },
 
   _pollScanJob: async function() {
     if (!this._scanJobId) return;
+    var id = this._scanJobId, sequence = this._scanSelectionSeq;
+    var key = id + ':' + sequence;
+    if (this._scanPolling === key) return;
+    this._scanPolling = key;
     try {
-      var r = await this.api("/api/indicators/scan-jobs/" + encodeURIComponent(this._scanJobId));
+      var r = await this.api("/api/indicators/scan-jobs/" + encodeURIComponent(id));
+      if (id !== this._scanJobId || sequence !== this._scanSelectionSeq) return;
+      if (r.status === 403 || r.status === 404) { this._setScanStatus('记录不存在或无权限', 'unavailable'); this._setScanBusy(false); return; }
       if (!r.ok) throw new Error("任务读取失败");
       var data = await r.json();
+      if (id !== this._scanJobId || sequence !== this._scanSelectionSeq) return;
       var job = data.job;
+      this._scanReadFailures = 0;
       this._renderScanJob(job);
       if (job.status === "queued" || job.status === "running") this._scheduleScanPoll();
       else this._loadRecentScans();
     } catch (e) {
-      this._setScanBusy(false);
-      this._setScanStatus("任务状态读取失败", "failed");
-    }
+      if (id !== this._scanJobId || sequence !== this._scanSelectionSeq) return;
+      this._scanReadFailures = (this._scanReadFailures || 0) + 1;
+      this._setScanStatus("连接中断，正在重读原任务；执行状态待确认", "reconnecting");
+      this._scheduleScanPoll(Math.min(30000, 1500 * Math.pow(2, Math.min(this._scanReadFailures, 4))));
+    } finally { if (this._scanPolling === key) this._scanPolling = null; }
   },
 
   _renderScanJob: function(job) {
     if (!job) return;
+    if (this._scanJobId && this._scanJobId !== job.id) return;
     this._scanJobId = job.id;
     var active = job.status === "queued" || job.status === "running";
     this._setScanBusy(active);
-    var labels = {queued:"等待执行",running:"扫描中",completed:"扫描完成",failed:"扫描失败",cancelled:"已取消",interrupted:"任务已中断"};
+    var labels = {queued:"等待执行",running:"扫描中",completed:"扫描完成",partial:"部分完成 · 覆盖不完整",failed:"扫描失败",cancelled:"已取消",interrupted:"任务已中断"};
     this._setScanStatus(labels[job.status] || job.status, job.status);
     var status = document.getElementById("marketScanStatus");
-    if (status) status.textContent = job.error || (job.indicator_name + " · " + (labels[job.status] || job.status));
+    if (status) status.textContent = (job.error || (job.indicator_name + " · " + (labels[job.status] || job.status))) +
+      ' · 有效评估 '+Number(job.evaluated || 0)+' / 资料不足 '+Number(job.insufficient || 0)+' / 条件排除 '+Number(job.excluded || 0)+' / 调用失败 '+Number(job.failed || 0);
     var progress = Number(job.progress || 0);
     var progressText = document.getElementById("marketScanProgressText");
     var progressBar = document.getElementById("marketScanProgressBar");
@@ -367,7 +386,8 @@ Object.assign(App, {
     if (!el) return;
     if (!matches.length) {
       var pending = job && (job.status === "queued" || job.status === "running");
-      el.innerHTML = '<div class="market-scan-empty">' + (pending ? "正在扫描，命中结果会实时出现在这里" : "当前条件暂无命中结果") + "</div>";
+      var incomplete = job && ['failed','partial','interrupted','cancelled'].indexOf(job.status) >= 0;
+      el.innerHTML = '<div class="market-scan-empty">' + (pending ? "正在扫描，命中结果会实时出现在这里" : incomplete ? "当前没有已取得的命中结果；覆盖不完整，不能据此判断全部股票均不满足条件" : "在已有效评估的范围内，当前条件暂无命中结果") + "</div>";
       return;
     }
     var html = '<div class="market-scan-table"><div class="market-scan-row market-scan-row-head"><span>股票</span><span>板块</span><span>价格</span><span>信号 / 数值</span><span>成交额</span><span>操作</span></div>';
@@ -395,8 +415,12 @@ Object.assign(App, {
 
   _cancelMarketScan: async function() {
     if (!this._scanJobId) return;
-    await this.api("/api/indicators/scan-jobs/" + encodeURIComponent(this._scanJobId) + "/cancel", {method:"POST"});
-    this._scheduleScanPoll(200);
+    var id = this._scanJobId;
+    try {
+      var response = await this.api("/api/indicators/scan-jobs/" + encodeURIComponent(id) + "/cancel", {method:"POST"});
+      if (!response.ok) throw new Error('cancel failed');
+      if (id === this._scanJobId) { this._setScanStatus('已请求取消，等待任务确认', 'cancelling'); this._scheduleScanPoll(200); }
+    } catch (error) { this._toast('取消请求未确认，请读取任务状态后重试'); }
   },
 
   _loadRecentScans: async function() {
@@ -429,12 +453,13 @@ Object.assign(App, {
 
   _openScanJob: async function(id) {
     clearTimeout(this._scanPollTimer);
+    var sequence = this._scanSelectionSeq = (this._scanSelectionSeq || 0) + 1;
     this._scanJobId = id;
-    var r = await this.api("/api/indicators/scan-jobs/" + encodeURIComponent(id));
-    if (!r.ok) return;
-    var job = (await r.json()).job;
-    this._renderScanJob(job);
-    if (job.status === "queued" || job.status === "running") this._scheduleScanPoll();
+    this._scanReadFailures = 0;
+    this._setScanBusy(true);
+    this._setScanStatus('正在读取任务…', 'loading');
+    await this._pollScanJob();
+    if (sequence !== this._scanSelectionSeq) return;
     this._loadRecentScans();
   },
 

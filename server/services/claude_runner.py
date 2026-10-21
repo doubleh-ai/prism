@@ -30,6 +30,7 @@ log = logging.getLogger("stock-app")
 
 # Per-conversation running processes: {conv_id: process}
 _active_procs: dict = {}
+_cancelled_procs: set[int] = set()
 
 
 def _skill_dir_name(skill_id_or_dir: str) -> str:
@@ -365,7 +366,9 @@ async def run_claude_stream(
         if not timed_out:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=1)
-            if proc.returncode not in (None, 0):
+            if id(proc) in _cancelled_procs:
+                yield {"type": "cancelled", "message": "用户已取消本轮研究"}
+            elif proc.returncode not in (None, 0):
                 err_text = ""
                 try:
                     err_raw = await asyncio.wait_for(proc.stderr.read(4096), timeout=0.5)
@@ -381,9 +384,10 @@ async def run_claude_stream(
         for call_event in pending_calls(force=True):
             yield call_event
     finally:
+        _cancelled_procs.discard(id(proc))
         if use_bridge:
             revoke_run_token(research["run_id"])
-        if conv_id:
+        if conv_id and _active_procs.get(conv_id) is proc:
             _active_procs.pop(conv_id, None)
         if proc.returncode is None:
             try:
@@ -422,12 +426,14 @@ async def cancel_process(conv_id: str) -> bool:
     proc = _active_procs.get(conv_id)
     if not proc:
         return False
+    _cancelled_procs.add(id(proc))
     try:
         proc.terminate()
         await asyncio.wait_for(proc.wait(), timeout=3)
     except Exception:
         with contextlib.suppress(Exception):
             proc.kill()
-    _active_procs.pop(conv_id, None)
+    if _active_procs.get(conv_id) is proc:
+        _active_procs.pop(conv_id, None)
     log.info(f"Cancelled Claude process for conv={conv_id}")
     return True

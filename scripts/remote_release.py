@@ -1,0 +1,1476 @@
+#!/usr/bin/env python3
+"""Fixed-host release RPC. Never run on import; stdin is private, output is redacted.
+
+Only release_controller may invoke this reviewed code. Candidate application code
+is not imported by validation. No arbitrary command, host, unit or path is accepted.
+"""
+
+from __future__ import annotations
+
+import base64
+import fcntl
+import grp
+import hashlib
+import io
+import json
+import os
+import pwd
+import re
+import secrets
+import select
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path, PurePosixPath
+
+ACTIONS = {"inspect", "prepare", "stage", "quiesce", "switch", "verify", "rollback", "resume"}
+SHA = re.compile(r"^[0-9a-f]{40}$")
+DIGEST = re.compile(r"^[0-9a-f]{64}$")
+RELEASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
+SERVICE = "stock-app.service"
+MAX_ARCHIVE = 64 * 1024 * 1024
+MAX_INPUT = 384 * 1024 * 1024
+MAX_DEPENDENCIES = 192 * 1024 * 1024
+RESERVE = 2 * 1024 * 1024 * 1024
+NGINX_SITES = ("stock-analyzer", "stock-app")
+HOLD_MESSAGE = "系统升级中，请稍后重试"
+
+
+def admission_config(raw):
+    """Only insert a fixed block at one direct server/location / declaration."""
+    text = raw.decode("utf-8")
+    tokens = list(re.finditer(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\#[^\n]*|[{};]|[^\s{};]+""", text))
+    stack, header, matches = [], [], []
+    for token in tokens:
+        value = token[0]
+        if value.startswith("#"):
+            continue
+        if value == "{":
+            words = [item[0] for item in header]
+            if words and words[0] == "location":
+                if any(word in {"~", "~*"} for word in words[1:]):
+                    raise ReleaseError("regex_location_requires_review")
+                if any("/api" in word.lower() for word in words[1:]):
+                    raise ReleaseError("existing_api_location")
+                if words == ["location", "/"]:
+                    if not stack or stack[-1] != "server":
+                        raise ReleaseError("root_location_not_direct_server")
+                    matches.append(header[0].start())
+            stack.append(words[0] if words else "")
+            header = []
+        elif value == "}":
+            if not stack or header:
+                raise ReleaseError("nginx_structure_rejected")
+            stack.pop()
+        elif value == ";":
+            header = []
+        else:
+            header.append(token)
+    if stack or header or len(matches) != 1:
+        raise ReleaseError("unique_root_location_required")
+    position = matches[0]
+    start = text.rfind("\n", 0, position) + 1
+    indent = text[start:position]
+    if indent.strip():
+        raise ReleaseError("standalone_root_location_required")
+    block = (
+        "# Prism controlled admission hold\n"
+        + indent
+        + "location ^~ /api/ {\n"
+        + indent
+        + "    default_type application/json;\n"
+        + indent
+        + "    add_header Retry-After 60 always;\n"
+        + indent
+        + '    return 503 \'{"error":"'
+        + HOLD_MESSAGE
+        + "\"}';\n"
+        + indent
+        + "}\n"
+        + indent
+    )
+    return (text[:position] + block + text[position:]).encode()
+
+
+class ReleaseError(RuntimeError):
+    """A safe category, never an upstream error body, command or credential."""
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def encoded(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def tree_digest(path, *, entries=None):
+    """Hash package files and link text; external contents need a separate manifest."""
+    inventory, size = [], 0
+    for item in sorted(path.rglob("*")):
+        relative = item.relative_to(path).as_posix()
+        if item.is_symlink():
+            inventory.append([relative, "link", os.readlink(item)])
+        elif item.is_dir():
+            inventory.append([relative, "directory", stat.S_IMODE(item.stat().st_mode)])
+        elif item.is_file():
+            hasher = hashlib.sha256()
+            with item.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(block)
+            size += item.stat().st_size
+            inventory.append(
+                [relative, item.stat().st_size, stat.S_IMODE(item.stat().st_mode), hasher.hexdigest()]
+            )
+    if entries is not None:
+        entries.extend(inventory)
+    return digest(encoded(inventory)), size
+
+
+def safe_path(value):
+    path = PurePosixPath(value)
+    if (
+        not value
+        or not value.isascii()
+        or "\\" in value
+        or path.is_absolute()
+        or any(p in {"", ".", ".."} for p in value.split("/"))
+    ):
+        raise ReleaseError("unsafe_path")
+    if any(p.startswith(".") for p in path.parts):
+        raise ReleaseError("hidden_path_forbidden")
+    return value
+
+
+def validate_archive(raw, expected, manifest_digest):
+    """Independently verify all bytes/modes; extraction occurs only after this returns."""
+    if len(raw) > MAX_ARCHIVE or digest(raw) != expected:
+        raise ReleaseError("archive_digest_mismatch")
+    files, total = {}, 0
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+        for member in archive:
+            safe_path(member.name)
+            if (
+                not member.isfile()
+                or member.name in files
+                or member.mode not in {0o644, 0o755}
+                or member.size > 8 * 1024 * 1024
+            ):
+                raise ReleaseError("archive_member_rejected")
+            total += member.size
+            if total > MAX_ARCHIVE or len(files) > 4096:
+                raise ReleaseError("archive_limits")
+            content = archive.extractfile(member).read()
+            if len(content) != member.size:
+                raise ReleaseError("archive_truncated")
+            files[member.name] = (content, member.mode)
+    manifest_raw = files.pop("release-manifest.json", (b"", 0))[0]
+    if digest(manifest_raw) != manifest_digest:
+        raise ReleaseError("manifest_digest_mismatch")
+    manifest = json.loads(manifest_raw)
+    entries = manifest.get("files", [])
+    if (
+        manifest.get("kind") != "candidate"
+        or manifest.get("deployed") is not False
+        or not SHA.fullmatch(manifest.get("commit", ""))
+    ):
+        raise ReleaseError("manifest_identity")
+    if len(entries) != len(files) or {item["path"] for item in entries} != set(files):
+        raise ReleaseError("manifest_inventory")
+    for item in entries:
+        content, mode = files[item["path"]]
+        if digest(content) != item["sha256"] or len(content) != item["size"] or f"{mode:04o}" != item["mode"]:
+            raise ReleaseError("manifest_content_mismatch")
+    return manifest, files, manifest_raw
+
+
+def run_command(args, *, env=None, timeout=120):
+    """Suppress package/systemd logs: they can contain paths or configuration."""
+    capture = args[:2] == ["/usr/bin/systemctl", "show"]
+    result = subprocess.run(
+        args,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout,
+        check=False,
+    )
+    missing_stage = (
+        capture
+        and args[2:3] == ["--property=LoadState,ActiveState"]
+        and len(args) == 4
+        and re.fullmatch(r"prism-stage-[0-9a-f]{12}\.service", args[-1])
+        and b"LoadState=not-found" in (result.stdout or b"").splitlines()
+    )
+    if result.returncode and not missing_stage:
+        raise ReleaseError("command_failed")
+    if result.stdout and len(result.stdout) > 65536:
+        raise ReleaseError("command_output_limit")
+    return result.stdout or b""
+
+
+class RemoteRelease:
+    def __init__(self, root=Path("/"), runner=run_command, permit=None, control=None, now=time.time):
+        self.root, self.run, self.permit, self.control, self.now = Path(root), runner, permit, control, now
+        self.production = self.root / "home/ubuntu/stock-analyzer"
+        self.old_venv = self.root / "home/ubuntu/stock-venv"
+        self.releases = self.root / "opt/prism/releases"
+        self.operations = self.root / "var/lib/prism-operations"
+        self.override = self.root / "etc/systemd/system/stock-app.service.d/90-prism-release.conf"
+        self.record = None
+
+    def checked(self, path):
+        path = Path(path)
+        for ancestor in [path, *path.parents]:
+            if ancestor == self.root.parent:
+                break
+            if ancestor.is_symlink():
+                raise ReleaseError("symlink_path_rejected")
+        return path
+
+    def stop(self):
+        if (self.control and self.control()) or self.checked(self.operations / "STOP").exists():
+            raise ReleaseError("operator_stop")
+
+    def boundary(self, label):
+        self.stop()
+        nonce = secrets.token_hex(16)
+        if not self.permit or self.permit(nonce, label) != nonce:
+            raise ReleaseError("fresh_operator_permit_required")
+        self.stop()
+
+    def space(self, path, needed):
+        while not path.exists():
+            path = path.parent
+        if shutil.disk_usage(path).free < needed + RESERVE:
+            raise ReleaseError("insufficient_disk_reserve")
+
+    def public_directory(self, path):
+        self.checked(path)
+        path.mkdir(parents=True, exist_ok=True, mode=0o755)
+        if self.root == Path("/") and path.stat().st_uid != 0:
+            raise ReleaseError("root_owned_directory_required")
+        path.chmod(0o755)
+
+    def write(self, path, content, mode=0o600):
+        self.checked(path)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_name(path.name + ".pending")
+        self.checked(temporary)
+        with temporary.open("xb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(mode)
+        temporary.replace(path)
+
+    def journal(self, stage, outcome):
+        previous = (
+            json.loads((self.record / "status.json").read_bytes())
+            if (self.record / "status.json").exists()
+            else {}
+        )
+        cutover = (
+            json.loads((self.record / "cutover.json").read_bytes())
+            if (self.record / "cutover.json").exists()
+            else {}
+        )
+        current_time = int(self.now())
+        event = {
+            "release_id": self.request["release_id"],
+            "commit": self.request["commit"],
+            "archive_sha256": self.request.get("archive_sha256"),
+            "stage": stage,
+            "outcome": outcome,
+            "status": "running" if outcome == "started" else outcome,
+            "at": current_time,
+            "started_at": previous.get("started_at", current_time),
+            "updated_at": current_time,
+            "operator": "Prism release controller",
+            "operator_issue": "https://github.com/doubleh-ai/prism/issues/9",
+            "previous_commit": cutover.get("previous_runtime", {}).get("served_revision"),
+            "recovery_commit": self.request.get("receipts", {}).get("recovery", {}).get("commit"),
+            "last_completed_stage": stage if outcome == "completed" else previous.get("last_completed_stage"),
+            "cutover_occurred": previous.get("cutover_occurred", False) or stage == "cutover_config_written",
+            "steps": previous.get("steps", [])[-49:]
+            + [{"stage": stage, "status": outcome, "at": current_time}],
+            "service_verified": (self.record / "verified.json").exists()
+            and not (self.record / "rollback.json").exists(),
+            "production_verified": outcome == "completed"
+            and stage == "resume"
+            and (self.record / "verified.json").exists()
+            and not (self.record / "rollback.json").exists(),
+        }
+        path = self.checked(self.record / "journal.jsonl")
+        with path.open("ab") as output:
+            output.write(encoded(event) + b"\n")
+            output.flush()
+            os.fsync(output.fileno())
+        path.chmod(0o600)
+        self.write(self.record / "status.json", encoded(event))
+        self.write(self.operations / "status.json", encoded(event), 0o644)
+        return event
+
+    def receipt(self, name):
+        receipt = self.request.get("receipts", {})
+        raw = base64.b64decode(self.request.get("receipts_raw", ""), validate=True)
+        if digest(raw) != self.request.get("receipts_sha256") or json.loads(raw) != receipt:
+            raise ReleaseError("receipt_digest_mismatch")
+        if (
+            receipt.get("commit") != self.request["commit"]
+            or receipt.get("archive_sha256") != self.request["archive_sha256"]
+        ):
+            raise ReleaseError("receipt_not_bound")
+        if not DIGEST.fullmatch(self.request.get("receipts_sha256", "")):
+            raise ReleaseError("receipt_digest_required")
+        item = receipt.get(name, {})
+        if item.get("verified") is not True or not DIGEST.fullmatch(item.get("receipt_sha256", "")):
+            raise ReleaseError("reviewed_receipt_required_" + name)
+        if not 0 <= self.now() - item.get("checked_at", 0) <= (120 if name == "activity" else 86400):
+            raise ReleaseError("receipt_expired_" + name)
+        if name == "compatibility" and item.get("database_forward_and_backward") is not True:
+            raise ReleaseError("database_compatibility_required")
+        return item
+
+    def runtime(self):
+        cwd = (
+            self.run(["/usr/bin/systemctl", "show", "--value", "--property=WorkingDirectory", SERVICE])
+            .decode()
+            .strip()
+        )
+        command = self.run(["/usr/bin/systemctl", "show", "--value", "--property=ExecStart", SERVICE])
+        pid = (
+            self.run(["/usr/bin/systemctl", "show", "--value", "--property=MainPID", SERVICE])
+            .decode()
+            .strip()
+        )
+        path = self.checked(Path(cwd))
+        if path != self.production and not (path.parent == self.releases and SHA.fullmatch(path.name)):
+            raise ReleaseError("unexpected_current_working_directory")
+        if not pid.isdigit() or pid == "0" or Path(os.readlink(self.root / "proc" / pid / "cwd")) != path:
+            raise ReleaseError("runtime_directory_not_reconciled")
+        # Legacy v0.19.7 has no readiness route. The PID/source fingerprint remains
+        # real; an unavailable served revision is explicitly unknown, not inferred.
+        try:
+            revision = self.ready().get("deployed_revision")
+        except Exception:
+            revision = None
+        result = {"working_directory": cwd, "exec_start_sha256": digest(command), "served_revision": revision}
+        result["fingerprint"] = digest(encoded(result))
+        return result
+
+    def ready(self):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                raise ReleaseError("readiness_redirect_rejected")
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with opener.open("http://127.0.0.1:8088/health/ready", timeout=10) as response:
+            raw = response.read(65537)
+            if len(raw) > 65536 or response.status != 200:
+                raise ReleaseError("readiness_unavailable")
+        return json.loads(raw)
+
+    def source_inventory(self, supplied, source=None):
+        """Hash declared files and independently detect added application source files."""
+        expected = supplied.get("files", [])
+        source = source or self.production
+        names = {safe_path(item["path"]) for item in expected}
+        if not names or len(names) != len(expected):
+            raise ReleaseError("source_inventory_required")
+        found = set()
+        excluded = {"data", "logs", "reports", "uploads", "backups", "__pycache__", "node_modules", "venv"}
+        for directory, folders, filenames in os.walk(source, followlinks=False):
+            folders[:] = [name for name in folders if not name.startswith(".") and name not in excluded]
+            for name in folders + filenames:
+                path = Path(directory) / name
+                if path.is_symlink() and not name.startswith("."):
+                    raise ReleaseError("production_source_symlink")
+            for name in filenames:
+                path = Path(directory) / name
+                if not name.startswith(".") and path.suffix in {
+                    ".py",
+                    ".js",
+                    ".css",
+                    ".html",
+                    ".json",
+                    ".svg",
+                    ".md",
+                    ".pth",
+                    ".so",
+                }:
+                    found.add(path.relative_to(source).as_posix())
+        if found - names:
+            raise ReleaseError("new_production_source")
+        for item in expected:
+            path = self.checked(source / item["path"])
+            if (
+                not path.is_file()
+                or path.stat().st_size != item["size"]
+                or digest(path.read_bytes()) != item["sha256"]
+                or f"{stat.S_IMODE(path.stat().st_mode):04o}" != item["mode"]
+            ):
+                raise ReleaseError("production_source_drift")
+        return digest(encoded(supplied))
+
+    def no_active_tasks(self):
+        activity = self.receipt("activity")
+        if activity.get("admission_paused") is not True:
+            raise ReleaseError("reviewed_admission_pause_required")
+        database = self.checked(self.production / "data/chat.db")
+        if not database.is_file():
+            raise ReleaseError("production_database_missing")
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in ("analysis_runs", "indicator_scan_jobs", "capability_calls"):
+                if (
+                    table in tables
+                    and db.execute(
+                        f"SELECT 1 FROM {table} WHERE status IN ('queued','starting','running','cancelling') LIMIT 1"
+                    ).fetchone()
+                ):
+                    raise ReleaseError("active_tasks")
+            if "vibe_plans" in tables:
+                for row in db.execute("SELECT plan_json FROM vibe_plans"):
+                    if json.loads(row[0]).get("status") in {"queued", "running", "cancelling"}:
+                        raise ReleaseError("active_tasks")
+            if (
+                "capability_runs" in tables
+                and db.execute(
+                    "SELECT 1 FROM capability_runs WHERE revoked=0 AND expires_at>? LIMIT 1",
+                    [int(self.now())],
+                ).fetchone()
+            ):
+                raise ReleaseError("active_tasks")
+            if "research_runs" in tables:
+                for row in db.execute("SELECT payload FROM research_runs"):
+                    if json.loads(row[0]).get("status") not in {
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                    }:
+                        raise ReleaseError("active_tasks")
+
+    def verify_tree(self):
+        if not (self.record / "prepared.json").exists():
+            raise ReleaseError("prepare_not_completed")
+        if self.root == Path("/") and (
+            self.release.stat().st_uid != 0 or self.release.stat().st_mode & 0o022
+        ):
+            raise ReleaseError("prepared_tree_writable_by_nonroot")
+        manifest_raw = (self.record / "manifest.json").read_bytes()
+        manifest = json.loads(manifest_raw)
+        identity = json.loads((self.record / "identity.json").read_bytes())
+        prepared = json.loads((self.record / "prepared.json").read_bytes())
+        if digest(manifest_raw) != identity.get("manifest_sha256") or any(
+            item.get("commit") != self.request["commit"] for item in (manifest, identity, prepared)
+        ):
+            raise ReleaseError("prepared_manifest_not_bound")
+        allowed = {item["path"] for item in manifest["files"]} | {".deploy-revision", ".engine-revision"}
+        for path in self.release.rglob("*"):
+            relative = path.relative_to(self.release)
+            if (
+                self.root == Path("/")
+                and not path.is_symlink()
+                and (path.stat().st_uid != 0 or stat.S_IMODE(path.stat().st_mode) & 0o022)
+            ):
+                raise ReleaseError("prepared_tree_writable_by_nonroot")
+            if relative.parts[0] == ".venv":
+                continue
+            self.checked(path)
+            if path.is_file() and relative.as_posix() not in allowed:
+                raise ReleaseError("unexpected_prepared_file")
+        if (self.release / ".deploy-revision").read_text().strip() != self.request["commit"]:
+            raise ReleaseError("prepared_revision_mismatch")
+        if (self.release / ".engine-revision").read_text().strip() != prepared.get("external_sources_sha256"):
+            raise ReleaseError("prepared_engine_revision_mismatch")
+        for item in manifest["files"]:
+            path = self.checked(self.release / item["path"])
+            if (
+                not path.is_file()
+                or digest(path.read_bytes()) != item["sha256"]
+                or path.stat().st_size != item["size"]
+                or f"{stat.S_IMODE(path.stat().st_mode):04o}" != item["mode"]
+            ):
+                raise ReleaseError("prepared_source_drift")
+        if tree_digest(self.release / ".venv")[0] != prepared.get("environment_sha256"):
+            raise ReleaseError("prepared_environment_drift")
+        self.verify_external(self.record)
+
+    def external_files(self, manifest):
+        if manifest.get("source_root") != "/home/ubuntu/TradingAgents-astock" or not SHA.fullmatch(
+            manifest.get("git_commit", "")
+        ):
+            raise ReleaseError("fixed_external_source_required")
+        entries = manifest.get("files", [])
+        paths = []
+        forbidden = {"data", "cache", "logs", "log", "reports", "venv", "__pycache__", "node_modules"}
+        for item in entries:
+            path = safe_path(item.get("path", ""))
+            if any(part in forbidden for part in PurePosixPath(path).parts) or Path(path).suffix in {
+                ".pyc",
+                ".db",
+                ".sqlite",
+                ".log",
+                ".pem",
+                ".key",
+                ".env",
+            }:
+                raise ReleaseError("external_runtime_or_secret_forbidden")
+            if (
+                item.get("mode") not in {"0644", "0755"}
+                or not DIGEST.fullmatch(item.get("sha256", ""))
+                or not isinstance(item.get("size"), int)
+                or not 0 <= item["size"] <= 8 * 1024 * 1024
+            ):
+                raise ReleaseError("invalid_external_manifest")
+            paths.append(path)
+        if (
+            not entries
+            or len(entries) > 4096
+            or len(set(paths)) != len(paths)
+            or sum(item["size"] for item in entries) > MAX_ARCHIVE
+        ):
+            raise ReleaseError("external_manifest_limits")
+        return entries
+
+    def external_target(self, manifest):
+        return self.checked(self.root / "opt/prism/engines/astock" / digest(encoded(manifest)))
+
+    def verify_external(self, record, expected=None):
+        raw = self.checked(record / "external-source-manifest.json").read_bytes()
+        manifest = json.loads(raw)
+        if expected is None:
+            expected = json.loads((record / "prepared.json").read_bytes()).get("external_sources_sha256")
+        if digest(encoded(manifest)) != expected:
+            raise ReleaseError("prepared_external_manifest_changed")
+        entries = self.external_files(manifest)
+        target = self.external_target(manifest)
+        if (
+            not target.is_dir()
+            or self.root == Path("/")
+            and (target.stat().st_uid != 0 or target.stat().st_mode & 0o022)
+        ):
+            raise ReleaseError("external_tree_not_root_locked")
+        expected = {item["path"] for item in entries}
+        found = set()
+        for path in target.rglob("*"):
+            self.checked(path)
+            if self.root == Path("/") and (path.stat().st_uid != 0 or path.stat().st_mode & 0o022):
+                raise ReleaseError("external_tree_not_root_locked")
+            if path.is_file():
+                found.add(path.relative_to(target).as_posix())
+        if found != expected:
+            raise ReleaseError("external_inventory_changed")
+        for item in entries:
+            path = target / item["path"]
+            if (
+                path.stat().st_size != item["size"]
+                or digest(path.read_bytes()) != item["sha256"]
+                or f"{stat.S_IMODE(path.stat().st_mode):04o}" != item["mode"]
+            ):
+                raise ReleaseError("external_source_drift")
+        return target
+
+    def prepare_external(self):
+        manifest = self.request.get("external_source_manifest", {})
+        expected = self.request["receipts"]["dependencies"].get("external_sources_sha256")
+        if digest(encoded(manifest)) != expected:
+            raise ReleaseError("external_source_receipt_required")
+        entries = self.external_files(manifest)
+        source = self.checked(self.root / "home/ubuntu/TradingAgents-astock")
+        names = {item["path"] for item in entries}
+        excluded = {"data", "cache", "logs", "reports", "venv", "__pycache__", "node_modules"}
+        for directory, folders, filenames in os.walk(source, followlinks=False):
+            ignored = excluded | ({"tests", "examples", "scripts"} if Path(directory) == source else set())
+            folders[:] = [name for name in folders if not name.startswith(".") and name not in ignored]
+            for name in folders + filenames:
+                path = Path(directory) / name
+                if path.is_symlink() and not name.startswith("."):
+                    raise ReleaseError("external_source_symlink")
+                if path.suffix == ".py" and path.relative_to(source).as_posix() not in names:
+                    raise ReleaseError("unregistered_external_python")
+        contents = {}
+        for item in entries:
+            path = self.checked(source / item["path"])
+            if (
+                not path.is_file()
+                or path.stat().st_size != item["size"]
+                or path.stat().st_mode & 0o7000
+                or bool(path.stat().st_mode & 0o111) != (item["mode"] == "0755")
+            ):
+                raise ReleaseError("external_source_drift")
+            content = path.read_bytes()
+            if digest(content) != item["sha256"]:
+                raise ReleaseError("external_source_drift")
+            contents[item["path"]] = content
+        target = self.external_target(manifest)
+        self.space(target, sum(item["size"] for item in entries))
+        self.boundary("prepare_fixed_external_source")
+        self.public_directory(target.parent.parent)
+        self.public_directory(target.parent)
+        if not target.exists():
+            target.mkdir(mode=0o755)
+            target.chmod(0o755)
+            for item in entries:
+                path = target / item["path"]
+                path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                for parent in path.parents:
+                    if parent == target.parent:
+                        break
+                    parent.chmod(0o755)
+                self.write(path, contents[item["path"]], int(item["mode"], 8))
+        self.write(self.record / "external-source-manifest.json", encoded(manifest))
+        self.verify_external(self.record, expected)
+        return expected
+
+    def prepare(self):
+        backup = self.receipt("backup")
+        if backup.get("recovery_verified") is not True:
+            raise ReleaseError("recovery_receipt_required")
+        self.receipt("compatibility")
+        raw = base64.b64decode(self.request["archive"], validate=True)
+        manifest, files, manifest_raw = validate_archive(
+            raw, self.request["archive_sha256"], self.request["manifest_sha256"]
+        )
+        if manifest["commit"] != self.request["commit"] or self.release.exists():
+            raise ReleaseError("release_identity_or_existing_path")
+        dependencies = self.request.get("dependencies", [])
+        dependency_size = sum(len(item.get("content", "")) * 3 // 4 for item in dependencies)
+        if dependency_size > MAX_DEPENDENCIES:
+            raise ReleaseError("dependency_limits")
+        inherited_entries = []
+        inherited, inherited_size = tree_digest(self.old_venv, entries=inherited_entries)
+        if inherited != self.request["receipts"].get("dependencies", {}).get("base_environment_sha256"):
+            raise ReleaseError("base_environment_changed")
+        self.space(self.releases, inherited_size * 2 + dependency_size * 3 + MAX_ARCHIVE)
+        self.space(self.operations, dependency_size)
+        self.boundary("prepare_candidate")
+        external_digest = self.prepare_external()
+        self.public_directory(self.releases.parent)
+        self.public_directory(self.releases)
+        self.release.mkdir(parents=True, mode=0o755)
+        self.release.chmod(0o755)
+        for name, (content, mode) in files.items():
+            path = self.release / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            for parent in path.parents:
+                if parent == self.release.parent:
+                    break
+                parent.chmod(0o755)
+            self.write(path, content, mode)
+        self.write(self.release / ".deploy-revision", (manifest["commit"] + "\n").encode(), 0o644)
+        self.write(self.release / ".engine-revision", (external_digest + "\n").encode(), 0o644)
+        self.write(self.record / "manifest.json", manifest_raw)
+        inputs = self.record / "dependencies"
+        inputs.mkdir(mode=0o700)
+        for item in dependencies:
+            name = item.get("name", "")
+            if name != "core.lock" and not re.fullmatch(r"[A-Za-z0-9_.+\-]+\.whl", name):
+                raise ReleaseError("dependency_filename_rejected")
+            content = base64.b64decode(item["content"], validate=True)
+            if digest(content) != item["sha256"] or (inputs / name).exists():
+                raise ReleaseError("dependency_digest_mismatch")
+            self.write(inputs / name, content)
+        if not (inputs / "core.lock").is_file():
+            raise ReleaseError("dependency_lock_required")
+        lock_digest = digest((inputs / "core.lock").read_bytes())
+        lock_entry = next((item for item in manifest["files"] if item["path"] == "requirements.lock"), {})
+        if lock_digest != lock_entry.get("sha256") or lock_digest != self.request["receipts"][
+            "dependencies"
+        ].get("lock_sha256"):
+            raise ReleaseError("candidate_dependency_lock_mismatch")
+        self.boundary("prepare_environment")
+        self.stage_account()
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "PIP_CONFIG_FILE": "/dev/null",
+            "PIP_NO_INPUT": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        target = self.release / ".venv"
+        self.run(["/usr/bin/python3.12", "-I", "-B", "-S", "-m", "venv", "--copies", str(target)], env=env)
+        sources = list((self.old_venv / "lib").glob("python*/site-packages"))
+        destinations = list((target / "lib").glob("python*/site-packages"))
+        if (
+            len(sources) != 1
+            or len(destinations) != 1
+            or sources[0].parent.name != destinations[0].parent.name
+        ):
+            raise ReleaseError("python_environment_mismatch")
+        for path in sources[0].rglob("*"):
+            if path.is_symlink() and (
+                not path.resolve(strict=True).is_relative_to(sources[0]) or path.is_dir()
+            ):
+                raise ReleaseError("package_symlink_requires_review")
+        inventory = {item[0]: item for item in inherited_entries}
+
+        def copy_verified(source, destination):
+            source = Path(source)
+            expected = inventory.get(source.relative_to(self.old_venv).as_posix())
+            if source.is_symlink():
+                if expected is None or expected[1:] != ["link", os.readlink(source)]:
+                    raise ReleaseError("inherited_package_drift")
+                source = source.resolve(strict=True)
+                if not source.is_relative_to(sources[0]):
+                    raise ReleaseError("package_symlink_requires_review")
+                expected = inventory.get(source.relative_to(self.old_venv).as_posix())
+            if expected is None or len(expected) != 4 or not isinstance(expected[1], int):
+                raise ReleaseError("inherited_package_drift")
+            hasher = hashlib.sha256()
+            descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as original, Path(destination).open("wb") as copied:
+                info = os.fstat(original.fileno())
+                if not stat.S_ISREG(info.st_mode) or (info.st_size, stat.S_IMODE(info.st_mode)) != tuple(
+                    expected[1:3]
+                ):
+                    raise ReleaseError("inherited_package_drift")
+                for block in iter(lambda: original.read(1024 * 1024), b""):
+                    hasher.update(block)
+                    copied.write(block)
+            if hasher.hexdigest() != expected[3]:
+                raise ReleaseError("inherited_package_drift")
+            Path(destination).chmod(expected[2])
+            return str(destination)
+
+        # This explicit projection removes the reviewed unused UI distribution
+        # and the editable installation replaced by the fixed engine manifest.
+        # Exact observed root names avoid pruning unrelated/transitive packages.
+        projected_out = {
+            "streamlit": "unused_ui",
+            "streamlit-1.58.0.dist-info": "unused_ui_metadata",
+            "tradingagents_astock-0.2.16.dist-info": "replaced_editable_metadata",
+            "~radingagents_astock-0.2.15.dist-info": "retired_editable_metadata",
+            "__editable__.tradingagents_astock-0.2.16.pth": "replaced_editable_hook",
+            "__editable___tradingagents_astock_0_2_16_finder.py": "replaced_editable_finder",
+            "~ttpx-0.25.2.dist-info": "retired_httpx_metadata",
+        }
+        excluded_roots = []
+        startup_patterns = (
+            "*.pth",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            "sitecustomize*",
+            "usercustomize*",
+            "patch_ssl*",
+        )
+        ignore_startup = shutil.ignore_patterns(*startup_patterns)
+
+        def ignore_inherited(directory, names):
+            ignored = set(ignore_startup(directory, names))
+            if Path(directory) == sources[0]:
+                for name in sorted(set(names) & projected_out.keys()):
+                    ignored.add(name)
+                    excluded_roots.append({"name": name, "reason": projected_out[name]})
+            return ignored
+
+        # Internal regular-file links are materialized; no link back to writable
+        # old packages, TLS bypass hook, or legacy editable startup hook survives.
+        shutil.copytree(
+            sources[0],
+            destinations[0],
+            dirs_exist_ok=True,
+            symlinks=False,
+            copy_function=copy_verified,
+            ignore=ignore_inherited,
+        )
+        if tree_digest(self.old_venv)[0] != inherited:
+            raise ReleaseError("base_environment_changed_during_copy")
+        if self.request["receipts"]["dependencies"].get("allowed_pth"):
+            raise ReleaseError("legacy_editable_hooks_rejected_use_fixed_engine_path")
+        build_inputs = self.checked(self.operations / "build-inputs" / self.request["release_id"])
+        self.public_directory(build_inputs.parent)
+        build_inputs.mkdir(mode=0o750)
+        build_inputs.chmod(0o750)
+        self.run(["/usr/bin/chown", "root:prism-stage", str(build_inputs)])
+        for item in inputs.iterdir():
+            self.write(build_inputs / item.name, item.read_bytes(), 0o640)
+            self.run(["/usr/bin/chown", "root:prism-stage", str(build_inputs / item.name)])
+        self.run(["/usr/bin/chown", "-hR", "prism-stage:prism-stage", str(target)])
+        self.boundary("offline_dependency_install")
+        self.build_command(
+            target,
+            "install",
+            [
+                "install",
+                "--no-cache-dir",
+                "--no-index",
+                "--find-links",
+                str(build_inputs),
+                "--require-hashes",
+                "--only-binary=:all:",
+                "--upgrade",
+                "-r",
+                str(build_inputs / "core.lock"),
+            ],
+        )
+        self.stop()
+        self.build_command(target, "check", ["check"])
+        self.run(["/usr/bin/chown", "-hR", "root:root", str(target)])
+        self.stop()
+        target.chmod(0o755)
+        for path in target.rglob("*"):
+            if not path.is_symlink():
+                path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)
+        self.write(
+            self.record / "prepared.json",
+            encoded(
+                {
+                    "commit": manifest["commit"],
+                    "receipt": self.request["receipts_sha256"],
+                    "environment_sha256": tree_digest(target)[0],
+                    "inherited_environment_sha256": inherited,
+                    "external_sources_sha256": external_digest,
+                    "inherited_package_projection": {
+                        "policy": "reviewed_legacy_ui_and_editable_v1",
+                        "excluded_roots": excluded_roots,
+                        "excluded_startup_and_bytecode_patterns": list(startup_patterns),
+                        "replacement_engine_manifest_sha256": external_digest,
+                        "source_inventory": "entire old environment before and after copy",
+                    },
+                }
+            ),
+        )
+        self.verify_external(self.record)
+
+    def build_command(self, target, phase, arguments):
+        self.run(
+            [
+                "/usr/bin/systemd-run",
+                "--wait",
+                "--pipe",
+                "--quiet",
+                "--collect",
+                "--unit=prism-build-" + self.request["commit"][:12] + "-" + phase,
+                "--uid=prism-stage",
+                "--gid=prism-stage",
+                "--property=PrivateNetwork=yes",
+                "--property=ProtectHome=yes",
+                "--property=ProtectProc=invisible",
+                "--property=NoNewPrivileges=yes",
+                "--property=PrivateTmp=yes",
+                "--property=ProtectSystem=strict",
+                "--property=ReadWritePaths=" + str(target),
+                "--property=InaccessiblePaths=/run -" + str(self.operations / "staging"),
+                "--property=MemoryMax=768M",
+                "--property=TasksMax=64",
+                "--property=CPUQuota=100%",
+                "--property=RuntimeMaxSec=1200",
+                "--property=KillMode=control-group",
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "HOME=/nonexistent",
+                "PIP_CONFIG_FILE=/dev/null",
+                "PIP_NO_INPUT=1",
+                "PYTHONDONTWRITEBYTECODE=1",
+                str(target / "bin/python"),
+                "-I",
+                "-B",
+                "-m",
+                "pip",
+                *arguments,
+            ],
+            timeout=1250,
+        )
+
+    def stage_account(self):
+        try:
+            account = pwd.getpwnam("prism-stage")
+        except KeyError:
+            self.run(
+                [
+                    "/usr/sbin/useradd",
+                    "--system",
+                    "--user-group",
+                    "--no-create-home",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    "prism-stage",
+                ]
+            )
+            account = pwd.getpwnam("prism-stage")
+        ubuntu = pwd.getpwnam("ubuntu")
+        if (
+            account.pw_uid == ubuntu.pw_uid
+            or account.pw_uid == 0
+            or account.pw_shell != "/usr/sbin/nologin"
+            or grp.getgrgid(account.pw_gid).gr_name != "prism-stage"
+            or any("prism-stage" in group.gr_mem for group in grp.getgrall())
+        ):
+            raise ReleaseError("stage_account_not_isolated")
+
+    def stage(self):
+        self.verify_tree()
+        stage = self.checked(self.operations / "staging" / self.request["release_id"])
+        socket = self.stage_socket(stage)
+        if stage.exists():
+            raise ReleaseError("stage_already_exists")
+        source_db = self.checked(self.production / "data/chat.db")
+        self.space(self.operations, source_db.stat().st_size * 3)
+        self.boundary("stage_private_copy")
+        self.stage_account()
+        self.public_directory(stage.parent)
+        stage.mkdir(mode=0o700)
+        data = stage / "data"
+        data.mkdir(mode=0o700)
+        with (
+            sqlite3.connect(source_db.as_uri() + "?mode=ro", uri=True) as source,
+            sqlite3.connect(data / "chat.db") as destination,
+        ):
+            source.backup(destination)
+            tables = {
+                row[0] for row in destination.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "sessions" in tables:
+                destination.execute("DELETE FROM sessions")
+            if "capability_runs" in tables:
+                destination.execute("UPDATE capability_runs SET revoked=1")
+        # A copied DB is for migration/auth/history checks only. Runtime state is not copied.
+        home = stage / "home"
+        home.mkdir(mode=0o700)
+        self.run(["/usr/bin/chown", "-R", "prism-stage:prism-stage", str(stage)])
+        self.run(["/usr/bin/chown", "prism-stage:ubuntu", str(stage)])
+        stage.chmod(0o750)
+        self.boundary("stage_isolated_service")
+        self.run(
+            [
+                "/usr/bin/systemd-run",
+                "--unit=prism-stage-" + self.request["commit"][:12],
+                "--collect",
+                "--uid=prism-stage",
+                "--gid=prism-stage",
+                "--property=WorkingDirectory=" + str(self.release),
+                "--property=NoNewPrivileges=yes",
+                "--property=PrivateNetwork=yes",
+                "--property=ProtectHome=yes",
+                "--property=ProtectProc=invisible",
+                "--property=PrivateTmp=yes",
+                "--property=ProtectSystem=strict",
+                "--property=ReadWritePaths=" + str(stage),
+                "--property=InaccessiblePaths=/run",
+                "--property=MemoryMax=768M",
+                "--property=TasksMax=64",
+                "--property=CPUQuota=100%",
+                "--property=RuntimeMaxSec=1800",
+                "--property=KillMode=control-group",
+                "--property=UMask=0077",
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "HOME=" + str(home),
+                "STOCK_DATA_DIR=" + str(data),
+                "STOCK_LOG_FILE=" + str(stage / "app.log"),
+                "CLAUDE_BIN=/nonexistent/prism-stage-claude",
+                "CLAUDE_SKILLS_HOME=" + str(home / "skills"),
+                "PRISM_ASTOCK_PROJECT=/nonexistent/prism-stage-astock",
+                "PRISM_VIBE_ENGINE_URL=http://127.0.0.1:9",
+                "PRISM_INTERNAL_API_URL=http://127.0.0.1:18888",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PRISM_SINGLE_WORKER=1",
+                "PRISM_ENVIRONMENT=staging",
+                str(self.release / ".venv/bin/python"),
+                "-I",
+                "-B",
+                "-m",
+                "uvicorn",
+                self.application(self.release, self.record),
+                "--app-dir",
+                str(self.release),
+                "--uds",
+                str(socket),
+            ]
+        )
+        deadline = time.monotonic() + 30
+        while not socket.exists() and time.monotonic() < deadline:
+            self.stop()
+            time.sleep(0.1)
+        if not self.is_socket(socket):
+            raise ReleaseError("stage_socket_unavailable")
+        self.run(["/usr/bin/chown", "prism-stage:ubuntu", str(socket)])
+        socket.chmod(0o660)
+        self.write(
+            self.record / "staged.json",
+            encoded({"socket": str(socket), "external_integrations_verified": False}),
+        )
+
+    @staticmethod
+    def stage_socket(stage):
+        socket = stage / "stage.sock"
+        if len(str(socket).encode()) >= 104:
+            raise ReleaseError("stage_socket_path_too_long")
+        return socket
+
+    @staticmethod
+    def is_socket(path):
+        return stat.S_ISSOCK(path.stat().st_mode)
+
+    def switch(self):
+        self.verify_tree()
+        self.receipt("backup")
+        self.receipt("compatibility")
+        stage = self.receipt("stage")
+        if (
+            stage.get("isolated") is not True
+            or stage.get("journeys_passed") is not True
+            or not (self.record / "staged.json").exists()
+        ):
+            raise ReleaseError("stage_verification_required")
+        self.assert_admission()
+        expected = self.request["receipts"].get("expected_source_manifest_sha256")
+        current = self.runtime()
+        if current["fingerprint"] != self.request["receipts"].get("expected_current_fingerprint"):
+            raise ReleaseError("current_runtime_changed")
+        if (
+            self.source_inventory(self.request.get("source_manifest", {}), Path(current["working_directory"]))
+            != expected
+        ):
+            raise ReleaseError("source_manifest_receipt_mismatch")
+        self.no_active_tasks()
+        self.recovery_target()
+        self.run(["/usr/bin/systemctl", "is-active", "--quiet", SERVICE])
+        if (self.record / "previous.json").exists():
+            raise ReleaseError("switch_already_attempted")
+        previous = {
+            "existed": self.checked(self.override).exists(),
+            "content": base64.b64encode(self.override.read_bytes()).decode()
+            if self.override.exists()
+            else "",
+        }
+        self.boundary("production_override")
+        # Must remain private: an old drop-in may contain credentials.
+        self.write(self.record / "previous.json", encoded(previous))
+        override = self.dropin(self.release)
+        self.write(
+            self.record / "cutover.json",
+            encoded(
+                {"at": int(self.now()), "previous_runtime": current, "override_sha256": digest(override)}
+            ),
+        )
+        self.write(self.override, override, 0o600)
+        self.journal("cutover_config_written", "completed")
+        self.boundary("production_daemon_reload")
+        self.run(["/usr/bin/systemctl", "daemon-reload"])
+        self.boundary("production_restart")
+        self.run(["/usr/bin/systemctl", "restart", SERVICE])
+        self.write(self.record / "switched.json", encoded({"at": int(self.now())}))
+
+    def application(self, release, record):
+        manifest = json.loads((record / "manifest.json").read_bytes())
+        if manifest.get("commit") != release.name:
+            raise ReleaseError("application_identity_mismatch")
+        if str(manifest.get("version", "")).endswith("-recovery"):
+            if not any(item.get("path") == "server/recovery.py" for item in manifest.get("files", [])):
+                raise ReleaseError("restricted_recovery_entry_required")
+            return "server.recovery:app"
+        return "server.main:app"
+
+    def dropin(self, release):
+        external = (release / ".engine-revision").read_text().strip()
+        if not DIGEST.fullmatch(external):
+            raise ReleaseError("fixed_engine_revision_required")
+        engine = self.checked(self.root / "opt/prism/engines/astock" / external)
+        recovery = self.request["receipts"].get("recovery", {})
+        if release.name == self.request["commit"]:
+            record = self.record
+        elif release.name == recovery.get("commit"):
+            record = self.checked(self.operations / recovery["release_id"])
+        else:
+            raise ReleaseError("application_identity_mismatch")
+        application = self.application(release, record)
+        return (
+            "[Service]\nWorkingDirectory="
+            + str(release)
+            + "\nExecStart=\nExecStart="
+            + str(release / ".venv/bin/python")
+            + " -I -B -m uvicorn "
+            + application
+            + " --app-dir "
+            + str(release)
+            + " --host 127.0.0.1 --port 8088\nEnvironmentFile="
+            + str(self.production / ".env")
+            + "\nEnvironment=STOCK_DATA_DIR="
+            + str(self.production / "data")
+            + "\nEnvironment=STOCK_LOG_FILE="
+            + str(self.production / "app.log")
+            + "\nEnvironment=PRISM_INTERNAL_API_URL=http://127.0.0.1:8088\nEnvironment=PRISM_ASTOCK_PROJECT="
+            + str(engine)
+            + "\nEnvironment=PRISM_SINGLE_WORKER=1\nEnvironment=PRISM_ENVIRONMENT=production\nEnvironment=PYTHONDONTWRITEBYTECODE=1\n"
+        ).encode()
+
+    def recovery_target(self):
+        recovery = self.receipt("recovery")
+        if (
+            not SHA.fullmatch(recovery.get("commit", ""))
+            or recovery["commit"] == self.request["commit"]
+            or not RELEASE_ID.fullmatch(recovery.get("release_id", ""))
+        ):
+            raise ReleaseError("safe_recovery_identity_required")
+        if not all(
+            recovery.get(key) is True
+            for key in ("security_verified", "journeys_passed", "database_forward_and_backward")
+        ):
+            raise ReleaseError("safe_recovery_acceptance_required")
+        saved = self.release, self.record, self.request
+        try:
+            self.release = self.checked(self.releases / recovery["commit"])
+            self.record = self.checked(self.operations / recovery["release_id"])
+            self.request = dict(self.request, commit=recovery["commit"])
+            identity = json.loads((self.record / "identity.json").read_bytes())
+            if (
+                any(
+                    identity.get(key) != recovery.get(key)
+                    for key in ("commit", "archive_sha256", "manifest_sha256")
+                )
+                or not (self.record / "staged.json").exists()
+            ):
+                raise ReleaseError("recovery_candidate_not_bound")
+            self.verify_tree()
+            if self.application(self.release, self.record) != "server.recovery:app":
+                raise ReleaseError("restricted_recovery_entry_required")
+            return self.release
+        finally:
+            self.release, self.record, self.request = saved
+
+    def verify(self):
+        if not (self.record / "switched.json").exists():
+            raise ReleaseError("cutover_not_recorded")
+        self.verify_tree()
+        journey = self.receipt("journeys")
+        if (
+            journey.get("served_commit") != self.request["commit"]
+            or journey.get("journeys_passed") is not True
+        ):
+            raise ReleaseError("core_journeys_required")
+        data = self.ready()
+        if (
+            data.get("status") not in {"ok", "ready"}
+            or data.get("deployed_revision") != self.request["commit"]
+        ):
+            raise ReleaseError("served_revision_not_verified")
+        self.write(
+            self.record / "verified.json",
+            encoded(
+                {
+                    "commit": self.request["commit"],
+                    "at": int(self.now()),
+                    "receipt": self.request["receipts_sha256"],
+                }
+            ),
+        )
+
+    def nginx_paths(self):
+        result = {}
+        for name in NGINX_SITES:
+            expected = self.root / "etc/nginx/sites-available" / name
+            enabled = self.root / "etc/nginx/sites-enabled" / name
+            if enabled.resolve(strict=True) != expected or self.checked(expected).stat().st_size > 65536:
+                raise ReleaseError("nginx_fixed_target_mismatch")
+            if self.root == Path("/") and expected.stat().st_uid != 0:
+                raise ReleaseError("nginx_root_owner_required")
+            result[name] = expected
+        return result
+
+    def probe_admission(self):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                raise ReleaseError("admission_redirect_rejected")
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        for url in ("https://doubleh.site/api/me", "http://124.223.168.224/api/me"):
+            try:
+                response = opener.open(url, timeout=10)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                data = response.read(4097)
+                if (
+                    response.code != 503
+                    or response.headers.get("Retry-After") != "60"
+                    or len(data) > 4096
+                    or json.loads(data).get("error") != HOLD_MESSAGE
+                ):
+                    raise ReleaseError("admission_hold_not_observed")
+
+    def assert_admission(self):
+        record = json.loads((self.record / "admission.json").read_bytes())
+        if (self.record / "resumed.json").exists():
+            raise ReleaseError("admission_already_resumed")
+        for name, path in self.nginx_paths().items():
+            if digest(path.read_bytes()) != record["files"][name]["hold_sha256"]:
+                raise ReleaseError("admission_configuration_changed")
+        self.probe_admission()
+
+    def nginx_write(self, record, destination):
+        paths = self.nginx_paths()
+        allowed = {
+            name: {item["original_sha256"], item["hold_sha256"]} for name, item in record["files"].items()
+        }
+        for name, path in paths.items():
+            if digest(path.read_bytes()) not in allowed[name]:
+                raise ReleaseError("nginx_configuration_changed")
+        for name, path in paths.items():
+            item = record["files"][name]
+            content = base64.b64decode(item[destination], validate=True)
+            if digest(content) != item[destination + "_sha256"]:
+                raise ReleaseError("private_nginx_record_corrupted")
+            self.write(path, content, item["mode"])
+            self.run(
+                ["/usr/bin/chown", "--no-dereference", str(item["uid"]) + ":" + str(item["gid"]), str(path)]
+            )
+
+    def quiesce(self):
+        self.verify_tree()
+        recovery = self.recovery_target()
+        stage = self.receipt("stage")
+        if (
+            not stage.get("isolated")
+            or not stage.get("journeys_passed")
+            or not (self.record / "staged.json").exists()
+        ):
+            raise ReleaseError("stage_verification_required")
+        self.boundary("stop_accepted_staging_services")
+        for commit in (self.request["commit"], recovery.name):
+            unit = "prism-stage-" + commit[:12] + ".service"
+            state = self.run(
+                ["/usr/bin/systemctl", "show", "--property=LoadState,ActiveState", unit]
+            ).decode()
+            values = dict(line.split("=", 1) for line in state.splitlines() if "=" in line)
+            if values.get("ActiveState") in {"active", "activating", "deactivating", "reloading"}:
+                self.run(["/usr/bin/systemctl", "stop", unit])
+            elif (
+                values.get("ActiveState") not in {"inactive", "failed"}
+                and values.get("LoadState") != "not-found"
+            ):
+                raise ReleaseError("staging_stop_state_unknown")
+        admission = self.receipt("admission")
+        path = self.record / "admission.json"
+        if path.exists():
+            record = json.loads(path.read_bytes())
+            if any(
+                record["files"][name]["original_sha256"] != admission.get("config_sha256", {}).get(name)
+                for name in NGINX_SITES
+            ):
+                raise ReleaseError("nginx_baseline_receipt_changed")
+        else:
+            record = {"runtime": self.runtime(), "files": {}}
+            for name, target in self.nginx_paths().items():
+                original = target.read_bytes()
+                if digest(original) != admission.get("config_sha256", {}).get(name):
+                    raise ReleaseError("nginx_baseline_drift")
+                hold = admission_config(original)
+                record["files"][name] = {
+                    "original": base64.b64encode(original).decode(),
+                    "hold": base64.b64encode(hold).decode(),
+                    "original_sha256": digest(original),
+                    "hold_sha256": digest(hold),
+                    "mode": stat.S_IMODE(target.stat().st_mode),
+                    "uid": target.stat().st_uid,
+                    "gid": target.stat().st_gid,
+                }
+            self.write(path, encoded(record))  # root 0700 record; contents never public
+        self.boundary("admission_hold_config")
+        if (self.record / "resumed.json").exists():
+            (self.record / "resumed.json").unlink()
+        self.nginx_write(record, "hold")
+        try:
+            self.run(["/usr/sbin/nginx", "-t"])
+        except Exception:
+            self.nginx_write(record, "original")
+            raise ReleaseError("nginx_hold_test_failed_original_restored") from None
+        self.boundary("admission_hold_reload")
+        self.run(["/usr/bin/systemctl", "reload", "nginx.service"])
+        self.assert_admission()
+
+    def resume(self):
+        record = json.loads((self.record / "admission.json").read_bytes())
+        if (self.record / "resumed.json").exists():
+            raise ReleaseError("admission_already_resumed")
+        if (self.record / "rollback.json").exists():
+            receipt = self.receipt("recovery_journeys")
+            expected = self.request["receipts"]["recovery"]["commit"]
+            if receipt.get("served_commit") != expected or receipt.get("journeys_passed") is not True:
+                raise ReleaseError("recovery_journeys_required")
+        elif (self.record / "verified.json").exists():
+            expected = self.request["commit"]
+        elif (
+            not (self.record / "cutover.json").exists()
+            and self.runtime()["fingerprint"] == record["runtime"]["fingerprint"]
+        ):
+            expected = None  # aborted before any service cutover; legacy runtime unchanged
+        else:
+            raise ReleaseError("resume_verification_required")
+        if expected:
+            ready = self.ready()
+            if ready.get("status") not in {"ok", "ready"} or ready.get("deployed_revision") != expected:
+                raise ReleaseError("resume_revision_not_ready")
+        self.boundary("admission_resume_config")
+        self.nginx_write(record, "original")
+        try:
+            self.run(["/usr/sbin/nginx", "-t"])
+        except Exception:
+            self.nginx_write(record, "hold")
+            raise ReleaseError("nginx_resume_test_failed_hold_preserved") from None
+        try:
+            self.boundary("admission_resume_reload")
+            self.run(["/usr/bin/systemctl", "reload", "nginx.service"])
+        except Exception as error:
+            self.nginx_write(record, "hold")
+            if isinstance(error, ReleaseError) and str(error) in {
+                "operator_stop",
+                "fresh_operator_permit_required",
+                "permit_timeout",
+            }:
+                raise
+            raise ReleaseError("nginx_resume_reload_unconfirmed_reconcile_required") from None
+        self.write(self.record / "resumed.json", encoded({"at": int(self.now())}))
+
+    def rollback(self):
+        self.receipt("compatibility")
+        self.assert_admission()
+        if not (self.record / "cutover.json").exists():
+            raise ReleaseError("cutover_not_attempted")
+        cutover = json.loads((self.record / "cutover.json").read_bytes())
+        if (self.record / "rollback.json").exists():
+            raise ReleaseError("rollback_already_completed")
+        recovery = self.recovery_target()
+        recovery_override = self.dropin(recovery)
+        intent = {
+            "recovery_commit": recovery.name,
+            "override_sha256": digest(recovery_override),
+            "cutover_sha256": cutover["override_sha256"],
+        }
+        intent_path = self.record / "recovery-intent.json"
+        if intent_path.exists() and json.loads(intent_path.read_bytes()) != intent:
+            raise ReleaseError("recovery_intent_changed")
+        if not self.checked(self.override).is_file() or digest(self.override.read_bytes()) not in {
+            cutover.get("override_sha256"),
+            digest(recovery_override),
+        }:
+            raise ReleaseError("rollback_configuration_changed")
+        self.boundary("recovery_override")
+        self.write(intent_path, encoded(intent))
+        self.write(self.override, recovery_override, 0o600)
+        self.journal("recovery_config_written", "completed")
+        self.boundary("recovery_daemon_reload")
+        self.run(["/usr/bin/systemctl", "daemon-reload"])
+        self.boundary("recovery_restart")
+        self.run(["/usr/bin/systemctl", "restart", SERVICE])
+        self.write(
+            self.record / "rollback.json",
+            encoded({"at": int(self.now()), "recovery_commit": recovery.name, "verification_required": True}),
+        )
+        # A completed rollback action is not a verified release. No DB restore.
+
+    def execute(self, request):
+        if (
+            request.get("action") not in ACTIONS
+            or not SHA.fullmatch(request.get("commit", ""))
+            or not RELEASE_ID.fullmatch(request.get("release_id", ""))
+        ):
+            raise ReleaseError("invalid_request")
+        self.request = request
+        self.release = self.checked(self.releases / request["commit"])
+        self.record = self.checked(self.operations / request["release_id"])
+        if request["action"] == "inspect":
+            return {
+                "runtime": self.runtime(),
+                "release_exists": self.release.exists(),
+                "stop_requested": (self.operations / "STOP").exists(),
+                "claude_binary_exists": (self.root / "home/ubuntu/.npm-global/bin/claude").is_file(),
+                "production_verified": False,
+            }
+        self.receipt("backup")
+        self.receipt("compatibility")
+        self.boundary("begin_" + request["action"])
+        self.public_directory(self.operations)
+        lock = self.checked(self.operations / "writer.lock").open("a")
+        try:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ReleaseError("another_writer_active") from None
+            self.record.mkdir(mode=0o700, exist_ok=True)
+            if self.root == Path("/") and self.record.stat().st_uid != 0:
+                raise ReleaseError("root_owned_record_required")
+            self.record.chmod(0o700)
+            identity = self.record / "identity.json"
+            bound = {key: request.get(key) for key in ("commit", "archive_sha256", "manifest_sha256")}
+            if identity.exists() and json.loads(identity.read_bytes()) != bound:
+                raise ReleaseError("release_identity_changed")
+            if not identity.exists():
+                self.write(identity, encoded(bound))
+            self.journal(request["action"], "started")
+            try:
+                getattr(self, request["action"])()
+                return self.journal(
+                    "verified" if request["action"] == "verify" else request["action"], "completed"
+                )
+            except Exception as error:
+                self.journal(
+                    request["action"],
+                    "cancelled"
+                    if isinstance(error, ReleaseError)
+                    and str(error) in {"operator_stop", "fresh_operator_permit_required", "permit_timeout"}
+                    else "failed",
+                )
+                raise
+        finally:
+            lock.close()
+
+
+def main():
+    if os.geteuid() != 0 or sys.platform != "linux":
+        raise ReleaseError("root_executor_required")
+    length = json.loads(sys.stdin.buffer.readline(128)).get("length", 0)
+    if not isinstance(length, int) or not 0 < length <= MAX_INPUT:
+        raise ReleaseError("input_limit")
+    memory = Path("/proc/meminfo").read_text()
+    available = int(re.search(r"^MemAvailable:\s+(\d+) kB$", memory, re.M)[1]) * 1024
+    if available < length * 3 + 256 * 1024 * 1024:
+        raise ReleaseError("insufficient_memory_reserve")
+    raw = sys.stdin.buffer.read(length)
+    if len(raw) != length or sys.stdin.buffer.read(1) != b"\n":
+        raise ReleaseError("input_truncated")
+
+    def read_control():
+        line = sys.stdin.buffer.readline(1024)
+        if not line:
+            raise ReleaseError("controller_disconnected")
+        return json.loads(line)
+
+    def control():
+        if select.select([sys.stdin.buffer], [], [], 0)[0]:
+            if read_control().get("stop") is True:
+                return True
+            raise ReleaseError("unexpected_control_message")
+        return False
+
+    def permit(nonce, boundary):
+        print(json.dumps({"permit_required": nonce, "boundary": boundary}), flush=True)
+        if not select.select([sys.stdin.buffer], [], [], 30)[0]:
+            raise ReleaseError("permit_timeout")
+        return read_control().get("permit")
+
+    result = RemoteRelease(permit=permit, control=control).execute(json.loads(raw))
+    print(json.dumps({"result": result}), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(
+            json.dumps({"error": str(error) if isinstance(error, ReleaseError) else "executor_failed"}),
+            flush=True,
+        )
+        raise SystemExit(1) from None

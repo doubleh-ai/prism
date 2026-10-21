@@ -119,6 +119,7 @@ def test_astock_legacy_node_delta_is_still_supported():
 class _Proc:
     def __init__(self, out):
         self.stdout = out.encode() if isinstance(out, str) else out
+        self.returncode = 0
 
 
 def test_extract_structured_ok(monkeypatch):

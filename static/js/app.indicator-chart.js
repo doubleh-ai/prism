@@ -4,7 +4,7 @@
 
   function _dateLabel(ts) {
     var d = new Date((ts || 0) * 1000);
-    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+    return new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
   }
 
   function _num(v, digits) {

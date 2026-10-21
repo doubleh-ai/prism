@@ -75,7 +75,7 @@
         {view:'reports',mark:'▤',title:'研究与研报',text:'继续已有研究，追溯来源与调用记录。'}
       ];
       var availability = this._capabilityError ? '<button class="workbench-inline-retry" data-workbench-retry="capabilities">'+esc(this._capabilityError)+'</button>' : '<span>'+(this._capabilitiesLoaded ? this._capabilities.length+' 项平台能力可供 Agent 按需调用' : '正在读取实际可用的平台能力…')+'</span>';
-      list.innerHTML = '<div class="workbench-welcome"><div class="workbench-kicker">YOUR RESEARCH WORKSPACE</div><h2>从一个问题开始，<br>把研究过程连起来。</h2><p>在对话里明确目标。查看真实能力调用、结果与来源，<br class="desktop-only">也可以进入对应工作区继续探索。</p><div class="workbench-welcome-status"><i></i>'+availability+'</div><div class="workbench-entry-grid">'+cards.map(function(card){return '<button data-capability-view="'+card.view+'"><span class="workbench-entry-mark">'+card.mark+'</span><h3>'+card.title+'</h3><p>'+card.text+'</p><small>打开工作区 <span>↗</span></small></button>';}).join('')+'</div><div class="workbench-prompts"><span>试着从这里开始</span><button data-draft-question="请先查询可用的平台能力，再帮我建立一份区分事实、推断与假设的研究计划。">建立研究计划 ↗</button><button data-draft-question="请列出我已有的研究报告，说明研究时点、来源与仍待核验的问题。">梳理已有研报 ↗</button></div><div class="workbench-evidence-principle">采集成功不等于事实已核验 · 数据时点未知时明确标注</div></div>';
+      list.innerHTML = '<div class="workbench-welcome"><div class="workbench-kicker">YOUR RESEARCH WORKSPACE</div><h2>从一个问题开始，<br>把研究过程连起来。</h2><p>在对话里明确目标。查看真实能力调用、结果与来源，<br class="desktop-only">也可以进入对应工作区继续探索。</p><div class="workbench-welcome-status"><i></i>'+availability+'</div><div class="workbench-entry-grid">'+cards.map(function(card){return '<button data-capability-view="'+card.view+'"><span class="workbench-entry-mark">'+card.mark+'</span><h3>'+card.title+'</h3><p>'+card.text+'</p><small>打开工作区 <span>↗</span></small></button>';}).join('')+'</div><div class="workbench-prompts"><span>试着从这里开始</span><button data-research-run="">查看我的研究与证据 ↗</button><button data-draft-question="请先查询可用的平台能力，再帮我建立一份区分事实、推断与假设的研究计划。">建立研究计划 ↗</button><button data-draft-question="请列出我已有的研究报告，说明研究时点、来源与仍待核验的问题。">梳理已有研报 ↗</button></div><div class="workbench-evidence-principle">采集成功不等于事实已核验 · 数据时点未知时明确标注</div></div>';
     },
     _draftResearchQuestion: function(text) {
       this.switchMode('chat');
@@ -94,10 +94,10 @@
     _renderPlatformCallHTML: function(call) {
       if (!call || !call.call_id) return '';
       this._platformCalls[call.call_id] = call;
-      var status = {running:'进行中',completed:'已完成',failed:'未完成'}[call.status] || '状态未知';
+      var status = {running:'进行中',completed:'已完成',failed:'未完成',interrupted:'已中断'}[call.status] || '状态未知';
       var label = call.label || call.capability_id || '平台能力';
       var view = call.target && call.target.view;
-      return '<article class="platform-call-card" data-call-id="'+escAttr(call.call_id)+'"><header><span class="platform-call-status '+escAttr(['running','completed','failed'].indexOf(call.status)>=0?call.status:'unknown')+'">'+status+'</span><strong>'+esc(label)+'</strong></header><p>'+esc(ChatRender.stringify(call.result_summary || call.input_summary || '等待能力返回结果'))+'</p><div class="platform-call-meta">'+esc(ChatRender.formatTime(call.created_at))+' · 平台调用记录，非原始核验证据</div><footer>'+ (capabilityViews.indexOf(view) >= 0 ? '<button data-platform-call="'+escAttr(call.call_id)+'">查看'+esc(viewLabels[view])+' ↗</button>' : '') + (call.conv_id ? '<button data-call-conversation="'+escAttr(call.conv_id)+'">返回原会话</button>' : '')+'</footer></article>';
+      return '<article class="platform-call-card" data-call-id="'+escAttr(call.call_id)+'"><header><span class="platform-call-status '+escAttr(['running','completed','failed','interrupted'].indexOf(call.status)>=0?call.status:'unknown')+'">'+status+'</span><strong>'+esc(label)+'</strong></header><p>'+esc(ChatRender.stringify(call.result_summary || call.input_summary || '等待能力返回结果'))+'</p><div class="platform-call-meta">'+esc(ChatRender.formatTime(call.created_at))+' · 平台调用记录，非原始核验证据</div><footer>'+ (capabilityViews.indexOf(view) >= 0 ? '<button data-platform-call="'+escAttr(call.call_id)+'">查看'+esc(viewLabels[view])+' ↗</button>' : '') + (call.conv_id ? '<button data-call-conversation="'+escAttr(call.conv_id)+'">返回原会话</button>' : '')+'</footer></article>';
     },
     _loadConversationCalls: function(id) { if (this.convId === id) this._loadWorkbenchHistory(); },
     _loadWorkbenchHistory: async function() {
@@ -160,9 +160,45 @@
     _openPlatformCall: async function(id) {
       var call = this._platformCalls[id];
       if (!call || !call.target) { if(this._toast)this._toast('此调用没有可打开的结果记录'); return; }
+      if (call.status === 'completed' && ['market','indicators'].indexOf(call.target.view) >= 0) {
+        await this._openCapabilitySnapshot(id); return;
+      }
       await this._navigateTarget(call.target);
     },
+    _openCapabilitySnapshot: async function(id) {
+      var sequence = this._capabilitySnapshotSeq = (this._capabilitySnapshotSeq || 0) + 1;
+      this._closeWorkbenchPanel();
+      var dialog = document.getElementById('capabilityResultDialog');
+      var body = document.getElementById('capabilityResultBody');
+      if (!dialog || !body) return;
+      if (!dialog.open) dialog.showModal();
+      body.innerHTML = '<div class="workbench-empty">读取当次调用快照…</div>';
+      try {
+        var response = await this.api('/api/capabilities/calls/'+encodeURIComponent(id));
+        if (!response.ok) throw new Error('unavailable');
+        var snapshot = await response.json();
+        if (sequence !== this._capabilitySnapshotSeq || !dialog.open) return;
+        var call = snapshot.call || this._platformCalls[id] || {};
+        var params = snapshot.params || call.params || {};
+        var result = snapshot.result || call.result;
+        this._capabilitySnapshot = snapshot;
+        document.getElementById('capabilityResultTitle').textContent = call.label || '能力调用结果';
+        var points = result && (result.bars || result.points || result.matches || result.kline);
+        var table = '';
+        if (Array.isArray(points) && points.length) {
+          var columns = Object.keys(points[0] || {}).filter(function(key) { return typeof points[0][key] !== 'object'; }).slice(0,8);
+          table = '<div class="research-table-scroll"><table class="research-table"><thead><tr>'+columns.map(function(key){return '<th>'+esc(key)+'</th>';}).join('')+'</tr></thead><tbody>'+points.slice(-50).map(function(row){return '<tr>'+columns.map(function(key){return '<td>'+esc(row[key] == null ? '未知' : String(row[key]))+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table></div><p class="research-note">共 '+points.length+' 条，展示最后 50 条。此处读取已保存结果，不重新计算。</p>';
+        }
+        body.innerHTML = '<p class="research-notice">当次查询快照 · '+esc(ChatRender.formatTime(call.created_at))+'<br>平台结果不等于原始事实核验；数据时点以结果内记录为准，缺失时未知。</p>'+
+          '<section class="research-section"><h3>实际条件</h3><pre>'+esc(JSON.stringify(params,null,2))+'</pre></section>'+
+          '<section class="research-section"><h3>原结果</h3>'+(result == null ? '<p>此历史调用未保留结果快照。请明确发起新查询；不会以当前数据替代历史结果。</p>' : table || '<pre>'+esc(JSON.stringify(result,null,2))+'</pre>')+'</section>'+
+          (call.conv_id ? '<button class="research-action" data-call-conversation="'+escAttr(call.conv_id)+'">返回原会话</button>' : '');
+      } catch (error) {
+        if (sequence === this._capabilitySnapshotSeq && dialog.open) body.innerHTML = '<div class="workbench-empty">原结果暂时无法读取。请重试；不会重新执行该调用。</div>';
+      }
+    },
     _returnToCallConversation: async function(id) {
+      var resultDialog = document.getElementById('capabilityResultDialog'); if (resultDialog && resultDialog.open) resultDialog.close();
       this._closeWorkbenchPanel(); this.switchMode('chat'); await this.openConv(id);
       this._loadConversationCalls(id);
     },
@@ -174,10 +210,17 @@
         if (view === 'indicators' || view === 'screener') {
           this._showMarketWorkspace(view==='indicators'?'library':'screener');
           if (view==='screener' && target.id) await this._openScanJob(target.id);
+          if (view==='indicators' && target.call_id) { await this._openCapabilitySnapshot(target.call_id); return; }
           if (view==='indicators' && target.id) { await this._loadIndicators(); this._openIndicatorEditor(target.id); }
         } else {
           this.switchMode(view);
-          if (view==='market' && target.ticker) await this._selectStock(target.ticker);
+          if (target.run_id && this._openResearchRun) {
+            await this._openResearchRun(target.run_id);
+            if (view === 'industry') { this._researchTab = 'industry'; this._renderResearch(); }
+            return;
+          }
+          if (view==='market' && target.call_id) { await this._openCapabilitySnapshot(target.call_id); return; }
+          if (view==='market' && target.ticker) { if(target.period) this._currentPeriod = target.period; await this._selectStock(target.ticker); }
           else if (view==='vibe' && target.id) await this._openVibePlan(target.id);
           else if (view==='reports' && target.id) await this._openSavedReport(target.id);
           else if (view==='industry' && target.id) await this._showIndustryNode(target.id);
@@ -190,12 +233,26 @@
     }
   });
   App.switchMode = function(mode) {
+    if (mode !== this._mode) {
+      this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
+      this._vibeSelectionSeq = (this._vibeSelectionSeq || 0) + 1;
+      this._industryNodeSeq = (this._industryNodeSeq || 0) + 1;
+      if (this._mode === 'vibe') {
+        Object.keys(this._vibePollTimers || {}).forEach(this._stopVibePolling.bind(this));
+        this._vibeListSeq = (this._vibeListSeq || 0) + 1;
+      }
+      if (this._mode === 'market') { clearTimeout(this._scanPollTimer); this._scanSelectionSeq = (this._scanSelectionSeq || 0) + 1; }
+    }
     originalSwitchMode.call(this, mode);
     this._syncWorkbenchHeading(); this._loadWorkbenchHistory();
     if (this._isCompactViewport()) this._closeMobileSidebar();
   };
   App._showMarketWorkspace = function(tab) {
+    if (this._marketWorkspaceTab === 'screener' && tab !== 'screener') {
+      clearTimeout(this._scanPollTimer); this._scanSelectionSeq = (this._scanSelectionSeq || 0) + 1;
+    }
     originalMarketWorkspace.call(this, tab);
+    if (tab === 'screener' && this._scanJobId) this._scheduleScanPoll(100);
     this._syncWorkbenchHeading(); this._loadWorkbenchHistory();
   };
 })();

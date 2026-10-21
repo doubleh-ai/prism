@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..database import get_db
-from .dsl import DSLError, evaluate, is_signal
+from .dsl import DSLError, MissingData, evaluate, is_signal
 
 log = logging.getLogger("prism.indicator-scanner")
 
@@ -212,12 +212,28 @@ def get_job(job_id: str, username: str) -> dict[str, Any] | None:
 
 
 def list_jobs(username: str, limit: int = 10) -> list[dict[str, Any]]:
+    reconcile_jobs(username)
     with get_db() as db:
         rows = db.execute(
             "SELECT * FROM indicator_scan_jobs WHERE username=? ORDER BY created_at DESC LIMIT ?",
             [username, max(1, min(30, int(limit)))],
         ).fetchall()
     return [_job_row(row) for row in rows]
+
+
+def reconcile_jobs(username: str) -> None:
+    """A lost process is interrupted, never silently queued for another execution."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM indicator_scan_jobs WHERE username=? AND status IN ('queued','running')",
+            [username],
+        ).fetchall()
+    for row in rows:
+        task = _TASKS.get(row["id"])
+        if task is None or task.done():
+            _persist_job(
+                _job_row(row), status="interrupted", error="服务重启或任务已失去执行上下文", completed=True
+            )
 
 
 def active_job(username: str) -> dict[str, Any] | None:
@@ -257,7 +273,7 @@ def _persist_job(
             """
             UPDATE indicator_scan_jobs SET
                 status=?,results_json=?,total=?,processed=?,matched=?,failed=?,error=?,
-                updated_at=?,completed_at=? WHERE id=? AND username=?
+                updated_at=?,completed_at=?,evaluated=?,insufficient=?,excluded=? WHERE id=? AND username=?
             """,
             [
                 job.get("status", "running"),
@@ -269,6 +285,9 @@ def _persist_job(
                 str(job.get("error") or "")[:500],
                 now,
                 completed_at,
+                int(job.get("evaluated") or 0),
+                int(job.get("insufficient") or 0),
+                int(job.get("excluded") or 0),
                 job["id"],
                 job["username"],
             ],
@@ -330,7 +349,11 @@ async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
             volume = float(bar.get("volume") or 0)
             rows.append(
                 {
-                    "t": int(datetime.datetime.combine(day, datetime.time()).timestamp()),
+                    "t": int(
+                        datetime.datetime.combine(
+                            day, datetime.time(), tzinfo=datetime.timezone(datetime.timedelta(hours=8))
+                        ).timestamp()
+                    ),
                     "open": float(bar["open"]),
                     "high": float(bar["high"]),
                     "low": float(bar["low"]),
@@ -345,7 +368,7 @@ async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
         return None
     frame = pd.DataFrame(rows).sort_values("t")
     if period in {"1w", "1m"}:
-        frame["date"] = pd.to_datetime(frame["t"], unit="s")
+        frame["date"] = pd.to_datetime(frame["t"], unit="s", utc=True).dt.tz_convert("Asia/Shanghai")
         frame = (
             frame.set_index("date")
             .resample("W-FRI" if period == "1w" else "ME")
@@ -468,17 +491,25 @@ async def _run_job(
                             )
                         if df is None or len(df) == 0:
                             raise RuntimeError("no kline")
-                        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else 0.0
+                        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else float("nan")
+                        if min_turnover and not math.isfinite(turnover):
+                            raise MissingData("缺少成交额，无法执行成交额门槛")
                         if min_turnover and turnover < min_turnover:
+                            job["excluded"] = job.get("excluded", 0) + 1
                             continue
                         result = evaluate(indicator["dsl"], df, fund, params)
+                        if result.empty or result.iloc[-1:].isna().any():
+                            raise MissingData("指标预热或输入资料不足")
+                        job["evaluated"] = job.get("evaluated", 0) + 1
                         match = None
                         if is_signal(result):
                             window = (
                                 result.iloc[-trigger_window:] if len(result) >= trigger_window else result
                             )
                             if bool(window.fillna(False).any()):
-                                indexes = [idx for idx in range(len(result)) if bool(result.iloc[idx])]
+                                indexes = [
+                                    idx for idx in range(len(result)) if bool(result.fillna(False).iloc[idx])
+                                ]
                                 idx = indexes[-1]
                                 days_ago = max(0, len(df) - 1 - idx)
                                 match = {
@@ -512,6 +543,8 @@ async def _run_job(
                                     del job["matches"][max_keep:]
                     except asyncio.CancelledError:
                         raise
+                    except MissingData:
+                        job["insufficient"] = job.get("insufficient", 0) + 1
                     except (TimeoutError, DSLError, RuntimeError):
                         job["failed"] += 1
                     except Exception as exc:
@@ -531,7 +564,13 @@ async def _run_job(
                     await fast_client.aclose()
             _sort_matches(job["matches"], config, signal_kind)
             job["matches"] = job["matches"][: int(config.get("max_results") or 100)]
-            _persist_job(job, status="completed", completed=True)
+            incomplete = int(job.get("failed") or 0) + int(job.get("insufficient") or 0)
+            status = "completed"
+            message = ""
+            if incomplete:
+                status = "partial" if job.get("evaluated") or job.get("excluded") else "failed"
+                message = "部分股票缺少资料或读取失败，请按实际覆盖范围解读结果"
+            _persist_job(job, status=status, error=message, completed=True)
     except asyncio.CancelledError:
         _persist_job(job, status="cancelled", error="用户已取消扫描", completed=True)
     except Exception as exc:

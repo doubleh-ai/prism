@@ -55,6 +55,11 @@ def build_research_prompt(context: dict) -> str:
         f"本轮研究时间：{context.get('as_of') or '未知'}；时区：{RESEARCH_TIMEZONE}。\n"
         "这只是本轮观察时间，不代表数据已经更新至此。区分来源发布时间、数据所属期间和检索时间；"
         "未知日期写未知，不得用今天或模型记忆补齐。追问中的‘今天/最新’以本轮时间为准。\n"
+        "用户明确要求历史信息截止时，有 research_scope 工具须在首次检索或登记结论之前调用，"
+        "information_cutoff 填 YYYY-MM-DD 或带时区的 ISO 秒精度时间，可另填 requested_period。"
+        "截止范围固定后不能改写；改变范围需要新一轮研究，as_of 始终是真实观察时点。"
+        "工具不可用或范围未固定时不得声称已执行历史截断。发布日期未知的关键事实保留未知和缺口，"
+        "不能默认其在截止前可用；日精度只按日对照，不能编造午夜或事件发生时间。\n"
         "涉及最新新闻、公告、财报或价格时，必须实际检索或调用可用数据工具；"
         "工具不可用、失败或来源过期时明确说明尚未验证。仅引用本轮真实返回的来源，"
         "历史来源要标明来自此前研究并重新检查时效。网页检索结果不等于事实已验证。\n"
@@ -63,7 +68,15 @@ def build_research_prompt(context: dict) -> str:
         "同一原稿的转载不算独立来源。无法取得原文时明确缺口，不因来源名称自动判定可信。\n"
         "Prism 内部工具返回的平台数据、历史报告和行业图谱是研究线索，不能冒充外部原始披露。"
         "事实需有可追溯来源与数据日期；计算写明原始值、单位和口径；"
-        "推断与假设分开，列出反方证据、缺口和可验证的失效条件。"
+        "推断与假设分开，列出反方证据、缺口和可验证的失效条件。\n"
+        "研究账本：成功的 WebSearch/WebFetch 返回会登记到本轮。可用时调用 research_read "
+        "读取真实 document_id/passage_id，再用 research_record_claims 登记逐项候选结论。"
+        "不得编造引用 ID。supports/opposes/background 使用 passage_id 列表；kind 区分 "
+        "fact/calculation/inference/hypothesis，数字填写 value/unit/currency/period，"
+        "推断填写 limitations（反证及失效条件）。计算 formula 只支持 operator "
+        "add/subtract/multiply/divide 与两个已登记 input_claim_ids。"
+        "搜索摘要只是线索，WebFetch 的工具摘要也不等于已获得完整原文。"
+        "引用结构校验不能证明语义真实，报告保留待核验状态。"
     )
 
 
@@ -73,11 +86,11 @@ def source_timestamp(value: Any) -> str | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(_TZ).isoformat(timespec="seconds")
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(_TZ).isoformat(timespec="seconds")
 
 
 def content_text(value: Any) -> str:
@@ -96,7 +109,7 @@ def content_text(value: Any) -> str:
 
 
 def _safe_url(url: Any) -> str | None:
-    if not isinstance(url, str):
+    if not isinstance(url, str) or len(url) > 4000 or any(ord(char) < 32 for char in url):
         return None
     try:
         parsed = urlsplit(url)
@@ -135,6 +148,10 @@ def _failed_tool_payload(text: str) -> bool:
     # The CLI's explicit API-error prefix can include a multiline response body.
     if re.match(r"(?i)^\s*API Error:\s*(?:HTTP\s*)?[45]\d{2}\b", text):
         return True
+    if re.match(r"(?i)^\s*(?:HTTP\s+)?(?:401\s+Unauthorized|403\s+Forbidden|404\s+Not Found)\b", text):
+        return True
+    if re.search(r"(?i)<title>\s*(?:access denied|sign in|log in|403 forbidden)\s*</title>", text):
+        return True
     # Other notices must be standalone transport errors, not arbitrary
     # occurrences of "error" inside fetched content or documentation examples.
     notice = text.strip()
@@ -155,7 +172,7 @@ def extract_web_refs(text: str) -> list[dict]:
     refs: list[dict] = []
     seen: set[str] = set()
 
-    def add(url, title, snippet=""):
+    def add(url, title, snippet="", published_at=None):
         url = _safe_url(url)
         if not url or url in seen:
             return
@@ -165,12 +182,16 @@ def extract_web_refs(text: str) -> list[dict]:
             {
                 "url": url,
                 "title": str(title or url),
-                "snippet": snippet[:120] + ("…" if len(snippet) > 120 else ""),
+                "snippet": snippet[:120],
+                "snippet_truncated": len(snippet) > 120,
+                "published_at": published_at if isinstance(published_at, str) else None,
             }
         )
 
     for match in re.finditer(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", text):
-        add(match.group(2), match.group(1).strip(), text[match.end() : match.end() + 160])
+        tail = text[match.end() :].split("\n\n", 1)[0]
+        tail = re.split(r"\[[^\]]+\]\(https?://", tail, maxsplit=1)[0]
+        add(match.group(2), match.group(1).strip(), tail[:160])
 
     def visit(value):
         if isinstance(value, list):
@@ -178,7 +199,7 @@ def extract_web_refs(text: str) -> list[dict]:
                 visit(item)
         elif isinstance(value, dict):
             if "url" in value:
-                add(value["url"], value.get("title"), value.get("snippet", ""))
+                add(value["url"], value.get("title"), value.get("snippet", ""), value.get("published_at"))
             for key in ("links", "results", "sources"):
                 if key in value:
                     visit(value[key])
@@ -231,13 +252,16 @@ class EvidenceTracker:
         if _failed_tool_payload(text):
             return []
         if name == "WebFetch":
-            url = _safe_url((call.get("input") or {}).get("url"))
+            inputs = call.get("input")
+            url = _safe_url(inputs.get("url")) if isinstance(inputs, dict) else None
             refs = [{"url": url, "title": url, "snippet": ""}] if url else []
         else:
             refs = extract_web_refs(text)
         result = []
         for ref in refs:
-            key = (kind, ref["url"])
+            # Fetching a discovered URL is a new, richer observation. Do not
+            # suppress it because the search already yielded the same link.
+            key = (call_id, ref["url"])
             if key in self.seen:
                 continue
             self.seen.add(key)
@@ -251,7 +275,7 @@ class EvidenceTracker:
                     "evidence_status": "retrieved",
                     "retrieval_type": "fetched_page" if name == "WebFetch" else "tool_result",
                     "retrieved_at": retrieved_at,
-                    "published_at": None,
+                    "published_at": ref.get("published_at"),
                 }
             )
         return result

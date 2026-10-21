@@ -24,8 +24,8 @@ const settled=()=>new Promise(setImmediate);
 function rendersBoundariesAndSafeLinks() {
   const {app}=environment();app._operationsData=snapshot();
   let html=app._renderOperationsContent();
-  for(const text of ['CI 检查','候选构建','部署流程','生产未接入','本实例版本，非生产核验','取消 GitHub 流程不等于回滚','3 分钟','北京时间','打开流程 / 在 GitHub 取消','草稿'])assert(html.includes(text),text);
-  assert.equal((html.match(/class="operations-run"/g)||[]).length,3);
+  for(const text of ['CI 检查','候选构建','生产发布记录','尚未取得可信的生产执行记录','本实例版本，非生产核验','停止剩余步骤不等于回滚','3 分钟','北京时间','打开流程 / 在 GitHub 取消','草稿'])assert(html.includes(text),text);
+  assert.equal((html.match(/class="operations-run"/g)||[]).length,2);
   assert(html.includes('当前开放 PR'));assert(!html.includes('草稿与合并状态单独显示'));
   assert(html.includes('href="https://github.com/doubleh-ai/prism/actions/runs/2"'));
   assert(html.includes('<button disabled>部署不可用</button>'));

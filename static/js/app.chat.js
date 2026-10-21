@@ -75,11 +75,32 @@ Object.assign(App, {
 
   /* ═══ Models ═══ */
   loadModels: async function() {
-    var r = await fetch('/api/models'); if (!r.ok) return;
     var s = document.getElementById('modelSelect');
-    s.innerHTML = (await r.json()).map(function(m){return '<option value="'+m.id+'"'+(m.id===App.model?' selected':'')+'>'+m.name+'</option>'}).join('');
+    try {
+      var r = await this.api('/api/models'); if (!r.ok) throw new Error('unavailable');
+      var data = await r.json(), models = Array.isArray(data) ? data : data.models || [];
+      this._models = models; this._modelsLoaded = true;
+      var available = models.filter(function(m){return m.configured === true;});
+      var preferred = available.find(function(m){return m.default === true || m.id === data.default;}) || available[0];
+      var saved = ''; try { saved = localStorage.getItem('prism-model:'+this.user) || ''; } catch(error) {}
+      var selected = available.find(function(m){return m.id === saved;}) || preferred;
+      this.model = selected ? selected.id : '';
+      s.innerHTML = models.length ? models.map(function(m){return '<option value="'+escAttr(m.id)+'"'+(m.id===App.model?' selected':'')+(m.configured===true?'':' disabled')+'>'+esc(m.name || m.id)+(m.configured===true?'':' · 未配置')+'</option>';}).join('') : '<option value="">尚未配置模型</option>';
+      s.value = this.model; s.disabled = !selected;
+      s.title = selected ? '配置已提供；真实调用是否可用以执行结果为准' : '没有已配置的研究模型，请由管理员完成配置';
+      var notice = document.getElementById('modelConfigurationNotice');
+      if (notice) { notice.hidden = !!selected; notice.textContent = selected ? '' : '尚未配置研究模型。可以继续查看历史、行情和报告；新研究暂不可用。'; }
+    } catch(error) {
+      s.innerHTML = '<option value="">模型配置读取失败</option>'; s.disabled = true;
+      this.model = ''; this._modelsLoaded = true;
+      var notice = document.getElementById('modelConfigurationNotice');
+      if (notice) { notice.hidden = false; notice.textContent = '模型配置暂时无法读取，请刷新后重试。'; }
+    }
   },
-  setModel: function(m) { this.model = m; },
+  setModel: function(m) {
+    if (!(this._models || []).some(function(item){return item.id === m && item.configured === true;})) return;
+    this.model = m; try { localStorage.setItem('prism-model:'+this.user,m); } catch(error) {}
+  },
 
   /* ═══ Conversations ═══ */
   _refreshReportsButton: async function() {
@@ -910,6 +931,7 @@ Object.assign(App, {
       if (this._toast) this._toast('当前会话仍在生成，请等待完成或先停止');
       return;
     }
+    if (this._modelsLoaded && !this.model) { this._toast('尚无可用模型配置，请刷新配置或联系管理员；不会创建空的研究任务'); return; }
     if (this.selectAC()) return;
     var inp = document.getElementById('input'), q = inp.value.trim(); if (!q) return;
     var m = q.match(/^\/([a-zA-Z一-龥-]+)\s*(.*)/);

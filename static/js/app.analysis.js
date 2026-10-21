@@ -10,14 +10,14 @@ Object.assign(App, {
   _analysisStartTime: 0,
   _analysisElapsedSeconds: null,
   _analysisCurrentStage: "",
-  _analysisProgressPct: 0,
+  _analysisCompletedNodes: 0,
   _analysisAttachAttempted: false,
   _analysisMode: "fast",
   _analysisSelectedAgents: ["market", "fundamentals"],
 
   _analysisStageLabels: {
-    analysts: "分析师研报", debate: "多空辩论", research: "研判整合",
-    trader: "交易方案", risk: "风险评估", decision: "最终决策"
+    queued: "等待引擎", analysts: "分析师研报", debate: "多空辩论", research: "研判整合",
+    trader: "交易方案", risk: "风险评估", decision: "最终决策", completed: "分析完成"
   },
   _analysisStageIcons: {
     analysts: "🔬", debate: "⚔️", research: "📋",
@@ -50,8 +50,11 @@ Object.assign(App, {
 
   /* ── 一键分析 (astock) ── */
   _runAnalysis: async function() {
+    if (this._analysisStarting) return;
     if (!this._analysisTicker) { alert("请先搜索并选择一只股票"); return; }
     if (this._analysisStreaming) { this._stopAnalysis(); return; }
+    var sequence = this._analysisRequestSeq = (this._analysisRequestSeq || 0) + 1;
+    this._analysisStarting = true;
 
     var ticker = this._analysisTicker, name = this._analysisName;
     var modeEl = document.getElementById("analysisMode");
@@ -63,7 +66,7 @@ Object.assign(App, {
     this._analysisAgentDone = {};
     this._analysisEvents = [];
     this._analysisCurrentStage = "";
-    this._analysisProgressPct = 0;
+    this._analysisCompletedNodes = 0;
     this._analysisStartTime = Date.now();
     this._analysisElapsedSeconds = null;
 
@@ -78,16 +81,20 @@ Object.assign(App, {
 
     this._renderAgentGrid();
 
-    var r = await this.api("/api/analysis/start", {
+    var r;
+    try { r = await this.api("/api/analysis/start", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ticker: ticker, name: name, mode: mode, force_refresh: forceRefresh})
-    });
+    }); } catch (error) { r = {ok:false}; }
+    this._analysisStarting = false;
+    if (sequence !== this._analysisRequestSeq) return;
     if (!r.ok) {
       document.getElementById("analysisPanelInner").innerHTML =
-        '<div class="market-empty-state">启动分析失败，请重试</div>';
+        '<div class="market-empty-state">启动请求未确认，请先核对已有研究记录再决定是否重试。</div>';
       return;
     }
     var data = await r.json();
+    if (sequence !== this._analysisRequestSeq) return;
     this._analysisId = data.analysis_id;
     this._analysisMode = data.mode || mode;
     this._setAnalysisMode(this._analysisMode);
@@ -101,6 +108,7 @@ Object.assign(App, {
   },
 
   _stopAnalysis: function() {
+    this._analysisRequestSeq = (this._analysisRequestSeq || 0) + 1;
     this._analysisStreaming = false;
     if (this._analysisReader) { this._analysisReader.abort(); this._analysisReader = null; }
     this._analysisId = null;
@@ -109,7 +117,7 @@ Object.assign(App, {
       '<div class="market-empty-state">已停止查看；后台研究可能仍在运行，请从记录继续查看，避免重复启动。</div>';
   },
 
-  /* ── Progress bar ── */
+  /* ── Observed engine stages; node count has no estimated denominator. ── */
   _buildProgressBar: function() {
     var stages = "";
     for (var si = 0; si < this._analysisStageOrder.length; si++) {
@@ -120,8 +128,7 @@ Object.assign(App, {
         '</div>';
     }
     return '<div class="ap-progress-wrap">' +
-      '<div class="ap-progress-hd"><div class="ap-progress-bar"><div class="ap-progress-fill" id="apProgressFill" style="width:0%"></div></div>' +
-      '<div class="ap-progress-pct" id="apProgressPct">0%</div></div>' +
+      '<div class="ap-progress-hd"><div class="ap-progress-pct" id="apProgressState" role="status">等待引擎</div></div>' +
       '<div class="ap-stage-row">' + stages + '</div>' +
       '<div class="ap-elapsed" id="apElapsed">准备中…</div>' +
       '</div>';
@@ -156,21 +163,18 @@ Object.assign(App, {
     return title;
   },
 
-  _updateProgress: function(pct) {
-    this._analysisProgressPct = Math.max(this._analysisProgressPct, pct);
-    var fill = document.getElementById("apProgressFill");
-    if (fill) fill.style.width = this._analysisProgressPct + "%";
-    var pctEl = document.getElementById("apProgressPct");
-    if (pctEl) pctEl.textContent = this._analysisProgressPct + "%";
-    // Highlight active stage
+  _updateAnalysisStage: function(completedNodes) {
+    if (typeof completedNodes === 'number' && Number.isInteger(completedNodes) && completedNodes >= 0) {
+      this._analysisCompletedNodes = Math.max(this._analysisCompletedNodes, completedNodes);
+    }
+    var stage = this._analysisCurrentStage;
+    var stateEl = document.getElementById("apProgressState");
+    if (stateEl) stateEl.textContent = (this._analysisStageLabels[stage] || "等待引擎") +
+      (this._analysisCompletedNodes ? " · 已完成 " + this._analysisCompletedNodes + " 个节点" : "");
+    // Only the actual observed stage is active; graph stages can repeat or be skipped.
     var stageEls = document.querySelectorAll(".ap-stage");
-    var found = false;
-    for (var si = stageEls.length - 1; si >= 0; si--) {
-      var s = stageEls[si].dataset.stage;
-      if (!found && this._analysisStageOrder.indexOf(s) <= this._analysisStageOrder.indexOf(this._analysisCurrentStage)) {
-        stageEls[si].classList.add("active");
-      }
-      if (s === this._analysisCurrentStage) found = true;
+    for (var si = 0; si < stageEls.length; si++) {
+      stageEls[si].classList.toggle("active", stageEls[si].dataset.stage === stage);
     }
     // Update elapsed
     this._tickElapsed();
@@ -228,6 +232,7 @@ Object.assign(App, {
   /* ── SSE ── */
   _openAnalysisRecord: async function(id, ticker) {
     if (!id) return;
+    this._analysisRequestSeq = (this._analysisRequestSeq || 0) + 1;
     if (this._analysisReader) { this._analysisReader.abort(); this._analysisReader = null; }
     this._analysisStreaming = false;
     this.switchMode('analysis');
@@ -235,6 +240,8 @@ Object.assign(App, {
     this._analysisTicker = ticker || '';
     this._analysisEvents = [];
     this._analysisAgentDone = {};
+    this._analysisCurrentStage = "";
+    this._analysisCompletedNodes = 0;
     var response;
     try { response = await this.api('/api/analysis/' + encodeURIComponent(id) + '/report'); }
     catch (e) {
@@ -254,6 +261,7 @@ Object.assign(App, {
     this._analysisSelectedAgents = data.selected_analysts || this._analysisAgentsForMode(this._analysisMode);
     this._analysisStartTime = data.started_at ? data.started_at * 1000 : Date.now();
     this._analysisElapsedSeconds = typeof data.elapsed === 'number' ? data.elapsed : null;
+    this._analysisCurrentStage = data.stage || "";
     document.getElementById('analysisPanelInner').innerHTML =
       '<div class="ap-container">' + this._buildProgressBar() +
       '<div class="ap-status" id="apStatus">正在查看已有研究…</div>' +
@@ -261,6 +269,7 @@ Object.assign(App, {
       '<div class="ap-stream" id="apStream"><div class="ap-stream-body" id="apStreamBody"></div></div></div>' +
       '<div class="ap-report" id="apReport" style="display:none"></div>';
     this._renderAgentGrid();
+    this._updateAnalysisStage();
     if (data.report) this._renderFinalReport(data.report, data.signal);
     if (response.status === 202) {
       this._analysisStreaming = true;
@@ -341,14 +350,15 @@ Object.assign(App, {
         break;
       case "stage":
         this._analysisCurrentStage = ev.stage || "";
-        this._updateProgress(ev.progress_pct || 0);
+        this._updateAnalysisStage(ev.completed_nodes);
         var status = document.getElementById("apStatus");
-        if (status) status.textContent = (this._analysisStageIcons[ev.stage] || "") + " " +
-          (this._analysisStageLabels[ev.stage] || ev.stage) + " — 分析中…";
+        if (status) status.textContent = ev.stage === 'queued' ? "等待研究引擎，尚未开始分析…" :
+          (this._analysisStageIcons[ev.stage] || "") + " " + (this._analysisStageLabels[ev.stage] || ev.stage) + " — 分析中…";
         this._saveAnalysisState();
         break;
       case "agent_done":
         if (ev.agent && ev.agent !== "messages") this._analysisAgentDone[ev.agent] = true;
+        this._updateAnalysisStage(ev.completed_nodes);
         this._renderAgentGrid();
         this._saveAnalysisState();
         break;
@@ -371,7 +381,8 @@ Object.assign(App, {
         if (typeof recordedDuration !== 'number') recordedDuration = ev.elapsed;
         this._analysisElapsedSeconds = typeof recordedDuration === 'number' ? recordedDuration : null;
         this._analysisStreaming = false;
-        this._updateProgress(100);
+        this._analysisCurrentStage = 'completed';
+        this._updateAnalysisStage();
         var s = document.getElementById("apStatus");
         if (s) {
           var total = ev.timings && ev.timings.total_seconds ? "，耗时 " + ev.timings.total_seconds + "s" : "";
@@ -666,7 +677,7 @@ Object.assign(App, {
       mode: this._analysisMode,
       selectedAgents: this._analysisSelectedAgents,
       stage: this._analysisCurrentStage,
-      progress: this._analysisProgressPct,
+      completedNodes: this._analysisCompletedNodes,
       agentDone: this._analysisAgentDone,
       eventCount: this._analysisEvents.length
     };
@@ -690,7 +701,7 @@ Object.assign(App, {
     this._analysisMode = state.mode || "fast";
     this._analysisSelectedAgents = state.selectedAgents || this._analysisAgentsForMode(this._analysisMode);
     this._analysisCurrentStage = state.stage || "";
-    this._analysisProgressPct = state.progress || 0;
+    this._analysisCompletedNodes = Number.isInteger(state.completedNodes) && state.completedNodes >= 0 ? state.completedNodes : 0;
     this._analysisAgentDone = state.agentDone || {};
     this._analysisEvents = [];
     this._setAnalysisMode(this._analysisMode);
@@ -705,9 +716,7 @@ Object.assign(App, {
       '</div>' +
       '<div class="ap-report" id="apReport" style="display:none"></div>';
 
-    if (this._analysisProgressPct > 0) {
-      this._updateProgress(this._analysisProgressPct);
-    }
+    this._updateAnalysisStage();
     this._renderAgentGrid();
 
     if (state.streaming) {
@@ -721,11 +730,16 @@ Object.assign(App, {
   },
 
   _fetchCompletedReport: async function() {
-    var r = await this.api("/api/analysis/" + this._analysisId + "/report");
+    var id = this._analysisId;
+    var r;
+    try { r = await this.api("/api/analysis/" + id + "/report"); } catch (error) { return; }
+    if (id !== this._analysisId) return;
     if (r.ok) {
       var data = await r.json();
+      if (id !== this._analysisId) return;
       if (data.report) {
-        this._updateProgress(100);
+        this._analysisCurrentStage = 'completed';
+        this._updateAnalysisStage();
         var s = document.getElementById("apStatus");
         if (s) s.textContent = "✅ 分析完成";
         this._setAnalysisMode(data.mode || this._analysisMode);

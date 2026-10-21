@@ -61,6 +61,13 @@ class Fundamentals(BaseModel):
     timestamp: int = Field(..., gt=0)
     data_timestamp: int | None = Field(default=None, gt=0)
     retrieved_at: int | None = Field(default=None, gt=0)
+    # Providers often mix current valuation and financial-statement figures.
+    # Absence remains unknown; retrieval time never becomes a reporting period.
+    reporting_period: str | None = None
+    currency: str | None = None
+    monetary_unit: str | None = None
+    accounting_scope: str | None = None
+    original_source_url: str | None = None
     stale: bool = False
     source: str = Field(..., min_length=1, max_length=32)
 

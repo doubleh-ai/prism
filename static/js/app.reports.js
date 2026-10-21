@@ -10,21 +10,28 @@ Object.assign(App, {
   },
 
   _loadReportLibrary: async function() {
+    var sequence = this._reportLibrarySeq = (this._reportLibrarySeq || 0) + 1;
+    var selection = this._reportSelectionSeq || 0;
     var side = document.getElementById('reportsSidebarList');
     var inner = document.getElementById('reportsPanelInner');
     if (side) side.innerHTML = '<div class="reports-lib-empty">加载中...</div>';
     if (inner && !this._activeSavedReportId) {
       inner.innerHTML = '<div class="market-empty-state">加载报告库中...</div>';
     }
-    var r = await this.api('/api/reports/library?limit=80');
+    var r;
+    try { r = await this.api('/api/reports/library?limit=80'); }
+    catch (error) { r = {ok:false}; }
+    if (sequence !== this._reportLibrarySeq) return;
     if (!r.ok) {
       if (side) side.innerHTML = '<div class="reports-lib-empty">报告库加载失败</div>';
       if (inner) inner.innerHTML = '<div class="market-empty-state">报告库加载失败</div>';
       return;
     }
     var data = await r.json();
+    if (sequence !== this._reportLibrarySeq) return;
     this._savedReports = data.reports || [];
     this._renderReportSidebar();
+    if (selection !== (this._reportSelectionSeq || 0)) return;
     if (this._activeSavedReportId) {
       this._openSavedReport(this._activeSavedReportId);
     } else {
@@ -54,6 +61,7 @@ Object.assign(App, {
   },
 
   _renderReportLibraryHome: function() {
+    this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
     var inner = document.getElementById('reportsPanelInner');
     if (!inner) return;
     var reports = this._savedReports || [];
@@ -79,17 +87,22 @@ Object.assign(App, {
 
   _openSavedReport: async function(id) {
     if (!id) return;
+    var sequence = this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
     this._activeSavedReportId = id;
     this._closeMobileSidebar();
     this._renderReportSidebar();
     var inner = document.getElementById('reportsPanelInner');
     if (inner) inner.innerHTML = '<div class="market-empty-state">加载报告...</div>';
-    var r = await this.api('/api/reports/library/' + encodeURIComponent(id));
+    var r;
+    try { r = await this.api('/api/reports/library/' + encodeURIComponent(id)); }
+    catch (error) { r = {ok:false,status:0}; }
+    if (sequence !== this._reportSelectionSeq || id !== this._activeSavedReportId) return;
     if (!r.ok) {
-      if (inner) inner.innerHTML = '<div class="market-empty-state">报告不存在或无权限访问</div>';
+      if (inner) inner.innerHTML = '<div class="market-empty-state">'+(r.status === 403 || r.status === 404 ? '报告不存在或无权限访问' : '报告读取暂时失败，请重新选择该报告重试；保存内容未改变')+'</div>';
       return;
     }
     var rep = await r.json();
+    if (sequence !== this._reportSelectionSeq || id !== this._activeSavedReportId) return;
     this._renderSavedReportDetail(rep);
   },
 
@@ -108,6 +121,11 @@ Object.assign(App, {
     var summary = incompleteChat
       ? '研究过程已保存，但任务在形成最终报告前中止。可返回原对话继续完成分析。'
       : this._reportSummaryText(deliveredDecision || rep.summary || structured.thesis || structured.verdict_summary || report.summary || report.question || finalDecision || '');
+    var research = report.research || rep.research;
+    var provenance = '<section class="reports-lib-section report-provenance"><h4>版本与研究边界</h4>' +
+      '<p>保存版本：'+esc(String(rep.revision || report.revision || '历史记录'))+' · 保存于 '+esc(ChatRender.formatTime(rep.created_at))+'</p>' +
+      (research ? ChatRender.renderResearch(research) : '<p>历史报告未记录可靠的研究时点；数据截至未知。</p>') +
+      '<p>采集、引用匹配与事实核验是不同环节。原引擎结论保留，未提供证据的表述仍待核验。</p></section>';
     var body = '';
 
     var thesis = this._reportText(structured.thesis || structured.verdict_summary || report.thesis || report.summary || '');
@@ -172,15 +190,10 @@ Object.assign(App, {
     var references = Array.isArray(report.references) ? report.references : [];
     if (references.length) {
       var self = this;
-      body += '<div class="reports-lib-section"><h4>引用与来源</h4><div class="reports-lib-ref-list">' +
+      body += '<div class="reports-lib-section"><h4>采集来源与线索</h4><div class="reports-lib-ref-list">' +
         references.map(function(ref) {
-          var title = self._reportText(ref.title || ref.url || ref.snippet || ref);
-          var snippet = self._reportText(ref.snippet || '');
-          var url = safeUrl(ref.url || '');
-          return '<div class="reports-lib-ref">' +
-            (url ? '<a href="' + escAttr(url) + '" target="_blank" rel="noopener">' + esc(title || url) + '</a>' : '<b>' + esc(title || '来源') + '</b>') +
-            (snippet ? '<p>' + esc(snippet) + '</p>' : '') +
-            '</div>';
+          if (!ref || typeof ref !== 'object') return '<div class="reports-lib-ref">'+esc(self._reportText(ref))+'</div>';
+          return ChatRender.renderChunk(Object.assign({}, ref, {t:'ref'}));
         }).join('') + '</div></div>';
     }
 
@@ -202,7 +215,7 @@ Object.assign(App, {
         '<h2>' + esc(title) + '</h2>' +
         (summary ? '<p>' + esc(summary) + '</p>' : '') + '</div>' +
         '<div class="reports-lib-signal' + cls + '">' + esc(sig) + '</div>' +
-      '</div>' + body + '</div>';
+      '</div>' + provenance + body + '</div>';
   },
 
   _deleteSavedReport: async function(id) {

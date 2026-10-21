@@ -387,14 +387,21 @@ async def test_scan_job_api_persists_full_market_config(client, auth_cookies, mo
 
     detail = await client.get(f"/api/indicators/scan-jobs/{job['id']}", cookies=auth_cookies)
     assert detail.status_code == 200
-    assert detail.json()["job"]["indicator_name"] == indicator["name"]
+    recovered = detail.json()["job"]
+    assert recovered["indicator_name"] == indicator["name"]
+    assert recovered["config"] == job["config"]
+    # The fake runner never creates an execution context. A read reconciles this
+    # orphan as interrupted, preserving the exact request without rerunning it.
+    assert recovered["status"] == "interrupted"
+    assert recovered["completed_at"] is not None
+    assert recovered["error"]
 
     cancelled = await client.post(
         f"/api/indicators/scan-jobs/{job['id']}/cancel",
         cookies=auth_cookies,
     )
     assert cancelled.status_code == 200
-    assert scanner.get_job(job["id"], "testuser")["status"] == "cancelled"
+    assert scanner.get_job(job["id"], "testuser")["status"] == "interrupted"
 
 
 @pytest.mark.asyncio

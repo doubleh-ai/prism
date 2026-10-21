@@ -12,8 +12,8 @@ def test_report_library_static_contract():
 
     assert 'data-mode="reports"' in template
     assert "reportsPanel" in template
-    assert "app.reports.js?v=79" in template
-    assert "app.chat-render.js?v=79" in template
+    assert "app.reports.js?v=81" in template
+    assert "app.chat-render.js?v=81" in template
     assert "/api/reports/library" in reports_js
     assert "/save-report" in reports_js
     assert "_reportText: function(value)" in reports_js

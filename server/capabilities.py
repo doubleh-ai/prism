@@ -35,6 +35,10 @@ class Arguments(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class DataInsufficient(ValueError):
+    """The query is valid, but the required observations are unavailable."""
+
+
 class EmptyArgs(Arguments):
     pass
 
@@ -77,6 +81,63 @@ class ScanArgs(Arguments):
     params: dict[str, float] = Field(default_factory=dict, max_length=30)
     max_universe: int = Field(default=0, ge=0, le=6000)
     max_results: int = Field(default=100, ge=10, le=300)
+    markets: list[Literal["SH", "SZ", "BJ"]] = Field(
+        default_factory=lambda: ["SH", "SZ", "BJ"], min_length=1, max_length=3
+    )
+    boards: list[Literal["main", "gem", "star", "bse"]] = Field(
+        default_factory=lambda: ["main", "gem", "star", "bse"], min_length=1, max_length=4
+    )
+    exclude_st: bool = True
+    min_turnover: float = Field(default=0, ge=0, le=100000000000)
+    sort: Literal["strength", "recent_signal", "latest_value"] = "strength"
+    direction: Literal["asc", "desc"] = "desc"
+
+
+class TranslateArgs(Arguments):
+    input: str = Field(min_length=1, max_length=200)
+
+
+class IndicatorCreateArgs(Arguments):
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=300)
+    dsl: dict[str, Any]
+    kind: Literal["plot", "signal"]
+    params: dict[str, Any] = Field(default_factory=dict, max_length=30)
+    plan: dict[str, Any] = Field(default_factory=dict, max_length=20)
+    visual: dict[str, Any] = Field(default_factory=dict, max_length=20)
+
+
+class FollowupArgs(IdArgs):
+    question: str = Field(min_length=2, max_length=3000)
+
+
+class SaveArgs(IdArgs):
+    source: Literal["analysis", "vibe", "research"]
+    title: str = Field(default="", max_length=160)
+    turn_id: RecordId | None = None
+
+
+class WatchItemArgs(Arguments):
+    ticker: Ticker
+    name: str = Field(default="", max_length=80)
+
+
+class WatchUpdateArgs(Arguments):
+    operation: Literal["add", "remove"]
+    items: list[WatchItemArgs] = Field(min_length=1, max_length=200)
+
+
+class ClaimsArgs(Arguments):
+    claims: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+
+
+class RelationsArgs(Arguments):
+    relations: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+
+
+class ResearchScopeArgs(Arguments):
+    information_cutoff: str = Field(min_length=10, max_length=40)
+    requested_period: str | None = Field(default=None, max_length=120)
 
 
 class IndustryArgs(Arguments):
@@ -244,6 +305,135 @@ _TOOLS = (
         "platform_research",
         "vibe",
     ),
+    Capability(
+        "watchlist_get",
+        "查看我的自选",
+        "读取当前账号的自选，不读取其他用户或浏览器旧缓存。",
+        EmptyArgs,
+        "platform_market",
+        "market",
+    ),
+    Capability(
+        "watchlist_update",
+        "更新我的自选",
+        "按用户要求添加或移除指定自选，返回实际保存结果。",
+        WatchUpdateArgs,
+        "platform_market",
+        "market",
+        False,
+    ),
+    Capability(
+        "indicator_translate",
+        "设计指标草案",
+        "将明确的自然语言条件翻译成受限指标DSL草案；不自动保存。",
+        TranslateArgs,
+        "platform_indicator",
+        "indicators",
+    ),
+    Capability(
+        "indicator_create",
+        "保存指标",
+        "将用户要求的有效指标DSL存入当前账号指标库。",
+        IndicatorCreateArgs,
+        "platform_indicator",
+        "indicators",
+        False,
+    ),
+    Capability(
+        "scan_list",
+        "查看已有扫描",
+        "列出当前账号已有扫描和实际筛选条件，不新启动扫描。",
+        ListArgs,
+        "platform_indicator",
+        "screener",
+    ),
+    Capability(
+        "scan_cancel",
+        "停止扫描",
+        "请求取消指定的当前用户扫描；以返回状态为准。",
+        IdArgs,
+        "platform_indicator",
+        "screener",
+        False,
+    ),
+    Capability(
+        "analysis_list",
+        "查看已有个股研究",
+        "列出当前用户已保存的分析任务，不重新执行。",
+        ListArgs,
+        "platform_research",
+        "analysis",
+    ),
+    Capability(
+        "vibe_list",
+        "查看已有主题研究",
+        "列出当前用户主题研究，恢复同一attempt的监控，不重发研究。",
+        ListArgs,
+        "platform_research",
+        "vibe",
+    ),
+    Capability(
+        "vibe_followup",
+        "追问主题研究",
+        "对用户指定的已完成主题研究追问，保留原报告和时间。",
+        FollowupArgs,
+        "platform_research",
+        "vibe",
+        False,
+    ),
+    Capability(
+        "vibe_cancel",
+        "停止主题研究",
+        "请求停止指定研究；未得到引擎确认不能当作已停止。",
+        IdArgs,
+        "platform_research",
+        "vibe",
+        False,
+    ),
+    Capability(
+        "report_save",
+        "保存研究报告",
+        "保存当前用户已有研究版本。Vibe默认原报告，保存已完成追问必须指定turn_id。",
+        SaveArgs,
+        "prior_research",
+        "reports",
+        False,
+    ),
+    Capability(
+        "research_read",
+        "查看本轮证据",
+        "读取本轮研究真实工具结果生成的文档、段落、Claim及缺口。",
+        EmptyArgs,
+        "research_ledger",
+        "reports",
+    ),
+    Capability(
+        "research_record_claims",
+        "登记本轮研究判断",
+        "登记事实/计算/推断/假设候选及支持或反方证据ID；不能自行声明已核验。",
+        ClaimsArgs,
+        "research_ledger",
+        "reports",
+        False,
+    ),
+    Capability(
+        "research_record_relations",
+        "登记本轮产业机制",
+        "登记本轮关系候选、阶段、传导条件、反证与失效条件；不自动升级为已披露事实。",
+        RelationsArgs,
+        "research_ledger",
+        "industry",
+        False,
+    ),
+    Capability(
+        "research_scope",
+        "固定研究信息截止",
+        "历史研究须在检索前固定信息截止与所属期间，保留真实观察时间；已有资料后不得改写范围。",
+        ResearchScopeArgs,
+        "research_ledger",
+        "reports",
+        False,
+    ),
 )
 REGISTRY = {tool.id: tool for tool in _TOOLS}
 
@@ -299,6 +489,16 @@ def issue_run_token(username: str, conv_id: str, run_id: str) -> str:
 def revoke_run_token(run_id: str) -> None:
     with get_db() as db:
         db.execute("UPDATE capability_runs SET revoked=1 WHERE run_id=?", [run_id])
+
+
+def recover_interrupted_calls() -> None:
+    """Single-worker startup only: old subprocess grants never survive restart."""
+    with get_db() as db:
+        db.execute("UPDATE capability_runs SET revoked=1 WHERE revoked=0")
+        db.execute(
+            "UPDATE capability_calls SET status='interrupted',result_summary='原调用进程已结束；请查看已有任务，未自动重发',completed_at=? WHERE status='running'",
+            [int(time.time())],
+        )
 
 
 def _authenticate_bridge(request: Request) -> dict:
@@ -363,7 +563,7 @@ def safe_result(value: Any, depth: int = 0) -> Any:
 
 def _public_call(row) -> dict:
     result = dict(row)
-    tool = REGISTRY[result["capability_id"]]
+    tool = REGISTRY.get(result["capability_id"])
     return {
         k: result[k]
         for k in (
@@ -377,13 +577,20 @@ def _public_call(row) -> dict:
             "created_at",
             "completed_at",
         )
-    } | {"label": tool.label, "source_kind": tool.source_kind, "target": json.loads(result["target_json"])}
+    } | {
+        "label": tool.label if tool else result["capability_id"],
+        "source_kind": tool.source_kind if tool else "unknown",
+        "target": json.loads(result["target_json"]),
+    }
 
 
 def list_calls(
     username: str, *, conv_id: str = "", run_id: str = "", view: str = "", limit: int = 100
 ) -> list[dict]:
-    clauses = ["username=?"]
+    clauses = [
+        "username=?",
+        "EXISTS(SELECT 1 FROM conversations c WHERE c.id=capability_calls.conv_id AND c.username=capability_calls.username AND c.deleted_at IS NULL)",
+    ]
     args: list[Any] = [username]
     if conv_id:
         clauses.append("conv_id=?")
@@ -417,6 +624,101 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         target["ticker"] = data["ticker"]
     if "id" in data:
         target["id"] = data["id"]
+    if "period" in data and name in {"market_kline", "indicator_eval"}:
+        target["period"] = data["period"]
+    if "limit" in data and name == "market_kline":
+        target["limit"] = data["limit"]
+    if name.startswith("research_"):
+        from .research import read_research_run, record_claims, record_relations
+
+        target["run_id"] = context["run_id"]
+        if name == "research_scope":
+            from .research import set_research_scope
+
+            return (
+                set_research_scope(
+                    user, context["run_id"], data["information_cutoff"], data["requested_period"]
+                ),
+                target,
+                "研究信息截止已固定，观察时间保留",
+            )
+        if name == "research_read":
+            result = read_research_run(user, context["run_id"])
+            return result, target, "已读取本轮证据账本；出处关联不等于语义已核验"
+        if name == "research_record_relations":
+            return (
+                record_relations(user, context["run_id"], data["relations"]),
+                target,
+                "产业机制候选已登记，未自动宣称事实已核验",
+            )
+        result = record_claims(user, context["run_id"], data["claims"])
+        return result, target, "本轮判断已登记，按实际引用检查结果显示缺口"
+    if name.startswith("watchlist_"):
+        from .watchlist import get_watchlist, set_watchlist
+
+        items = get_watchlist(user)
+        if name == "watchlist_update":
+            indexed = {item["ticker"]: item for item in items}
+            for item in data["items"]:
+                if data["operation"] == "add":
+                    indexed[item["ticker"]] = item
+                else:
+                    indexed.pop(item["ticker"], None)
+            items = set_watchlist(user, list(indexed.values()))
+        return {"items": items}, target, f"当前账号共有 {len(items)} 个自选标的"
+    if name == "report_save":
+        from .reports import save_completed_analysis, save_report_snapshot, save_vibe_report
+
+        if data["turn_id"] and data["source"] != "vibe":
+            raise ValueError("turn_id is only valid for Vibe follow-ups")
+
+        if data["source"] == "analysis":
+            saved = save_completed_analysis(user, data["id"], title=data["title"], conv_id=context["conv_id"])
+        elif data["source"] == "vibe":
+            saved = save_vibe_report(
+                user, data["id"], title=data["title"], turn_id=data["turn_id"], conv_id=context["conv_id"]
+            )
+        else:
+            from .research import read_research_run
+
+            ledger = read_research_run(user, data["id"])
+            revisions = ledger.get("report_revisions") or []
+            if not revisions:
+                raise HTTPException(409, "研究尚未产生报告版本")
+            latest = revisions[-1]
+            revision = latest.get("id") or latest.get("revision_id")
+            saved = save_report_snapshot(
+                user,
+                {
+                    "source": "research",
+                    "source_id": str(revision),
+                    "conv_id": context["conv_id"],
+                    "title": data["title"] or "研究报告",
+                    "report": {
+                        "research_run_id": data["id"],
+                        "research_revision_id": revision,
+                        "research": ledger.get("run", {}),
+                        "markdown": latest.get("narrative", ""),
+                    },
+                },
+            )
+        target["id"] = saved["id"]
+        return {"report": saved}, target, "已保存该研究版本，后续追问不会覆盖"
+    if name == "analysis_list":
+        from .analysis_engine import get_analysis_record
+
+        with get_db() as db:
+            rows = db.execute(
+                "SELECT id FROM analysis_runs WHERE username=? ORDER BY started_at DESC LIMIT ?",
+                [user, data["limit"]],
+            ).fetchall()
+        fields = ("id", "ticker", "name", "status", "mode", "trade_date", "started_at", "research")
+        records = [
+            {key: record.get(key) for key in fields}
+            for row in rows
+            if (record := get_analysis_record(row["id"], user))
+        ]
+        return {"analyses": records}, target, f"找到 {len(records)} 条已有个股研究"
     if name.startswith("market_"):
         from .market.factory import get_chain
 
@@ -447,13 +749,44 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             target,
             "已取得平台数据" + ("（备用过期数据）" if stale else ""),
         )
-    if name in {"indicator_list", "indicator_eval", "scan_start", "scan_status"}:
+    if name in {
+        "indicator_list",
+        "indicator_eval",
+        "indicator_translate",
+        "indicator_create",
+        "scan_start",
+        "scan_status",
+        "scan_list",
+        "scan_cancel",
+    }:
         import pandas as pd
 
         from .indicators import router as indicators
         from .indicators import scanner
-        from .indicators.dsl import evaluate, is_signal, validate
+        from .indicators.dsl import MissingData, evaluate, is_signal, validate
         from .indicators.models import ScanRequest
+
+        if name == "indicator_translate":
+            from .indicators.translator import translate
+
+            result = await asyncio.to_thread(translate, data["input"])
+            if not result:
+                raise ValueError("indicator translation unavailable")
+            return {"draft": indicators.enrich_indicator(result)}, target, "已生成指标草案，尚未保存或扫描"
+        if name == "indicator_create":
+            from .indicators.models import IndicatorCreate
+
+            result = indicators.create_owned_indicator(user, IndicatorCreate(**data, source="agent"))
+            target["id"] = result["id"]
+            return result, target, "指标已保存到当前账号"
+        if name == "scan_list":
+            scanner.reconcile_jobs(user)
+            records = scanner.list_jobs(user, data["limit"])
+            return {"jobs": records}, target, f"找到 {len(records)} 个已有扫描"
+        if name == "scan_cancel":
+            if not scanner.cancel_job(data["id"], user):
+                raise HTTPException(404)
+            return {"job": scanner.get_job(data["id"], user)}, target, "已请求停止扫描，请核对任务状态"
 
         if name == "indicator_list":
             with get_db() as db:
@@ -467,6 +800,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
                 f"取得 {len(rows)} 个指标",
             )
         if name == "scan_status":
+            scanner.reconcile_jobs(user)
             job = scanner.get_job(data["id"], user)
             if not job:
                 raise HTTPException(404)
@@ -476,6 +810,12 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         if not validate(indicator["dsl"], params):
             raise ValueError("invalid indicator")
         if name == "scan_start":
+            if data["scope"] == "watchlist" and not data["tickers"]:
+                from .watchlist import get_watchlist
+
+                items = get_watchlist(user)
+                data["tickers"] = [item["ticker"] for item in items]
+                data["ticker_names"] = {item["ticker"]: item["name"] for item in items}
             req = ScanRequest(**data)
             if req.scope == "watchlist" and not req.tickers:
                 raise ValueError("empty watchlist")
@@ -484,28 +824,31 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             job = scanner.create_job(user, indicator, req.model_dump())
             scanner.start_job(job, indicator, indicators._build_df)
             target["id"] = job["id"]
-            return {"id": job["id"], "status": job["status"]}, target, "扫描已启动，可在选股页面查看进度"
+            return (
+                {"id": job["id"], "status": job["status"], "config": req.model_dump()},
+                target,
+                "扫描已启动，可在选股页面查看进度与实际条件",
+            )
         df, fund = await indicators._build_df(
             data["ticker"], data["period"], include_fundamentals=scanner.uses_fundamentals(indicator["dsl"])
         )
         if df is None or df.empty:
             raise RuntimeError("data unavailable")
 
-        def missing_funds(node):
-            if isinstance(node, dict):
-                if "fund" in node and fund.get(node["fund"]) is None:
-                    return True
-                return any(missing_funds(v) for v in node.values())
-            return isinstance(node, list) and any(missing_funds(v) for v in node)
-
-        if missing_funds(indicator["dsl"]):
-            raise RuntimeError("fundamentals unavailable")
-        values = evaluate(indicator["dsl"], df, fund, params)
+        try:
+            values = evaluate(indicator["dsl"], df, fund, params)
+        except MissingData:
+            raise DataInsufficient("required fundamentals unavailable") from None
+        if values.empty or bool(values.iloc[-1:].isna().any()):
+            raise DataInsufficient("latest indicator is not available")
         target["id"] = indicator["id"]
         signal = is_signal(values)
         result = {
             "indicator_id": indicator["id"],
             "ticker": data["ticker"],
+            "period": data["period"],
+            "params": params,
+            "kline": df.to_dict("records"),
             "kind": "signal" if signal else "plot",
             "points": [
                 {"t": int(t), "value": None if pd.isna(v) else bool(v) if signal else float(v)}
@@ -560,7 +903,37 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         return entry, target, f"研究状态：{status_label}"
     if name.startswith("vibe_"):
         from .models import VibePlanRequest
-        from .vibe import _insert_vibe_plan, _load_vibe_plan, _start_task, build_vibe_plan
+        from .vibe import (
+            _insert_vibe_plan,
+            _start_task,
+            build_vibe_plan,
+            cancel_owned_plan,
+            get_owned_plan,
+            list_owned_plans,
+            start_owned_followup,
+        )
+
+        if name == "vibe_list":
+            fields = (
+                "id",
+                "title",
+                "status",
+                "stage_label",
+                "created_at",
+                "updated_at",
+                "research",
+                "report_research",
+            )
+            records = [
+                {key: plan.get(key) for key in fields} for plan in list_owned_plans(user, data["limit"])
+            ]
+            return {"plans": records}, target, f"找到 {len(records)} 条已有主题研究"
+        if name == "vibe_cancel":
+            result = await cancel_owned_plan(user, data["id"])
+            return result, target, "研究已停止" if result["cancelled"] else "尚未确认引擎停止，请核对当前任务"
+        if name == "vibe_followup":
+            plan = start_owned_followup(user, data["id"], data["question"])
+            return {"plan": plan}, target, "追问已排队，原报告保留"
 
         if name == "vibe_start":
             plan = build_vibe_plan(VibePlanRequest(**data, agent=True))
@@ -569,9 +942,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             _start_task(plan["id"], user)
             target["id"] = plan["id"]
         else:
-            plan = _load_vibe_plan(data["id"], user)
-            if not plan:
-                raise HTTPException(404)
+            plan = get_owned_plan(user, data["id"])
         result = {
             k: plan.get(k)
             for k in (
@@ -586,6 +957,9 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
                 "candidates",
                 "gaps",
                 "research",
+                "report_research",
+                "report_quality",
+                "followups",
             )
         }
         return (
@@ -604,7 +978,12 @@ async def dispatch_call(context: dict, request: CallRequest) -> dict:
         args = tool.schema.model_validate(request.arguments)
     except ValidationError:
         raise HTTPException(422, "平台能力参数无效") from None
-    canonical = json.dumps(args.model_dump(), sort_keys=True, ensure_ascii=False)
+    try:
+        canonical = json.dumps(args.model_dump(), sort_keys=True, ensure_ascii=False, allow_nan=False)
+    except (ValueError, TypeError):
+        raise HTTPException(422, "平台能力参数无效") from None
+    if len(canonical.encode()) > 32768:
+        raise HTTPException(413, "调用参数过大")
     args_hash = hashlib.sha256(canonical.encode()).hexdigest()
     with get_db() as db:
         existing = db.execute(
@@ -645,6 +1024,17 @@ async def dispatch_call(context: dict, request: CallRequest) -> dict:
                 int(time.time()),
             ],
         )
+        # Snapshots retain reproducible market/indicator conditions, never raw
+        # prompts, follow-up questions or model-authored claim prose in audit.
+        replay_args = {
+            key: value
+            for key, value in args.model_dump().items()
+            if key not in {"prompt", "question", "input", "claims", "relations"}
+        }
+        db.execute(
+            "UPDATE capability_calls SET arguments_json=? WHERE call_id=?",
+            [json.dumps(safe_result(replay_args), ensure_ascii=False, allow_nan=False), call_id],
+        )
     error = None
     try:
         value, target, result_summary = await asyncio.wait_for(_execute(tool.id, args, context), timeout=50)
@@ -677,7 +1067,13 @@ async def dispatch_call(context: dict, request: CallRequest) -> dict:
         status = "failed"
         if isinstance(exc, HTTPException) and exc.status_code == 404:
             code, result_summary = "not_found", "记录不存在或不可访问"
-        elif isinstance(exc, (ValidationError, ValueError, TypeError)):
+        elif isinstance(exc, DataInsufficient):
+            code, result_summary = "data_insufficient", "所需资料或最新指标预热不足，未生成有效计算结果"
+        elif (
+            isinstance(exc, (ValidationError, ValueError, TypeError))
+            or isinstance(exc, HTTPException)
+            and exc.status_code in {400, 422}
+        ):
             code, result_summary = "invalid_arguments", "参数或指标输入无效"
         elif isinstance(exc, HTTPException) and exc.status_code == 409:
             code, result_summary = "conflict", "已有研究任务运行，请先查看已有记录"
@@ -723,6 +1119,32 @@ async def api_conversation_calls(conv_id: str, request: Request):
 async def api_capability_calls(request: Request, view: View | None = None, limit: int = 20):
     user = require_auth(request)
     return {"calls": list_calls(user, view=view or "", limit=limit)}
+
+
+def get_call_snapshot(username: str, call_id: str) -> dict:
+    with get_db() as db:
+        row = db.execute(
+            "SELECT * FROM capability_calls WHERE call_id=? AND username=?", [call_id, username]
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "调用记录不存在或不可访问")
+    _owned_conversation(username, row["conv_id"])
+    response = json.loads(row["response_json"] or "{}")
+    call = _public_call(row)
+    return {
+        "call": call,
+        "params": json.loads(row["arguments_json"] or "{}"),
+        "result": response.get("data", {}),
+        "target": call["target"],
+        "error": response.get("error"),
+        "notice": "原调用快照，未重新请求行情或计算；私密自由文本不在调用参数账本中保存。",
+    }
+
+
+@router.get("/capabilities/calls/{call_id}")
+@router.get("/capability-calls/{call_id}")
+async def api_call_snapshot(call_id: str, request: Request):
+    return get_call_snapshot(require_auth(request), call_id)
 
 
 @router.get("/internal/capabilities/tools")

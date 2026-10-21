@@ -9,11 +9,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
+import threading
 import time
 import uuid
-from contextlib import contextmanager
 
+from . import config as app_config
 from .config import (
     ASTOCK_CACHE_TTL_SECONDS,
     ASTOCK_DATA_VENDOR,
@@ -22,19 +24,17 @@ from .config import (
     ASTOCK_FAST_DEBATE_ROUNDS,
     ASTOCK_FAST_RISK_ROUNDS,
     ASTOCK_HARD_TIMEOUT_SECONDS,
-    ASTOCK_LLM_API_KEY,
     ASTOCK_LLM_BASE_URL,
     ASTOCK_LLM_DEEP,
     ASTOCK_LLM_PROVIDER,
     ASTOCK_LLM_QUICK,
     ASTOCK_MAX_DEBATE_ROUNDS,
-    ASTOCK_NO_PROXY_DOMAINS,
     ASTOCK_OUTPUT_LANGUAGE,
     ASTOCK_PROJECT,
     ASTOCK_RESULTS_DIR,
 )
 from .database import get_db
-from .research_context import build_research_context
+from .research_context import build_research_context, build_research_prompt
 
 log = logging.getLogger("prism.analysis")
 
@@ -53,6 +53,10 @@ def _ensure_astock():
 
 # ── In-memory store for running/completed analyses ──
 _store: dict[str, dict] = {}
+
+# This exact upstream engine uses module-global dataflows.set_config(). Keep its
+# entire lifetime serial within this process; per-run paths alone are not enough.
+_ENGINE_RUN_LOCK = threading.Lock()
 
 _VALID_ANALYSTS = {"market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"}
 
@@ -114,6 +118,7 @@ def get_analysis_record(analysis_id: str, username: str) -> dict | None:
                 "mode",
                 "trade_date",
                 "status",
+                "stage",
                 "report",
                 "signal",
                 "error",
@@ -229,32 +234,22 @@ def _save_cached_analysis(
         log.warning("analysis cache write failed: %s", exc)
 
 
-@contextmanager
-def _astock_no_proxy_env():
-    """Bypass local proxy for flaky A-share data sources during one run."""
-    keys = ("no_proxy", "NO_PROXY")
-    old = {k: os.environ.get(k) for k in keys}
-    merged = set()
-    for k in keys:
-        for part in (old.get(k) or "").split(","):
-            part = part.strip()
-            if part:
-                merged.add(part)
-    merged.update(ASTOCK_NO_PROXY_DOMAINS)
-    value = ",".join(sorted(merged))
-    for k in keys:
-        os.environ[k] = value
-    try:
-        yield
-    finally:
-        for k, v in old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+def _analysis_directories(analysis_id: str) -> dict[str, str]:
+    """Only a service-issued UUID may select an engine output directory."""
+    if not isinstance(analysis_id, str) or not re.fullmatch(r"[0-9a-f]{32}", analysis_id):
+        raise ValueError("a service-issued analysis UUID is required")
+    data = app_config.DATA_DIR.resolve(strict=True)
+    root, run = data / "analysis_engine", data / "analysis_engine" / analysis_id
+    results, cache = run / "results", run / "cache"
+    for path in (root, run, results, cache):
+        path.mkdir(mode=0o700, exist_ok=True)
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError("engine directories must not be symlinks")
+        os.chmod(path, 0o700)
+    return {"results_dir": str(results), "data_cache_dir": str(cache)}
 
 
-def _build_config(mode: str = "deep") -> dict:
+def _build_config(mode: str = "deep", *, analysis_id: str | None = None) -> dict:
     """Build astock DEFAULT_CONFIG overrides from Prism config."""
     from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -265,12 +260,9 @@ def _build_config(mode: str = "deep") -> dict:
     cfg["quick_think_llm"] = ASTOCK_LLM_QUICK
     if ASTOCK_LLM_BASE_URL:
         cfg["backend_url"] = ASTOCK_LLM_BASE_URL.rstrip("/") + "/v1"
-    if ASTOCK_LLM_API_KEY:
-        os_key = f"{ASTOCK_LLM_PROVIDER.upper()}_API_KEY"
-        import os as _os
-
-        if not _os.environ.get(os_key):
-            _os.environ[os_key] = ASTOCK_LLM_API_KEY
+    # Upstream Graph does not forward a config API-key field. Its provider SDK
+    # reads the service's startup environment. Never mutate that shared process
+    # environment from one research thread or pretend an ignored key works.
     cfg["output_language"] = ASTOCK_OUTPUT_LANGUAGE
     if normalized == "fast":
         cfg["max_debate_rounds"] = ASTOCK_FAST_DEBATE_ROUNDS
@@ -279,6 +271,10 @@ def _build_config(mode: str = "deep") -> dict:
         cfg["max_debate_rounds"] = ASTOCK_MAX_DEBATE_ROUNDS
         cfg["max_risk_discuss_rounds"] = ASTOCK_MAX_DEBATE_ROUNDS
     cfg["results_dir"] = ASTOCK_RESULTS_DIR
+    cfg["memory_log_path"] = None
+    cfg["checkpoint_enabled"] = False
+    if analysis_id is not None:
+        cfg.update(_analysis_directories(analysis_id))
     cfg["data_vendors"] = {
         "core_stock_apis": ASTOCK_DATA_VENDOR,
         "technical_indicators": ASTOCK_DATA_VENDOR,
@@ -350,7 +346,7 @@ async def start_analysis(
     # The requested research date is not necessarily an exchange trading day.
     trade_date = date or research["date"]
     selected_analysts = _selected_analysts(mode)
-    aid = uuid.uuid4().hex[:12]
+    aid = uuid.uuid4().hex
     events: list[dict] = []
     _store[aid] = {
         "id": aid,
@@ -363,6 +359,7 @@ async def start_analysis(
         "cached": False,
         "timings": {},
         "status": "starting",
+        "stage": "queued",
         "events": events,
         "report": None,
         "signal": None,
@@ -385,11 +382,13 @@ async def start_analysis(
                 "cache_updated_at": cached.get("updated_at"),
                 "timings": cached.get("timings") or {},
                 "request_context": research,
+                "evidence_status": "unverified_engine_report",
             }
         )
         _store[aid].update(
             {
                 "status": "done",
+                "stage": "completed",
                 "report": report,
                 "signal": cached.get("signal"),
                 "cached": True,
@@ -401,7 +400,7 @@ async def start_analysis(
         events.append(
             {"type": "status", "elapsed": 0, "message": "使用今日缓存报告，已跳过重复 Astock 分析。"}
         )
-        events.append({"type": "stage", "elapsed": 0, "stage": "decision", "progress_pct": 100})
+        events.append({"type": "stage", "elapsed": 0, "stage": "decision", "cached": True})
         events.append(
             {
                 "type": "done",
@@ -437,8 +436,6 @@ async def start_analysis(
         def _emit(event_type: str, **kwargs):
             events.append({"type": event_type, "elapsed": round(time.time() - start, 1), **kwargs})
 
-        _STAGE_ORDER = ["analysts", "debate", "research", "trader", "risk", "decision"]
-        _STAGE_PCT = {"analysts": 40, "debate": 55, "research": 65, "trader": 75, "risk": 90, "decision": 100}
         _seen_stages = set()
         _seen_nodes = set()
         _last_node_text = {}
@@ -450,23 +447,25 @@ async def start_analysis(
         }
         last_node_at = start
 
-        # Emit progress IMMEDIATELY so the UI isn't frozen at 0% while the
-        # engine builds and the first analyst grinds through data-fetch + LLM.
-        # The frontend ticks its elapsed timer off the heartbeats we send
-        # every 0.5s, so the user sees it's alive even before node 1 completes.
-        _emit("stage", stage="analysts", progress_pct=_STAGE_PCT["analysts"])
-        _seen_stages.add("analysts")
-        _emit("status", message="正在初始化分析引擎…")
+        _emit("stage", stage="queued", completed_nodes=0)
+        _emit("status", message="等待研究引擎；当前任务不会与其他用户共享缓存或记忆。")
 
-        proxy_ctx = _astock_no_proxy_env()
-        proxy_entered = False
+        acquired = False
         ta = None
         try:
-            proxy_ctx.__enter__()
-            proxy_entered = True
-            cfg = _build_config(mode)
+            if not isinstance(aid, str) or not re.fullmatch(r"[0-9a-f]{32}", aid):
+                raise ValueError("a service-issued analysis UUID is required")
+            _ENGINE_RUN_LOCK.acquire()
+            acquired = True
+            timings["queue_seconds"] = round(time.time() - start, 1)
+            last_node_at = time.time()
+            cfg = _build_config(mode, analysis_id=aid)
             import inspect
 
+            _store[aid]["stage"] = "analysts"
+            _emit("stage", stage="analysts", completed_nodes=0)
+            _seen_stages.add("analysts")
+            _emit("status", message="正在初始化独立研究环境…")
             graph_kwargs = {"debug": True, "config": cfg}
             if "selected_analysts" in inspect.signature(TradingAgentsGraph).parameters:
                 graph_kwargs["selected_analysts"] = selected_analysts
@@ -479,6 +478,13 @@ async def start_analysis(
                 _emit("status", message="正在深度分析（7 agent 全链路），预计 3-8 分钟…")
 
             init_state, graph_args, _ = ta.prepare_graph_run(ticker, trade_date)
+            # The real market analyst consumes MessagesPlaceholder, but later
+            # upstream nodes may clear it. This is a first-step context only,
+            # never a claim that all agents enforce source or time constraints.
+            init_state = dict(init_state or {})
+            init_state["messages"] = list(init_state.get("messages") or []) + [
+                ("human", build_research_prompt(research))
+            ]
             final_state = dict(init_state or {})
             for chunk in ta.graph.stream(init_state, **graph_args):
                 previous_state = final_state.copy()
@@ -492,7 +498,8 @@ async def start_analysis(
                     stage = semantic.get("stage") or _STAGE_FOR_NODE.get(node_name, "")
                     if stage and stage not in _seen_stages:
                         _seen_stages.add(stage)
-                        _emit("stage", stage=stage, progress_pct=_STAGE_PCT.get(stage, 0))
+                        _store[aid]["stage"] = stage
+                        _emit("stage", stage=stage, completed_nodes=len(_seen_nodes))
                     agent_key = semantic.get("agent") or _agent_key_for_node(node_name)
                     if node_name not in _seen_nodes:
                         node_timing = {
@@ -507,7 +514,13 @@ async def start_analysis(
                         _emit("timing", **node_timing)
                         last_node_at = now
                         _seen_nodes.add(node_name)
-                        _emit("agent_done", agent=agent_key, node=node_name, label=label)
+                        _emit(
+                            "agent_done",
+                            agent=agent_key,
+                            node=node_name,
+                            label=label,
+                            completed_nodes=len(_seen_nodes),
+                        )
                     # Stream the node's own output text so the UI can show what
                     # each analyst/trader is producing in real time (then fold
                     # it away when the final dashboard renders).
@@ -528,6 +541,9 @@ async def start_analysis(
                 "research": research,
                 "data_as_of": None,
                 "evidence_status": "unverified_engine_report",
+                "context_injection_scope": "first_analyst_message_only",
+                "run_storage_isolated": True,
+                "shared_memory_enabled": False,
             }
             _store[aid]["report"] = report
             _store[aid]["signal"] = signal
@@ -560,26 +576,34 @@ async def start_analysis(
                     )
                     _emit("structured", structured=structured)
             except Exception as exc:
-                log.warning("structured extraction failed: %s", exc)
+                log.warning("Analysis %s extraction failed (%s)", aid, type(exc).__name__)
             _store[aid]["status"] = "done"
+            _store[aid]["stage"] = "completed"
             _persist_analysis(_store[aid])
             _emit("done", report=report, signal=signal, mode=mode, cached=False, timings=timings)
         except Exception as exc:
-            log.exception("Analysis %s failed: %s", aid, exc)
+            log.error("Analysis %s failed (%s)", aid, type(exc).__name__)
             _store[aid]["status"] = "error"
-            _store[aid]["error"] = str(exc)
+            code = "engine_timeout" if isinstance(exc, TimeoutError) else "engine_unavailable"
+            message = (
+                "研究引擎超时，已保留现有记录"
+                if code == "engine_timeout"
+                else "研究引擎暂不可用，已保留现有记录；请联系管理员核查配置"
+            )
+            _store[aid]["error"] = message
             _persist_analysis(_store[aid])
-            _emit("error", message=str(exc))
+            _emit("error", code=code, message=message)
         finally:
-            if ta is not None:
-                close_graph_run = getattr(ta, "close_graph_run", None)
-                if callable(close_graph_run):
-                    try:
+            try:
+                if ta is not None:
+                    close_graph_run = getattr(ta, "close_graph_run", None)
+                    if callable(close_graph_run):
                         close_graph_run()
-                    except Exception as exc:
-                        log.warning("Analysis %s graph cleanup failed: %s", aid, exc)
-            if proxy_entered:
-                proxy_ctx.__exit__(None, None, None)
+            except Exception as exc:
+                log.warning("Analysis %s graph cleanup failed (%s)", aid, type(exc).__name__)
+            finally:
+                if acquired:
+                    _ENGINE_RUN_LOCK.release()
 
     loop = asyncio.get_event_loop()
     future = loop.run_in_executor(None, _run)
@@ -592,7 +616,7 @@ async def start_analysis(
         try:
             fut.result()
         except Exception as exc:
-            log.exception("Analysis executor crashed unexpectedly: %s", exc)
+            log.error("Analysis %s executor failed (%s)", aid, type(exc).__name__)
 
     future.add_done_callback(_on_run_done)
     return aid
@@ -1025,9 +1049,7 @@ def _extract_structured(report: dict, ticker: str, name: str) -> dict | None:
     falls back to the plain-text report. Runs synchronously in the analysis
     executor thread; bounded by a subprocess timeout so it can't hang.
     """
-    import subprocess
-
-    from .config import CLAUDE_BIN
+    from .services.auxiliary_model import run_text
 
     def _t(v):
         return _get_last_message(v)
@@ -1073,26 +1095,12 @@ def _extract_structured(report: dict, ticker: str, name: str) -> dict | None:
     )
 
     try:
-        proc = subprocess.run(
-            [
-                CLAUDE_BIN,
-                "-p",
-                prompt,
-                "--model",
-                "minimax-m2.7-fast",
-                "--max-tokens",
-                "1500",
-                "--output-format",
-                "json",
-            ],
-            capture_output=True,
-            timeout=40,
-        )
+        output = run_text(prompt, timeout=40, output_format="json")
     except Exception as exc:
-        log.warning("structured extraction subprocess failed: %s", exc)
+        log.warning("structured extraction unavailable: %s", type(exc).__name__)
         return None
 
-    data = _parse_json_lenient(proc.stdout.decode("utf-8", errors="replace").strip())
+    data = _parse_json_lenient(output)
     if not isinstance(data, dict):
         return None
     # Require at least a signal or thesis — otherwise treat as garbage.

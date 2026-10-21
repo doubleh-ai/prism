@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 研究工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=79">
+  <link rel="stylesheet" href="/static/css/app.css?v=81">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%233b5d8a'/><stop offset='100%' stop-color='%236b95c8'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='%231c1a16'/><circle cx='16' cy='16' r='9' fill='none' stroke='url(%23g)' stroke-width='1.8'/><circle cx='16' cy='16' r='3.5' fill='url(%23g)' opacity='.9'/></svg>">
 </head>
 <body>
@@ -161,11 +161,12 @@
             <button class="report-viewer-act" onclick="App.closeReportViewer()" title="关闭">×</button>
           </div>
         </div>
-        <iframe id="reportFrame" class="report-viewer-frame" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer"></iframe>
+        <iframe id="reportFrame" class="report-viewer-frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
       </div>
     </div>
 
     <div class="input-zone">
+      <div id="modelConfigurationNotice" class="research-status-notice" role="status" hidden></div>
       <div class="composer" id="composer">
         <div class="composer-chips" id="composerChips"></div>
         <textarea id="input" rows="1" placeholder="提出研究问题，也可以要求查询行情、比较产业关系或查看历史研报…"></textarea>
@@ -320,25 +321,35 @@
   <div class="workbench-dialog-tabs" role="tablist"><button role="tab" id="workbenchCapabilityTab" onclick="App._openWorkbenchPanel('capabilities')">平台能力</button><button role="tab" id="workbenchHistoryTab" onclick="App._openWorkbenchPanel('history')">调用记录</button></div>
   <div id="workbenchDialogBody" class="workbench-dialog-body"></div>
 </dialog>
-<script src="/static/lib/marked.min.js?v=79"></script>
-<script src="/static/lib/echarts.min.js?v=79"></script>
-<script src="/static/js/app.util.js?v=79"></script>
-<script src="/static/js/app.chat-render.js?v=79"></script>
-<script src="/static/js/app.core.js?v=79"></script>
-<script src="/static/js/app.diagnostics.js?v=79"></script>
-<script src="/static/js/app.chat.js?v=79"></script>
-<script src="/static/js/app.market.js?v=79"></script>
-<script src="/static/js/app.vibe.js?v=79"></script>
-<script src="/static/js/app.analysis.js?v=79"></script>
-<script src="/static/js/app.reports.js?v=79"></script>
-<script src="/static/js/app.industry.js?v=79"></script>
-<script src="/static/js/app.indicators.js?v=79"></script>
-<script src="/static/js/app.screener.js?v=79"></script>
-<script src="/static/js/app.indicator-chart.js?v=79"></script>
-<script src="/static/js/app.admin.js?v=79"></script>
-<script src="/static/js/app.release.js?v=79"></script>
-<script src="/static/js/app.tour.js?v=79"></script>
-<script src="/static/js/app.workbench.js?v=79"></script>
-<script src="/static/js/app.operations.js?v=79"></script>
+<dialog id="capabilityResultDialog" class="workbench-dialog research-dialog" aria-labelledby="capabilityResultTitle">
+  <header><div><span class="workbench-kicker">RECORDED RESULT</span><h2 id="capabilityResultTitle">能力调用结果</h2></div><button onclick="document.getElementById('capabilityResultDialog').close()" aria-label="关闭原结果">×</button></header>
+  <div id="capabilityResultBody" class="workbench-dialog-body"></div>
+</dialog>
+<dialog id="researchDialog" class="workbench-dialog research-dialog" aria-labelledby="researchTitle">
+  <header><div><span class="workbench-kicker">RESEARCH & EVIDENCE</span><h2 id="researchTitle">研究记录</h2></div><button onclick="document.getElementById('researchDialog').close()" aria-label="关闭研究记录">×</button></header>
+  <nav id="researchTabs" class="workbench-dialog-tabs" role="tablist" aria-label="研究视图"><button role="tab" data-research-tab="overview">研究概览</button><button role="tab" data-research-tab="report">网页研报</button><button role="tab" data-research-tab="evidence">来源证据</button><button role="tab" data-research-tab="industry">产业关系</button></nav>
+  <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
+</dialog>
+<script src="/static/lib/marked.min.js?v=81"></script>
+<script src="/static/lib/echarts.min.js?v=81"></script>
+<script src="/static/js/app.util.js?v=81"></script>
+<script src="/static/js/app.chat-render.js?v=81"></script>
+<script src="/static/js/app.core.js?v=81"></script>
+<script src="/static/js/app.diagnostics.js?v=81"></script>
+<script src="/static/js/app.chat.js?v=81"></script>
+<script src="/static/js/app.market.js?v=81"></script>
+<script src="/static/js/app.vibe.js?v=81"></script>
+<script src="/static/js/app.analysis.js?v=81"></script>
+<script src="/static/js/app.reports.js?v=81"></script>
+<script src="/static/js/app.industry.js?v=81"></script>
+<script src="/static/js/app.indicators.js?v=81"></script>
+<script src="/static/js/app.screener.js?v=81"></script>
+<script src="/static/js/app.indicator-chart.js?v=81"></script>
+<script src="/static/js/app.admin.js?v=81"></script>
+<script src="/static/js/app.release.js?v=81"></script>
+<script src="/static/js/app.tour.js?v=81"></script>
+<script src="/static/js/app.workbench.js?v=81"></script>
+<script src="/static/js/app.research.js?v=81"></script>
+<script src="/static/js/app.operations.js?v=81"></script>
 </body>
 </html>

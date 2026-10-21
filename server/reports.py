@@ -8,12 +8,19 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import require_auth
 from .database import get_db
 from .models import SavedReportCreateRequest, SavedReportSaveRequest, validation_error_message
 
 router = APIRouter(prefix="/api")
+
+
+class VibeReportSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="", max_length=160)
+    turn_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_\-]{1,128}$")
 
 
 def _text_from_value(value: Any) -> str:
@@ -98,7 +105,7 @@ def _sanitize_report_value(value: Any, *, force_text: bool = False) -> Any:
     if force_text:
         return _text_from_value(value)
     if value is None:
-        return ""
+        return None
     if isinstance(value, str):
         return value.replace("[object Object]", "").strip()
     if isinstance(value, (int, float, bool)):
@@ -107,7 +114,7 @@ def _sanitize_report_value(value: Any, *, force_text: bool = False) -> Any:
         out = []
         for item in value:
             cleaned = _sanitize_report_value(item)
-            if cleaned in ("", None, [], {}):
+            if cleaned in ("", [], {}):
                 continue
             out.append(cleaned)
         return out
@@ -119,10 +126,8 @@ def _sanitize_report_value(value: Any, *, force_text: bool = False) -> Any:
             return _text_from_value(value)
         out = {}
         for key, child in value.items():
-            if key in {"id", "type", "role", "source_id", "conv_id"}:
-                continue
             cleaned = _sanitize_report_value(child, force_text=key in _REPORT_TEXT_KEYS)
-            if cleaned in ("", None, [], {}):
+            if cleaned in ("", [], {}):
                 continue
             out[str(key)] = cleaned
         return out
@@ -166,7 +171,7 @@ def _signal_from(report: Any, fallback: str = "") -> str:
 
 
 def save_report_snapshot(username: str, payload: dict) -> dict:
-    """Insert or update a user's saved report snapshot."""
+    """Save one immutable source revision; repeat saves return the same snapshot."""
     report = _sanitize_report_payload(payload.get("report") or {})
     now = int(time.time())
     source = (payload.get("source") or "manual").strip()[:32]
@@ -182,6 +187,14 @@ def save_report_snapshot(username: str, payload: dict) -> dict:
     report_json = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
 
     with get_db() as db:
+        if (
+            payload.get("conv_id")
+            and not db.execute(
+                "SELECT id FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+                [payload["conv_id"], username],
+            ).fetchone()
+        ):
+            raise HTTPException(404, "会话不存在或不可访问")
         existing = None
         if source_id:
             existing = db.execute(
@@ -190,26 +203,8 @@ def save_report_snapshot(username: str, payload: dict) -> dict:
             ).fetchone()
         if existing:
             rid = existing["id"]
-            db.execute(
-                """
-                UPDATE saved_reports
-                SET title=?, ticker=?, name=?, signal=?, summary=?, report_json=?,
-                    conv_id=?, updated_at=?
-                WHERE id=? AND username=?
-                """,
-                [
-                    title,
-                    ticker,
-                    name,
-                    signal,
-                    summary,
-                    report_json,
-                    payload.get("conv_id"),
-                    now,
-                    rid,
-                    username,
-                ],
-            )
+            # A follow-up must use its new run/attempt ID. Repeated reads and
+            # saves cannot rewrite the previous report, timestamps or evidence.
         else:
             rid = secrets.token_hex(12)
             db.execute(
@@ -314,8 +309,41 @@ async def api_create_saved_report(request: Request):
         req = SavedReportCreateRequest(**(body or {}))
     except Exception as exc:
         raise HTTPException(422, validation_error_message(exc))
-    saved = save_report_snapshot(username, req.model_dump())
+    # Only trusted, owner-scoped producers can reserve a server research ID.
+    # Otherwise a client could preempt Chat's immutable run snapshot.
+    if req.source != "manual":
+        raise HTTPException(422, "研究来源由服务端保存；此接口仅接受手动笔记")
+    payload = req.model_dump()
+    payload["report"] = _manual_report(payload["report"])
+    payload["report"]["evidence_status"] = "user_supplied_unverified"
+    saved = save_report_snapshot(username, payload)
     return {"ok": True, "report": saved}
+
+
+def _manual_report(value):
+    """User notes cannot mint server evidence IDs, receipts or verification state."""
+    reserved = {
+        "research",
+        "_analysis_meta",
+        "research_run_id",
+        "research_revision_id",
+        "run_id",
+        "claim_id",
+        "passage_id",
+        "document_id",
+        "tool_call_id",
+        "citation_status",
+        "semantic_status",
+        "evidence_status",
+        "verification_status",
+        "source_kind",
+        "source_id",
+    }
+    if isinstance(value, dict):
+        return {key: _manual_report(child) for key, child in value.items() if key not in reserved}
+    if isinstance(value, list):
+        return [_manual_report(child) for child in value]
+    return value
 
 
 @router.get("/reports/library/{report_id}")
@@ -344,24 +372,81 @@ async def api_save_analysis_report(analysis_id: str, request: Request):
     except Exception as exc:
         raise HTTPException(422, validation_error_message(exc))
 
-    from .analysis_engine import _store
+    saved = save_completed_analysis(username, analysis_id, title=req.title or "", summary=req.summary or "")
+    return {"ok": True, "report": saved}
 
-    entry = _store.get(analysis_id)
-    if not entry or entry.get("username") != username:
+
+def save_completed_analysis(
+    username: str, analysis_id: str, *, title: str = "", summary: str = "", conv_id: str | None = None
+) -> dict:
+    """Read through the durable owner-scoped service, including after restart."""
+    from .analysis_engine import get_analysis_record
+
+    entry = get_analysis_record(analysis_id, username)
+    if not entry:
         raise HTTPException(404, "analysis not found")
     if entry.get("status") != "done" or not entry.get("report"):
         raise HTTPException(409, "analysis report is not ready")
-
     report = entry["report"]
-    payload = {
-        "source": "analysis",
-        "source_id": analysis_id,
-        "ticker": entry.get("ticker") or "",
-        "name": entry.get("name") or "",
-        "title": req.title or "",
-        "signal": entry.get("signal") or report.get("signal") or "",
-        "summary": req.summary or "",
-        "report": report,
-    }
-    saved = save_report_snapshot(username, payload)
+    return save_report_snapshot(
+        username,
+        {
+            "source": "analysis",
+            "source_id": analysis_id,
+            "conv_id": conv_id,
+            "ticker": entry.get("ticker") or "",
+            "name": entry.get("name") or "",
+            "title": title,
+            "signal": entry.get("signal") or report.get("signal") or "",
+            "summary": summary,
+            "report": report,
+        },
+    )
+
+
+def save_vibe_report(
+    username: str, plan_id: str, *, title: str = "", turn_id: str | None = None, conv_id: str | None = None
+) -> dict:
+    from .vibe import get_owned_plan
+
+    plan = get_owned_plan(username, plan_id, recover=False)
+    content = plan.get("report_markdown")
+    research = plan.get("report_research") or plan.get("research") or {}
+    quality = plan.get("report_quality") or plan.get("quality")
+    if turn_id:
+        turn = next((item for item in plan.get("followups") or [] if item.get("id") == turn_id), None)
+        if not turn:
+            raise HTTPException(404, "追问不存在或不可访问")
+        if turn.get("status") != "complete":
+            raise HTTPException(409, "追问尚未产生完整报告")
+        content, research, quality = (
+            turn.get("answer_markdown"),
+            turn.get("research") or {},
+            turn.get("quality"),
+        )
+    if not content:
+        raise HTTPException(409, "研究尚未产生报告")
+    revision = str(research.get("run_id") or turn_id or "legacy-original")
+    return save_report_snapshot(
+        username,
+        {
+            "source": "vibe",
+            "source_id": f"{plan_id}:{revision}",
+            "conv_id": conv_id,
+            "title": title or (str(plan.get("title") or "Vibe研究") + (" · 追问" if turn_id else "")),
+            "report": {
+                "markdown": content,
+                "research": research,
+                "quality": quality,
+                "plan_id": plan_id,
+                "turn_id": turn_id,
+                "evidence_status": "unverified_engine_report",
+            },
+        },
+    )
+
+
+@router.post("/vibe/plans/{plan_id}/save-report")
+async def api_save_vibe_report(plan_id: str, body: VibeReportSaveRequest, request: Request):
+    saved = save_vibe_report(require_auth(request), plan_id, title=body.title, turn_id=body.turn_id)
     return {"ok": True, "report": saved}

@@ -112,7 +112,7 @@ def test_vibe_structured_answer_and_disclosed_gaps_are_readable():
     assert plan["quality"]["tool_success"] == 0
 
 
-def test_vibe_tool_failures_keep_audit_detail_but_expose_readable_summary():
+def test_vibe_tool_failures_expose_classification_without_raw_provider_detail():
     connection_error = (
         '{"ok": false, "error": "ranking_request failed: '
         "HTTPConnectionPool(host='push2.eastmoney.com', port=443): Max retries exceeded"
@@ -141,7 +141,7 @@ def test_vibe_tool_failures_keep_audit_detail_but_expose_readable_summary():
     activity = plan["activity"][-1]
     assert activity["result"] == "外部数据源暂时不可达，已跳过并记录缺口"
     assert "HTTPConnectionPool" not in activity["result"]
-    assert "HTTPConnectionPool" in activity["detail"]
+    assert activity["detail"] == activity["result"]
 
 
 async def test_vibe_draft_crud(client, auth_cookies):

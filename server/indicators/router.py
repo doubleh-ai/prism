@@ -12,7 +12,7 @@ from ..auth import require_auth
 from ..config import RATE_EXPLAIN_PER_MIN
 from ..database import check_rate_limit, get_db
 from . import scanner
-from .dsl import DSLError, evaluate, is_signal, validate
+from .dsl import DSLError, MissingData, evaluate, is_signal, validate
 from .metadata import enrich_indicator
 from .models import EvalRequest, IndicatorCreate, IndicatorUpdate, ScanRequest, TranslateRequest
 from .translator import translate
@@ -410,6 +410,22 @@ def _df_from_kline_rows(kline_rows, limit=500):
     return df
 
 
+async def _fund_for_ticker(chain, ticker):
+    try:
+        f, _ = await chain.get_fundamentals(ticker)
+        fd = f.model_dump()
+        return {
+            "pe": fd.get("pe_ttm"),
+            "pb": fd.get("pb"),
+            "roe": fd.get("roe"),
+            "market_cap": fd.get("market_cap"),
+            "revenue_growth": None,
+            "dividend_yield": None,
+        }
+    except Exception:
+        return {}
+
+
 async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
     """Fetch OHLCV + fundamentals for a ticker -> (df, fund_dict)."""
     from ..market.router import get_chain
@@ -453,21 +469,7 @@ async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
     if df is None:
         return None, {}
 
-    fund = {}
-    if include_fundamentals:
-        try:
-            f, _ = await chain.get_fundamentals(ticker)
-            fd = f.model_dump()
-            fund = {
-                "pe": fd.get("pe_ttm"),
-                "pb": fd.get("pb"),
-                "roe": fd.get("roe"),
-                "market_cap": fd.get("market_cap"),
-                "revenue_growth": None,
-                "dividend_yield": None,
-            }
-        except Exception:
-            pass
+    fund = await _fund_for_ticker(chain, ticker) if include_fundamentals else {}
     return df, fund
 
 
@@ -484,6 +486,7 @@ def _event_reason(ind, idx, df, res):
 
 
 def _signal_events(ind, df, res, limit=60):
+    res = res.fillna(False)
     visual = ind.get("visual") or {}
     color = visual.get("color") or "#22c55e"
     marker = visual.get("marker") or "▲"
@@ -506,6 +509,7 @@ def _signal_events(ind, df, res, limit=60):
 
 
 def _signal_zones(ind, df, res, limit=10):
+    res = res.fillna(False)
     visual = ind.get("visual") or {}
     color = visual.get("color") or "#22c55e"
     zones = []
@@ -554,7 +558,11 @@ async def list_indicators(request: Request):
 
 @router.post("")
 async def create_indicator(req: IndicatorCreate, request: Request):
-    u = require_auth(request)
+    return create_owned_indicator(require_auth(request), req)
+
+
+def create_owned_indicator(u: str, req: IndicatorCreate) -> dict:
+    """Shared creation contract for the page and scoped platform tools."""
     if not validate(req.dsl, _param_values(req.params)):
         raise HTTPException(400, "DSL 无效（含未知指标/操作符或参数）")
     iid = uuid.uuid4().hex[:16]
@@ -648,6 +656,7 @@ async def indicator_scan_jobs(request: Request, limit: int = 10):
 @router.get("/scan-jobs/{job_id}")
 async def indicator_scan_job(job_id: str, request: Request):
     u = require_auth(request)
+    scanner.reconcile_jobs(u)
     job = scanner.get_job(job_id, u)
     if not job:
         raise HTTPException(404, "扫描任务不存在")
@@ -712,15 +721,27 @@ async def eval_indicator(ind_id: str, req: EvalRequest, request: Request):
     df = _df_from_kline_rows(req.kline or [], limit=500)
     fund = {}
     if df is None:
-        df, fund = await _build_df(req.ticker, req.period)
+        df, fund = await _build_df(
+            req.ticker, req.period, include_fundamentals=scanner.uses_fundamentals(ind["dsl"])
+        )
+    elif scanner.uses_fundamentals(ind["dsl"]):
+        from ..market.router import get_chain
+
+        fund = await _fund_for_ticker(get_chain(), req.ticker)
     if df is None or len(df) == 0:
         log.warning("eval %s kline: empty/failed (ticker=%r, period=%s)", ind_id, req.ticker, req.period)
         return JSONResponse({"error": "无法获取K线数据（行情源不可达或代码无效）"}, status_code=404)
     pvals = _param_values(ind.get("params"), req.params)
     try:
         res = evaluate(ind["dsl"], df, fund, pvals)
+    except MissingData as exc:
+        return JSONResponse({"error": str(exc), "status": "data_insufficient"}, status_code=422)
     except DSLError as exc:
         return JSONResponse({"error": f"指标计算错误: {exc!s}"}, status_code=400)
+    if res.empty or bool(res.iloc[-1:].isna().any()):
+        return JSONResponse(
+            {"error": "最新指标预热或输入资料不足", "status": "data_insufficient"}, status_code=422
+        )
     ts = df["t"].tolist()
     if is_signal(res):
         events = _signal_events(ind, df, res)
@@ -788,7 +809,7 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
             continue
         window = res.iloc[-req.trigger_window :] if len(res) >= req.trigger_window else res
         if bool(window.fillna(False).any()):
-            idxs = [i for i in range(len(res)) if bool(res.iloc[i])]
+            idxs = [i for i in range(len(res)) if bool(res.fillna(False).iloc[i])]
             idx = idxs[-1] if idxs else len(res) - 1
             days_ago = max(0, len(df) - 1 - idx)
             matches.append(

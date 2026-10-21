@@ -96,7 +96,7 @@ var _idb = (function() {
 
 var App = {
   user: '', skill: '', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
-  model: 'minimax-m3',
+  model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
   _activeReader: null,    // AbortController for stop button
   _bulkMode: false,       // Bulk select mode — true when checkboxes are visible
@@ -159,7 +159,7 @@ var App = {
   },
 
   api: async function(url, opts) {
-    opts = opts || {};
+    opts = Object.assign({}, opts || {});
     // Inject CSRF defense headers on every API call. The double-submit
     // cookie pattern: the server sets csrf_token (non-HttpOnly), JS mirrors
     // it in the X-CSRF-Token header. X-Requested-With additionally blocks
@@ -173,10 +173,19 @@ var App = {
       var csrf = this._getCookie('csrf_token');
       if (csrf) opts.headers['X-CSRF-Token'] = csrf;
     }
-    var r;
+    var r, deadline, expired = false, upstream = opts.signal;
+    var controller = new AbortController();
+    var cancel = function() { controller.abort(); };
+    if (upstream) {
+      if (upstream.aborted) cancel();
+      else upstream.addEventListener('abort', cancel, {once:true});
+    }
+    opts.signal = controller.signal;
+    deadline = setTimeout(function() { expired = true; controller.abort(); }, 30000);
     try {
       r = await fetch(url, opts);
     } catch (error) {
+      if (expired) error = new Error('请求超时，执行结果尚未确认。请刷新相关历史后再决定是否重试。');
       if (this._captureDiagnostic && String(url).indexOf('/api/diagnostics/') < 0) {
         this._captureDiagnostic('api_network_error', error.message || 'API network error', {
           severity:'warning', component:'api', stack:error.stack || '',
@@ -184,6 +193,9 @@ var App = {
         });
       }
       throw error;
+    } finally {
+      clearTimeout(deadline);
+      if (upstream) upstream.removeEventListener('abort', cancel);
     }
     if (r.status >= 500 && this._captureDiagnostic && String(url).indexOf('/api/diagnostics/') < 0) {
       this._captureDiagnostic('api_http_5xx', 'HTTP ' + r.status + ' from API', {
@@ -494,6 +506,7 @@ var App = {
       this._convRequestId = (this._convRequestId || 0) + 1;
       if (_idb && _idb.clear) { try { await _idb.clear(); } catch(e) {} }
       this.msgs = []; this.convId = ''; this.user = '';
+      this._watchlist = []; this._watchlistOwner = '';
       try { sessionStorage.removeItem('prism_analysis'); } catch(e) {}
       window.location.href = '/login';
     } catch (error) {

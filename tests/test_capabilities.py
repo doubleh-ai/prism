@@ -201,7 +201,7 @@ async def test_indicator_executes_real_dsl_and_missing_fund_is_failure(scoped_ru
         scoped_run, "indicator_eval", {"indicator_id": indicator["id"], "ticker": "600519"}, "missing-fund"
     )
     assert result["ok"] is False
-    assert result["error"]["code"] == "unavailable"
+    assert result["error"]["code"] == "data_insufficient"
 
 
 async def test_scan_background_creation_and_owner_status(scoped_run, monkeypatch):
@@ -270,6 +270,15 @@ async def test_industry_exposes_background_provenance(scoped_run):
         "scan_start",
         "analysis_start",
         "vibe_start",
+        "watchlist_update",
+        "indicator_create",
+        "scan_cancel",
+        "vibe_followup",
+        "vibe_cancel",
+        "report_save",
+        "research_record_claims",
+        "research_record_relations",
+        "research_scope",
     }
 
 

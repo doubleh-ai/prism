@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from contextlib import aclosing
 from pathlib import Path
 
 from fastapi import Request
@@ -13,6 +14,12 @@ from .analysis_graph import persist_graph
 from .auth import require_auth
 from .config import DEFAULT_MODEL, MODELS, RATE_CHAT_PER_MIN
 from .database import check_rate_limit, get_db
+from .research import (
+    create_research_run,
+    finalize_research_run,
+    ingest_tool_result,
+    set_run_status,
+)
 from .research_context import (
     EvidenceTracker,
     build_research_context,
@@ -20,7 +27,6 @@ from .research_context import (
     parse_claude_jsonl_events,
 )
 from .services.claude_runner import (
-    _resolve_skill_dir,
     cancel_process,
     respond_to_question,
     run_claude_stream,
@@ -35,7 +41,7 @@ CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 # loaded by Claude Code — no server-side prompt injection needed.
 
 
-def _clean_object_artifacts(text: str) -> str:
+def _clean_object_artifacts(text: str, *, strip_edges: bool = True) -> str:
     """Remove JavaScript object-stringification artifacts from Claude CLI output."""
     if not text:
         return ""
@@ -45,7 +51,8 @@ def _clean_object_artifacts(text: str) -> str:
         r"\1 ",
         cleaned,
     )
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip() if strip_edges else cleaned
 
 
 _REPORT_DELIVERY_RE = re.compile(
@@ -56,7 +63,6 @@ _REPORT_FAILURE_RE = re.compile(
     r"API Error|operation timed out|timed out|请求超时|任务中止",
     re.IGNORECASE,
 )
-_REPORT_FILE_EXTENSIONS = {".html", ".htm", ".pdf", ".md"}
 
 
 def _prepare_chat_report(text: str, skill_name: str = "") -> tuple[str, str]:
@@ -68,34 +74,6 @@ def _prepare_chat_report(text: str, skill_name: str = "") -> tuple[str, str]:
     if skill_name or _REPORT_FAILURE_RE.search(cleaned):
         return cleaned, "incomplete"
     return cleaned, "complete"
-
-
-def _skill_report_snapshot(skill_name: str) -> dict[str, tuple[int, int]]:
-    """Return safe metadata for report files produced by the active skill."""
-    try:
-        from .config import SKILL_MAP
-
-        info = SKILL_MAP.get(skill_name)
-        if not info:
-            return {}
-        skill_dir, _ = _resolve_skill_dir(info["dir"])
-        reports_dir = skill_dir / "reports" if skill_dir else None
-        if not reports_dir or not reports_dir.exists():
-            return {}
-        snapshot = {}
-        for path in reports_dir.iterdir():
-            if not path.is_file() or path.suffix.lower() not in _REPORT_FILE_EXTENSIONS:
-                continue
-            stat = path.stat()
-            snapshot[path.name] = (stat.st_mtime_ns, stat.st_size)
-        return snapshot
-    except OSError:
-        return {}
-
-
-def _changed_report_files(before: dict, after: dict) -> list[str]:
-    changed = [name for name, meta in after.items() if before.get(name) != meta and meta[1] > 0]
-    return sorted(changed, key=lambda name: after[name][0], reverse=True)
 
 
 def _prioritize_report_files(files: list[str]) -> list[str]:
@@ -196,7 +174,11 @@ async def chat_stream(request: Request):
     extra_skills = req.extra_skills  # Additional skills via --append-system-prompt
     conv_id = req.conv_id or ""
     model_id = req.model or DEFAULT_MODEL
-    model_cfg = MODELS.get(model_id, MODELS[DEFAULT_MODEL])
+    if model_id not in MODELS:
+        return JSONResponse({"error": "所选模型不存在，请重新选择"}, status_code=422)
+    model_cfg = MODELS[model_id]
+    if not model_cfg.get("api_key"):
+        return JSONResponse({"error": "所选模型尚未配置认证，请选择可用模型或联系管理员"}, status_code=503)
     if not question:
         return JSONResponse({"error": "空问题"}, status_code=400)
 
@@ -239,6 +221,10 @@ async def chat_stream(request: Request):
                 [question[:40], conv_id, user],
             )
     research = build_research_context(engine="chat")
+    create_research_run(user, conv_id, question, research)
+    research["ledger_available"] = True
+    research["status"] = "queued"
+    progress = {"text": "", "finished": False}
 
     async def generate():
         session_id = resume_session_id  # May be None for first message
@@ -261,6 +247,10 @@ async def chat_stream(request: Request):
                 return _content_to_text(v)
 
             clean = {str(k): _json_safe(v) for k, v in event.items()}
+            if isinstance(event.get("text"), str):
+                # Preserve paragraph boundaries when the client appends text;
+                # apply the same artifact filter without trimming the edges.
+                clean["text"] = _clean_object_artifacts(event["text"], strip_edges=False)
             return f"data: {json.dumps(clean, ensure_ascii=False)}\n\n"
 
         full_text = ""
@@ -270,13 +260,18 @@ async def chat_stream(request: Request):
         live_chunks = [{"t": "research", "research": research}]
         platform_calls = {}
         stream_error = ""
+        stream_cancelled = False
+        terminal_result_seen = False
         delivery_note = ""
-        report_files_before = _skill_report_snapshot(skill_name)
+        # Shared skill directories have no provable owner/run binding. Only
+        # explicitly registered artifacts may ever appear as report files.
+        delivery_reports = []
 
         yield _emit({"research": research})
         yield _emit({"pulse": "start"})
+        set_run_status(user, research["run_id"], "discovering")
 
-        async for ev in run_claude_stream(
+        engine = run_claude_stream(
             question,
             skill_name,
             user=user,
@@ -285,7 +280,9 @@ async def chat_stream(request: Request):
             conv_id=conv_id,
             extra_skills=extra_skills,
             research_context=research,
-        ):
+        )
+        progress["engine"] = engine
+        async for ev in engine:
             t = ev.get("type", "")
 
             # Capture session info from system/init (first message only)
@@ -307,6 +304,9 @@ async def chat_stream(request: Request):
                             refs = evidence.record_result(
                                 block, retrieved_at=build_research_context()["as_of"]
                             )
+                            if refs:
+                                call = evidence.calls.get(str(block.get("tool_use_id") or ""), {})
+                                refs = ingest_tool_result(user, research["run_id"], call, block, refs)
                             for ref in refs:
                                 collected_refs.append(ref)
                                 live_chunks.append({"t": "ref", **ref})
@@ -348,6 +348,7 @@ async def chat_stream(request: Request):
                         if not txt:
                             continue
                         full_text += txt
+                        progress["text"] = full_text
                         live_chunks.append({"t": "text", "c": txt})
                         yield _emit({"text": txt})
                     elif bt == "tool_use":
@@ -381,12 +382,21 @@ async def chat_stream(request: Request):
                     yield _emit({"status": message})
 
             # Error from Claude
+            elif t == "cancelled":
+                stream_cancelled = True
+                message = "用户已取消本轮研究"
+                live_chunks.append({"t": "status", "c": message})
+                yield _emit({"status": message})
+
             elif t == "error":
                 stream_error = _content_to_text(ev.get("message")) or "AI引擎异常"
                 log.error(f"[{user}] Claude error: {stream_error}")
                 yield _emit({"error": stream_error})
 
             elif t == "result":
+                terminal_result_seen = True
+                if ev.get("is_error") or str(ev.get("subtype", "")).startswith("error"):
+                    stream_error = stream_error or "研究引擎返回未完成状态"
                 log.info(
                     f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}"
                 )
@@ -399,24 +409,21 @@ async def chat_stream(request: Request):
                     if terminal_text:
                         addition = terminal_text if not full_text else "\n\n" + terminal_text
                         full_text += addition
+                        progress["text"] = full_text
                         live_chunks.append({"t": "text", "c": addition})
                         yield _emit({"text": addition, "recovered": True})
 
             elif t == "heartbeat":
                 yield _emit({"pulse": "wait", "idle_ms": ev.get("idle_ms", 0)})
 
-        report_files_after = _skill_report_snapshot(skill_name)
-        changed_reports = _changed_report_files(report_files_before, report_files_after)
-        delivery_reports = _prioritize_report_files(changed_reports)
-        if skill_name and not _REPORT_DELIVERY_RE.search(full_text):
-            if delivery_reports:
-                filename = delivery_reports[0]
-                delivery_note = f"\n\n## 报告已交付\n\n完整报告：reports/{filename}"
-            else:
-                reason = _clean_object_artifacts(stream_error) or "Agent 在形成最终结论前结束"
-                delivery_note = (
-                    f"\n\n> **研究未完成**：{reason}。已保留研究过程，可在本对话中发送“继续完成报告”恢复。"
-                )
+        if not terminal_result_seen and not stream_error and not stream_cancelled:
+            stream_error = "研究引擎未返回结束状态，已保留收到的内容"
+        if skill_name and (not _REPORT_DELIVERY_RE.search(full_text) or stream_error or stream_cancelled):
+            reason = "用户已取消本轮研究" if stream_cancelled else _clean_object_artifacts(stream_error)
+            delivery_note = "\n\n**本轮尚未形成完整可核查报告**。"
+            if reason:
+                delivery_note += reason + "。"
+            delivery_note += "已保留回答与研究过程，可在本对话中发送“继续完成报告”发起后续研究。"
             full_text += delivery_note
             live_chunks.append({"t": "text", "c": delivery_note})
             yield _emit({"text": delivery_note, "delivery": True})
@@ -424,7 +431,21 @@ async def chat_stream(request: Request):
         elapsed = time.time() - t0
         log.info(f"[{user}] DONE {elapsed:.1f}s len={len(full_text)} refs={len(collected_refs)}")
 
-        report_text, report_status = _prepare_chat_report(full_text, skill_name)
+        report_text, _ = _prepare_chat_report(full_text, skill_name)
+        revision = finalize_research_run(
+            user, research["run_id"], report_text, error=bool(stream_error), cancelled=stream_cancelled
+        )
+        progress["finished"] = True
+        report_status = revision["acceptance_status"]
+        research.update(
+            status=report_status,
+            revision_id=revision["revision_id"],
+            gaps=revision["gaps"],
+            information_cutoff=revision.get("information_cutoff"),
+            cutoff_precision=revision.get("cutoff_precision", "unknown"),
+            requested_period=revision.get("requested_period"),
+        )
+        yield _emit({"research": research})
 
         if conv_id and full_text.strip():
             try:
@@ -436,14 +457,10 @@ async def chat_stream(request: Request):
                     user,
                     {
                         "source": "chat",
-                        "source_id": conv_id,
+                        "source_id": research["run_id"],
                         "conv_id": conv_id,
                         "title": title or "Chat report",
-                        "summary": (
-                            clean_text[:240]
-                            if report_status == "complete"
-                            else "研究过程已保存，但任务在形成最终报告前中止。"
-                        ),
+                        "summary": clean_text[:240],
                         "report": {
                             "question": question,
                             "final_decision": report_text,
@@ -452,6 +469,8 @@ async def chat_stream(request: Request):
                             "skill": skill_name,
                             "references": collected_refs,
                             "research": research,
+                            "research_revision_id": revision["revision_id"],
+                            "run_id": research["run_id"],
                         },
                     },
                 )
@@ -521,7 +540,32 @@ async def chat_stream(request: Request):
         )
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    async def tracked_generate():
+        failed = False
+        try:
+            async with aclosing(generate()) as events:
+                async for event in events:
+                    yield event
+        except Exception:
+            failed = True
+            raise
+        finally:
+            try:
+                engine = progress.get("engine")
+                if engine is not None:
+                    await engine.aclose()
+            finally:
+                if not progress["finished"]:
+                    try:
+                        finalize_research_run(
+                            user, research["run_id"], progress["text"], error=failed, cancelled=not failed
+                        )
+                    except Exception:
+                        # A deleted/reassigned conversation must not be revived or
+                        # written through just because an engine was still running.
+                        log.warning("Research interrupted; finalization unavailable")
+
+    return StreamingResponse(tracked_generate(), media_type="text/event-stream")
 
 
 async def chat_respond(request: Request):

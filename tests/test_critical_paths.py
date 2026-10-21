@@ -136,8 +136,21 @@ class TestReportEdgeCases:
 
     @pytest.mark.asyncio
     async def test_report_unsupported_extension_rejected(self, client, auth_cookies):
-        r = await client.get("/api/reports/some-conv/file.exe", cookies=auth_cookies)
-        assert r.status_code == 400
+        from server.database import get_db
+
+        own = (await client.post("/api/convs", cookies=auth_cookies, json={})).json()
+        other = (await client.post("/api/convs", cookies=auth_cookies, json={})).json()
+        with get_db() as db:
+            db.execute("UPDATE conversations SET username=? WHERE id=?", ["another-owner", other["id"]])
+        # Foreign and unknown conversations are indistinguishable. Even an
+        # owned conversation cannot expose an unregistered artifact by filename.
+        replies = [
+            await client.get(f"/api/reports/{cid}/file.exe", cookies=auth_cookies)
+            for cid in (own["id"], other["id"], "does-not-exist")
+        ]
+        assert [reply.status_code for reply in replies] == [404, 404, 404]
+        assert replies[1].json() == replies[2].json()
+        assert all("file.exe" not in reply.text for reply in replies)
 
     @pytest.mark.asyncio
     async def test_report_null_byte_rejected(self, client, auth_cookies):

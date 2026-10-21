@@ -70,7 +70,11 @@ MODELS = {
         "model": "MiniMax-M2.7-highspeed",
     },
 }
-DEFAULT_MODEL = "minimax-m3"
+_PREFERRED_MODEL = os.environ.get("PRISM_DEFAULT_MODEL", "minimax-m3")
+DEFAULT_MODEL = next(
+    (key for key in [_PREFERRED_MODEL, *MODELS] if key in MODELS and MODELS[key].get("api_key")),
+    "minimax-m3",
+)
 
 # ── Claude Code CLI ──
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", os.path.expanduser("~/.npm-global/bin/claude"))

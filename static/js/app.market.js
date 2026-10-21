@@ -157,7 +157,15 @@ Object.assign(App, {
 
   _showMarketEmpty: function() {
     var inner = document.getElementById('marketPanelInner');
-    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>从左侧搜索或点击自选，也可以先从全市场指标选股开始。</span><div><button type="button" onclick="App._showMarketWorkspace(\'screener\')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace(\'library\')">配置指标库</button></div></div>';
+    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>搜索股票或选择已有自选，也可以从全市场指标选股开始。</span><div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button><button type="button" onclick="App._showMarketWorkspace(\'screener\')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace(\'library\')">配置指标库</button></div></div>';
+  },
+
+  _openMarketSearch: function() {
+    var shell = document.getElementById('appShell');
+    if (this._isCompactViewport()) this.toggleSidebar(true);
+    else if (shell) shell.classList.remove('collapsed');
+    var input = document.getElementById('marketSidebarQ');
+    if (input) input.focus();
   },
 
   // ── 自选列表（localStorage） ──
@@ -180,25 +188,47 @@ Object.assign(App, {
       pct: item.pct == null ? (item.change_pct == null ? null : item.change_pct) : item.pct
     };
   },
-  _loadWatchlist: function() {
+  _loadWatchlist: async function() {
+    var owner = this.user || '';
+    if (this._watchlistOwner !== owner) { this._watchlist = []; this._watchlistOwner = owner; }
+    var sequence = this._watchlistReadSeq = (this._watchlistReadSeq || 0) + 1;
     try {
-      var raw = localStorage.getItem('prism-watchlist');
-      var parsed = raw ? JSON.parse(raw) : [];
-      var rows = Array.isArray(parsed) ? parsed : [];
-      var seen = {};
-      var clean = [];
-      for (var i = 0; i < rows.length; i++) {
-        var row = this._normalizeWatchEntry(rows[i]);
-        if (!row || seen[row.ticker]) continue;
-        seen[row.ticker] = true;
-        clean.push(row);
-      }
-      this._watchlist = clean;
-      if (clean.length !== rows.length) this._saveWatchlist();
-    } catch (e) { this._watchlist = []; }
+      var response = await this.api('/api/watchlist');
+      if (!response.ok) throw new Error('unavailable');
+      var data = await response.json();
+      if (owner !== this.user || sequence !== this._watchlistReadSeq) return false;
+      this._watchlist = (data.items || []).map(this._normalizeWatchEntry.bind(this)).filter(Boolean);
+      this._renderWatchlist(); this._refreshWatchlist(); return true;
+    } catch (error) {
+      if (owner === this.user && sequence === this._watchlistReadSeq) this._toast('账号自选暂时无法同步，请稍后重试');
+      return false;
+    }
   },
-  _saveWatchlist: function() {
-    try { localStorage.setItem('prism-watchlist', JSON.stringify(this._watchlist)); } catch (e) {}
+  _mutateWatchlist: function(mutate, activityAction) {
+    var self = this, owner = this.user;
+    var task = (this._watchlistMutationQueue || Promise.resolve()).catch(function() {}).then(async function() {
+      if (owner !== self.user) return null;
+      // Read the account version immediately before editing; never import another user's browser list.
+      var response = await self.api('/api/watchlist');
+      if (!response.ok) throw new Error('unavailable');
+      var current = (await response.json()).items || [];
+      if (owner !== self.user) return null;
+      var changed = mutate(current);
+      if (changed === false) { self._watchlist = current; self._renderWatchlist(); return false; }
+      var saved = await self.api('/api/watchlist', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:current.map(function(item){return {ticker:item.ticker,name:item.name};})})});
+      if (!saved.ok) throw new Error('save failed');
+      var data = await saved.json();
+      if (owner !== self.user) return null;
+      self._watchlistReadSeq = (self._watchlistReadSeq || 0) + 1;
+      self._watchlist = data.items || []; self._watchlistOwner = owner;
+      self._renderWatchlist(); self._refreshWatchlist();
+      // Count confirmed actions only; stock codes, names and the account list stay private.
+      if (self._trackUiEvent && activityAction) {
+        try { self._trackUiEvent('market', activityAction); } catch (error) {}
+      }
+      return true;
+    }).catch(function() { if (owner === self.user) self._toast('自选未保存成功；服务端原记录保留，请重试'); return null; });
+    this._watchlistMutationQueue = task; return task;
   },
   _findWatchIndex: function(ticker) {
     ticker = this._normalizeTicker(ticker);
@@ -208,34 +238,21 @@ Object.assign(App, {
     return -1;
   },
   _addToWatchlist: function(ticker, name) {
-    var row = this._normalizeWatchEntry({ticker: ticker, name: name});
-    if (!row) return false;
-    var existing = this._findWatchIndex(row.ticker);
-    if (existing >= 0) {
-      if (name && (!this._watchlist[existing].name || this._watchlist[existing].name === this._watchlist[existing].ticker)) {
-        this._watchlist[existing].name = String(name).trim();
-        this._saveWatchlist();
-        this._renderWatchlist();
-      }
-      return false;
-    }
-    this._watchlist.push(row);
-    this._saveWatchlist();
-    this._renderWatchlist();
-    this._refreshWatchlist();
-    if (this._trackUiEvent) this._trackUiEvent('market', 'watchlist_add', 'ticker', row.ticker, row.name);
-    return true;
+    var row = this._normalizeWatchEntry({ticker:ticker,name:name});
+    if (!row) return Promise.resolve(false);
+    return this._mutateWatchlist(function(items) {
+      if (items.some(function(item){return item.ticker === row.ticker;})) return false;
+      items.push({ticker:row.ticker,name:row.name}); return true;
+    }, 'watchlist_add');
   },
   _removeFromWatchlist: function(ticker, ev) {
     if (ev) ev.stopPropagation();
     ticker = this._normalizeTicker(ticker);
-    var i = this._findWatchIndex(ticker);
-    if (i < 0) return;
-    var removed = this._watchlist[i];
-    this._watchlist.splice(i, 1);
-    this._saveWatchlist();
-    this._renderWatchlist();
-    if (this._trackUiEvent) this._trackUiEvent('market', 'watchlist_remove', 'ticker', ticker, removed && removed.name);
+    return this._mutateWatchlist(function(items) {
+      var index = items.findIndex(function(item){return item.ticker === ticker;});
+      if (index < 0) return false;
+      items.splice(index,1); return true;
+    }, 'watchlist_remove');
   },
   _renderWatchlist: function() {
     var el = document.getElementById('watchlist');
@@ -317,7 +334,6 @@ Object.assign(App, {
           }
         }
         if (changed) {
-          self._saveWatchlist();
           self._renderWatchlist();
         }
       });
@@ -360,12 +376,14 @@ Object.assign(App, {
           '<span class="market-hit__code">' + esc(h.ticker) + '</span>' +
           '<span class="market-hit__name">' + esc(h.name) + '</span>' +
           '<button class="market-hit__add' + (added ? ' added' : '') + '">' + (added ? '✓ 已加' : '⊕ 自选') + '</button>';
-        li.addEventListener('click', function(ev) {
+        li.addEventListener('click', async function(ev) {
           var addBtn = ev.target.closest ? ev.target.closest('.market-hit__add') : null;
           if (addBtn) {
             ev.stopPropagation();
             if (addBtn.classList.contains('added')) return;
-            var didAdd = self._addToWatchlist(h.ticker, h.name);
+            addBtn.disabled = true;
+            var didAdd = await self._addToWatchlist(h.ticker, h.name);
+            if (didAdd === null) { addBtn.disabled = false; return; }
             addBtn.classList.add('added');
             addBtn.textContent = '✓ 已加';
             addBtn.disabled = true;
@@ -382,6 +400,8 @@ Object.assign(App, {
   // ── 主面板：选股 + 渲染 ──
   _selectStock: function(ticker, name) {
     if (this._showMarketWorkspace) this._showMarketWorkspace('quote');
+    this._marketSelectionSeq = (this._marketSelectionSeq || 0) + 1;
+    this._invalidateKline();
     this._currentTicker = ticker;
     this._currentName = name || '';
     this._renderWatchlist();
@@ -389,6 +409,12 @@ Object.assign(App, {
     this._renderKline(ticker, this._currentPeriod);
     this._renderFundamentals(ticker);
     this._closeMobileSidebar();
+  },
+  _invalidateKline: function() {
+    this._lastKline = null;
+    this._klineIdentity = null;
+    this._indicatorOverlays = []; this._indicatorMarkers = []; this._indicatorTracks = []; this._indicatorZones = [];
+    this._indicatorEvalSeq = (this._indicatorEvalSeq || 0) + 1;
   },
   _fmtVolume: function(v) {
     var n = Number(v);
@@ -398,6 +424,7 @@ Object.assign(App, {
     return n.toFixed(0);
   },
   _renderQuoteCard: async function(ticker, name) {
+    var sequence = this._marketSelectionSeq;
     var inner = document.getElementById('marketPanelInner');
     if (!inner) return;
     inner.innerHTML =
@@ -406,20 +433,23 @@ Object.assign(App, {
         '<div class="market-kline-wrap"></div>' +
       '</div><aside class="market-detail-aside"><div class="market-fundamentals"></div><div class="market-indicator-dock" id="marketIndicatorDock"></div></aside></div>';
     if (this._renderIndicatorDock) this._renderIndicatorDock();
-    var r = await this.api('/api/quote/' + encodeURIComponent(ticker));
+    var r;
+    try { r = await this.api('/api/quote/' + encodeURIComponent(ticker)); }
+    catch (error) { r = {ok:false}; }
+    if (sequence !== this._marketSelectionSeq || (this._currentTicker && ticker !== this._currentTicker)) return;
     var card = inner.querySelector('.market-quote-card');
     if (!r.ok) {
       card.innerHTML = '<div class="market-error-state">暂无 ' + esc(ticker) + ' 的行情数据<button onclick="App._selectStock(' + JSON.stringify(ticker).replace(/"/g,'&quot;') + ',' + JSON.stringify(name||'').replace(/"/g,'&quot;') + ')">重试</button></div>';
       return;
     }
     var q = await r.json();
+    if (sequence !== this._marketSelectionSeq || (this._currentTicker && ticker !== this._currentTicker)) return;
     var officialName = String(q.name || '').trim();
     if (officialName && officialName !== ticker) {
       this._currentName = officialName;
       var watchIndex = this._findWatchIndex(ticker);
       if (watchIndex >= 0 && this._watchlist[watchIndex].name !== officialName) {
         this._watchlist[watchIndex].name = officialName;
-        this._saveWatchlist();
         this._renderWatchlist();
       }
     }
@@ -469,6 +499,9 @@ Object.assign(App, {
     return label + '：' + new Date(timestamp * 1000).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'}) + ' 北京时间';
   },
   _renderKline: async function(ticker, period, limit) {
+    if (ticker !== this._currentTicker) return;
+    var sequence = this._klineRequestSeq = (this._klineRequestSeq || 0) + 1;
+    this._invalidateKline();
     this._currentPeriod = period;
     var defaults = {'1d':120, '1w':104, '1m':60};
     limit = Math.max(12, Math.min(500, Number(limit || this._klinePeriodLimits[period] || defaults[period] || 120)));
@@ -496,16 +529,21 @@ Object.assign(App, {
       return '<label class="market-kline-ma' + (checked ? ' active' : '') + '"><input type="checkbox" ' + (checked ? 'checked ' : '') + 'onchange="App._toggleKlineSeries(\'' + ma + '\',this.checked);this.parentNode.classList.toggle(\'active\',this.checked)"><span>' + ma + '</span></label>';
     }).join('');
     wrap.innerHTML = '<div class="market-kline-hd"><h4>K 线</h4><div class="market-kline-segment">' + tabs + '</div><div class="market-kline-segment range">' + ranges + '</div><div class="market-kline-tools"><div class="market-kline-ma-list">' + maToggles + '</div><button class="market-kline-icon" title="复位缩放" aria-label="复位缩放" onclick="App._resetKlineZoom()">↺</button><button class="market-kline-icon" title="全屏查看" aria-label="全屏查看" onclick="App._toggleKlineFullscreen()">⛶</button></div></div><div class="market-kline-empty">加载 K 线中…</div>';
-    var r = await this.api('/api/quote/' + encodeURIComponent(ticker) + '/kline?period=' + encodeURIComponent(period) + '&limit=' + limit);
+    var r;
+    try { r = await this.api('/api/quote/' + encodeURIComponent(ticker) + '/kline?period=' + encodeURIComponent(period) + '&limit=' + limit); }
+    catch (error) { r = {ok:false}; }
+    if (sequence !== this._klineRequestSeq || ticker !== this._currentTicker || period !== this._currentPeriod) return;
     var emptyEl = wrap.querySelector('.market-kline-empty');
     if (!r.ok) { if (emptyEl) emptyEl.textContent = 'K 线数据加载失败'; return; }
     var data = await r.json();
+    if (sequence !== this._klineRequestSeq || ticker !== this._currentTicker || period !== this._currentPeriod) return;
     var kline = data.kline || [];
     if (!kline.length) { if (emptyEl) emptyEl.textContent = '暂无 K 线数据'; return; }
     if (emptyEl) emptyEl.remove();
     var chartDiv = document.createElement('div');
     chartDiv.id = 'marketKlineChart';
     wrap.appendChild(chartDiv);
+    this._klineIdentity = {ticker:ticker,period:period,limit:limit,request_id:sequence,data_as_of:data.data_timestamp || null};
     this.renderKlineChart(chartDiv, kline);
   },
   _toggleKlineSeries: function(name, visible) {
@@ -631,13 +669,18 @@ Object.assign(App, {
     }
   },
   _renderFundamentals: async function(ticker) {
+    var sequence = this._marketSelectionSeq;
     var inner = document.getElementById('marketPanelInner');
     var wrap = inner ? inner.querySelector('.market-fundamentals') : null;
     if (!wrap) return;
     wrap.innerHTML = '<h4>基本面</h4><div class="market-fund-unavailable">加载中…</div>';
-    var r = await this.api('/api/fundamentals/' + encodeURIComponent(ticker));
+    var r;
+    try { r = await this.api('/api/fundamentals/' + encodeURIComponent(ticker)); }
+    catch (error) { r = {ok:false}; }
+    if (sequence !== this._marketSelectionSeq || ticker !== this._currentTicker) return;
     if (!r.ok) { wrap.innerHTML = '<h4>基本面</h4><div class="market-fund-unavailable">基本面数据暂不可用</div>'; return; }
     var f = await r.json();
+    if (sequence !== this._marketSelectionSeq || ticker !== this._currentTicker) return;
     function cell(label, val) {
       var v = (val == null || val === '') ? '—' : esc(Number(val).toFixed(2));
       return '<div class="market-fund-cell"><span class="market-fund-cell__label">' + label + '</span><span class="market-fund-cell__val">' + v + '</span></div>';
@@ -646,7 +689,9 @@ Object.assign(App, {
     wrap.innerHTML = '<h4>基本面</h4>' +
       (hasAny
         ? '<div class="market-fund-grid">' + cell('PE(TTM)', f.pe_ttm) + cell('PE(静态)', f.pe_static) + cell('PB', f.pb) + cell('PS(TTM)', f.ps_ttm) + '</div>' +
-          '<div class="market-qc-src">数据来源: ' + esc(f.source || '—') + '</div>'
+          '<div class="market-qc-src">数据来源: ' + esc(f.source || '—') +
+          '<br>财报期间：'+esc(f.reporting_period || '未知')+' · 币种/单位：'+esc((f.currency || '未知')+' / '+(f.monetary_unit || '未知'))+
+          '<br>口径：'+esc(f.accounting_scope || '未知')+' · 采集：'+esc(ChatRender.formatTime(f.retrieved_at || f.timestamp))+'</div>'
         : '<div class="market-fund-unavailable">基本面数据暂不可用</div>');
   },
   _askAboutStock: function() {
