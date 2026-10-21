@@ -39,6 +39,7 @@ ACTIONS = {
     "diagnose_build",
     "quarantine_failed_prepare",
     "stage",
+    "finish_stage",
     "quiesce",
     "switch",
     "verify",
@@ -1256,42 +1257,178 @@ class RemoteRelease:
         self.verify_external(self.record)
         self.verify_cli(self.record, self.release)
 
+    def kernel_uids(self, process):
+        try:
+            # Non-dumpable processes can expose a root-owned /proc/PID.
+            # Only the kernel's real/effective/saved/fs UIDs establish UID.
+            with (process / "status").open("rb") as source:
+                values = None
+                for _ in range(64):
+                    line = source.readline(4097)
+                    if not line or len(line) > 4096:
+                        break
+                    if line.startswith(b"Uid:"):
+                        match = re.fullmatch(
+                            rb"Uid:[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]*\n?",
+                            line,
+                        )
+                        if match:
+                            values = tuple(int(value) for value in match.groups())
+                        break
+            if values is None or any(value > 4294967295 for value in values):
+                raise ReleaseError("process_status_rejected")
+            return values
+        except FileNotFoundError:
+            try:
+                process.stat()  # Only disappearance, never directory ownership.
+            except FileNotFoundError:
+                return None
+            except OSError:
+                raise ReleaseError("process_inspection_failed") from None
+            raise ReleaseError("process_status_rejected") from None
+        except OSError:
+            raise ReleaseError("process_inspection_failed") from None
+
     def no_stage_processes(self):
         uid = pwd.getpwnam("prism-stage").pw_uid
         for process in (self.root / "proc").iterdir():
             if not process.name.isdigit():
                 continue
             try:
-                # Non-dumpable processes can expose a root-owned /proc/PID.
-                # Only the kernel's real/effective/saved/fs UIDs establish UID.
-                with (process / "status").open("rb") as source:
-                    values = None
-                    for _ in range(64):
-                        line = source.readline(4097)
-                        if not line or len(line) > 4096:
-                            break
-                        if line.startswith(b"Uid:"):
-                            match = re.fullmatch(
-                                rb"Uid:[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]*\n?",
-                                line,
-                            )
-                            if match:
-                                values = tuple(int(value) for value in match.groups())
-                            break
-                if values is None or any(value > 4294967295 for value in values):
-                    raise ReleaseError("failed_prepare_process_status_rejected")
-                if uid in values:
-                    raise ReleaseError("failed_prepare_stage_process_active")
+                values = self.kernel_uids(process)
+            except ReleaseError as error:
+                raise ReleaseError("failed_prepare_" + failure_code(error)) from None
+            if values is not None and uid in values:
+                raise ReleaseError("failed_prepare_stage_process_active")
+
+    def stage_cgroup_members(self, group):
+        root = self.checked(self.root / "sys/fs/cgroup")
+        if not (root / "cgroup.controllers").is_file():
+            raise ReleaseError("stage_cgroup_v2_required")
+        directory = self.checked(root / group.lstrip("/"))
+        if not directory.exists():
+            return set()
+        paths = [directory / "cgroup.procs", *directory.glob("**/*/cgroup.procs")]
+        if len(paths) > 64:
+            raise ReleaseError("stage_cgroup_limit")
+        members = set()
+        for path in paths:
+            try:
+                with self.checked(path).open("rb") as source:
+                    raw = source.read(8193)
             except FileNotFoundError:
-                try:
-                    process.stat()  # Only disappearance, never directory ownership.
-                except FileNotFoundError:
+                if not path.parent.exists():
                     continue
-                except OSError:
-                    raise ReleaseError("failed_prepare_process_inspection_failed") from None
-                raise ReleaseError("failed_prepare_process_status_rejected") from None
+                raise ReleaseError("stage_cgroup_unavailable") from None
             except OSError:
-                raise ReleaseError("failed_prepare_process_inspection_failed") from None
+                raise ReleaseError("stage_cgroup_unavailable") from None
+            if len(raw) > 8192 or any(
+                not re.fullmatch(rb"[1-9][0-9]{0,9}", line) or int(line) <= 1 for line in raw.splitlines()
+            ):
+                raise ReleaseError("stage_cgroup_rejected")
+            members.update(int(line) for line in raw.splitlines())
+        return members
+
+    def finish_stage(self):
+        self.verify_tree()
+        staged = json.loads(self.checked(self.record / "staged.json").read_bytes())
+        isolation = json.loads(self.checked(self.record / "stage-isolation.json").read_bytes())
+        journeys = json.loads(self.checked(self.record / "stage-journeys.json").read_bytes())
+        proof, identity = isolation.get("proof", {}), isolation.get("identity", {})
+        if (
+            staged.get("read_only_private_runtime_mount") is not True
+            or identity.get("read_only_private_runtime_mount") is not True
+            or proof.get("commit") != self.request["commit"]
+            or proof.get("stage_pid") != identity.get("stage_pid")
+            or staged.get("isolation_proof_sha256") != digest(encoded(proof))
+            or staged.get("journeys_sha256") != digest(encoded(journeys))
+            or journeys.get("commit") != self.request["commit"]
+            or journeys.get("served_commit") != self.request["commit"]
+            or journeys.get("passed") is not True
+        ):
+            raise ReleaseError("accepted_stage_cleanup_required")
+        unit = "prism-stage-" + self.request["commit"][:12] + ".service"
+        group = "/system.slice/" + unit
+
+        def reconcile():
+            raw = self.run(["/usr/bin/systemctl", "show", "--property=LoadState,ActiveState", unit]).decode()
+            state = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+            members = self.stage_cgroup_members(group)
+            if state.get("LoadState") == "not-found":
+                if members:
+                    raise ReleaseError("stage_cgroup_state_unknown")
+                return False, members
+            if state.get("ActiveState") not in {
+                "active",
+                "activating",
+                "deactivating",
+                "reloading",
+                "inactive",
+                "failed",
+            }:
+                raise ReleaseError("stage_cgroup_state_unknown")
+            current = (
+                self.run(["/usr/bin/systemctl", "show", "--value", "--property=ControlGroup", unit])
+                .decode()
+                .strip()
+            )
+            pid = self.run(["/usr/bin/systemctl", "show", "--value", "--property=MainPID", unit]).strip()
+            if current not in {"", group} or not re.fullmatch(rb"[0-9]{1,10}", pid):
+                raise ReleaseError("stage_cgroup_identity_mismatch")
+            if int(pid):
+                if int(pid) != identity.get("stage_pid") or int(pid) not in members:
+                    raise ReleaseError("stage_cgroup_identity_mismatch")
+                process = self.root / "proc" / pid.decode()
+                if Path(os.readlink(process / "cwd")) != self.release:
+                    raise ReleaseError("stage_cgroup_identity_mismatch")
+            elif members:
+                raise ReleaseError("stage_cgroup_state_unknown")
+            uid = pwd.getpwnam("prism-stage").pw_uid
+            for member in members:
+                process = self.root / "proc" / str(member)
+                try:
+                    values = self.kernel_uids(process)
+                    with (process / "cgroup").open("rb") as source:
+                        membership = source.read(8193)
+                except OSError:
+                    raise ReleaseError("stage_cgroup_identity_unavailable") from None
+                if (
+                    values != (uid,) * 4
+                    or len(membership) > 8192
+                    or not any(
+                        line == b"0::" + group.encode() or line.startswith(b"0::" + group.encode() + b"/")
+                        for line in membership.splitlines()
+                    )
+                ):
+                    raise ReleaseError("stage_cgroup_identity_mismatch")
+            return True, members
+
+        present, members = reconcile()
+        before = len(members)
+        if present:
+            self.boundary("finish_accepted_stage_unit")
+            reconcile()  # A fresh permit cannot authorize a changed unit/cgroup.
+            self.run(["/usr/bin/systemctl", "stop", unit])
+        deadline = time.monotonic() + 5
+        while self.stage_cgroup_members(group):
+            if time.monotonic() > deadline:
+                raise ReleaseError("stage_cgroup_not_empty")
+            time.sleep(0.1)
+        result = {
+            "schema": 1,
+            "commit": self.request["commit"],
+            "checked_at": int(self.now()),
+            "unit_stopped": True,
+            "cgroup_empty": True,
+            "members_before": before,
+            "other_stage_units_changed": False,
+            "production_changed": False,
+            "stage_files_preserved": True,
+        }
+        destination = self.checked(self.record / "finished-stage.json")
+        if not destination.exists():
+            self.write(destination, encoded(result))
+        self.action_report = result
 
     def failed_prepare_guard(self, *, candidate_required=True):
         forbidden = (
@@ -2718,6 +2855,8 @@ class RemoteRelease:
                 )
                 if request["action"] == "diagnose_build":
                     result["diagnostics"] = self.action_report
+                elif request["action"] == "finish_stage":
+                    result["stage_cleanup"] = self.action_report
                 return result
             except Exception as error:
                 self.journal(

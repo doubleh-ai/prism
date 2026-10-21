@@ -28,6 +28,7 @@ ACTIONS = (
     "diagnose_build",
     "quarantine_failed_prepare",
     "stage",
+    "finish_stage",
     "quiesce",
     "switch",
     "verify",
