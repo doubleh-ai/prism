@@ -31,6 +31,7 @@ ACTIONS = (
     "finish_stage",
     "integration_astock",
     "integration_cli",
+    "integration_live",
     "validate_legacy_retirement",
     "quiesce",
     "switch",
@@ -51,8 +52,14 @@ INTEGRATION_PROBES = {
     ),
 }
 RETIREMENT_HELPERS = {
-    "retirement_probe.py": "cc59a350e18a26ebe70d35e239998e296e4159cce5c45b9a8498d1c8ab8da54a",
-    "retirement_validation.py": "4e329edbfa86c1d91165c414923f64a88cc3f77a261cddb2e413498f50de7b16",
+    "retirement_probe.py": "d94cd09a9ed4746b69996660539a8d7f1f124c6b09cb257423179f50ed2ce5e8",
+    "retirement_validation.py": "5c4ba8016b58f4dc0dff035cce683047fd545e4189bff8179a2465a1f5e414a1",
+}
+LIVE_INTEGRATION_HELPERS = {
+    "live_integration_validation.py": "dc9ea1216acba4fa46bf5f2ec4b0aa51e0ab1719b4bed6bc679c5138041239e9",
+    "live_integration_worker.py": "b269d8d0293f60741ed41278bfeacd7615e578bec52562593937280b2e2ac6f0",
+    "live_integration_transport.py": "20e7f1ea12a575590c54beaa21f75fd5b0e5964b58b16aa79212039051d3a2bd",
+    "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
 }
 
 # This small stdlib loader stays below Linux's single-argument limit. The
@@ -208,6 +215,22 @@ def request_for(args):
             integration_probe_sha256=approved,
             integration_attempt=attempt,
         )
+    if args.action == "integration_live":
+        attempt = getattr(args, "integration_attempt", None)
+        if not isinstance(attempt, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", attempt):
+            raise ControlError("explicit_live_integration_attempt_required")
+        helpers = {}
+        for filename, approved in LIVE_INTEGRATION_HELPERS.items():
+            field = filename.removesuffix(".py").replace("live_integration_", "live_") + "_sha256"
+            if getattr(args, field, None) != approved:
+                raise ControlError("approved_live_integration_helpers_required")
+            helpers[filename] = {
+                "sha256": approved,
+                "content": base64.b64encode(trusted_source(filename, approved)).decode(),
+            }
+        if not args.source_manifest or not isinstance(receipts.get("model_environment"), dict):
+            raise ControlError("live_integration_private_bindings_required")
+        request.update(live_helpers=helpers, integration_attempt=attempt)
     if args.action == "validate_legacy_retirement":
         helpers = {}
         for filename, approved in RETIREMENT_HELPERS.items():
@@ -408,6 +431,10 @@ def main():
         "astock-probe-sha256",
         "cli-probe-sha256",
         "integration-attempt",
+        "live-validation-sha256",
+        "live-worker-sha256",
+        "live-transport-sha256",
+        "live-policy-sha256",
         "retirement-probe-sha256",
         "retirement-validation-sha256",
         "retirement-attempt",

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from scripts import retirement_probe as probe
 
-PROBE_SOURCE_SHA256 = "cc59a350e18a26ebe70d35e239998e296e4159cce5c45b9a8498d1c8ab8da54a"
+PROBE_SOURCE_SHA256 = "d94cd09a9ed4746b69996660539a8d7f1f124c6b09cb257423179f50ed2ce5e8"
 PRODUCTION_UNIT = "stock-app.service"
 PROPERTIES = (
     "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,"
@@ -118,7 +118,15 @@ def main():
     try:fd=os.open(forbidden_write,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     except OSError as exc:readonly=exc.errno==errno.EROFS
     else:os.close(fd);forbidden_write.unlink()
-    endpoints_hidden=not any(Path(path).exists() for path in ('/run/systemd/private','/run/dbus/system_bus_socket'))
+    # Presence is not reachability: systemd can populate inaccessible mount
+    # placeholders. No IPC bytes are sent; root also checks the actual masks.
+    endpoints_hidden=True
+    for path in ('/run/systemd/private','/run/dbus/system_bus_socket'):
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as endpoint:
+            endpoint.settimeout(.2)
+            try:endpoint.connect(path)
+            except OSError as exc:endpoints_hidden &= exc.errno in (errno.EACCES,errno.EPERM,errno.ENOENT)
+            else:endpoints_hidden=False
     mark('validation_isolation',uid_nonroot=True,production_paths_hidden=hidden,inet_sockets_denied=sockets_denied,run_readonly=readonly,runtime_endpoints_hidden=endpoints_hidden)
     if not all((hidden,sockets_denied,readonly,endpoints_hidden)):raise SystemExit(2)
     phase='fixture_source'
@@ -505,7 +513,7 @@ def _mounts(pid, runtime, host_runtime):
         before, after = head.split(), tail.split()
         if not separator or len(before) < 6 or len(after) < 3:
             reject("retirement_mountinfo_rejected")
-        if before[4] in {b"/run", runtime.encode()}:
+        if before[4] in {b"/run", runtime.encode(), b"/run/systemd", b"/run/dbus"}:
             mounts[before[4]] = (set(before[5].split(b",")), after[0])
     if (
         b"/run" not in mounts
@@ -523,6 +531,23 @@ def _mounts(pid, runtime, host_runtime):
         reject("retirement_child_runtime_not_directory")
     if (host.st_dev, host.st_ino, host.st_uid) != (inside.st_dev, inside.st_ino, inside.st_uid):
         reject("retirement_runtime_bind_mismatch")
+    for path in ("/run/systemd", "/run/dbus"):
+        if path.encode() not in mounts or b"ro" not in mounts[path.encode()][0]:
+            reject("retirement_runtime_ipc_mount_rejected")
+        outside = Path(path).lstat()
+        masked = (Path("/proc") / str(pid) / "root" / path.lstrip("/")).lstat()
+        if (
+            not stat.S_ISDIR(outside.st_mode)
+            or outside.st_uid != 0
+            or outside.st_gid != 0
+            or stat.S_IMODE(outside.st_mode) != 0o755
+            or not stat.S_ISDIR(masked.st_mode)
+            or masked.st_uid != 0
+            or masked.st_gid != 0
+            or stat.S_IMODE(masked.st_mode) != 0
+            or (outside.st_dev, outside.st_ino) == (masked.st_dev, masked.st_ino)
+        ):
+            reject("retirement_runtime_ipc_mask_rejected")
 
 
 def _deadline(case):

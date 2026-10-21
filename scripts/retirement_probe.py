@@ -445,7 +445,7 @@ def descriptor(request, *, nonce=None):
             "ReadWritePaths": str(runtime),
             # Mask existing ancestors as well as future children; optional '-'
             # paths would expose a later-created production directory.
-            "InaccessiblePaths": "/home /root /var/lib /etc /opt/prism/releases",
+            "InaccessiblePaths": "/home /root /var/lib /etc /opt/prism/releases /run/systemd /run/dbus",
             "NoExecPaths": "/run /tmp /var/tmp /home /root",
             "UMask": "0077",
             "CapabilityBoundingSet": "",

@@ -8,6 +8,7 @@ is not imported by validation. No arbitrary command, host, unit or path is accep
 from __future__ import annotations
 
 import base64
+import ctypes
 import fcntl
 import grp
 import hashlib
@@ -17,6 +18,7 @@ import json
 import os
 import pwd
 import re
+import resource
 import secrets
 import select
 import shutil
@@ -43,6 +45,7 @@ ACTIONS = {
     "finish_stage",
     "integration_astock",
     "integration_cli",
+    "integration_live",
     "validate_legacy_retirement",
     "quiesce",
     "switch",
@@ -67,9 +70,65 @@ INTEGRATION_PROBES = {
     "integration_astock": ("astock", "612d7194b63e16b7ffd1e9badaa483da1f09a4a270670df8f950628d968a9184"),
     "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
 }
+LIVE_INTEGRATION_HELPERS = {
+    "live_integration_validation.py": "dc9ea1216acba4fa46bf5f2ec4b0aa51e0ab1719b4bed6bc679c5138041239e9",
+    "live_integration_worker.py": "b269d8d0293f60741ed41278bfeacd7615e578bec52562593937280b2e2ac6f0",
+    "live_integration_transport.py": "20e7f1ea12a575590c54beaa21f75fd5b0e5964b58b16aa79212039051d3a2bd",
+    "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
+}
+LIVE_STAGES = {
+    "request_validated",
+    "accounts",
+    "workspace",
+    "broker_start",
+    "worker_start",
+    "preflight",
+    "allow",
+    "key_release",
+    "key_send",
+    "public_qa",
+    "result_validation",
+    "broker_finish",
+    "verification",
+    "complete",
+}
+LIVE_BOUNDARIES = {"live_" + stage for stage in LIVE_STAGES} | {
+    "live_wait_bootstrap",
+    "live_wait_qa",
+    "live_wait_broker",
+}
+LIVE_ERRORS = {
+    "request_rejected",
+    "root_linux_required",
+    "source_rejected",
+    "candidate_rejected",
+    "account_rejected",
+    "uid_busy",
+    "workspace_exists",
+    "workspace_rejected",
+    "dns_rejected",
+    "unit_rejected",
+    "kernel_rejected",
+    "private_run_rejected",
+    "bootstrap_rejected",
+    "ipc_rejected",
+    "broker_preflight_rejected",
+    "key_rejected",
+    "worker_result_rejected",
+    "worker_failed",
+    "broker_failed",
+    "cleanup_failed",
+    "supervision_failed",
+    "operator_stop",
+}
+LIVE_SOURCE_PINS = {
+    name.removeprefix("live_integration_").removesuffix(".py"): value
+    for name, value in LIVE_INTEGRATION_HELPERS.items()
+    if name != "live_integration_validation.py"
+}
 RETIREMENT_HELPERS = {
-    "retirement_probe.py": "cc59a350e18a26ebe70d35e239998e296e4159cce5c45b9a8498d1c8ab8da54a",
-    "retirement_validation.py": "4e329edbfa86c1d91165c414923f64a88cc3f77a261cddb2e413498f50de7b16",
+    "retirement_probe.py": "d94cd09a9ed4746b69996660539a8d7f1f124c6b09cb257423179f50ed2ce5e8",
+    "retirement_validation.py": "5c4ba8016b58f4dc0dff035cce683047fd545e4189bff8179a2465a1f5e414a1",
 }
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
 ASTOCK_ERROR_DETAILS = {
@@ -435,6 +494,56 @@ def digest(data):
 
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def selected_model_key(raw):
+    """Extract only the existing DeepSeek key; never evaluate shell or dotenv code."""
+    if type(raw) is not bytes or len(raw) > 65536 or b"\0" in raw:
+        raise ReleaseError("live_model_credential_unavailable")
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError:
+        raise ReleaseError("live_model_credential_unavailable") from None
+    selected = {}
+    for line in lines:
+        match = re.match(r"^\s*(?:export\s+)?(DEEPSEEK_API_KEY|LLM_API_KEY)\s*=(.*)$", line)
+        if match:
+            if match[1] in selected:
+                raise ReleaseError("live_model_credential_unavailable")
+            selected[match[1]] = match[2].strip()
+    value = selected.get("DEEPSEEK_API_KEY", selected.get("LLM_API_KEY", ""))
+    # This matches the candidate's provider-specific preference and legacy
+    # fallback. Only literal token syntax is accepted; no substitutions, shell
+    # escapes, multiline strings or unrelated provider values are interpreted.
+    match = re.fullmatch(r"([A-Za-z0-9._-]{16,4096})(?:\s+#.*)?", value)
+    if match:
+        return match[1]
+    match = re.fullmatch(r"(['\"])([A-Za-z0-9._-]{16,4096})\1(?:\s+#.*)?", value)
+    if match:
+        return match[2]
+    raise ReleaseError("live_model_credential_unavailable")
+
+
+def seal_executor_memory():
+    """Disable dumps of this executor only, before it opens configuration."""
+    try:
+        if sys.platform != "linux" or os.geteuid() != 0:
+            raise ValueError
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        if resource.getrlimit(resource.RLIMIT_CORE) != (0, 0):
+            raise ValueError
+        call = ctypes.CDLL(None, use_errno=True).prctl
+        call.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        call.restype = ctypes.c_int
+        if (
+            call(4, 0, 0, 0, 0) != 0
+            or call(3, 0, 0, 0, 0) != 0
+            or resource.getrlimit(resource.RLIMIT_CORE) != (0, 0)
+        ):
+            raise ValueError
+        return True
+    except Exception:
+        raise ReleaseError("live_executor_memory_unsealed") from None
 
 
 def tree_digest(path, *, entries=None):
@@ -2158,6 +2267,769 @@ class RemoteRelease:
                 values = self.kernel_uids(process)
                 if values is not None and uid in values:
                     raise ReleaseError("integration_process_active")
+
+    def live_original_state(self):
+        current = self.runtime()
+        expected = self.request.get("receipts", {})
+        if current["working_directory"] != str(self.production) or current["fingerprint"] != expected.get(
+            "expected_current_fingerprint"
+        ):
+            raise ReleaseError("live_original_runtime_changed")
+        if self.source_inventory(self.request.get("source_manifest", {}), self.production) != expected.get(
+            "expected_source_manifest_sha256"
+        ):
+            raise ReleaseError("live_original_source_changed")
+        return {"production_pid": self.process_id(SERVICE), "runtime_fingerprint": current["fingerprint"]}
+
+    def live_helper_sources(self):
+        supplied = self.request.get("live_helpers")
+        if type(supplied) is not dict or set(supplied) != set(LIVE_INTEGRATION_HELPERS):
+            raise ReleaseError("approved_live_integration_helpers_required")
+        contents = {}
+        for name, approved in LIVE_INTEGRATION_HELPERS.items():
+            item = supplied[name]
+            if (
+                type(item) is not dict
+                or set(item) != {"sha256", "content"}
+                or item["sha256"] != approved
+                or type(item["content"]) is not str
+                or len(item["content"]) > 180000
+            ):
+                raise ReleaseError("approved_live_integration_helpers_required")
+            try:
+                raw = base64.b64decode(item["content"], validate=True)
+            except (ValueError, TypeError):
+                raise ReleaseError("approved_live_integration_helpers_required") from None
+            if not 0 < len(raw) <= 131072 or digest(raw) != approved:
+                raise ReleaseError("approved_live_integration_helpers_required")
+            contents[name] = raw
+        return contents
+
+    def live_sealed_sources(self, directory):
+        self.checked(directory)
+        if set(path.name for path in directory.iterdir()) != set(LIVE_INTEGRATION_HELPERS):
+            raise ReleaseError("live_helper_source_rejected")
+        for parent in (directory, *directory.parents):
+            if parent == self.root.parent:
+                break
+            info = parent.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_mode & 0o022
+                or self.root == Path("/")
+                and info.st_uid != 0
+            ):
+                raise ReleaseError("live_helper_source_rejected")
+        contents = {}
+        for name, approved in LIVE_INTEGRATION_HELPERS.items():
+            path = self.checked(directory / name)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o444
+                    or info.st_size > 131072
+                    or self.root == Path("/")
+                    and info.st_uid != 0
+                ):
+                    raise ReleaseError("live_helper_source_rejected")
+                raw = stream.read(131073)
+                if (
+                    self.cli_identity(info) != self.cli_identity(os.fstat(stream.fileno()))
+                    or self.cli_identity(info) != self.cli_identity(path.lstat())
+                    or digest(raw) != approved
+                ):
+                    raise ReleaseError("live_helper_source_rejected")
+            contents[name] = raw
+        return contents
+
+    @contextmanager
+    def live_module(self, contents):
+        directory = self.checked(
+            self.root / "opt/prism/validation/live" / digest(encoded(LIVE_INTEGRATION_HELPERS))
+        )
+        if not directory.exists():
+            self.boundary("live_install_helpers")
+            self.public_directory(directory.parent.parent)
+            self.public_directory(directory.parent)
+            directory.mkdir(mode=0o700)
+            for name, raw in contents.items():
+                self.write(directory / name, raw, 0o444)
+            directory.chmod(0o555)
+        sealed = self.live_sealed_sources(directory)
+        module = types.ModuleType("reviewed_live_integration_validation")
+        module.__file__ = str(directory / "live_integration_validation.py")
+        exec(compile(sealed["live_integration_validation.py"], module.__file__, "exec"), module.__dict__)
+        if module.SOURCE_PINS != LIVE_SOURCE_PINS or module.SAFE_ERRORS != LIVE_ERRORS:
+            raise ReleaseError("live_helper_source_rejected")
+        self._live_module = module
+        try:
+            yield module
+        finally:
+            self._live_module = None
+
+    def live_model_gate(self, work, expected_binding=None):
+        """Re-read the root permit and real processes before opening any config."""
+        try:
+            module = getattr(self, "_live_module", None)
+            attempt = self.request.get("integration_attempt")
+            if (
+                self.request.get("action") != "integration_live"
+                or module is None
+                or type(attempt) is not str
+                or not RELEASE_ID.fullmatch(attempt)
+                or getattr(self, "_live_attempt", None) != attempt
+            ):
+                raise ValueError
+            fixed = self.checked(self.operations / "integration" / attempt / "live")
+            if Path(work) != fixed:
+                raise ValueError
+            for path in (fixed, *fixed.parents):
+                if path == self.root.parent:
+                    break
+                info = path.lstat()
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or info.st_mode & 0o022
+                    or self.root == Path("/")
+                    and info.st_uid != 0
+                ):
+                    raise ValueError
+            path = self.checked(fixed / "root-allow.json")
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o444
+                    or info.st_size > 16384
+                    or self.root == Path("/")
+                    and info.st_uid != 0
+                ):
+                    raise ValueError
+                allow = module.decode(stream.read(16385))
+                if self.cli_identity(info) != self.cli_identity(
+                    os.fstat(stream.fileno())
+                ) or self.cli_identity(info) != self.cli_identity(path.lstat()):
+                    raise ValueError
+            if (
+                type(allow) is not dict
+                or set(allow)
+                != {
+                    "schema",
+                    "binding",
+                    "policy_sha256",
+                    "bootstrap_proof_sha256",
+                    "allowed_at",
+                    "witness",
+                    "kernel",
+                    "sources",
+                }
+                or type(allow["schema"]) is not int
+                or allow["schema"] != 1
+                or allow["sources"] != LIVE_SOURCE_PINS
+                or allow["policy_sha256"] != LIVE_SOURCE_PINS["policy"]
+                or type(allow["allowed_at"]) is not int
+                or not 0 <= self.now() - allow["allowed_at"] <= 120
+            ):
+                raise ValueError
+            binding = allow["binding"]
+            cli = (self.release / ".cli-revision").read_text().strip()
+            if (
+                type(binding) is not dict
+                or set(binding)
+                != {"candidate", "cli_sha256", "probe_sha256", "nonce", "worker_pid", "broker_pid"}
+                or binding["candidate"] != self.request["commit"]
+                or binding["cli_sha256"] != cli
+                or binding["probe_sha256"] != LIVE_SOURCE_PINS["worker"]
+                or type(binding["nonce"]) is not str
+                or not re.fullmatch("[0-9a-f]{32}", binding["nonce"])
+                or any(
+                    type(binding[key]) is not int or binding[key] <= 1 for key in ("worker_pid", "broker_pid")
+                )
+                or binding["worker_pid"] == binding["broker_pid"]
+                or expected_binding is not None
+                and binding != expected_binding
+            ):
+                raise ValueError
+            kernel = allow["kernel"]
+            keys = {
+                "worker_uids",
+                "broker_uids",
+                "worker_netns_inode",
+                "broker_netns_inode",
+                "host_netns_inode",
+                "worker_startticks",
+                "broker_startticks",
+            }
+            if (
+                type(kernel) is not dict
+                or set(kernel) != keys
+                or any(
+                    type(kernel[key]) is not int or kernel[key] <= 0
+                    for key in keys - {"worker_uids", "broker_uids"}
+                )
+            ):
+                raise ValueError
+            host = (self.root / "proc/1/ns/net").stat().st_ino
+            production_pid = self.process_id(SERVICE)
+            production_ns = (self.root / "proc" / str(production_pid) / "ns/net").stat().st_ino
+            identities = [
+                pwd.getpwnam(name)
+                for name in ("prism-integration", "prism-integration-broker", "ubuntu", "prism-stage")
+            ]
+            if (
+                0 in {item.pw_uid for item in identities[:2]}
+                or len({item.pw_uid for item in identities}) != 4
+                or len({item.pw_gid for item in identities}) != 4
+                or any(item.pw_shell != "/usr/sbin/nologin" for item in identities[:2])
+            ):
+                raise ValueError
+            for role, account in zip(("worker", "broker"), identities[:2], strict=True):
+                pid = binding[role + "_pid"]
+                unit = (
+                    "prism-live-"
+                    + role
+                    + "-"
+                    + self.request["commit"][:12]
+                    + "-"
+                    + binding["nonce"]
+                    + ".service"
+                )
+                raw = self.run(
+                    [
+                        "/usr/bin/systemctl",
+                        "show",
+                        "--property=MainPID,ExecMainPID,InvocationID,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,LimitCORE",
+                        unit,
+                    ],
+                    timeout=5,
+                )
+                state = dict(line.split("=", 1) for line in raw.decode("ascii").splitlines() if "=" in line)
+                if (
+                    state.get("MainPID") != str(pid)
+                    or state.get("ExecMainPID") != str(pid)
+                    or not re.fullmatch("[0-9a-f]{32}", state.get("InvocationID", ""))
+                    or state.get("User") != account.pw_name
+                    or state.get("Group") != account.pw_name
+                    or state.get("ControlGroup") != "/system.slice/" + unit
+                    or state.get("NoNewPrivileges") != "yes"
+                    or state.get("ProtectSystem") != "strict"
+                    or state.get("ProtectHome") != "yes"
+                    or state.get("PrivateNetwork") != ("yes" if role == "worker" else "no")
+                    or state.get("KillMode") != "control-group"
+                    or state.get("LimitCORE") != "0"
+                ):
+                    raise ValueError
+                process = self.root / "proc" / str(pid)
+                if (
+                    self.kernel_uids(process) != (account.pw_uid,) * 4
+                    or module.core_disabled(process) is not True
+                    or kernel[role + "_uids"] != [account.pw_uid] * 4
+                    or (process / "cgroup").read_text().strip() != "0::/system.slice/" + unit
+                    or module.startticks(process) != kernel[role + "_startticks"]
+                    or (process / "ns/net").stat().st_ino != kernel[role + "_netns_inode"]
+                    or self.stage_runtime_mount(process) is not True
+                ):
+                    raise ValueError
+            if (
+                kernel["host_netns_inode"] != host
+                or kernel["broker_netns_inode"] != host
+                or kernel["worker_netns_inode"] in {host, production_ns}
+            ):
+                raise ValueError
+            for process in (self.root / "proc").iterdir():
+                if process.name.isdigit():
+                    values = self.kernel_uids(process)
+                    if (
+                        values is not None
+                        and identities[3].pw_uid in values
+                        and (process / "ns/net").stat().st_ino == kernel["worker_netns_inode"]
+                    ):
+                        raise ValueError
+            proof, proof_sha = self.integration_read(
+                fixed / "output/bootstrap-proof.json", identities[0].pw_uid
+            )
+            if (
+                set(proof)
+                != {"schema", "binding", "production_pid", "issued_at", "checked_at", "sources", "checks"}
+                or type(proof["schema"]) is not int
+                or proof["schema"] != 1
+                or proof["binding"] != binding
+                or type(proof["production_pid"]) is not int
+                or proof["production_pid"] != production_pid
+                or type(proof["issued_at"]) is not int
+                or type(proof["checked_at"]) is not int
+                or not proof["issued_at"]
+                <= proof["checked_at"]
+                <= allow["allowed_at"]
+                <= self.now()
+                <= proof["issued_at"] + 120
+                or proof["sources"] != LIVE_SOURCE_PINS
+                or type(proof["checks"]) is not dict
+                or set(proof["checks"]) != module.BOOT_CHECKS
+                or any(flag is not True for flag in proof["checks"].values())
+                or proof_sha != allow["bootstrap_proof_sha256"]
+            ):
+                raise ValueError
+            witness = allow["witness"]
+            if (
+                type(witness) is not dict
+                or set(witness) != {"binding", "checked_at", "checks"}
+                or witness["binding"] != binding
+                or type(witness["checked_at"]) is not int
+                or not proof["checked_at"] <= witness["checked_at"] <= allow["allowed_at"]
+                or type(witness["checks"]) is not dict
+                or set(witness["checks"]) != module.WITNESSES
+                or any(flag is not True for flag in witness["checks"].values())
+            ):
+                raise ValueError
+            for name, approved in LIVE_SOURCE_PINS.items():
+                source = self.checked(fixed / (name + ".py"))
+                info = source.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or info.st_mode & 0o022
+                    or info.st_size > 131072
+                    or self.root == Path("/")
+                    and info.st_uid != 0
+                    or digest(source.read_bytes()) != approved
+                ):
+                    raise ValueError
+            return binding
+        except Exception:
+            raise ReleaseError("live_model_authorization_rejected") from None
+
+    def read_bound_model_key(self, work, expected_binding):
+        """Only a live supervisor's post-isolation callback may invoke this."""
+        if getattr(self, "_live_key_attempted", False):
+            raise ReleaseError("live_model_credential_unavailable")
+        self.live_model_gate(work, expected_binding)
+        self.boundary("live_credential_access")
+        self.live_original_state()
+        self.live_model_gate(work, expected_binding)
+        expected = self.live_environment_binding()
+        self._live_key_attempted = True
+        self._live_executor_memory_sealed = seal_executor_memory()
+        if self._live_executor_memory_sealed is not True:
+            raise ReleaseError("live_executor_memory_unsealed")
+        path = self.checked(self.production / ".env")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_uid not in {0, pwd.getpwnam("ubuntu").pw_uid}
+                or not 0 < before.st_size <= 65536
+                or before.st_size != expected.get("size")
+                or f"{stat.S_IMODE(before.st_mode):04o}" != expected.get("mode")
+            ):
+                raise ReleaseError("live_model_credential_unavailable")
+            raw = source.read(65537)
+            if (
+                digest(raw) != expected.get("sha256")
+                or self.cli_identity(before) != self.cli_identity(os.fstat(source.fileno()))
+                or self.cli_identity(before) != self.cli_identity(path.lstat())
+            ):
+                raise ReleaseError("live_model_credential_unavailable")
+            key = selected_model_key(raw)
+            self.boundary("live_credential_reconcile")
+            self.live_original_state()
+            self.live_model_gate(work, expected_binding)
+            if self.cli_identity(before) != self.cli_identity(os.fstat(source.fileno())) or self.cli_identity(
+                before
+            ) != self.cli_identity(path.lstat()):
+                raise ReleaseError("live_model_credential_unavailable")
+            return key
+
+    def live_environment_binding(self):
+        expected = self.request.get("receipts", {}).get("model_environment")
+        if (
+            type(expected) is not dict
+            or set(expected) != {"sha256", "size", "mode"}
+            or type(expected.get("sha256")) is not str
+            or not DIGEST.fullmatch(expected["sha256"])
+            or type(expected.get("size")) is not int
+            or not 0 < expected["size"] <= 65536
+            or type(expected.get("mode")) is not str
+            or not re.fullmatch("0[0-7]{3}", expected["mode"])
+        ):
+            raise ReleaseError("live_model_credential_unavailable")
+        return expected
+
+    def live_safe_record(self, value, attempt):
+        """Whitelist every value before any journal/write/output sees it."""
+        progress = {
+            "schema",
+            "action",
+            "candidate",
+            "release_id",
+            "stage",
+            "at",
+            "passed",
+            "production_verified",
+        }
+        final = {
+            "schema",
+            "action",
+            "candidate",
+            "release_id",
+            "source_sha256",
+            "started_at",
+            "finished_at",
+            "stage",
+            "passed",
+            "error_class",
+            "live_model_verified",
+            "native_search_verified",
+            "owned_mcp_verified",
+            "server_clock_verified",
+            "native_fetch_verified",
+            "market_provider_verified",
+            "research_quality_verified",
+            "production_verified",
+            "units_stopped",
+            "cleanup_error_class",
+            "broker_negative_errno",
+            "broker_filesystem_checks",
+            "provider_peer_count",
+            "bootstrap_proof_sha256",
+            "worker_result_sha256",
+            "blocked_provider_header_names",
+            "official_source_count",
+            "broker_summary_sha256",
+            "requests",
+        }
+        if (
+            type(value) is not dict
+            or set(value) not in (progress, final)
+            or type(value.get("schema")) is not int
+            or value["schema"] != 1
+            or value.get("action") != "integration_live"
+            or value.get("candidate") != self.request["commit"]
+            or value.get("release_id") != attempt
+            or value.get("stage") not in LIVE_STAGES
+            or type(value.get("passed")) is not bool
+            or value.get("production_verified") is not False
+        ):
+            raise ReleaseError("live_safe_record_rejected")
+        if set(value) == progress:
+            if (
+                value["passed"] is not False
+                or type(value.get("at")) is not int
+                or not 0 <= self.now() - value["at"] <= 300
+            ):
+                raise ReleaseError("live_safe_record_rejected")
+            return json.loads(encoded(value))
+        flags = {
+            "live_model_verified",
+            "native_search_verified",
+            "owned_mcp_verified",
+            "server_clock_verified",
+            "native_fetch_verified",
+            "market_provider_verified",
+            "research_quality_verified",
+            "production_verified",
+            "units_stopped",
+        }
+        requests = value.get("requests")
+        errno = value.get("broker_negative_errno")
+        filesystem = value.get("broker_filesystem_checks")
+        if (
+            value.get("source_sha256") != LIVE_SOURCE_PINS
+            or any(type(value.get(key)) is not bool for key in flags)
+            or any(
+                value[key] is not False
+                for key in (
+                    "native_fetch_verified",
+                    "market_provider_verified",
+                    "research_quality_verified",
+                    "production_verified",
+                )
+            )
+            or value.get("error_class") not in LIVE_ERRORS | {None}
+            or value.get("cleanup_error_class") not in {None, "cleanup_failed"}
+            or any(type(value.get(key)) is not int for key in ("started_at", "finished_at"))
+            or not value["started_at"] <= value["finished_at"] <= self.now() + 1
+            or not 0 <= value["finished_at"] - value["started_at"] <= 300
+            or type(requests) is not dict
+            or set(requests) != {"messages", "count_tokens", "quote", "kline", "public_fetch"}
+            or any(type(item) is not int or item < 0 for item in requests.values())
+            or requests["messages"] > 6
+            or requests["count_tokens"] > 2
+            or any(requests[key] != 0 for key in ("quote", "kline", "public_fetch"))
+            or type(errno) is not dict
+            or set(errno) not in (set(), {"production", "vibe", "metadata", "private", "disallowed_public"})
+            or any(type(code) is not int or code not in {1, 13} for code in errno.values())
+            or type(filesystem) is not dict
+            or set(filesystem)
+            not in (
+                set(),
+                {
+                    "production_home_denied",
+                    "production_proc_denied",
+                    "config_write_denied",
+                    "staging_directory_denied",
+                },
+            )
+            or any(flag is not True for flag in filesystem.values())
+        ):
+            raise ReleaseError("live_safe_record_rejected")
+        for name, maximum in (("provider_peer_count", 16), ("official_source_count", 16)):
+            if type(value.get(name)) is not int or not 0 <= value[name] <= maximum:
+                raise ReleaseError("live_safe_record_rejected")
+        for name in ("bootstrap_proof_sha256", "worker_result_sha256", "broker_summary_sha256"):
+            if value.get(name) is not None and (
+                type(value[name]) is not str or not DIGEST.fullmatch(value[name])
+            ):
+                raise ReleaseError("live_safe_record_rejected")
+        headers = value.get("blocked_provider_header_names")
+        if (
+            type(headers) is not list
+            or len(headers) > 64
+            or any(
+                type(name) is not str or not re.fullmatch("[a-z][a-z0-9-]{0,63}", name) for name in headers
+            )
+        ):
+            raise ReleaseError("live_safe_record_rejected")
+        if value["passed"] and (
+            value["error_class"] is not None
+            or value["cleanup_error_class"] is not None
+            or value["stage"] != "complete"
+            or value["units_stopped"] is not True
+            or any(
+                value[key] is not True
+                for key in (
+                    "live_model_verified",
+                    "native_search_verified",
+                    "owned_mcp_verified",
+                    "server_clock_verified",
+                )
+            )
+            or requests["messages"] < 2
+            or not errno
+            or not filesystem
+            or value["provider_peer_count"] < 1
+            or value["official_source_count"] < 1
+            or headers
+            or any(
+                value[name] is None
+                for name in ("bootstrap_proof_sha256", "worker_result_sha256", "broker_summary_sha256")
+            )
+        ):
+            raise ReleaseError("live_safe_record_rejected")
+        if not value["passed"] and value["error_class"] is None:
+            raise ReleaseError("live_safe_record_rejected")
+        return json.loads(encoded(value))
+
+    def integration_live(self):
+        self.verify_tree()
+        self.live_environment_binding()
+        contents = self.live_helper_sources()
+        attempt = self.request.get("integration_attempt")
+        if type(attempt) is not str or not RELEASE_ID.fullmatch(attempt):
+            raise ReleaseError("explicit_live_integration_attempt_required")
+        baseline = self.live_original_state()
+        work = self.checked(self.operations / "integration" / attempt / "live")
+        directory = self.checked(self.record / ("integration-live-" + attempt))
+        if work.exists() or directory.exists():
+            raise ReleaseError("live_integration_attempt_already_exists")
+        self.boundary("live_attempt")
+        directory.mkdir(mode=0o700)
+        descriptor = os.open(
+            directory / "events.jsonl",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        summary, count, chain, cancelled, boundary_error, key_error = None, 0, digest(b""), None, None, None
+        key_provided = False
+        own_units = set()
+        self._live_attempt = attempt
+        self._live_key_attempted = False
+        self._live_executor_memory_sealed = False
+        try:
+            with self.live_module(contents) as module:
+
+                def record(value):
+                    nonlocal summary, count, chain
+                    safe = self.live_safe_record(value, attempt)
+                    if summary is not None:
+                        raise ReleaseError("live_events_after_result_rejected")
+                    entry = encoded({"sequence": count + 1, "previous_sha256": chain, "event": safe}) + b"\n"
+                    if len(entry) > 16384:
+                        raise ReleaseError("live_safe_record_rejected")
+                    view = memoryview(entry)
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise ReleaseError("live_event_write_failed")
+                        view = view[written:]
+                    os.fsync(descriptor)
+                    count += 1
+                    chain = digest(entry)
+                    if "finished_at" in safe:
+                        summary = safe
+
+                def boundary(label):
+                    nonlocal cancelled, boundary_error
+                    if label not in LIVE_BOUNDARIES:
+                        raise module.ValidationError("supervision_failed")
+                    try:
+                        self.boundary(label)
+                        if self.live_original_state() != baseline:
+                            raise ReleaseError("live_original_runtime_changed")
+                    except Exception as error:
+                        code = failure_code(error)
+                        if code in {
+                            "operator_stop",
+                            "fresh_operator_permit_required",
+                            "permit_timeout",
+                            "controller_disconnected",
+                        }:
+                            cancelled = "operator_stop"
+                            raise module.ValidationError("operator_stop") from None
+                        boundary_error = code
+                        raise module.ValidationError("supervision_failed") from None
+
+                def run(argv, *, timeout):
+                    if (
+                        type(argv) is not list
+                        or any(type(item) is not str or "\0" in item for item in argv)
+                        or type(timeout) not in {int, float}
+                        or not 0 < timeout <= 30
+                    ):
+                        raise ReleaseError("live_command_rejected")
+                    unit_pattern = (
+                        "prism-live-(worker|broker)-"
+                        + self.request["commit"][:12]
+                        + "-[0-9a-f]{32}\\.service"
+                    )
+                    allowed = False
+                    if argv[:1] == ["/usr/bin/systemd-run"]:
+                        names = [item.removeprefix("--unit=") for item in argv if item.startswith("--unit=")]
+                        allowed = (
+                            len(names) == 1
+                            and re.fullmatch(unit_pattern, names[0])
+                            and names[0] not in own_units
+                            and len(own_units) < 2
+                        )
+                        if allowed:
+                            own_units.add(names[0])
+                    elif argv[:2] == ["/usr/bin/systemctl", "stop"]:
+                        allowed = len(argv) == 3 and argv[2] in own_units
+                    elif argv[:2] == ["/usr/bin/systemctl", "list-units"]:
+                        allowed = (
+                            len(argv) == 6
+                            and argv[2:5] == ["--all", "--plain", "--no-legend"]
+                            and re.fullmatch(unit_pattern, argv[5])
+                        )
+                    elif argv[:2] == ["/usr/bin/systemctl", "show"]:
+                        allowed = bool(re.fullmatch(unit_pattern, argv[-1])) or argv == [
+                            "/usr/bin/systemctl",
+                            "show",
+                            "--value",
+                            "--property=MainPID",
+                            SERVICE,
+                        ]
+                    elif argv[:1] == ["/usr/sbin/useradd"]:
+                        allowed = argv[:-1] == [
+                            "/usr/sbin/useradd",
+                            "--system",
+                            "--user-group",
+                            "--no-create-home",
+                            "--shell",
+                            "/usr/sbin/nologin",
+                        ] and argv[-1] in {"prism-integration", "prism-integration-broker"}
+                    elif argv == ["/usr/sbin/groupadd", "--system", "prism-integration-bridge"] or argv == [
+                        "/usr/bin/python3",
+                        "-I",
+                        "-B",
+                        "-S",
+                        "-c",
+                        module.RESOLVE_CODE,
+                    ]:
+                        allowed = True
+                    if not allowed:
+                        raise ReleaseError("live_command_rejected")
+                    return self.run(argv, timeout=timeout)
+
+                def key_provider():
+                    nonlocal key_error, key_provided
+                    try:
+                        binding = self.live_model_gate(work)
+                        key = self.read_bound_model_key(work, binding)
+                        key_provided = True
+                        return key
+                    except Exception as error:
+                        key_error = failure_code(error)
+                        raise
+
+                bindings = {
+                    "schema": 1,
+                    "release_id": attempt,
+                    "candidate": self.request["commit"],
+                    "cli_sha256": (self.release / ".cli-revision").read_text().strip(),
+                    "production_pid": baseline["production_pid"],
+                    "sources": {
+                        name: base64.b64encode(contents["live_integration_" + name + ".py"]).decode()
+                        for name in LIVE_SOURCE_PINS
+                    },
+                }
+                returned = self.live_safe_record(
+                    module.run_validation(
+                        bindings, boundary=boundary, run=run, record=record, key_provider=key_provider
+                    ),
+                    attempt,
+                )
+                if summary != returned:
+                    raise ReleaseError("live_durable_result_required")
+                if cancelled:
+                    raise ReleaseError(cancelled)
+                if self.live_original_state() != baseline:
+                    raise ReleaseError("live_original_runtime_changed")
+                if returned["passed"] is not True:
+                    raise ReleaseError(key_error or boundary_error or "live_integration_failed")
+                if not key_provided or self._live_executor_memory_sealed is not True:
+                    raise ReleaseError("live_model_authorization_rejected")
+                self.action_report = {
+                    "attempt": attempt,
+                    "summary": returned,
+                    "events": count,
+                    "last_event_sha256": chain,
+                    "passed": True,
+                    "production_verified": False,
+                    "executor_memory_sealed": True,
+                    "model_key_read_after_gate": True,
+                }
+        finally:
+            self._live_attempt = None
+            self._live_module = None
+            self._live_key_attempted = True
+            os.close(descriptor)
+            self.write(
+                directory / "receipt.json",
+                encoded(
+                    {
+                        "schema": 1,
+                        "attempt": attempt,
+                        "candidate": self.request["commit"],
+                        "helper_sha256": dict(LIVE_INTEGRATION_HELPERS),
+                        "summary": summary,
+                        "events": count,
+                        "last_event_sha256": chain,
+                        "model_environment_binding_supplied": True,
+                        "executor_memory_sealed": getattr(self, "_live_executor_memory_sealed", False)
+                        is True,
+                        "model_key_read_after_gate": key_provided,
+                        "production_verified": False,
+                    }
+                ),
+            )
 
     def integration_identity(self, unit, production_pid, uid):
         pid = self.process_id(unit)
@@ -3989,7 +4861,7 @@ class RemoteRelease:
                     result["diagnostics"] = self.action_report
                 elif request["action"] == "finish_stage":
                     result["stage_cleanup"] = self.action_report
-                elif request["action"] in INTEGRATION_PROBES:
+                elif request["action"] in INTEGRATION_PROBES or request["action"] == "integration_live":
                     result["integration"] = self.action_report
                 elif request["action"] == "validate_legacy_retirement":
                     result["legacy_retirement"] = self.action_report

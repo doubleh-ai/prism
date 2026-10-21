@@ -24,13 +24,15 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 SSH = [
-    "ssh",
+    "/usr/bin/ssh",
     "-S",
     "/tmp/prism-release-ssh-%C",
     "-o",
     "BatchMode=yes",
     "-o",
     "StrictHostKeyChecking=yes",
+    "-o",
+    "ForwardAgent=no",
     "-o",
     "ConnectTimeout=10",
     "-p",
@@ -478,7 +480,10 @@ def main():
         recovery.mkdir(mode=0o700)
         with archive.open("xb") as output:
             proc = subprocess.run(
-                [*SSH, "python3 -"], input=REMOTE.encode(), stdout=output, stderr=subprocess.PIPE
+                [*SSH, "sudo -n /usr/bin/python3 -I -B -S -"],
+                input=REMOTE.encode(),
+                stdout=output,
+                stderr=subprocess.PIPE,
             )
         if proc.returncode:
             raise RuntimeError("Remote capture failed; private partial backup retained")

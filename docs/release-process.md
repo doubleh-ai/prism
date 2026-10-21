@@ -137,3 +137,17 @@ Mac 必须提供两个已批准的公开 helper 的固定摘要；远端再次�
 实际 Linux 首轮合成服务因不存在的必需屏蔽子目录，在 Python 启动前以 226/NAMESPACE 失败。后续描述符改用实际存在的 `/var/lib` 与 `/etc` 祖先遮罩，限制更严格，不创建那些生产目录。命名空间启动失败只有在原 Invocation/ExecMainPID、退出码 226、无存活 PID、空运行目录及空或不存在的递归 cgroup 一致时，才可记录无工作负载；原失败 unit 与回执保留，不发送清理信号，也不将失败改成通过。
 
 Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth 执行，结束后恢复 site 函数。来源核验只额外接受封存引擎内六个实际存在的 PEP 420 命名空间包：必须具有真正的 NamespaceLoader，唯一搜索目录与 spec 一致，且该目录为无链接、root 锁定的预期路径。混合路径、引擎外目录、任意无文件模块均拒绝。安全结果只增加固定枚举 error_detail，绝不记录原异常文本、模块名称或配置；真实 Linux 通过仍须单独取得新 attempt 的实际回执。
+
+## 有界真实模型与搜索联调
+
+固定 `integration_live` 动作已实现接线和禁网回归，真实 Linux 运行仍须独立回执。Mac 必须显式给出新的 `--integration-attempt` 和四个已审查摘要：`--live-validation-sha256`、`--live-worker-sha256`、`--live-transport-sha256`、`--live-policy-sha256`。远端再次核固定摘要，将公开 helper 字节封存在 root 锁定目录；root 只编译标准库监督器，候选、模型 CLI 及第三方包在独立 UID 内执行。它不执行切流、生产重启或部署。
+
+生产非隐藏源码清单继续保持原遍历规则，`.env` 不进入源码清单或公开产物。新私有 receipts 使用 `model_environment` 的精确三个字段 `sha256`、`size`、`mode` 绑定原配置，值不得公开。摘要应来自已验证加密备份并与当前只读配置核对；当前 mode 绑定不能冒充旧备份 mode 已比对。读取器不执行 shell、dotenv 替换或配置代码，只选现有 `DEEPSEEK_API_KEY`；该项缺失时才允许旧 `LLM_API_KEY` fallback，不选其他供应商的 key。
+
+worker 使用全新 HOME、空合成数据库和私有网络命名空间，只能通过 loopback→Unix socket 桥访问独立 broker。broker 使用另一专用 UID，仅允许固定 DeepSeek HTTPS、实际解析的公开地址及精确 DNS resolver 地址；不允许宽泛 loopback 网段、重定向、重试或 CONNECT。两 unit 均限制 180 秒、资源和 core dump，父控制器核实际 `LimitCORE=0` 及 `/proc/<pid>/limits` 的 core soft/hard 都为零。root 执行器也只对本次自身进程设置并回读 `RLIMIT_CORE=0` 和 `PR_SET_DUMPABLE=0`，失败则不打开配置，不调整生产进程或主机全局设置。模型消息最多 6 次、计数请求最多 2 次，请求与响应总字节也有硬限；金额只是估算，不能称为硬金额上限。
+
+发出真实请求前，broker 先做无 key 的实际 DNS/TLS 连接与文件访问负控；对生产 8088、Vibe 8899、metadata、私网和禁止的公共地址，实际连接必须返回权限拒绝，连接不存在或被拒绝不能替代该证据。root 再核四个 Uid、真实 PID/startticks、InvocationID、cgroup、网络命名空间、只读独立 `/run`、固定源码及 worker 的 11 项导入前证明，才写 root 所有 0444 的允许文件。读取配置前还要再次核同一允许文件、worker 证明与实际进程、原生产源码和运行指纹。配置的单一打开 FD、摘要、大小、mode 和路径身份保持到读取后复核结束；允许文件缺失、过期或身份变化时，连配置打开都不允许。key 只通过 peer 绑定的 Unix socket 在内存交给 broker，worker 只拿合成 token。
+
+联调使用两个固定公开问题，走候选真实 `/api/chat/stream`、CLI、流式显示协议和研究记录路径，分别核模型完成、原生搜索的上交所官网出处及记录、上海服务端时间、所属 `indicator_list`/`research_read` 工具往返和外部账号 404。原生抓取、行情供应商、研究质量、生产发布始终分项保持 false，不能由模型或搜索成功推导。原模型帧和用户可见响应仅在合成私有目录留存，事件和回执只允许固定安全字段、布尔、计数和摘要，不收任意异常、正文或凭证。
+
+每个 attempt 的事件链、最终结果及失败保留，旧目录存在即拒绝覆盖。停止或失败后，仅处理本次完整随机数命名且 InvocationID、ExecMainPID、startticks 一致的两个合成 unit；未取得自身实例证据时不操作未知实例。只有退出结果及 cgroup 的聚合 `populated=0` 和空进程列表均实际核对后，才算清理完成。操作许可在等待和密钥释放前后持续复核，原生产与既有 staging 服务不停止。

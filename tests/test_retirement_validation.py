@@ -89,6 +89,8 @@ def test_launch_only_targets_one_fixed_synthetic_unit_with_a_private_run(case_id
         "/var/lib",
         "/etc",
         "/opt/prism/releases",
+        "/run/systemd",
+        "/run/dbus",
     ]
     # No mandatory child path can fail merely because production has not
     # created it yet; the existing ancestors also conceal future children.
@@ -566,7 +568,7 @@ def test_unknown_exception_text_is_never_in_safe_failure_result(monkeypatch):
 
 def test_actual_mount_witness_requires_ro_tmpfs_and_the_same_runtime_inode(monkeypatch):
     runtime = "/run/prism-retirement-probe-test"
-    mountinfo = f"1 0 0:1 / /run ro - tmpfs tmpfs ro\n2 1 0:2 / {runtime} rw - tmpfs tmpfs rw\n".encode()
+    mountinfo = f"1 0 0:1 / /run ro - tmpfs tmpfs ro\n2 1 0:2 / {runtime} rw - tmpfs tmpfs rw\n3 1 0:3 / /run/systemd ro - tmpfs tmpfs ro\n4 1 0:3 / /run/dbus ro - tmpfs tmpfs ro\n".encode()
     monkeypatch.setattr(probe, "_read_regular", lambda *_: (mountinfo, None))
     original = validation.os.stat
 
@@ -576,6 +578,10 @@ def test_actual_mount_witness_requires_ro_tmpfs_and_the_same_runtime_inode(monke
             return SimpleNamespace(st_ino=3)
         if value == "/proc/self/ns/mnt":
             return SimpleNamespace(st_ino=4)
+        if value in {"/run/systemd", "/run/dbus"}:
+            return SimpleNamespace(st_dev=1, st_ino=20, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+        if value in {"/proc/123/root/run/systemd", "/proc/123/root/run/dbus"}:
+            return SimpleNamespace(st_dev=1, st_ino=21, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR)
         if value in {"/run/private/host-storage", "/proc/123/root" + runtime}:
             return SimpleNamespace(st_dev=1, st_ino=2, st_uid=4321, st_mode=stat.S_IFDIR | 0o700)
         return original(path, **kwargs)
@@ -742,3 +748,50 @@ def test_wrapper_failure_diagnostics_are_fixed_phase_type_with_no_exception_text
     source = validation.wrapper_source()
     ast.parse(source)
     assert b"dir_fd=fd" in source and b"str(exc)" not in source
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (PermissionError(13, "not emitted"), True),
+        (FileNotFoundError(2, "not emitted"), True),
+        (ConnectionRefusedError(61, "not emitted"), False),
+        (TimeoutError(60, "not emitted"), False),
+        (None, False),
+    ],
+)
+def test_runtime_ipc_canary_requires_denial_not_path_absence_or_refused_listener(error, expected):
+    import errno
+
+    tree = ast.parse(validation.wrapper_source())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    loop = next(
+        n
+        for n in main.body
+        if isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Tuple)
+        and any(isinstance(v, ast.Constant) and v.value == "/run/systemd/private" for v in n.iter.elts)
+    )
+    assignment = ast.Assign(
+        targets=[ast.Name(id="endpoints_hidden", ctx=ast.Store())], value=ast.Constant(True)
+    )
+    function = ast.FunctionDef(
+        name="canary",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[assignment, loop, ast.Return(value=ast.Name(id="endpoints_hidden", ctx=ast.Load()))],
+        decorator_list=[],
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    connection = mock.MagicMock()
+    connection.__enter__.return_value = connection
+    connection.connect.side_effect = error
+    fake_socket = SimpleNamespace(socket=mock.Mock(return_value=connection), AF_UNIX=1, SOCK_STREAM=1)
+    namespace = {"socket": fake_socket, "errno": errno}
+    exec(compile(module, "<fixed-ipc-canary-unit-only>", "exec"), namespace)
+    assert namespace["canary"]() is expected
+    assert connection.connect.call_args_list == [
+        mock.call("/run/systemd/private"),
+        mock.call("/run/dbus/system_bus_socket"),
+    ]
+    connection.sendall.assert_not_called()
+    connection.send.assert_not_called()
