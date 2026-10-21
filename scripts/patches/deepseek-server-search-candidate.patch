@@ -1,0 +1,134 @@
+--- a/server/research_context.py
++++ b/server/research_context.py
+@@ -231,12 +231,91 @@
+         self.run_id = run_id
+         self.calls: dict[str, dict] = {}
+         self.completed: set[str] = set()
++        self.server_calls: dict[str, dict] = {}
+         self.seen: set[tuple[str, str]] = set()
+ 
+     def record_call(self, call: dict) -> None:
+         call_id = call.get("id") or call.get("tool_use_id")
+         if call_id and isinstance(call.get("name"), str):
+             self.calls[str(call_id)] = call
++
++    def record_server_call(self, block: dict) -> None:
++        """Dormant candidate: documented server search only, awaiting real CLI frames."""
++        call_id, inputs = block.get("id"), block.get("input")
++        if (
++            block.get("type") != "server_tool_use"
++            or block.get("name") != "web_search"
++            or not isinstance(call_id, str)
++            or not 0 < len(call_id) <= 200
++            or call_id in self.calls
++            or not isinstance(inputs, dict)
++            or not isinstance(inputs.get("query"), str)
++        ):
++            return
++        self.record_call(
++            {
++                "type": "tool_use",
++                "id": call_id,
++                "name": "WebSearch",
++                "input": {"query": inputs["query"][:2000]},
++            }
++        )
++        self.server_calls[call_id] = self.calls[call_id]
++
++    def record_server_result(self, block: dict, *, retrieved_at: str | None = None):
++        """Record URL metadata only; ciphertext/page_age is never article/publication evidence."""
++        call_id = str(block.get("tool_use_id") or "")
++        if (
++            block.get("type") != "web_search_tool_result"
++            or call_id not in self.server_calls
++            or call_id in self.completed
++            or self.calls.get(call_id) is not self.server_calls[call_id]
++        ):
++            return None
++        content = block.get("content")
++        if (
++            block.get("is_error")
++            or not isinstance(content, list)
++            or not content
++            or any(not isinstance(row, dict) or row.get("type") != "web_search_result" for row in content)
++        ):
++            self.completed.add(call_id)
++            return None
++        self.completed.add(call_id)
++        rows, refs = [], []
++        for row in content[:100]:
++            url = _safe_url(row.get("url"))
++            key = (call_id, url)
++            if not url or key in self.seen:
++                continue
++            self.seen.add(key)
++            title = row.get("title")
++            title = title[:500] if isinstance(title, str) else url
++            rows.append({"url": url, "title": title})
++            refs.append(
++                {
++                    "url": url,
++                    "title": title,
++                    "snippet": "",
++                    "snippet_truncated": False,
++                    "published_at": None,
++                    "run_id": self.run_id,
++                    "tool": "WebSearch",
++                    "tool_call_id": call_id,
++                    "source_kind": "external_web",
++                    "evidence_status": "retrieved",
++                    "retrieval_type": "tool_result",
++                    "retrieved_at": retrieved_at,
++                    "provider_transport": "server_tool_use",
++                    "content_scope": "search_metadata_only",
++                }
++            )
++        normalized = {
++            "type": "tool_result",
++            "tool_use_id": call_id,
++            "content": json.dumps({"results": rows}, ensure_ascii=False),
++        }
++        return self.calls[call_id], normalized, refs
+ 
+     def record_result(self, block: dict, *, retrieved_at: str | None = None) -> list[dict]:
+         call_id = str(block.get("tool_use_id") or "")
+@@ -334,6 +413,15 @@
+                     text = content_text(block.get(typ))
+                     if text:
+                         chunks.append({"t": "text" if typ == "text" else "think", "c": text})
++                elif typ == "server_tool_use":
++                    tracker.record_server_call(block)
++                elif typ == "web_search_tool_result":
++                    normalized = tracker.record_server_result(
++                        block, retrieved_at=source_timestamp(event.get("timestamp"))
++                    )
++                    if normalized:
++                        for ref in normalized[2]:
++                            chunks.append({"t": "ref", **ref})
+                 elif typ == "tool_use":
+                     tracker.record_call(block)
+                     inp = block.get("input") or {}
+--- a/server/chat.py
++++ b/server/chat.py
+@@ -343,7 +343,20 @@
+             elif t == "assistant":
+                 for b in ev.get("message", {}).get("content", []):
+                     bt = b.get("type", "")
+-                    if bt == "text":
++                    if bt == "server_tool_use":
++                        evidence.record_server_call(b)
++                    elif bt == "web_search_tool_result":
++                        normalized = evidence.record_server_result(
++                            b, retrieved_at=build_research_context()["as_of"]
++                        )
++                        if normalized:
++                            call, result_block, refs = normalized
++                            refs = ingest_tool_result(user, research["run_id"], call, result_block, refs)
++                            for ref in refs:
++                                collected_refs.append(ref)
++                                live_chunks.append({"t": "ref", **ref})
++                                yield _emit({"ref": ref})
++                    elif bt == "text":
+                         txt = _content_to_text(b.get("text", ""))
+                         if not txt:
+                             continue
