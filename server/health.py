@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -13,6 +14,31 @@ from .config import CLAUDE_BIN, DATA_DIR, MODELS, SKILL_FALLBACK_ROOTS, SKILL_MA
 from .database import get_db
 from .release import release_payload
 from .services.claude_runner import _resolve_skill_dir
+
+
+def readiness_payload() -> dict[str, Any]:
+    """Public basic readiness evidence; this is not deployment acceptance.
+
+    No CLI, model or provider is invoked. A usable DB can coexist with an
+    unknown deployment identity; release validation must separately match the
+    observed revision against its immutable candidate.
+    """
+    try:
+        release = release_payload()
+    except (OSError, UnicodeError):
+        # Unreadable metadata is unknown identity, not evidence of a dead DB.
+        release = {}
+    revision = release.get("deployed_revision")
+    revision = revision.strip() if isinstance(revision, str) else ""
+    version = release.get("version")
+    version = version.strip() if isinstance(version, str) else ""
+    return {
+        "status": "ready" if _check_db().get("status") == "ok" else "unready",
+        "version": version if re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version) else "unknown",
+        "deployed_revision": revision.lower() if re.fullmatch(r"[a-fA-F0-9]{40}", revision) else "unknown",
+        "checked_at": int(time.time()),
+        "tz": "Asia/Shanghai",
+    }
 
 
 def _ok(status: str) -> bool:
@@ -93,7 +119,7 @@ def admin_health_payload() -> dict[str, Any]:
     models = _model_checks()
     critical = [
         _ok(db.get("status", "")),
-        any(s["id"] == "bottleneck-hunter" and s["status"] == "ok" for s in skills),
+        any(s["id"] == "prism-research" and s["status"] == "ok" and s["has_claude_md"] for s in skills),
         _ok(claude.get("status", "")),
     ]
     return {

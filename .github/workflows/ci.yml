@@ -9,7 +9,7 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main, codex/prism-production-v0.19.7]
+    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench]
 
 jobs:
   test:
@@ -45,8 +45,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check server/ tests/
-          ruff format --check server/ tests/
+          ruff check server/ tests/ scripts/release_candidate.py
+          ruff format --check server/ tests/ scripts/release_candidate.py
 
       - name: Run tests with coverage
         env:

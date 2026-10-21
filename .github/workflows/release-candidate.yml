@@ -1,0 +1,124 @@
+# Inert candidate packaging only. No production credentials, SSH or deployment.
+# This PR-owned validator is a development check, not an independent attestation.
+# A future promotion must re-verify with a trusted validator and exact Git source.
+name: Release candidate (not deployment)
+
+on:
+  pull_request:
+    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact 40-character commit to package (candidate only)
+        required: true
+        type: string
+      source_branch:
+        description: Commit must already belong to this repository branch
+        required: true
+        default: codex/prism-agent-workbench
+        type: choice
+        options: [codex/prism-agent-workbench, master, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.repository }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Validate and package candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Official actions/checkout v7.0.1; pinned to its published tag's commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Resolve and constrain immutable source
+        id: source
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True, stderr=subprocess.DEVNULL).strip()
+          def sha(value):
+              if not re.fullmatch('[0-9a-f]{40}', value):
+                  raise SystemExit('A complete lowercase commit SHA is required')
+              if git('cat-file', '-t', value) != 'commit':
+                  raise SystemExit('Candidate source is not a commit')
+              return value
+          if os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+              if os.environ['PR_HEAD_REPOSITORY'] != os.environ['GITHUB_REPOSITORY']:
+                  raise SystemExit('Fork candidates require separate review; no artifact was created')
+              commit = sha(os.environ['PR_HEAD_SHA'])
+              base = sha(os.environ['PR_BASE_SHA'])
+              # A candidate must include its declared integration base.
+              subprocess.run(['git', 'merge-base', '--is-ancestor', base, commit], check=True)
+              tip = commit
+          elif os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              commit = sha(os.environ['REQUESTED_COMMIT'])
+              branch = os.environ['SOURCE_BRANCH']
+              if branch not in {'master', 'main', 'codex/prism-agent-workbench'}:
+                  raise SystemExit('Unsupported candidate source branch')
+              tip = sha(git('rev-parse', '--verify', 'refs/remotes/origin/' + branch))
+              subprocess.run(['git', 'merge-base', '--is-ancestor', commit, tip], check=True)
+          else:
+              raise SystemExit('Unsupported event')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('commit=' + commit + '\ntip=' + tip + '\n')
+          PY
+
+      - name: Build and verify without running candidate application
+        env:
+          CANDIDATE_SHA: ${{ steps.source.outputs.commit }}
+          ALLOWED_TIP: ${{ steps.source.outputs.tip }}
+        run: |
+          set -euo pipefail
+          CANDIDATE_DIR="${RUNNER_TEMP}/prism-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export CANDIDATE_DIR
+          # Only the stdlib packaging validator runs; no app imports or pip install.
+          python3 scripts/release_candidate.py build --repo "$GITHUB_WORKSPACE" \
+            --commit "$CANDIDATE_SHA" --allowed-tip "$ALLOWED_TIP" \
+            --output-dir "$CANDIDATE_DIR" > "$RUNNER_TEMP/candidate-build.json"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'candidate-build.json').read_text())
+          subprocess.run(['python3', 'scripts/release_candidate.py', 'verify',
+              '--archive', result['archive'], '--manifest', result['manifest'],
+              '--repo', os.environ['GITHUB_WORKSPACE'], '--commit', os.environ['CANDIDATE_SHA']], check=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('CANDIDATE_DIR=' + os.environ['CANDIDATE_DIR'] + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Candidate validated — not deployed\n\n')
+              summary.write('Commit: `' + result['commit'] + '`\n\n')
+              summary.write('Version: `' + result['version'] + '`\n\n')
+              summary.write('Archive SHA-256: `' + result['archive_sha256'] + '`\n\n')
+              summary.write('The artifact contains an inert source snapshot and manifest. '
+                            'No production access, dependency installation, service restart or release publication occurred. '
+                            'Runtime configuration, backups and deployment approval remain separate.\n')
+          PY
+
+      # Official actions/upload-artifact v7.0.2; tag commit verified 2026-10-21.
+      - name: Retain candidate for review (7 days)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: prism-candidate-${{ steps.source.outputs.commit }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_DIR }}/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false

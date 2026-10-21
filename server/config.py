@@ -212,3 +212,9 @@ VIBE_ENGINE_VERSION = os.environ.get("PRISM_VIBE_ENGINE_VERSION", "0.1.11")
 # The stdio bridge may only call this same Prism server over numeric loopback.
 CAPABILITY_INTERNAL_URL = os.environ.get("PRISM_INTERNAL_API_URL", "http://127.0.0.1:8088").rstrip("/")
 CAPABILITY_TOKEN_TTL = max(60, min(3600, int(os.environ.get("PRISM_CAPABILITY_TOKEN_TTL", "1800"))))
+
+# Operator-supplied label only; never treated as proof of production deployment.
+_OPERATIONS_ENVIRONMENT = os.environ.get("PRISM_ENVIRONMENT", "unknown").lower()
+OPERATIONS_ENVIRONMENT = (
+    _OPERATIONS_ENVIRONMENT if _OPERATIONS_ENVIRONMENT in {"local", "staging", "production"} else "unknown"
+)

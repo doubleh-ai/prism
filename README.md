@@ -257,14 +257,28 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development guide.
 
 ## Deployment
 
-```bash
-# One-script deploy (dev → prod)
-bash /tmp/prism-deploy-p2.sh
+The current release workflow is **candidate-only**: prepare and check a
+specific revision, then inspect actual GitHub workflow results in the admin
+operations view. It does not publish to production, restart services, or
+perform rollback. Unavailable or stale observations are shown explicitly;
+a passing candidate is not evidence that production has changed.
 
-# Or manual:
-sudo cp -r /home/develop/projects/prism/* /home/ubuntu/stock-analyzer/
-sudo systemctl restart stock-app.service
-```
+`GET /health/ready` is a public, read-only application/database readiness
+probe (200 or 503). It exposes only basic status, version/revision metadata,
+and observation time. It does not verify model calls, live market data, or
+deployment acceptance. The Docker healthcheck uses this endpoint.
+
+Do not use the former `/tmp/prism-deploy-p2.sh`, recursive copies into the
+live directory, `install.sh`, or `scripts/verify.sh` as a release executor.
+The installer is for initial setup; the verification script can change
+state and invoke external services. A GitHub workflow cancellation link
+stops that workflow only when GitHub confirms cancellation; it does not
+roll back production.
+
+See [the release process and emergency-control boundaries](docs/release-process.md)
+for what is available now and the required gates before production can be
+connected. Existing Docker packaging also needs a separate full-feature
+acceptance check before it can be used as a production artifact.
 
 ## License
 

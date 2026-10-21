@@ -64,11 +64,12 @@ from .database import (
     user_exists,
 )
 from .diagnostics import router as diagnostics_router
-from .health import admin_health_payload
+from .health import admin_health_payload, readiness_payload
 from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
+from .operations import router as operations_router
 from .release import release_payload
 from .reports import list_saved_reports_for_conv
 from .reports import router as reports_router
@@ -237,6 +238,16 @@ async def index(request: Request):
 
 
 # ── Auth ──
+@app.get("/health/ready")
+async def api_readiness():
+    payload = readiness_payload()
+    return JSONResponse(
+        payload,
+        status_code=200 if payload["status"] == "ready" else 503,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/login")
 async def api_login(request: Request):
     return await auth_login(request)
@@ -523,6 +534,7 @@ app.include_router(indicators_router)
 app.include_router(reports_router)
 app.include_router(vibe_router)
 app.include_router(diagnostics_router)
+app.include_router(operations_router)
 
 
 # ── Report viewer ──

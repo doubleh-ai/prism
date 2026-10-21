@@ -205,9 +205,30 @@ async function completedAnalysisUsesRecordedDuration() {
   assert.equal(doc.getElementById('apElapsed').textContent,'耗时未记录','missing timing must not inherit the previous record or invent elapsed days');
   assert.deepEqual(requests,['/api/analysis/completed-old/report','/api/analysis/duration-unknown/report']);
 }
+async function managementDoesNotRequestCapabilityHistory() {
+  const {context,app,doc}=environment();const requests=[];let finishOld;
+  app.switchMode=mode=>{app._mode=mode;};app._mode='market';
+  vm.runInContext(fs.readFileSync('static/js/app.workbench.js','utf8'),context,{filename:'app.workbench.js'});
+  app.api=url=>{requests.push(url);return new Promise(resolve=>{finishOld=resolve;});};
+  const pending=app._loadWorkbenchHistory();
+  app.switchMode('admin');await settled();
+  assert.equal(doc.getElementById('workbenchContext').style.display,'none');
+  assert.equal(requests.length,1);assert(!requests.some(url=>url.includes('view=admin')));
+  assert.equal(app._workbenchHistoryLoading,false);assert.equal(doc.getElementById('workbenchCallCount').textContent,'0');
+  finishOld({ok:false,status:503});await pending;assert.equal(app._workbenchHistoryError,'','late capability failure must not raise a management alert');
+  assert.equal(app._capabilityView({id:'admin-control',target_view:'admin'}),'');
+  assert(!app._renderPlatformCallHTML({call_id:'invalid-admin',target:{view:'admin'}}).includes('data-platform-call='));
+  app._openWorkbenchPanel('history');assert.equal(app._workbenchPanel,'capabilities');assert.equal(doc.getElementById('workbenchHistoryTab').hidden,true);
+  app.api=async url=>{requests.push(url);return {ok:true,json:async()=>({calls:[]})};};
+  app.switchMode('market');await settled();
+  assert.equal(doc.getElementById('workbenchContext').style.display,'');assert.equal(doc.getElementById('workbenchHistoryTab').hidden,false);
+  assert.equal(requests.at(-1),'/api/capability-calls?view=market&limit=30');
+  app.convId='original-chat';app.switchMode('chat');await settled();assert.equal(requests.at(-1),'/api/convs/original-chat/capability-calls');
+  const before=requests.length;app.switchMode('unsupported-view');await settled();assert.equal(requests.length,before);assert.equal(doc.getElementById('workbenchContext').style.display,'none');
+}
 
 (async()=>{
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
-  await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();
-  console.log('workbench runtime ok: 14 scenarios');
+  await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();
+  console.log('workbench runtime ok: 15 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

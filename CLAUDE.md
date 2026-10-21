@@ -27,7 +27,7 @@ server/
   middleware.py      — request ID, error handlers, rotating file log
   models.py          — Pydantic schemas for all request/response validation
   proxy.py           — provider-aware LLM API proxy
-  analysis_engine.py — 7-agent astock wrapper: ThreadPoolExecutor + asyncio.Queue → SSE
+  analysis_engine.py — 7-agent astock wrapper: ThreadPoolExecutor + replayable event log → SSE
   analysis_graph.py  — persist analysis nodes/edges to SQLite
   industry_router.py — Phase 6 industry chain graph (4 API endpoints)
   market/            — Pluggable market data layer (akshare/baostock/tencent)
@@ -49,7 +49,7 @@ templates/
   app.html           — main SPA shell (sidebar + icon rail + main area)
   login.html         — standalone login page
 
-tests/               — 297 tests (pytest + httpx TestClient)
+tests/               — offline pytest + httpx + real JavaScript regression tests
   conftest.py        — fixtures: temp_data_dir, client, auth_user
 ```
 
@@ -76,13 +76,14 @@ tests/               — 297 tests (pytest + httpx TestClient)
 ### Testing
 - Tests live in `tests/`, using `httpx.AsyncClient` with `ASGITransport`
 - `conftest.py` provides `temp_data_dir` (tempfile) and `client` (authenticated)
-- Run: `python3 -m pytest tests/ -x --tb=short` (297 tests, ~60s)
+- Run: `python3 -m pytest tests/ -x --tb=short` in isolated HOME/data directories
 - All tests are offline (no real LLM calls, no real network to market data)
 - New endpoints MUST have at least happy-path + one error-case test
 
 ### Git
-- NO git commit without explicit user request
-- Deploy script: `/tmp/prism-deploy-p2.sh` (copy files + restart systemd)
+- Commit and push only within the current human-authorized scope; preserve independent branches and draft PRs.
+- Read `AGENTS.md` and `docs/release-process.md` before release work.
+- Current delivery is candidate-only. The old external `/tmp` copy/restart script is not a supported release path.
 - Dev: `/home/develop/projects/prism/`, Prod: `/home/ubuntu/stock-analyzer/`
 - Server name: `stock-app.service` (systemd), runs on port 8088
 
@@ -103,10 +104,10 @@ python3 -m pytest tests/test_api.py -x --tb=short
 
 ## Key gotchas
 
-1. **pip needs `--break-system-packages`** — this machine uses system Python 3.12
+1. **Use an isolated Python environment** for development and tests; do not upgrade production dependencies in place.
 2. **Tsinghua mirror**: `-i https://pypi.tuna.tsinghua.edu.cn/simple` for fast downloads
 3. **TradingAgents-astock** at `/home/develop/projects/TradingAgents-astock/` — install with `pip install -e`
-4. **No headless browser** in dev env — verify UI changes via static review + pytest + user's browser
+4. **UI validation** — execute real JavaScript regressions and use an available isolated browser for visual QA; describe any live integrations left untested.
 5. **Prod egress**: Sina ✓, baostock:10087/eastmoney ✗, local proxy at 127.0.0.1:7890 for LLMs
 6. **`static/js/app.js`** no longer exists — it was split into 9 modules in v0.8
 7. **Analysis state** persists in `sessionStorage['prism_analysis']` — check `_restoreAnalysisState()`
@@ -120,5 +121,6 @@ python3 -m pytest tests/test_api.py -x --tb=short
 - **SQLite over Postgres**: single-user app, WAL mode is fast enough, zero ops overhead
 - **ECharts self-hosted**: `static/lib/echarts.min.js` (~1MB) avoids CDN dependency in prod
 - **Provider chain order**: akshare first (most stable via Sina), baostock/tencent as fallback
-- **Analysis in thread**: LangGraph runs in `ThreadPoolExecutor` to not block the event loop
+- **Analysis in thread**: LangGraph runs in `ThreadPoolExecutor`; each SSE subscriber has its own replay cursor
+- **Release observations**: CI and candidate artifacts are distinct from verified production changes; no production executor is connected yet
 - **Indicators server-side**: computed in Python (pandas-ta), not in browser, for consistency
