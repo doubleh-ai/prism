@@ -107,3 +107,17 @@ root 私有阶段记录保留失败、取消和恢复；`/var/lib/prism-operatio
 ## 不作为发布入口的方式
 
 不要执行未审查的 `/tmp/prism-deploy-p2.sh`，不要覆盖在线目录或原地升级依赖。`install.sh` 是初始安装工具，`scripts/verify.sh` 会写测试状态并可能调用真实模型，均不能冒充只读检查或绕过本流程。Docker 的基础 `healthy` 状态同样不能代替完整研究功能和生产发布验收。
+
+## 无真实凭证的集成分项验收
+
+`integration_astock` 与 `integration_cli` 是两个独立动作，不启动生产、不接通真实模型或行情。Mac 必须同时提供本次已审查执行器摘要与对应探针的固定已批准摘要；控制器从本机脚本读出字节并核对，远端再与内置批准摘要核对，不能从候选目录动态取脚本并自行信任。它们复核已准备候选、环境、封存引擎及 CLI，原生产 PID/工作目录保持不变。
+
+每项以独立 `prism-integration` 系统账号运行，UID/GID 不同于生产和 `prism-stage`，从而不能读取已有 stage 数据库副本或进程。工作目录固定在 `/var/lib/prism-operations/integration/<attempt>/astock` 或 `cli-protocol`；根目录和探针由 root 锁定，只有 output/home/tmp/data 四个初始空子目录可写，均为专用账号 0700。PrivateNetwork、ProtectHome、ProtectProc、严格文件系统、只读私有 `/run`、staging 目录屏蔽及 60 秒运行上限保留；环境由 `env -i` 重建，不提供真实凭证。默认 attempt 为 release-id；失败保留目录和回执，不能覆盖重跑，后续若有经过审查的修复只能明确指定新的 `--integration-attempt`。
+
+第三方或候选代码导入前，受信任标准库探针实际尝试打开生产 `.env` 与生产进程环境（不读取内容），连接 8088/8899，写候选独占 canary，并打开 staging 目录。六项必须拒绝，证明绑定当前 PID、候选、引擎、源码摘要、随机数与有效期。root 父控制器另外读取内核四个 Uid，核实际 MainPID、与生产及 stage 不同的网络命名空间，再从该 PID 的真实 `/run` 核只读独立 mount。重新取得操作许可并复核身份和证明后，才写 root 所有 0444 的允许文件。仅有配置 flags、其他进程的证明或过期允许文件不能放行。
+
+Astock 探针自行完成上述导入前握手，随后仅导入固定来源并以本地自签 TLS 端点验证 urllib/requests/httpx 拒绝无效证书。CLI 使用已审查的标准库启动器生成握手，得到允许后在**同一 PID** 编译执行固定探针；后者调用封存官方 CLI 和实际应用 runner，通过仅 loopback 的合成协议服务验证新会话、恢复会话及辅助调用。协议测试有意覆盖模型配置，仅使用合成鉴权，`live_model_verified`、原生搜索/抓取及行情仍为 false。失败类别和布尔检查可进入私有安全回执，原始输出只在专用私有目录；每项最终停止自己的 unit 并核专用 UID 已无进程，保留全部文件，不停止其他 stage。
+
+上述分项实现与离线回归不能代替真实 Linux 运行回执，更不能代替有范围的真实模型、搜索、抓取、行情和研究质量验收。只有实际执行且内核身份、握手、结果及停止检查均通过，才可将对应分项标记通过；它们不会标记生产发布成功。
+
+生产 drop-in 的固定非秘密约束（CLI、数据/日志路径、内部 API、封存 Astock 引擎、单 worker、production 环境和禁写 bytecode）统一放在最终 `ExecStart=/usr/bin/env` 参数中。systemd 的 EnvironmentFile 可以覆盖 Environment，故不再依赖 Environment 来绑定这些路径；原 EnvironmentFile 仅继承配置与凭证。固定路径拒绝空白、引号、反斜线、百分号、美元符和其他 systemd 特殊字符，避免参数展开或分词；不读出配置值。离线测试用冲突的合成环境实际执行 `/usr/bin/env` 验证优先级；实际执行 integration 时还会在独立 root 工作根生成无凭证的冲突合成 EnvironmentFile 与 service 片段，用固定 `systemd-analyze verify` 仅解析启动命令，真实 `.env` 路径已替换且不会读取，不启动该合成 unit。Mac 回归不宣称已完成 Linux systemd 解析或生产启动验收。

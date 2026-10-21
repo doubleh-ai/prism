@@ -40,6 +40,8 @@ ACTIONS = {
     "quarantine_failed_prepare",
     "stage",
     "finish_stage",
+    "integration_astock",
+    "integration_cli",
     "quiesce",
     "switch",
     "verify",
@@ -59,6 +61,142 @@ HOLD_MESSAGE = "系统升级中，请稍后重试"
 CLI_ENTRY = "home/ubuntu/.npm-global/bin/claude"
 CLI_SOURCE = "home/ubuntu/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 MAX_CLI_BINARY = 512 * 1024 * 1024
+INTEGRATION_PROBES = {
+    "integration_astock": ("astock", "a89af482aee19ec561c42a53274fdf7262c7dc2793d0e64095f774c11c71219b"),
+    "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
+}
+INTEGRATION_BOOT_CHECKS = {
+    "production_environment_denied",
+    "production_process_environment_denied",
+    "production_http_denied",
+    "sidecar_http_denied",
+    "candidate_write_denied",
+    "staging_directory_denied",
+}
+INTEGRATION_RESULT_CHECKS = {
+    "integration_astock": {
+        "credential_free_synthetic_environment",
+        "root_bootstrap_gate_accepted",
+        "astock_import_and_fixed_sources",
+        "default_tls_verification",
+        "tls_urllib_rejected",
+        "tls_requests_rejected",
+        "tls_httpx_rejected",
+    },
+    "integration_cli": {
+        "real_runner_new_session",
+        "real_runner_resume",
+        "real_auxiliary_no_tools",
+        "synthetic_children_reaped",
+        "cli_argv_and_environment",
+        "only_three_cli_children",
+        "paths_allowlisted",
+        "request_body_bounded",
+        "synthetic_auth_only",
+        "synthetic_model_only",
+        "request_budget_respected",
+        "auxiliary_http_tools_absent",
+        "requests_well_formed",
+        "three_real_cli_invocations",
+        "all_phases_reached_fixture",
+    },
+}
+
+# The CLI fixture consumes a same-PID gate but never manufactures that gate.
+# This reviewed stdlib bootstrap runs before site or candidate imports.
+CLI_INTEGRATION_BOOTSTRAP = r"""
+import errno
+import hashlib
+import json
+import os
+import re
+import socket
+import stat
+import sys
+import time
+from pathlib import Path
+
+
+def denied(path, write=False):
+    flags = os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_WRONLY | os.O_CREAT | os.O_EXCL if write else os.O_RDONLY)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as error:
+        return error.errno in ({errno.EACCES, errno.EPERM, errno.EROFS} if write else {errno.EACCES, errno.EPERM, errno.ENOENT})
+    os.close(fd)
+    if write:
+        os.unlink(path)
+    return False
+
+
+def disconnected(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as channel:
+        channel.settimeout(0.5)
+        code = channel.connect_ex(("127.0.0.1", port))
+    return code in {errno.EACCES, errno.EPERM, errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH}
+
+
+def main():
+    if len(sys.argv) != 9:
+        raise ValueError("bootstrap_arguments_rejected")
+    candidate, engine, cli, location, nonce, production, issued, expected = sys.argv[1:]
+    if (not re.fullmatch("[0-9a-f]{40}", candidate) or not all(re.fullmatch("[0-9a-f]{64}", value) for value in (engine, cli, expected))
+        or not re.fullmatch("[0-9a-f]{32}", nonce) or not re.fullmatch("[1-9][0-9]{0,9}", production)
+        or int(production) <= 1 or not re.fullmatch("[0-9]{1,12}", issued)):
+        raise ValueError("bootstrap_arguments_rejected")
+    work = Path(location)
+    if (work.parent.parent != Path("/var/lib/prism-operations/integration") or work.name != "cli-protocol"
+        or not re.fullmatch("[a-z0-9][a-z0-9-]{7,63}", work.parent.name) or not 0 <= time.time() - int(issued) <= 120):
+        raise ValueError("bootstrap_identity_rejected")
+    proof = {"schema": 1, "candidate": candidate, "engine": engine, "nonce": nonce, "pid": os.getpid(),
+        "production_pid": int(production), "issued_at": int(issued), "checked_at": int(time.time()), "probe_sha256": expected,
+        "checks": {
+            "production_environment_denied": denied("/home/ubuntu/stock-analyzer/.env"),
+            "production_process_environment_denied": denied("/proc/" + production + "/environ"),
+            "production_http_denied": disconnected(8088), "sidecar_http_denied": disconnected(8899),
+            "candidate_write_denied": denied("/opt/prism/releases/" + candidate + "/.integration-canary-" + nonce, True),
+            "staging_directory_denied": denied("/var/lib/prism-operations/staging"),
+        }}
+    raw = json.dumps(proof, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    fd = os.open(work / "output/bootstrap-proof.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as target:
+        target.write(raw)
+        target.flush()
+        os.fsync(target.fileno())
+    if not all(proof["checks"].values()):
+        raise ValueError("bootstrap_isolation_rejected")
+    allow_path = work / "root-allow.json"
+    deadline = time.monotonic() + 20
+    while not allow_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    fd = os.open(allow_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o444 or info.st_size > 4096:
+            raise ValueError("root_allow_rejected")
+        allow = json.loads(stream.read(4097))
+    values = {key: proof[key] for key in ("schema", "candidate", "engine", "nonce", "pid", "probe_sha256")}
+    values["bootstrap_proof_sha256"] = hashlib.sha256(raw).hexdigest()
+    if (type(allow) is not dict or set(allow) != {*values, "allowed_at"}
+        or any(type(allow.get(key)) is not type(value) or allow[key] != value for key, value in values.items())
+        or type(allow["allowed_at"]) is not int or not proof["checked_at"] <= allow["allowed_at"] <= time.time() <= int(issued) + 120):
+        raise ValueError("root_allow_rejected")
+    source = work / "probe.py"
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 131072:
+            raise ValueError("probe_source_rejected")
+        content = stream.read(131073)
+    if hashlib.sha256(content).hexdigest() != expected:
+        raise ValueError("probe_source_rejected")
+    # No subprocess: frozen helper checks this exact PID/proof before imports.
+    sys.argv = [str(source), "--candidate", candidate, "--cli-sha256", cli, "--workdir", str(work), "--nonce", nonce, "--probe-sha256", expected]
+    exec(compile(content, str(source), "exec"), {"__name__": "__main__", "__file__": str(source), "__package__": None})
+
+
+main()
+"""
 
 # Passed verbatim to the isolated interpreter, never supplied by a candidate.
 # -S keeps even site initialization behind the probes; site.main() subsequently
@@ -339,7 +477,7 @@ def run_command(args, *, env=None, timeout=120):
         and args[2:3] == ["--property=LoadState,ActiveState"]
         and len(args) == 4
         and re.fullmatch(
-            r"prism-(?:stage-[0-9a-f]{12}|diagnose-[0-9a-f]{12}-(?:namespace|check|dryrun|runonly|privaterun|runtimemasks|basicnamespace)-[0-9a-f]{8})\.service",
+            r"prism-(?:stage-[0-9a-f]{12}|integration-[0-9a-f]{12}-(?:astock|cli)-[0-9a-f]{8}|diagnose-[0-9a-f]{12}-(?:namespace|check|dryrun|runonly|privaterun|runtimemasks|basicnamespace)-[0-9a-f]{8})\.service",
             args[-1],
         )
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
@@ -1914,6 +2052,482 @@ class RemoteRelease:
         ):
             raise ReleaseError("stage_account_not_isolated")
 
+    def integration_account(self):
+        try:
+            account = pwd.getpwnam("prism-integration")
+        except KeyError:
+            self.boundary("integration_account")
+            self.run(
+                [
+                    "/usr/sbin/useradd",
+                    "--system",
+                    "--user-group",
+                    "--no-create-home",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    "prism-integration",
+                ]
+            )
+            account = pwd.getpwnam("prism-integration")
+        others = [pwd.getpwnam(name) for name in ("ubuntu", "prism-stage")]
+        if (
+            account.pw_uid == 0
+            or account.pw_gid == 0
+            or any(account.pw_uid == item.pw_uid or account.pw_gid == item.pw_gid for item in others)
+            or account.pw_shell != "/usr/sbin/nologin"
+            or grp.getgrgid(account.pw_gid).gr_name != "prism-integration"
+            or any("prism-integration" in group.gr_mem for group in grp.getgrall())
+        ):
+            raise ReleaseError("integration_account_not_isolated")
+        return account
+
+    def integration_idle(self, uid):
+        for process in (self.root / "proc").iterdir():
+            if process.name.isdigit():
+                values = self.kernel_uids(process)
+                if values is not None and uid in values:
+                    raise ReleaseError("integration_process_active")
+
+    def integration_identity(self, unit, production_pid, uid):
+        pid = self.process_id(unit)
+        process = self.root / "proc" / str(pid)
+        production = self.root / "proc" / str(production_pid)
+        if (
+            pid == production_pid
+            or self.process_id(SERVICE) != production_pid
+            or self.run(["/usr/bin/systemctl", "show", "--value", "--property=User", unit]).strip()
+            != b"prism-integration"
+            or self.kernel_uids(process) != (uid,) * 4
+            or (process / "ns/net").readlink() == (production / "ns/net").readlink()
+        ):
+            raise ReleaseError("integration_process_identity_rejected")
+        stage_uid = pwd.getpwnam("prism-stage").pw_uid
+        namespace = (process / "ns/net").readlink()
+        for other in (self.root / "proc").iterdir():
+            if not other.name.isdigit():
+                continue
+            values = self.kernel_uids(other)
+            if values is not None and stage_uid in values:
+                try:
+                    if (other / "ns/net").readlink() == namespace:
+                        raise ReleaseError("integration_stage_namespace_shared")
+                except FileNotFoundError:
+                    if other.exists():
+                        raise ReleaseError("integration_process_identity_rejected") from None
+        if self.stage_runtime_mount(process) is not True:
+            raise ReleaseError("integration_private_runtime_mount_required")
+        if (
+            self.process_id(unit) != pid
+            or self.process_id(SERVICE) != production_pid
+            or self.kernel_uids(process) != (uid,) * 4
+            or (process / "ns/net").readlink() != namespace
+            or namespace == (production / "ns/net").readlink()
+        ):
+            raise ReleaseError("integration_process_identity_rejected")
+        return {
+            "pid": pid,
+            "production_pid": production_pid,
+            "dedicated_user": True,
+            "separate_network_namespace": True,
+            "separate_stage_namespace": True,
+            "read_only_private_runtime_mount": True,
+            "checked_at": int(self.now()),
+        }
+
+    def integration_read(self, path, uid):
+        descriptor = os.open(self.checked(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != uid
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size > 16384
+            ):
+                raise ReleaseError("integration_record_rejected")
+            raw = source.read(16385)
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise ReleaseError("integration_record_rejected") from None
+        if type(value) is not dict or len(raw) > 16384:
+            raise ReleaseError("integration_record_rejected")
+        return value, digest(raw)
+
+    def integration_proof(self, work, uid, expected):
+        proof, sha = self.integration_read(work / "output/bootstrap-proof.json", uid)
+        if (
+            set(proof) != {*expected, "checked_at", "checks"}
+            or any(
+                type(proof.get(key)) is not type(value) or proof[key] != value
+                for key, value in expected.items()
+            )
+            or type(proof.get("checked_at")) is not int
+            or not expected["issued_at"] <= proof["checked_at"] <= self.now() <= expected["issued_at"] + 120
+            or type(proof.get("checks")) is not dict
+            or set(proof["checks"]) != INTEGRATION_BOOT_CHECKS
+            or any(value is not True for value in proof["checks"].values())
+        ):
+            raise ReleaseError("integration_bootstrap_proof_rejected")
+        return proof, sha
+
+    def integration_result(self, action, work, uid, expected, cli_sha):
+        filename = "result.json" if action == "integration_astock" else "cli-result.json"
+        value, sha = self.integration_read(work / "output" / filename, uid)
+        identity = {key: expected[key] for key in ("schema", "candidate", "nonce", "pid", "probe_sha256")}
+        if action == "integration_astock":
+            identity.update(
+                engine=expected["engine"],
+                production_pid=expected["production_pid"],
+                probe="astock_import_tls",
+                network_namespace_verified=False,
+                live_model_verified=False,
+                live_market_verified=False,
+            )
+            errors = {
+                "identity_rejected",
+                "credential_environment_rejected",
+                "bootstrap_rejected",
+                "astock_import_rejected",
+                "tls_verification_rejected",
+                "probe_execution_failed",
+                "private_result_write_failed",
+                "invalid_arguments",
+            }
+            extra = set()
+        else:
+            identity.update(
+                cli_sha256=cli_sha,
+                probe="cli_protocol_fixture",
+                fixture_model_configuration_override=True,
+                live_model_verified=False,
+                native_search_verified=False,
+                native_fetch_verified=False,
+            )
+            errors = {
+                "cli_protocol_fixture_failed",
+                "same_pid_bootstrap_required",
+                "synthetic_cleanup_failed",
+                "private_result_write_failed",
+            }
+            extra = {"cli_protocol_fixture_verified", "requests"}
+        allowed = {*identity, "checked_at", "passed", "checks", "error_class", *extra}
+        checks = value.get("checks")
+        if (
+            set(value) != allowed
+            or any(
+                type(value.get(key)) is not type(item) or value[key] != item for key, item in identity.items()
+            )
+            or type(value.get("checked_at")) is not int
+            or not expected["issued_at"] <= value["checked_at"] <= self.now() <= expected["issued_at"] + 120
+            or type(value.get("passed")) is not bool
+            or type(checks) is not dict
+            or not set(checks).issubset(INTEGRATION_RESULT_CHECKS[action])
+            or any(type(item) is not bool for item in checks.values())
+            or (
+                value.get("error_class") is not None
+                and (type(value["error_class"]) is not str or value["error_class"] not in errors)
+            )
+            or (
+                value["passed"]
+                and (
+                    set(checks) != INTEGRATION_RESULT_CHECKS[action]
+                    or not all(checks.values())
+                    or value["error_class"] is not None
+                )
+            )
+        ):
+            raise ReleaseError("integration_result_rejected")
+        if action == "integration_cli":
+            requests = value.get("requests")
+            if (
+                type(value.get("cli_protocol_fixture_verified")) is not bool
+                or value["cli_protocol_fixture_verified"] != value["passed"]
+                or type(requests) is not dict
+                or not set(requests).issubset({"stream_new", "stream_resume", "auxiliary"})
+                or any(
+                    type(row) is not dict
+                    or set(row) != {"messages", "count_tokens"}
+                    or any(type(item) is not int or not 0 <= item <= 8 for item in row.values())
+                    for row in requests.values()
+                )
+                or sum(sum(row.values()) for row in requests.values()) > 24
+                or (
+                    value["passed"]
+                    and (
+                        set(requests) != {"stream_new", "stream_resume", "auxiliary"}
+                        or any(row["messages"] < 1 for row in requests.values())
+                    )
+                )
+            ):
+                raise ReleaseError("integration_result_rejected")
+        return value, sha
+
+    def integration_command(
+        self, action, unit, work, engine_sha, cli_sha, nonce, production_pid, issued, source_sha
+    ):
+        arguments = [
+            "/usr/bin/systemd-run",
+            "--quiet",
+            "--unit=" + unit,
+            "--property=Type=exec",
+            "--property=RemainAfterExit=yes",
+            "--property=User=prism-integration",
+            "--property=Group=prism-integration",
+            "--property=SupplementaryGroups=",
+            "--property=WorkingDirectory=" + str(work),
+            "--property=PrivateNetwork=yes",
+            "--property=PrivateTmp=yes",
+            "--property=ProtectHome=yes",
+            "--property=ProtectProc=invisible",
+            "--property=ProcSubset=pid",
+            "--property=NoNewPrivileges=yes",
+            "--property=ProtectSystem=strict",
+            "--property=TemporaryFileSystem=/run:ro",
+            "--property=InaccessiblePaths=-" + str(self.operations / "staging"),
+            "--property=UMask=0077",
+            "--property=ReadWritePaths="
+            + " ".join(str(work / name) for name in ("output", "home", "tmp", "data")),
+            "--property=MemoryMax=768M",
+            "--property=TasksMax=32",
+            "--property=CPUQuota=100%",
+            "--property=RuntimeMaxSec=60",
+            "--property=KillMode=control-group",
+            "--property=StandardOutput=null",
+            "--property=StandardError=null",
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/bin:/bin",
+            "HOME=" + str(work / "home"),
+            "TMPDIR=" + str(work / "tmp"),
+            "PYTHONDONTWRITEBYTECODE=1",
+            "LANG=C.UTF-8",
+            "TZ=Asia/Shanghai",
+            str(self.release / ".venv/bin/python"),
+            "-I",
+            "-B",
+            "-S",
+        ]
+        if action == "integration_astock":
+            arguments += [
+                str(work / "probe.py"),
+                "--candidate",
+                self.request["commit"],
+                "--engine",
+                engine_sha,
+                "--workdir",
+                str(work),
+                "--nonce",
+                nonce,
+                "--production-pid",
+                str(production_pid),
+                "--issued-at",
+                str(issued),
+                "--probe-sha256",
+                source_sha,
+            ]
+        else:
+            arguments += [
+                "-c",
+                CLI_INTEGRATION_BOOTSTRAP,
+                self.request["commit"],
+                engine_sha,
+                cli_sha,
+                str(work),
+                nonce,
+                str(production_pid),
+                str(issued),
+                source_sha,
+            ]
+        return arguments
+
+    def integration_astock(self):
+        self.integration("integration_astock")
+
+    def integration_cli(self):
+        self.integration("integration_cli")
+
+    def integration_launch_syntax(self, work):
+        """Parse the fixed deployment command without opening real config."""
+        content = self.dropin(self.release)
+        environment = work / "synthetic-environment"
+        unit = work / "deployment-contract.service"
+        marker = b"EnvironmentFile=" + str(self.production / ".env").encode() + b"\n"
+        if content.count(marker) != 1:
+            raise ReleaseError("deployment_contract_rejected")
+        values = (
+            "CLAUDE_BIN",
+            "STOCK_DATA_DIR",
+            "STOCK_LOG_FILE",
+            "PRISM_INTERNAL_API_URL",
+            "PRISM_ASTOCK_PROJECT",
+            "PRISM_SINGLE_WORKER",
+            "PRISM_ENVIRONMENT",
+            "PYTHONDONTWRITEBYTECODE",
+        )
+        self.write(
+            environment, "".join(name + "=/synthetic-conflicting-setting\n" for name in values).encode()
+        )
+        content = content.replace(marker, b"EnvironmentFile=" + str(environment).encode() + b"\n")
+        unit_content = b"[Unit]\nDescription=Prism fixed deployment syntax contract\n" + content
+        self.write(unit, unit_content)
+        self.boundary("integration_validate_launch")
+        self.run(["/usr/bin/systemd-analyze", "verify", str(unit)], timeout=15)
+        return {
+            "systemd_syntax_verified": True,
+            "synthetic_environment_only": True,
+            "unit_started": False,
+            "unit_sha256": digest(unit_content),
+            "fixed_constraints": list(values),
+        }
+
+    def integration(self, action):
+        self.verify_tree()
+        kind, source_sha = INTEGRATION_PROBES[action]
+        attempt = self.request.get("integration_attempt", self.request["release_id"])
+        if not isinstance(attempt, str) or not RELEASE_ID.fullmatch(attempt):
+            raise ReleaseError("integration_attempt_rejected")
+        try:
+            source = base64.b64decode(self.request.get("integration_probe", ""), validate=True)
+        except (ValueError, TypeError):
+            raise ReleaseError("approved_integration_probe_required") from None
+        if (
+            self.request.get("integration_probe_sha256") != source_sha
+            or not 0 < len(source) <= 131072
+            or digest(source) != source_sha
+        ):
+            raise ReleaseError("approved_integration_probe_required")
+        account = self.integration_account()
+        self.integration_idle(account.pw_uid)
+        production_pid = self.process_id(SERVICE)
+        if Path(os.readlink(self.root / "proc" / str(production_pid) / "cwd")) != self.production:
+            raise ReleaseError("integration_original_runtime_required")
+        engine_sha = (self.release / ".engine-revision").read_text().strip()
+        cli_sha = (self.release / ".cli-revision").read_text().strip()
+        if not DIGEST.fullmatch(engine_sha) or not DIGEST.fullmatch(cli_sha):
+            raise ReleaseError("integration_candidate_identity_rejected")
+        work = self.checked(self.operations / "integration" / attempt / kind)
+        receipt = self.checked(self.record / ("integration-" + kind + "-" + attempt + ".json"))
+        if work.exists() or receipt.exists():
+            raise ReleaseError("integration_attempt_already_exists")
+        self.boundary("integration_workspace")
+        self.public_directory(work.parent.parent)
+        self.public_directory(work.parent)
+        work.mkdir(mode=0o755)
+        for name in ("output", "home", "tmp", "data"):
+            directory = work / name
+            directory.mkdir(mode=0o700)
+            os.chown(directory, account.pw_uid, account.pw_gid)
+        self.write(work / "probe.py", source, 0o644)
+        nonce, issued = secrets.token_hex(16), int(self.now())
+        unit = (
+            "prism-integration-"
+            + self.request["commit"][:12]
+            + ("-astock-" if action == "integration_astock" else "-cli-")
+            + nonce[:8]
+            + ".service"
+        )
+        expected = {
+            "schema": 1,
+            "candidate": self.request["commit"],
+            "engine": engine_sha,
+            "nonce": nonce,
+            "production_pid": production_pid,
+            "issued_at": issued,
+            "probe_sha256": source_sha,
+        }
+        report = {
+            "schema": 1,
+            "action": action,
+            "commit": self.request["commit"],
+            "attempt": attempt,
+            "probe_sha256": source_sha,
+            "passed": False,
+            "production_verified": False,
+            "live_model_verified": False,
+            "live_market_verified": False,
+            "native_search_verified": False,
+            "native_fetch_verified": False,
+            "unit_stopped": False,
+        }
+        launched = False
+        try:
+            report["deployment_contract"] = self.integration_launch_syntax(work)
+            self.boundary("integration_start")
+            self.integration_idle(account.pw_uid)
+            if self.process_id(SERVICE) != production_pid:
+                raise ReleaseError("integration_production_process_changed")
+            launched = True
+            self.run(
+                self.integration_command(
+                    action, unit, work, engine_sha, cli_sha, nonce, production_pid, issued, source_sha
+                ),
+                timeout=15,
+            )
+            deadline = time.monotonic() + 15
+            while not (work / "output/bootstrap-proof.json").exists():
+                self.stop()
+                if time.monotonic() >= deadline:
+                    raise ReleaseError("integration_bootstrap_timeout")
+                time.sleep(0.05)
+            identity = self.integration_identity(unit, production_pid, account.pw_uid)
+            expected["pid"] = identity["pid"]
+            proof, proof_sha = self.integration_proof(work, account.pw_uid, expected)
+            self.boundary("integration_allow_imports")
+            if self.integration_identity(unit, production_pid, account.pw_uid)["pid"] != identity["pid"]:
+                raise ReleaseError("integration_process_identity_rejected")
+            # Re-read untrusted output immediately before the root-owned gate.
+            if self.integration_proof(work, account.pw_uid, expected)[1] != proof_sha:
+                raise ReleaseError("integration_bootstrap_proof_changed")
+            allow = {
+                key: expected[key]
+                for key in ("schema", "candidate", "engine", "nonce", "pid", "probe_sha256")
+            }
+            allow.update(bootstrap_proof_sha256=proof_sha, allowed_at=int(self.now()))
+            self.write(work / "root-allow.json", encoded(allow), 0o444)
+            report.update(
+                identity=identity, bootstrap_proof_sha256=proof_sha, bootstrap_checks=proof["checks"]
+            )
+            deadline = time.monotonic() + 65
+            while True:
+                self.stop()
+                raw = self.run(
+                    ["/usr/bin/systemctl", "show", "--property=MainPID,ExecMainStatus,Result", unit]
+                )
+                status = dict(line.split("=", 1) for line in raw.decode("ascii").splitlines() if "=" in line)
+                if status.get("MainPID") == "0":
+                    break
+                if status.get("MainPID") != str(identity["pid"]) or time.monotonic() >= deadline:
+                    raise ReleaseError("integration_execution_timeout_or_identity_changed")
+                time.sleep(0.1)
+            result, result_sha = self.integration_result(action, work, account.pw_uid, expected, cli_sha)
+            report.update(result=result, result_sha256=result_sha)
+            if (
+                status.get("ExecMainStatus") != "0"
+                or status.get("Result") != "success"
+                or result["passed"] is not True
+            ):
+                raise ReleaseError("integration_probe_failed")
+            report["passed"] = True
+        except Exception as error:
+            report["failure_code"] = failure_code(error)
+            raise
+        finally:
+            try:
+                if launched:
+                    self.run(["/usr/bin/systemctl", "stop", unit], timeout=15)
+                    self.integration_idle(account.pw_uid)
+                    report["unit_stopped"] = True
+            except Exception:
+                report["passed"] = False
+                report["failure_code"] = "integration_cleanup_unconfirmed"
+                raise ReleaseError("integration_cleanup_unconfirmed") from None
+            finally:
+                report["checked_at"] = int(self.now())
+                self.action_report = report
+                self.write(receipt, encoded(report))
+
     def seed_stage_probes(self, stage):
         """Create disposable owners only in the not-yet-started private DB copy."""
         expected = self.checked(self.operations / "staging" / self.request["release_id"])
@@ -2522,26 +3136,45 @@ class RemoteRelease:
             raise ReleaseError("application_identity_mismatch")
         application = self.application(release, record)
         cli = self.verify_cli(record, release)
+        # systemd EnvironmentFile wins over Environment. /usr/bin/env assigns
+        # these reviewed non-secret constraints after inherited configuration.
+        paths = [
+            release,
+            release / ".venv/bin/python",
+            cli,
+            engine,
+            self.production / ".env",
+            self.production / "data",
+            self.production / "app.log",
+        ]
+        if any(
+            not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(path))
+            or any(part in {".", ".."} for part in PurePosixPath(str(path)).parts)
+            or "//" in str(path)
+            for path in paths
+        ):
+            raise ReleaseError("systemd_fixed_path_rejected")
+        constraints = {
+            "CLAUDE_BIN": str(cli),
+            "STOCK_DATA_DIR": str(self.production / "data"),
+            "STOCK_LOG_FILE": str(self.production / "app.log"),
+            "PRISM_INTERNAL_API_URL": "http://127.0.0.1:8088",
+            "PRISM_ASTOCK_PROJECT": str(engine),
+            "PRISM_SINGLE_WORKER": "1",
+            "PRISM_ENVIRONMENT": "production",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        command = "/usr/bin/env " + " ".join(name + "=" + value for name, value in constraints.items())
+        command += " " + str(release / ".venv/bin/python") + " -I -B -m uvicorn " + application
+        command += " --app-dir " + str(release) + " --host 127.0.0.1 --port 8088 --workers 1"
         return (
             "[Service]\nNoNewPrivileges=yes\nUMask=0077\nWorkingDirectory="
             + str(release)
-            + "\nExecStart=\nExecStart=/usr/bin/env CLAUDE_BIN="
-            + str(cli)
-            + " "
-            + str(release / ".venv/bin/python")
-            + " -I -B -m uvicorn "
-            + application
-            + " --app-dir "
-            + str(release)
-            + " --host 127.0.0.1 --port 8088 --workers 1\nEnvironmentFile="
+            + "\nExecStart=\nExecStart="
+            + command
+            + "\nEnvironmentFile="
             + str(self.production / ".env")
-            + "\nEnvironment=STOCK_DATA_DIR="
-            + str(self.production / "data")
-            + "\nEnvironment=STOCK_LOG_FILE="
-            + str(self.production / "app.log")
-            + "\nEnvironment=PRISM_INTERNAL_API_URL=http://127.0.0.1:8088\nEnvironment=PRISM_ASTOCK_PROJECT="
-            + str(engine)
-            + "\nEnvironment=PRISM_SINGLE_WORKER=1\nEnvironment=PRISM_ENVIRONMENT=production\nEnvironment=PYTHONDONTWRITEBYTECODE=1\n"
+            + "\n"
         ).encode()
 
     def recovery_target(self):
@@ -2857,6 +3490,8 @@ class RemoteRelease:
                     result["diagnostics"] = self.action_report
                 elif request["action"] == "finish_stage":
                     result["stage_cleanup"] = self.action_report
+                elif request["action"] in INTEGRATION_PROBES:
+                    result["integration"] = self.action_report
                 return result
             except Exception as error:
                 self.journal(

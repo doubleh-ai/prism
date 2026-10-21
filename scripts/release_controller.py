@@ -29,6 +29,8 @@ ACTIONS = (
     "quarantine_failed_prepare",
     "stage",
     "finish_stage",
+    "integration_astock",
+    "integration_cli",
     "quiesce",
     "switch",
     "verify",
@@ -37,6 +39,16 @@ ACTIONS = (
 )
 ROOT = Path(__file__).resolve().parent
 MAX_EXECUTOR_SOURCE = 512 * 1024
+INTEGRATION_PROBES = {
+    "integration_astock": (
+        "integration_probe.py",
+        "a89af482aee19ec561c42a53274fdf7262c7dc2793d0e64095f774c11c71219b",
+    ),
+    "integration_cli": (
+        "cli_protocol_probe.py",
+        "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789",
+    ),
+}
 
 # This small stdlib loader stays below Linux's single-argument limit. The
 # expected digest comes from trusted_source(), never from the stdin header.
@@ -175,6 +187,22 @@ def request_for(args):
             "manifest_sha256": receipts.get("manifest_sha256"),
         }
     )
+    if args.action in INTEGRATION_PROBES:
+        filename, approved = INTEGRATION_PROBES[args.action]
+        supplied = getattr(
+            args, "astock_probe_sha256" if args.action == "integration_astock" else "cli_probe_sha256", None
+        )
+        if supplied != approved:
+            raise ControlError("approved_integration_probe_required")
+        probe = trusted_source(filename, approved)
+        attempt = getattr(args, "integration_attempt", None) or args.release_id
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", attempt):
+            raise ControlError("integration_attempt_rejected")
+        request.update(
+            integration_probe=base64.b64encode(probe).decode(),
+            integration_probe_sha256=approved,
+            integration_attempt=attempt,
+        )
     if args.source_manifest:
         manifest = json.loads(outside_git(args.source_manifest).read_bytes())
         canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -359,6 +387,9 @@ def main():
         "lock",
         "wheelhouse",
         "verifier-sha256",
+        "astock-probe-sha256",
+        "cli-probe-sha256",
+        "integration-attempt",
     ):
         parser.add_argument("--" + name)
     parser.add_argument("--stop-file", required=True, help="Private operator stop flag outside Git")

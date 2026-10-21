@@ -17,7 +17,7 @@ remote = existing.remote
 def test_both_fixed_recovery_actions_are_exposed_without_integration_wip():
     assert {"diagnose_build", "quarantine_failed_prepare"}.issubset(remote.ACTIONS)
     assert {"diagnose_build", "quarantine_failed_prepare"}.issubset(existing.controller.ACTIONS)
-    assert "integration_astock" not in remote.ACTIONS
+    assert {"integration_astock", "integration_cli"}.issubset(remote.ACTIONS)
 
 
 @pytest.fixture
