@@ -4,6 +4,7 @@ The structural graph remains evidence-backed. This module reads other Prism
 features and produces a transient signal layer without inventing supply-chain
 edges from weak correlations.
 """
+
 from __future__ import annotations
 
 import json
@@ -13,7 +14,6 @@ from collections import defaultdict
 from typing import Any
 
 from .database import get_db
-
 
 _TICKER_RE = re.compile(r"(?<!\d)([034689]\d{5})(?!\d)")
 _SOURCE_ORDER = {"analysis": 0, "vibe": 1, "report": 2, "watchlist": 3}
@@ -67,15 +67,18 @@ def build_industry_context(username: str) -> dict[str, Any]:
         if not code or source not in _SOURCE_ORDER:
             return
         timestamp = int(at or 0)
-        item = tickers.setdefault(code, {
-            "ticker": code,
-            "name": "",
-            "latest_at": 0,
-            "latest_signal": "",
-            "signal_tone": "neutral",
-            "source_counts": defaultdict(int),
-            "evidence": [],
-        })
+        item = tickers.setdefault(
+            code,
+            {
+                "ticker": code,
+                "name": "",
+                "latest_at": 0,
+                "latest_signal": "",
+                "signal_tone": "neutral",
+                "source_counts": defaultdict(int),
+                "evidence": [],
+            },
+        )
         clean_name = _text(name, 80)
         if clean_name and (not item["name"] or timestamp >= item["latest_at"]):
             item["name"] = clean_name
@@ -86,16 +89,18 @@ def build_industry_context(username: str) -> dict[str, Any]:
             item["latest_signal"] = clean_signal
             item["signal_tone"] = _tone(clean_signal)
             item["latest_signal_at"] = timestamp
-        item["evidence"].append({
-            "source": source,
-            "source_label": _SOURCE_LABELS[source],
-            "label": _text(label, 100) or _SOURCE_LABELS[source],
-            "detail": _text(detail, 280),
-            "signal": clean_signal,
-            "tone": _tone(clean_signal),
-            "at": timestamp,
-            "target_id": _text(target_id, 128),
-        })
+        item["evidence"].append(
+            {
+                "source": source,
+                "source_label": _SOURCE_LABELS[source],
+                "label": _text(label, 100) or _SOURCE_LABELS[source],
+                "detail": _text(detail, 280),
+                "signal": clean_signal,
+                "tone": _tone(clean_signal),
+                "at": timestamp,
+                "target_id": _text(target_id, 128),
+            }
+        )
 
     with get_db() as db:
         analyses = db.execute(
@@ -111,8 +116,12 @@ def build_industry_context(username: str) -> dict[str, Any]:
         for row in analyses:
             source_totals["analysis"] += 1
             register(
-                row["ticker"], name=row["name"], source="analysis",
-                at=row["updated_at"], signal=row["signal"], target_id=row["id"],
+                row["ticker"],
+                name=row["name"],
+                source="analysis",
+                at=row["updated_at"],
+                signal=row["signal"],
+                target_id=row["id"],
                 label=f"{row['mode'] or 'deep'} 分析",
                 detail=f"最新评级：{row['signal'] or '未评级'}",
             )
@@ -130,9 +139,14 @@ def build_industry_context(username: str) -> dict[str, Any]:
         for row in reports:
             source_totals["report"] += 1
             register(
-                row["ticker"], name=row["name"], source="report",
-                at=row["updated_at"], signal=row["signal"], target_id=row["id"],
-                label=row["title"] or "已保存报告", detail=row["summary"],
+                row["ticker"],
+                name=row["name"],
+                source="report",
+                at=row["updated_at"],
+                signal=row["signal"],
+                target_id=row["id"],
+                label=row["title"] or "已保存报告",
+                detail=row["summary"],
             )
 
         plans = db.execute(
@@ -158,8 +172,11 @@ def build_industry_context(username: str) -> dict[str, Any]:
                     continue
                 source_totals["vibe"] += 1
                 register(
-                    candidate.get("ticker"), name=candidate.get("name"),
-                    source="vibe", at=timestamp, target_id=row["id"],
+                    candidate.get("ticker"),
+                    name=candidate.get("name"),
+                    source="vibe",
+                    at=timestamp,
+                    target_id=row["id"],
                     label=candidate.get("role") or plan.get("title") or "Vibe 候选",
                     detail=candidate.get("why") or plan.get("agent_summary") or "",
                 )
@@ -185,8 +202,11 @@ def build_industry_context(username: str) -> dict[str, Any]:
                 continue
             source_totals["watchlist"] += 1
             register(
-                code, name=row["target_label"], source="watchlist",
-                at=row["created_at"], label="当前自选关注",
+                code,
+                name=row["target_label"],
+                source="watchlist",
+                at=row["created_at"],
+                label="当前自选关注",
                 detail="来自行情看板的自选操作",
             )
 
@@ -198,9 +218,12 @@ def build_industry_context(username: str) -> dict[str, Any]:
             """
         ).fetchall()
 
-    links: dict[str, dict[str, set[str]]] = defaultdict(lambda: {
-        "categories": set(), "node_ids": set(),
-    })
+    links: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: {
+            "categories": set(),
+            "node_ids": set(),
+        }
+    )
     for row in link_rows:
         code = _ticker(row["source_ticker"])
         if not code:
@@ -224,32 +247,39 @@ def build_industry_context(username: str) -> dict[str, Any]:
         if linked:
             linked_count += 1
             for category in item["categories"]:
-                context = category_context.setdefault(category, {
-                    "active_tickers": 0,
-                    "latest_at": 0,
-                    "source_counts": defaultdict(int),
-                    "signals": [],
-                })
+                context = category_context.setdefault(
+                    category,
+                    {
+                        "active_tickers": 0,
+                        "latest_at": 0,
+                        "source_counts": defaultdict(int),
+                        "signals": [],
+                    },
+                )
                 context["active_tickers"] += 1
                 context["latest_at"] = max(context["latest_at"], item["latest_at"])
                 for source, count in item["source_counts"].items():
                     context["source_counts"][source] += count
                 if item["latest_signal"]:
-                    context["signals"].append({
-                        "ticker": code,
-                        "name": item["name"],
-                        "signal": item["latest_signal"],
-                        "tone": item["signal_tone"],
-                        "at": item["latest_at"],
-                    })
+                    context["signals"].append(
+                        {
+                            "ticker": code,
+                            "name": item["name"],
+                            "signal": item["latest_signal"],
+                            "tone": item["signal_tone"],
+                            "at": item["latest_at"],
+                        }
+                    )
         for event in item["evidence"][:3]:
-            recent_events.append({
-                **event,
-                "ticker": code,
-                "name": item["name"] or code,
-                "linked": item["linked"],
-                "categories": item["categories"],
-            })
+            recent_events.append(
+                {
+                    **event,
+                    "ticker": code,
+                    "name": item["name"] or code,
+                    "linked": item["linked"],
+                    "categories": item["categories"],
+                }
+            )
 
     for context in category_context.values():
         context["source_counts"] = dict(context["source_counts"])

@@ -1,9 +1,11 @@
 """Security regressions: XSS, security headers, path traversal."""
+
 import os
 import re
 import sys
-import pytest
 from pathlib import Path
+
+import pytest
 
 # Make server importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,13 +31,22 @@ def _sanitize_html(html):
     s = re.sub(r"\s+on[a-z]+\s*=\s*[^\s>]+", "", s, flags=re.IGNORECASE)
     s = re.sub(
         r'(href|src|action|formaction|srcset|xlink:href)\s*=\s*"\s*(javascript|vbscript)\s*:[^"]*"',
-        r'\1="#"', s, flags=re.IGNORECASE)
+        r'\1="#"',
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(
         r"(href|src|action|formaction|srcset|xlink:href)\s*=\s*'\s*(javascript|vbscript)\s*:[^']*'",
-        "$1='#'", s, flags=re.IGNORECASE)
+        "$1='#'",
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(
         r"(href|src|action|formaction|srcset|xlink:href)\s*=\s*(javascript|vbscript)\s*:[^\s>]*",
-        '$1="#"', s, flags=re.IGNORECASE)
+        '$1="#"',
+        s,
+        flags=re.IGNORECASE,
+    )
     return s
 
 
@@ -88,10 +99,9 @@ class TestHTMLSanitizer:
 class TestServerXSS:
     def test_filename_escaped_in_404(self):
         """The 404 page must escape the filename — no reflected XSS."""
-        from html import escape
-        from unittest.mock import patch
+
         # Simulate a malicious filename — quoted HTML would otherwise inject markup
-        evil = '<script>alert(1)</script>.html'
+        _evil = "<script>alert(1)</script>.html"
         # We don't have a live app here; just assert the constant path is escaped
         # by reading main.py and confirming html.escape is used in the 404 branch.
         main_src = Path(__file__).resolve().parent.parent / "server" / "main.py"
@@ -158,7 +168,8 @@ class TestCSRFDefense:
     async def test_post_without_csrf_header_is_rejected(self, client, auth_cookies):
         """A POST without X-Requested-With: XMLHttpRequest must be 403."""
         r = await client.post(
-            "/api/convs", json={"title": "x"},
+            "/api/convs",
+            json={"title": "x"},
             headers={"X-Requested-With": ""},  # present but wrong value
             cookies=auth_cookies,
         )
@@ -168,7 +179,8 @@ class TestCSRFDefense:
     async def test_post_with_csrf_header_passes(self, client, auth_cookies):
         """A POST with the correct CSRF header must succeed."""
         r = await client.post(
-            "/api/convs", json={"title": "csrf test"},
+            "/api/convs",
+            json={"title": "csrf test"},
             cookies=auth_cookies,
         )
         assert r.status_code == 200, f"Got {r.status_code}: {r.text}"
@@ -176,7 +188,8 @@ class TestCSRFDefense:
     @pytest.mark.asyncio
     async def test_delete_without_csrf_header_is_rejected(self, client, auth_cookies):
         r = await client.delete(
-            "/api/convs/abc", cookies=auth_cookies,
+            "/api/convs/abc",
+            cookies=auth_cookies,
             headers={"X-Requested-With": ""},
         )
         assert r.status_code == 403
@@ -191,7 +204,8 @@ class TestCSRFDefense:
     async def test_login_exempt_from_csrf(self, client, test_user):
         """Login is unauthenticated so CSRF can't apply (no session to bind to)."""
         r = await client.post(
-            "/api/login", json={"username": test_user["username"], "password": test_user["password"]},
+            "/api/login",
+            json={"username": test_user["username"], "password": test_user["password"]},
         )
         # 200 on success, 403 on bad creds — but never 403 due to missing CSRF header
         assert r.status_code in (200, 403)
@@ -215,6 +229,7 @@ class TestCookieSecurity:
     def test_login_sets_csrf_cookie(self, client, test_user):
         """Successful login must issue both 'token' and 'csrf_token' cookies."""
         import asyncio
+
         async def _check():
             r = await client.post(
                 "/api/login",
@@ -225,6 +240,7 @@ class TestCookieSecurity:
             jar = dict(client.cookies)
             # At minimum the token cookie is present
             assert "token" in jar
+
         asyncio.get_event_loop().run_until_complete(_check())
 
 
@@ -232,27 +248,34 @@ class TestCookieSecurity:
 class TestCSRFVerify:
     def test_get_passes(self):
         from server.auth import verify_csrf
+
         # Build a mock request-like object
         class R:
             method = "GET"
             headers = {}
+
         verify_csrf(R())  # No raise
 
     def test_post_without_header_raises(self):
-        from server.auth import verify_csrf
         from fastapi import HTTPException
+
+        from server.auth import verify_csrf
+
         class R:
             method = "POST"
             headers = {}
+
         with pytest.raises(HTTPException) as e:
             verify_csrf(R())
         assert e.value.status_code == 403
 
     def test_post_with_header_passes(self):
         from server.auth import verify_csrf
+
         class R:
             method = "POST"
             headers = {"X-Requested-With": "XMLHttpRequest"}
+
         verify_csrf(R())  # No raise
 
 
@@ -260,13 +283,17 @@ class TestCSRFVerify:
 class TestPydanticModels:
     def test_login_request_requires_username(self):
         from pydantic import ValidationError
+
         from server.models import LoginRequest
+
         with pytest.raises(ValidationError):
             LoginRequest(password="x")
 
     def test_login_request_length_limits(self):
         from pydantic import ValidationError
+
         from server.models import LoginRequest
+
         with pytest.raises(ValidationError):
             LoginRequest(username="x" * 100, password="x")
         with pytest.raises(ValidationError):
@@ -274,31 +301,41 @@ class TestPydanticModels:
 
     def test_chat_stream_question_too_long_rejected(self):
         from pydantic import ValidationError
+
         from server.models import ChatStreamRequest
+
         with pytest.raises(ValidationError):
             ChatStreamRequest(question="x" * 40000)
 
     def test_chat_stream_question_required(self):
         from pydantic import ValidationError
+
         from server.models import ChatStreamRequest
+
         with pytest.raises(ValidationError):
             ChatStreamRequest()
 
     def test_batch_delete_ids_too_many(self):
         from pydantic import ValidationError
+
         from server.models import BatchDeleteRequest
+
         with pytest.raises(ValidationError):
             BatchDeleteRequest(ids=[f"id{i}" for i in range(300)])
 
     def test_batch_delete_ids_too_long_string(self):
         from pydantic import ValidationError
+
         from server.models import BatchDeleteRequest
+
         with pytest.raises(ValidationError):
             BatchDeleteRequest(ids=["x" * 200])
 
     def test_explain_term_length_cap(self):
         from pydantic import ValidationError
+
         from server.models import ExplainTermRequest
+
         with pytest.raises(ValidationError):
             ExplainTermRequest(term="x" * 100)
 
@@ -309,8 +346,11 @@ class TestPydanticModels:
 
     @pytest.mark.asyncio
     async def test_chat_endpoint_returns_422_on_oversize_question(self, client, auth_cookies):
-        r = await client.post("/api/chat/stream", cookies=auth_cookies,
-                              json={"question": "x" * 40000, "skill": "bottleneck-hunter"})
+        r = await client.post(
+            "/api/chat/stream",
+            cookies=auth_cookies,
+            json={"question": "x" * 40000, "skill": "bottleneck-hunter"},
+        )
         assert r.status_code == 422
 
     @pytest.mark.asyncio
@@ -330,12 +370,12 @@ class TestRequestIDMiddleware:
 
     @pytest.mark.asyncio
     async def test_client_supplied_request_id_is_echoed(self, client, auth_cookies):
-        r = await client.get("/api/me", cookies=auth_cookies,
-                             headers={"X-Request-ID": "trace-abc-123"})
+        r = await client.get("/api/me", cookies=auth_cookies, headers={"X-Request-ID": "trace-abc-123"})
         assert r.headers["X-Request-ID"] == "trace-abc-123"
 
     def test_get_request_id_context(self):
-        from server.middleware import get_request_id, _request_id_var
+        from server.middleware import _request_id_var, get_request_id
+
         # Without a request, the default is '-'
         _request_id_var.set("-")
         assert get_request_id() == "-"
@@ -357,8 +397,7 @@ class TestErrorSanitization:
 
     @pytest.mark.asyncio
     async def test_validation_error_sanitized(self, client, auth_cookies):
-        r = await client.post("/api/chat/stream", cookies=auth_cookies,
-                              json={"question": "x" * 99999})
+        r = await client.post("/api/chat/stream", cookies=auth_cookies, json={"question": "x" * 99999})
         assert r.status_code == 422
         body = r.json()
         # The full echo of the sent value must NOT be returned
@@ -375,32 +414,38 @@ class TestErrorSanitization:
 class TestLoggingConfig:
     def test_uses_rotating_file_handler(self):
         import logging
-        from logging.handlers import RotatingFileHandler
+        import tempfile
+
         from server.middleware import configure_logging
-        import tempfile, os
+
         with tempfile.TemporaryDirectory() as td:
             log_path = os.path.join(td, "test.log")
-            logger = configure_logging(log_path, level="DEBUG")
+            configure_logging(log_path, level="DEBUG")
             # The root logger should have a RotatingFileHandler
             root = logging.getLogger()
             kinds = [type(h).__name__ for h in root.handlers]
             assert "RotatingFileHandler" in kinds
 
     def test_request_id_filter_attached(self):
-        from server.middleware import configure_logging, RequestIDFilter
-        import logging, tempfile, os
+        import logging
+        import tempfile
+
+        from server.middleware import RequestIDFilter, configure_logging
+
         with tempfile.TemporaryDirectory() as td:
             log_path = os.path.join(td, "test.log")
             configure_logging(log_path)
             root = logging.getLogger()
             # Filter must be on at least one handler
-            found = any(any(isinstance(f, RequestIDFilter) for f in h.filters)
-                        for h in root.handlers)
+            found = any(any(isinstance(f, RequestIDFilter) for f in h.filters) for h in root.handlers)
             assert found
 
     def test_log_level_configurable(self):
-        import logging, tempfile
+        import logging
+        import tempfile
+
         from server.middleware import configure_logging
+
         with tempfile.TemporaryDirectory() as td:
             log_path = f"{td}/test.log"
             configure_logging(log_path, level="DEBUG")

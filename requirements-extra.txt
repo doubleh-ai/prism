@@ -1,5 +1,6 @@
 # Prism — 可选依赖（行情数据源）
 # 这些包体积大或仅在启用对应 provider 时才需要。
 # 安装：pip install -r requirements-extra.txt
-akshare>=1.13,<2
-baostock>=0.8.11,<1
+# CI 也安装这些版本，使行情 provider 的模拟测试可以导入完整依赖。
+akshare==1.18.64
+baostock==0.9.2

@@ -4,9 +4,11 @@ Defense-in-depth: every endpoint that accepts JSON should validate the
 input shape and reject malformed/malicious payloads at the boundary
 rather than deep in business logic.
 """
+
 import re
-from typing import Any, List, Optional
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from typing import Any
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 def validation_error_message(e: Exception) -> str:
@@ -53,19 +55,19 @@ class AdminUserStatusRequest(BaseModel):
 class ActivityTrackRequest(BaseModel):
     feature: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]*$")
     action: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-z][a-z0-9_-]*$")
-    target_type: Optional[str] = Field(default="", max_length=32, pattern=r"^[a-z0-9_-]*$")
-    target_id: Optional[str] = Field(default="", max_length=120)
-    target_label: Optional[str] = Field(default="", max_length=120)
+    target_type: str | None = Field(default="", max_length=32, pattern=r"^[a-z0-9_-]*$")
+    target_id: str | None = Field(default="", max_length=120)
+    target_label: str | None = Field(default="", max_length=120)
 
 
 class DiagnosticEventRequest(BaseModel):
     kind: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-z][a-z0-9_-]*$")
     severity: str = Field(default="error", pattern=r"^(info|warning|error|critical)$")
-    component: Optional[str] = Field(default="", max_length=120)
-    page: Optional[str] = Field(default="", max_length=240)
+    component: str | None = Field(default="", max_length=120)
+    page: str | None = Field(default="", max_length=240)
     message: str = Field(..., min_length=1, max_length=2000)
-    stack: Optional[str] = Field(default="", max_length=8000)
-    version: Optional[str] = Field(default="", max_length=40)
+    stack: str | None = Field(default="", max_length=8000)
+    version: str | None = Field(default="", max_length=40)
     context: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("context")
@@ -86,19 +88,19 @@ class DiagnosticEventRequest(BaseModel):
 # ── Saved reports ──
 class SavedReportCreateRequest(BaseModel):
     source: str = Field(default="manual", min_length=1, max_length=32)
-    source_id: Optional[str] = Field(default=None, max_length=128)
-    conv_id: Optional[str] = Field(default=None, max_length=128)
-    ticker: Optional[str] = Field(default="", max_length=32)
-    name: Optional[str] = Field(default="", max_length=80)
-    title: Optional[str] = Field(default="", max_length=160)
-    signal: Optional[str] = Field(default="", max_length=32)
-    summary: Optional[str] = Field(default="", max_length=500)
+    source_id: str | None = Field(default=None, max_length=128)
+    conv_id: str | None = Field(default=None, max_length=128)
+    ticker: str | None = Field(default="", max_length=32)
+    name: str | None = Field(default="", max_length=80)
+    title: str | None = Field(default="", max_length=160)
+    signal: str | None = Field(default="", max_length=32)
+    summary: str | None = Field(default="", max_length=500)
     report: dict[str, Any] = Field(default_factory=dict)
 
 
 class SavedReportSaveRequest(BaseModel):
-    title: Optional[str] = Field(default="", max_length=160)
-    summary: Optional[str] = Field(default="", max_length=500)
+    title: str | None = Field(default="", max_length=160)
+    summary: str | None = Field(default="", max_length=500)
 
 
 # ── Vibe Trading ──
@@ -117,7 +119,7 @@ class VibeFollowUpRequest(BaseModel):
 
 # ── Conversations ──
 class CreateConvRequest(BaseModel):
-    skill: Optional[str] = Field(default="bottleneck-hunter", max_length=64)
+    skill: str | None = Field(default="bottleneck-hunter", max_length=64)
 
 
 class UpdateSkillRequest(BaseModel):
@@ -125,11 +127,11 @@ class UpdateSkillRequest(BaseModel):
 
 
 class BatchDeleteRequest(BaseModel):
-    ids: List[str] = Field(..., min_length=1, max_length=200)
+    ids: list[str] = Field(..., min_length=1, max_length=200)
 
     @field_validator("ids")
     @classmethod
-    def _validate_ids(cls, v: List[str]) -> List[str]:
+    def _validate_ids(cls, v: list[str]) -> list[str]:
         for cid in v:
             if not isinstance(cid, str) or len(cid) == 0 or len(cid) > 128:
                 raise ValueError("invalid conversation id")
@@ -140,9 +142,9 @@ class BatchDeleteRequest(BaseModel):
 class ChatStreamRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=32000)
     skill: str = Field(default="bottleneck-hunter", max_length=64)
-    conv_id: Optional[str] = Field(default=None, max_length=128)
-    model: Optional[str] = Field(default=None, max_length=64)
-    extra_skills: Optional[List[str]] = Field(default=None, max_length=16)
+    conv_id: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=64)
+    extra_skills: list[str] | None = Field(default=None, max_length=16)
 
     @field_validator("extra_skills")
     @classmethod
@@ -167,4 +169,4 @@ class ChatCancelRequest(BaseModel):
 # ── Term explanation ──
 class ExplainTermRequest(BaseModel):
     term: str = Field(..., min_length=1, max_length=80)
-    context: Optional[str] = Field(default="", max_length=200)
+    context: str | None = Field(default="", max_length=200)

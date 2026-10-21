@@ -1,17 +1,24 @@
 """Indicator DSL evaluator — whitelist + correctness."""
+
 import numpy as np
 import pandas as pd
 import pytest
-from server.indicators.dsl import evaluate, validate, is_signal, DSLError
+
+from server.indicators.dsl import DSLError, evaluate, is_signal, validate
 
 
 def _df():
     # flat then jump → ma5 crosses above ma20 after step 30
     close = np.array([10.0] * 30 + [15.0] * 30)
-    return pd.DataFrame({
-        "open": close, "high": close + 0.5, "low": close - 0.5,
-        "close": close, "volume": np.linspace(1e6, 3e6, 60),
-    })
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.linspace(1e6, 3e6, 60),
+        }
+    )
 
 
 def test_ma_evaluates():
@@ -27,10 +34,12 @@ def test_cross_up_is_signal_and_fires():
 
 
 def test_and_combination_evaluates():
-    dsl = {"and": [
-        {"cross_up": [{"ma": 5}, {"ma": 20}]},
-        {"gt": [{"vol": 0}, {"mul": [2, {"ma_vol": 5}]}]},
-    ]}
+    dsl = {
+        "and": [
+            {"cross_up": [{"ma": 5}, {"ma": 20}]},
+            {"gt": [{"vol": 0}, {"mul": [2, {"ma_vol": 5}]}]},
+        ]
+    }
     s = evaluate(dsl, _df())
     assert is_signal(s)
 
@@ -77,36 +86,50 @@ def test_extended_time_series_ops():
 
 
 def _ma_stack_volume_dsl():
-    return {"and": [
-        {"and": [
-            {"within": [
-                {"cross_up": [{"ma": {"param": ["fast", 5]}}, {"ma": {"param": ["mid", 10]}}]},
-                {"param": ["sync_window", 1]},
-            ]},
-            {"within": [
-                {"cross_up": [{"ma": {"param": ["mid", 10]}}, {"ma": {"param": ["slow", 20]}}]},
-                {"param": ["sync_window", 1]},
-            ]},
-        ]},
-        {"gt": [
-            {"vol": 0},
-            {"mul": [
-                {"param": ["multiplier", 3]},
-                {"ref": [{"ma_vol": {"param": ["baseline_window", 5]}}, 1]},
-            ]},
-        ]},
-    ]}
+    return {
+        "and": [
+            {
+                "and": [
+                    {
+                        "within": [
+                            {"cross_up": [{"ma": {"param": ["fast", 5]}}, {"ma": {"param": ["mid", 10]}}]},
+                            {"param": ["sync_window", 1]},
+                        ]
+                    },
+                    {
+                        "within": [
+                            {"cross_up": [{"ma": {"param": ["mid", 10]}}, {"ma": {"param": ["slow", 20]}}]},
+                            {"param": ["sync_window", 1]},
+                        ]
+                    },
+                ]
+            },
+            {
+                "gt": [
+                    {"vol": 0},
+                    {
+                        "mul": [
+                            {"param": ["multiplier", 3]},
+                            {"ref": [{"ma_vol": {"param": ["baseline_window", 5]}}, 1]},
+                        ]
+                    },
+                ]
+            },
+        ]
+    }
 
 
 def test_ma_stack_volume_combines_three_conditions_and_excludes_current_volume():
     close = np.array([10.0] * 30 + [30.0])
-    df = pd.DataFrame({
-        "open": close,
-        "high": close + 0.5,
-        "low": close - 0.5,
-        "close": close,
-        "volume": np.array([100.0] * 30 + [301.0]),
-    })
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.array([100.0] * 30 + [301.0]),
+        }
+    )
     params = {
         "fast": 5,
         "mid": 10,

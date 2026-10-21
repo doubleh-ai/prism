@@ -11,7 +11,6 @@ from server.vibe import (
     build_vibe_plan,
 )
 
-
 REPORT = """# 存储产业深度研究
 
 > 存储至少包含存储芯片、企业数据存储与能源储能三条路线，本次根据 A 股纯度与证据质量聚焦存储芯片。
@@ -116,17 +115,20 @@ def test_vibe_structured_answer_and_disclosed_gaps_are_readable():
 def test_vibe_tool_failures_keep_audit_detail_but_expose_readable_summary():
     connection_error = (
         '{"ok": false, "error": "ranking_request failed: '
-        "HTTPConnectionPool(host='push2.eastmoney.com', port=443): Max retries exceeded" 
+        "HTTPConnectionPool(host='push2.eastmoney.com', port=443): Max retries exceeded"
         '"}'
     )
     assert _tool_result_summary("get_sector_info", connection_error, "error") == (
         "外部数据源暂时不可达，已跳过并记录缺口"
     )
-    assert _tool_result_summary(
-        "web_search",
-        '{"status":"ok","query":"HBM","results":[],"note":"No results found"}',
-        "warning",
-    ) == "本次检索未找到可用公开证据"
+    assert (
+        _tool_result_summary(
+            "web_search",
+            '{"status":"ok","query":"HBM","results":[],"note":"No results found"}',
+            "warning",
+        )
+        == "本次检索未找到可用公开证据"
+    )
 
     plan = {"quality": {}, "activity": [], "created_at": 1}
     _apply_engine_event(plan, "tool_call", {"tool": "get_sector_info"}, "call")
@@ -193,7 +195,11 @@ async def test_official_vibe_run_persists_tools_report_and_followup(client, auth
     async def fake_messages(session_id, limit=100):
         messages = []
         for attempt in sorted(state["terminal"]):
-            content = REPORT if attempt == "attempt-1" else "## 增量核验\n\n追问已使用 [新来源](https://example.com/new) 完成复核。"
+            content = (
+                REPORT
+                if attempt == "attempt-1"
+                else "## 增量核验\n\n追问已使用 [新来源](https://example.com/new) 完成复核。"
+            )
             messages.append({"role": "assistant", "linked_attempt_id": attempt, "content": content})
         return messages
 
@@ -201,9 +207,17 @@ async def test_official_vibe_run_persists_tools_report_and_followup(client, auth
         attempt = f"attempt-{state['attempt']}"
         yield "attempt.started", {}, "e1"
         yield "tool_call", {"tool": "web_search", "arguments": {"query": "存储产业 A股"}}, "e2"
-        yield "tool_result", {"tool": "web_search", "status": "ok", "elapsed_ms": 120, "preview": "2 sources"}, "e3"
+        yield (
+            "tool_result",
+            {"tool": "web_search", "status": "ok", "elapsed_ms": 120, "preview": "2 sources"},
+            "e3",
+        )
         yield "tool_call", {"tool": "get_financial_statements", "arguments": {"symbol": "688525.SH"}}, "e4"
-        yield "tool_result", {"tool": "get_financial_statements", "status": "ok", "elapsed_ms": 220, "preview": "financials"}, "e5"
+        yield (
+            "tool_result",
+            {"tool": "get_financial_statements", "status": "ok", "elapsed_ms": 220, "preview": "financials"},
+            "e5",
+        )
         yield "thinking_done", {}, "e6"
         state["terminal"].add(attempt)
         yield "attempt.completed", {"summary": "done"}, "e7"

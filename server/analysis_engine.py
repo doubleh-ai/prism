@@ -4,6 +4,7 @@ Each analysis runs in a thread-pool executor.  LangGraph stream events are
 pushed into an asyncio.Queue so the SSE endpoint can consume them without
 polling or blocking the event loop.
 """
+
 import asyncio
 import json
 import logging
@@ -11,27 +12,26 @@ import os
 import sys
 import time
 import uuid
-from contextlib import contextmanager
-from typing import Dict, Optional
+from contextlib import contextmanager, suppress
 
 from .config import (
-    ASTOCK_PROJECT,
-    ASTOCK_LLM_QUICK,
-    ASTOCK_LLM_DEEP,
-    ASTOCK_LLM_PROVIDER,
-    ASTOCK_LLM_BASE_URL,
-    ASTOCK_LLM_API_KEY,
-    ASTOCK_DATA_VENDOR,
-    ASTOCK_MAX_DEBATE_ROUNDS,
-    ASTOCK_OUTPUT_LANGUAGE,
-    ASTOCK_RESULTS_DIR,
-    ASTOCK_HARD_TIMEOUT_SECONDS,
     ASTOCK_CACHE_TTL_SECONDS,
-    ASTOCK_FAST_ANALYSTS,
+    ASTOCK_DATA_VENDOR,
     ASTOCK_DEEP_ANALYSTS,
+    ASTOCK_FAST_ANALYSTS,
     ASTOCK_FAST_DEBATE_ROUNDS,
     ASTOCK_FAST_RISK_ROUNDS,
+    ASTOCK_HARD_TIMEOUT_SECONDS,
+    ASTOCK_LLM_API_KEY,
+    ASTOCK_LLM_BASE_URL,
+    ASTOCK_LLM_DEEP,
+    ASTOCK_LLM_PROVIDER,
+    ASTOCK_LLM_QUICK,
+    ASTOCK_MAX_DEBATE_ROUNDS,
     ASTOCK_NO_PROXY_DOMAINS,
+    ASTOCK_OUTPUT_LANGUAGE,
+    ASTOCK_PROJECT,
+    ASTOCK_RESULTS_DIR,
 )
 from .database import get_db
 
@@ -51,7 +51,7 @@ def _ensure_astock():
 
 
 # ── In-memory store for running/completed analyses ──
-_store: Dict[str, dict] = {}
+_store: dict[str, dict] = {}
 
 _VALID_ANALYSTS = {"market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"}
 
@@ -70,7 +70,7 @@ def _cache_key_user(username: str) -> str:
     return username or "__anonymous__"
 
 
-def _load_cached_analysis(username: str, ticker: str, trade_date: str, mode: str) -> Optional[dict]:
+def _load_cached_analysis(username: str, ticker: str, trade_date: str, mode: str) -> dict | None:
     if ASTOCK_CACHE_TTL_SECONDS <= 0:
         return None
     cutoff = int(time.time()) - ASTOCK_CACHE_TTL_SECONDS
@@ -102,9 +102,17 @@ def _load_cached_analysis(username: str, ticker: str, trade_date: str, mode: str
         return None
 
 
-def _save_cached_analysis(username: str, ticker: str, trade_date: str, mode: str,
-                          name: str, signal: str, report: dict,
-                          timings: dict, elapsed: float) -> None:
+def _save_cached_analysis(
+    username: str,
+    ticker: str,
+    trade_date: str,
+    mode: str,
+    name: str,
+    signal: str,
+    report: dict,
+    timings: dict,
+    elapsed: float,
+) -> None:
     if ASTOCK_CACHE_TTL_SECONDS <= 0 or not report:
         return
     now = int(time.time())
@@ -182,6 +190,7 @@ def _build_config(mode: str = "deep") -> dict:
     if ASTOCK_LLM_API_KEY:
         os_key = f"{ASTOCK_LLM_PROVIDER.upper()}_API_KEY"
         import os as _os
+
         if not _os.environ.get(os_key):
             _os.environ[os_key] = ASTOCK_LLM_API_KEY
     cfg["output_language"] = ASTOCK_OUTPUT_LANGUAGE
@@ -214,7 +223,7 @@ _ASTOCK_SNAPSHOT_KEYS = {
 }
 
 
-def _merge_astock_stream_state(previous: dict, chunk, initial_state: Optional[dict] = None) -> dict:
+def _merge_astock_stream_state(previous: dict, chunk, initial_state: dict | None = None) -> dict:
     """Normalize TradingAgents stream output without flattening state containers.
 
     Current TradingAgents-astock releases stream with ``stream_mode='values'``;
@@ -242,9 +251,14 @@ def _merge_astock_stream_state(previous: dict, chunk, initial_state: Optional[di
     return merged
 
 
-async def start_analysis(ticker: str, name: str = "", date: str = "",
-                         username: str = "", mode: str = "deep",
-                         force_refresh: bool = False) -> str:
+async def start_analysis(
+    ticker: str,
+    name: str = "",
+    date: str = "",
+    username: str = "",
+    mode: str = "deep",
+    force_refresh: bool = False,
+) -> str:
     """Launch an astock analysis in a background thread.
 
     Returns an *analysis_id* that can be used to stream progress via
@@ -280,33 +294,41 @@ async def start_analysis(ticker: str, name: str = "", date: str = "",
     if cached:
         report = cached["report"]
         meta = report.setdefault("_analysis_meta", {})
-        meta.update({
-            "mode": mode,
-            "cached": True,
-            "trade_date": trade_date,
-            "selected_analysts": selected_analysts,
-            "cache_updated_at": cached.get("updated_at"),
-            "timings": cached.get("timings") or {},
-        })
-        _store[aid].update({
-            "status": "done",
-            "report": report,
-            "signal": cached.get("signal"),
-            "cached": True,
-            "timings": cached.get("timings") or {},
-            "elapsed": cached.get("elapsed") or 0,
-        })
-        queue.put_nowait({"type": "status", "elapsed": 0, "message": "使用今日缓存报告，已跳过重复 Astock 分析。"})
+        meta.update(
+            {
+                "mode": mode,
+                "cached": True,
+                "trade_date": trade_date,
+                "selected_analysts": selected_analysts,
+                "cache_updated_at": cached.get("updated_at"),
+                "timings": cached.get("timings") or {},
+            }
+        )
+        _store[aid].update(
+            {
+                "status": "done",
+                "report": report,
+                "signal": cached.get("signal"),
+                "cached": True,
+                "timings": cached.get("timings") or {},
+                "elapsed": cached.get("elapsed") or 0,
+            }
+        )
+        queue.put_nowait(
+            {"type": "status", "elapsed": 0, "message": "使用今日缓存报告，已跳过重复 Astock 分析。"}
+        )
         queue.put_nowait({"type": "stage", "elapsed": 0, "stage": "decision", "progress_pct": 100})
-        queue.put_nowait({
-            "type": "done",
-            "elapsed": round(cached.get("elapsed") or 0, 1),
-            "report": report,
-            "signal": cached.get("signal"),
-            "mode": mode,
-            "cached": True,
-            "timings": cached.get("timings") or {},
-        })
+        queue.put_nowait(
+            {
+                "type": "done",
+                "elapsed": round(cached.get("elapsed") or 0, 1),
+                "report": report,
+                "signal": cached.get("signal"),
+                "mode": mode,
+                "cached": True,
+                "timings": cached.get("timings") or {},
+            }
+        )
         return aid
 
     _ensure_astock()
@@ -323,10 +345,8 @@ async def start_analysis(ticker: str, name: str = "", date: str = "",
         start = time.time()
 
         def _emit(event_type: str, **kwargs):
-            try:
+            with suppress(asyncio.QueueFull):
                 queue.put_nowait({"type": event_type, "elapsed": round(time.time() - start, 1), **kwargs})
-            except asyncio.QueueFull:
-                pass
 
         _STAGE_ORDER = ["analysts", "debate", "research", "trader", "risk", "decision"]
         _STAGE_PCT = {"analysts": 40, "debate": 55, "research": 65, "trader": 75, "risk": 90, "decision": 100}
@@ -357,6 +377,7 @@ async def start_analysis(ticker: str, name: str = "", date: str = "",
             proxy_entered = True
             cfg = _build_config(mode)
             import inspect
+
             graph_kwargs = {"debug": True, "config": cfg}
             if "selected_analysts" in inspect.signature(TradingAgentsGraph).parameters:
                 graph_kwargs["selected_analysts"] = selected_analysts
@@ -420,7 +441,9 @@ async def start_analysis(ticker: str, name: str = "", date: str = "",
             _store[aid]["timings"] = timings
             _store[aid]["elapsed"] = timings["total_seconds"]
             _store[aid]["status"] = "done"
-            _save_cached_analysis(username, ticker, trade_date, mode, name, signal, report, timings, timings["total_seconds"])
+            _save_cached_analysis(
+                username, ticker, trade_date, mode, name, signal, report, timings, timings["total_seconds"]
+            )
             _emit("done", report=report, signal=signal, mode=mode, cached=False, timings=timings)
 
             # Post-analysis structured extraction (dashboard upgrade). Emits a
@@ -430,7 +453,17 @@ async def start_analysis(ticker: str, name: str = "", date: str = "",
                 structured = _extract_structured(report, ticker, name)
                 if structured:
                     report["structured"] = structured
-                    _save_cached_analysis(username, ticker, trade_date, mode, name, signal, report, timings, timings["total_seconds"])
+                    _save_cached_analysis(
+                        username,
+                        ticker,
+                        trade_date,
+                        mode,
+                        name,
+                        signal,
+                        report,
+                        timings,
+                        timings["total_seconds"],
+                    )
                     _emit("structured", structured=structured)
             except Exception as exc:
                 log.warning("structured extraction failed: %s", exc)
@@ -478,31 +511,34 @@ async def stream_events(analysis_id: str):
     started = entry.get("started_at") or time.time()
     last_activity = time.time()
     warned_slow = False
-    SLOW_IDLE = 60            # no real event for 60s → tell user it's slow
-    HARD_TIMEOUT = 15 * 60    # 15 min total with no done/error → abort
+    SLOW_IDLE = 60  # no real event for 60s → tell user it's slow
+    HARD_TIMEOUT = 15 * 60  # 15 min total with no done/error → abort
 
     HARD_TIMEOUT = max(60, ASTOCK_HARD_TIMEOUT_SECONDS)
 
     while True:
         try:
             event = await asyncio.wait_for(queue.get(), timeout=0.5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             now = time.time()
             # Warn once when data fetching stalls (typical when mootdx/eastmoney
             # are blocked — each call burns its full timeout before failing).
             if now - last_activity > SLOW_IDLE and not warned_slow:
                 warned_slow = True
-                yield _sse({"type": "slow",
-                            "message": "数据源响应较慢，仍在拉取中…（行情接口偶有阻塞）"})
+                yield _sse({"type": "slow", "message": "数据源响应较慢，仍在拉取中…（行情接口偶有阻塞）"})
             # Hard ceiling so a hung run can't spin forever silently.
             if now - started > HARD_TIMEOUT:
                 entry["status"] = "error"
                 entry["error"] = f"analysis timeout after {HARD_TIMEOUT}s"
                 timeout_min = max(1, round(HARD_TIMEOUT / 60))
-                yield _sse({"type": "error",
-                            "message": f"分析超时（{timeout_min} 分钟无进展）已中止。"
-                                       "通常因行情数据源（mootdx/eastmoney）网络不通，"
-                                       "请检查服务器出口或更换数据源。"})
+                yield _sse(
+                    {
+                        "type": "error",
+                        "message": f"分析超时（{timeout_min} 分钟无进展）已中止。"
+                        "通常因行情数据源（mootdx/eastmoney）网络不通，"
+                        "请检查服务器出口或更换数据源。",
+                    }
+                )
                 break
             # Heartbeat keeps the SSE connection alive and lets the
             # frontend tick its elapsed timer every 0.5s.
@@ -516,7 +552,7 @@ async def stream_events(analysis_id: str):
             break
 
 
-def get_report(analysis_id: str) -> Optional[dict]:
+def get_report(analysis_id: str) -> dict | None:
     """Return the completed analysis report, or None if still running."""
     entry = _store.get(analysis_id)
     if not entry or entry["status"] not in ("done", "error"):
@@ -552,9 +588,15 @@ def _extract_report(final_state: dict, ticker: str, name: str) -> dict:
     }
 
     # Analyst reports
-    for key in ("market_report", "sentiment_report", "news_report",
-                "fundamentals_report", "policy_report",
-                "hot_money_report", "lockup_report"):
+    for key in (
+        "market_report",
+        "sentiment_report",
+        "news_report",
+        "fundamentals_report",
+        "policy_report",
+        "hot_money_report",
+        "lockup_report",
+    ):
         val = _get_last_message(final_state.get(key, ""))
         if val:
             report["analyst_reports"][key.replace("_report", "")] = val
@@ -619,8 +661,17 @@ def _get_last_message(obj) -> str:
                 return content
         return ""
     if isinstance(obj, dict):
-        for key in ("text", "content", "result", "output", "message", "summary",
-                    "final_trade_decision", "final_decision", "trader_investment_plan"):
+        for key in (
+            "text",
+            "content",
+            "result",
+            "output",
+            "message",
+            "summary",
+            "final_trade_decision",
+            "final_decision",
+            "trader_investment_plan",
+        ):
             if key in obj:
                 content = _get_last_message(obj.get(key))
                 if content:
@@ -644,14 +695,21 @@ def _get_last_message(obj) -> str:
 # lower/replace turned "Social Media Analyst" into "social_media", which never
 # matched the grid's "social" key.)
 _AGENT_KEY = {
-    "Market Analyst": "market", "Social Media Analyst": "social",
-    "News Analyst": "news", "Fundamentals Analyst": "fundamentals",
-    "Policy Analyst": "policy", "Hot Money Analyst": "hot_money",
+    "Market Analyst": "market",
+    "Social Media Analyst": "social",
+    "News Analyst": "news",
+    "Fundamentals Analyst": "fundamentals",
+    "Policy Analyst": "policy",
+    "Hot Money Analyst": "hot_money",
     "Lockup Analyst": "lockup",
-    "Bull Researcher": "bull_researcher", "Bear Researcher": "bear_researcher",
-    "Research Manager": "research_manager", "Trader": "trader",
-    "Aggressive Analyst": "aggressive", "Conservative Analyst": "conservative",
-    "Neutral Analyst": "neutral", "Risk Committee": "risk",
+    "Bull Researcher": "bull_researcher",
+    "Bear Researcher": "bear_researcher",
+    "Research Manager": "research_manager",
+    "Trader": "trader",
+    "Aggressive Analyst": "aggressive",
+    "Conservative Analyst": "conservative",
+    "Neutral Analyst": "neutral",
+    "Risk Committee": "risk",
     "Portfolio Manager": "portfolio_manager",
 }
 
@@ -675,15 +733,21 @@ _NODE_LABELS = {
 }
 
 _STAGE_FOR_NODE = {
-    "Market Analyst": "analysts", "Social Media Analyst": "analysts",
-    "News Analyst": "analysts", "Fundamentals Analyst": "analysts",
-    "Policy Analyst": "analysts", "Hot Money Analyst": "analysts",
+    "Market Analyst": "analysts",
+    "Social Media Analyst": "analysts",
+    "News Analyst": "analysts",
+    "Fundamentals Analyst": "analysts",
+    "Policy Analyst": "analysts",
+    "Hot Money Analyst": "analysts",
     "Lockup Analyst": "analysts",
-    "Bull Researcher": "debate", "Bear Researcher": "debate",
+    "Bull Researcher": "debate",
+    "Bear Researcher": "debate",
     "Research Manager": "research",
     "Trader": "trader",
-    "Aggressive Analyst": "risk", "Conservative Analyst": "risk",
-    "Neutral Analyst": "risk", "Risk Committee": "risk",
+    "Aggressive Analyst": "risk",
+    "Conservative Analyst": "risk",
+    "Neutral Analyst": "risk",
+    "Risk Committee": "risk",
     "Portfolio Manager": "decision",
 }
 
@@ -703,10 +767,18 @@ _STATE_FIELD_NODE = {
 
 # State fields that hold a node's main prose output, in priority order.
 _REPORT_FIELDS = (
-    "market_report", "sentiment_report", "news_report", "fundamentals_report",
-    "policy_report", "hot_money_report", "lockup_report",
-    "investment_debate_state", "trader_investment_plan",
-    "risk_debate_state", "final_trade_decision", "investment_plan",
+    "market_report",
+    "sentiment_report",
+    "news_report",
+    "fundamentals_report",
+    "policy_report",
+    "hot_money_report",
+    "lockup_report",
+    "investment_debate_state",
+    "trader_investment_plan",
+    "risk_debate_state",
+    "final_trade_decision",
+    "investment_plan",
 )
 
 
@@ -718,7 +790,7 @@ def _node_label(node_name: str) -> str:
     return _NODE_LABELS.get(node_name) or str(node_name or "")
 
 
-def _semantic_stream_updates(chunk, previous_state: Optional[dict] = None) -> list[dict]:
+def _semantic_stream_updates(chunk, previous_state: dict | None = None) -> list[dict]:
     """Normalize LangGraph stream chunks into user-facing analysis events.
 
     TradingAgents-astock debug streams usually emit state snapshots whose first
@@ -734,14 +806,16 @@ def _semantic_stream_updates(chunk, previous_state: Optional[dict] = None) -> li
         if node_name not in _STAGE_FOR_NODE:
             continue
         update = raw_update if isinstance(raw_update, dict) else {node_name: raw_update}
-        updates.append({
-            "node": node_name,
-            "label": _node_label(node_name),
-            "agent": _agent_key_for_node(node_name),
-            "stage": _STAGE_FOR_NODE.get(node_name, ""),
-            "update": update,
-            "text": _node_snippet(update),
-        })
+        updates.append(
+            {
+                "node": node_name,
+                "label": _node_label(node_name),
+                "agent": _agent_key_for_node(node_name),
+                "stage": _STAGE_FOR_NODE.get(node_name, ""),
+                "update": update,
+                "text": _node_snippet(update),
+            }
+        )
     if updates:
         return updates
 
@@ -756,14 +830,16 @@ def _semantic_stream_updates(chunk, previous_state: Optional[dict] = None) -> li
         if text == _get_last_message(previous_state.get(field, "")):
             continue
         update = {field: value}
-        updates.append({
-            "node": node_name,
-            "label": _node_label(node_name),
-            "agent": _agent_key_for_node(node_name),
-            "stage": _STAGE_FOR_NODE.get(node_name, ""),
-            "update": update,
-            "text": _node_snippet(update),
-        })
+        updates.append(
+            {
+                "node": node_name,
+                "label": _node_label(node_name),
+                "agent": _agent_key_for_node(node_name),
+                "stage": _STAGE_FOR_NODE.get(node_name, ""),
+                "update": update,
+                "text": _node_snippet(update),
+            }
+        )
     return updates
 
 
@@ -792,6 +868,7 @@ def _parse_json_lenient(raw: str):
     Also tolerates raw JSON and JSON embedded in prose."""
     import json
     import re
+
     if not raw:
         return None
     data = None
@@ -825,7 +902,7 @@ def _parse_json_lenient(raw: str):
     return None
 
 
-def _extract_structured(report: dict, ticker: str, name: str) -> Optional[dict]:
+def _extract_structured(report: dict, ticker: str, name: str) -> dict | None:
     """Post-analysis LLM extraction: turn the free-text astock report into a
     structured JSON the frontend renders as a dashboard (signal, confidence,
     metrics, trade plan, per-analyst digests, bull/bear, verdict).
@@ -835,6 +912,7 @@ def _extract_structured(report: dict, ticker: str, name: str) -> Optional[dict]:
     executor thread; bounded by a subprocess timeout so it can't hang.
     """
     import subprocess
+
     from .config import CLAUDE_BIN
 
     def _t(v):
@@ -844,19 +922,21 @@ def _extract_structured(report: dict, ticker: str, name: str) -> Optional[dict]:
     sections = [f"### {k}\n{_t(v)[:1500]}" for k, v in ar.items()]
     debate = report.get("investment_debate", {}) or {}
     risk = report.get("risk_debate", {}) or {}
-    bundle = "\n\n".join([
-        f"股票: {ticker} {name}",
-        "## 分析师研报\n" + "\n\n".join(sections),
-        f"## 多方论点\n{_t(debate.get('bull_history', ''))[:1000]}",
-        f"## 空方论点\n{_t(debate.get('bear_history', ''))[:1000]}",
-        f"## 多空裁决\n{_t(debate.get('judge_decision', ''))[:600]}",
-        f"## 交易方案\n{_t(report.get('trader_plan', ''))[:1000]}",
-        f"## 激进方\n{_t(risk.get('aggressive', ''))[:600]}",
-        f"## 保守方\n{_t(risk.get('conservative', ''))[:600]}",
-        f"## 最终决策\n{_t(report.get('final_decision', ''))[:2000]}",
-    ])
+    bundle = "\n\n".join(
+        [
+            f"股票: {ticker} {name}",
+            "## 分析师研报\n" + "\n\n".join(sections),
+            f"## 多方论点\n{_t(debate.get('bull_history', ''))[:1000]}",
+            f"## 空方论点\n{_t(debate.get('bear_history', ''))[:1000]}",
+            f"## 多空裁决\n{_t(debate.get('judge_decision', ''))[:600]}",
+            f"## 交易方案\n{_t(report.get('trader_plan', ''))[:1000]}",
+            f"## 激进方\n{_t(risk.get('aggressive', ''))[:600]}",
+            f"## 保守方\n{_t(risk.get('conservative', ''))[:600]}",
+            f"## 最终决策\n{_t(report.get('final_decision', ''))[:2000]}",
+        ]
+    )
     schema = (
-        '严格只输出JSON，schema：'
+        "严格只输出JSON，schema："
         '{"signal":"买入|持有|卖出|观望",'
         '"confidence":0到100的整数,'
         '"thesis":"1-2句核心论点",'
@@ -868,18 +948,30 @@ def _extract_structured(report: dict, ticker: str, name: str) -> Optional[dict]:
         '"verdict":"多|空|中","bullets":["要点1","要点2"]}],'
         '"bull_bear":{"bull":"多方摘要","bear":"空方摘要","judge":"偏多|偏空|中性"},'
         '"verdict_summary":"最终结论摘要"}'
-        '只输出JSON，不要任何额外文字。'
+        "只输出JSON，不要任何额外文字。"
     )
-    prompt = ("你是投研分析师。根据以下 astock 多智能体分析报告，提炼成结构化JSON仪表盘数据。\n"
-              + schema + "\n\n报告内容：\n" + bundle)
+    prompt = (
+        "你是投研分析师。根据以下 astock 多智能体分析报告，提炼成结构化JSON仪表盘数据。\n"
+        + schema
+        + "\n\n报告内容：\n"
+        + bundle
+    )
 
     try:
         proc = subprocess.run(
-            [CLAUDE_BIN, "-p", prompt,
-             "--model", "minimax-m2.7-fast",
-             "--max-tokens", "1500",
-             "--output-format", "json"],
-            capture_output=True, timeout=40,
+            [
+                CLAUDE_BIN,
+                "-p",
+                prompt,
+                "--model",
+                "minimax-m2.7-fast",
+                "--max-tokens",
+                "1500",
+                "--output-format",
+                "json",
+            ],
+            capture_output=True,
+            timeout=40,
         )
     except Exception as exc:
         log.warning("structured extraction subprocess failed: %s", exc)

@@ -1,8 +1,10 @@
 """Build the default provider chain based on ``MARKET_PROVIDERS`` config."""
+
 import logging
+
+from ..config import FUNDAMENTALS_TTL, KLINE_TTL, MARKET_PROVIDERS, QUOTE_TTL
 from .cache import MarketCache
 from .chain import ProviderChain
-from ..config import MARKET_PROVIDERS, QUOTE_TTL, KLINE_TTL, FUNDAMENTALS_TTL
 
 log = logging.getLogger("stock-app")
 
@@ -14,12 +16,15 @@ def _try_build_provider(name: str):
     try:
         if name == "akshare":
             from .akshare_provider import AkshareProvider
+
             return AkshareProvider()
         if name == "baostock":
             from .baostock_provider import BaostockProvider
+
             return BaostockProvider()
         if name == "tencent":
             from .tencent_provider import TencentProvider
+
             return TencentProvider()
         log.warning(f"Unknown market provider: {name}")
         return None
@@ -42,7 +47,8 @@ def get_chain() -> ProviderChain:
     if not providers:
         log.warning("No market providers available — endpoints will return 503")
     _chain = ProviderChain(
-        providers, cache=cache,
+        providers,
+        cache=cache,
         ttls={"quote": QUOTE_TTL, "kline": KLINE_TTL, "fundamentals": FUNDAMENTALS_TTL},
     )
     return _chain

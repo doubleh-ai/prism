@@ -1,4 +1,5 @@
 """Privacy-aware anomaly collection and admin diagnostic bundles."""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,12 +15,20 @@ from .database import check_rate_limit, get_db
 from .models import DiagnosticEventRequest, validation_error_message
 from .release import release_payload
 
-
 router = APIRouter()
 
 _ALLOWED_CONTEXT_KEYS = {
-    "mode", "route", "method", "status", "selector", "resource",
-    "request_id", "source", "line", "column", "viewport",
+    "mode",
+    "route",
+    "method",
+    "status",
+    "selector",
+    "resource",
+    "request_id",
+    "source",
+    "line",
+    "column",
+    "viewport",
 }
 _TOKEN_RE = re.compile(
     r"(?i)(?:bearer\s+)?(?:sk-[A-Za-z0-9_-]{8,}|(?:api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+)"
@@ -47,17 +56,31 @@ def _safe_context(context: dict | None) -> dict[str, Any]:
 
 
 def record_diagnostic(
-    *, username: str = "", kind: str, severity: str = "error",
-    component: str = "", page: str = "", message: str,
-    stack: str = "", version: str = "", context: dict | None = None,
+    *,
+    username: str = "",
+    kind: str,
+    severity: str = "error",
+    component: str = "",
+    page: str = "",
+    message: str,
+    stack: str = "",
+    version: str = "",
+    context: dict | None = None,
 ) -> int:
     now = int(time.time())
     clean_message = _redact(message, 2000) or "Unknown anomaly"
     clean_stack = _redact(stack, 8000)
     clean_context = _safe_context(context)
-    signature = "\n".join([
-        kind, component, page, clean_message[:600], clean_stack.splitlines()[0] if clean_stack else "", version,
-    ])
+    signature = "\n".join(
+        [
+            kind,
+            component,
+            page,
+            clean_message[:600],
+            clean_stack.splitlines()[0] if clean_stack else "",
+            version,
+        ]
+    )
     fingerprint = hashlib.sha256(signature.encode("utf-8", errors="replace")).hexdigest()[:24]
     with get_db() as db:
         row = db.execute(
@@ -71,8 +94,13 @@ def record_diagnostic(
                 """UPDATE diagnostic_events
                    SET occurrences=?, last_seen=?, severity=?, context_json=?
                    WHERE id=?""",
-                [int(row["occurrences"] or 0) + 1, now, severity,
-                 json.dumps(clean_context, ensure_ascii=False), row["id"]],
+                [
+                    int(row["occurrences"] or 0) + 1,
+                    now,
+                    severity,
+                    json.dumps(clean_context, ensure_ascii=False),
+                    row["id"],
+                ],
             )
             return int(row["id"])
         cur = db.execute(
@@ -80,9 +108,20 @@ def record_diagnostic(
                (username, kind, severity, component, page, message, stack,
                 fingerprint, version, context_json, first_seen, last_seen)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            [username, kind, severity, _redact(component, 120), _redact(page, 240),
-             clean_message, clean_stack, fingerprint, _redact(version, 40),
-             json.dumps(clean_context, ensure_ascii=False), now, now],
+            [
+                username,
+                kind,
+                severity,
+                _redact(component, 120),
+                _redact(page, 240),
+                clean_message,
+                clean_stack,
+                fingerprint,
+                _redact(version, 40),
+                json.dumps(clean_context, ensure_ascii=False),
+                now,
+                now,
+            ],
         )
         return int(cur.lastrowid)
 

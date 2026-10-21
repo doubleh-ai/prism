@@ -3,11 +3,14 @@
 Phase 6: Each astock analysis can feed new nodes/edges into the graph,
 building a global industry knowledge map over time.
 """
+
 import json
 import re
-from fastapi import APIRouter, Request, HTTPException
-from .database import get_db
+
+from fastapi import APIRouter, HTTPException, Request
+
 from .auth import require_auth
+from .database import get_db
 from .industry_context import build_industry_context
 
 router = APIRouter(prefix="/api/industry")
@@ -20,8 +23,10 @@ def _slug(name: str) -> str:
 
 def _category_stats(db) -> list[dict]:
     """Return enriched per-chain stats for navigation and overview cards."""
-    rows = [dict(r) for r in db.execute(
-        """
+    rows = [
+        dict(r)
+        for r in db.execute(
+            """
         SELECT
             category,
             COUNT(*) AS node_count,
@@ -36,7 +41,8 @@ def _category_stats(db) -> list[dict]:
         GROUP BY category
         ORDER BY node_count DESC, category ASC
         """
-    ).fetchall()]
+        ).fetchall()
+    ]
     edge_counts = {
         r["category"]: r["edge_count"]
         for r in db.execute(
@@ -51,8 +57,10 @@ def _category_stats(db) -> list[dict]:
     for row in rows:
         cat = row["category"]
         row["edge_count"] = edge_counts.get(cat, 0)
-        row["top_nodes"] = [dict(r) for r in db.execute(
-            """
+        row["top_nodes"] = [
+            dict(r)
+            for r in db.execute(
+                """
             SELECT id, name, source_ticker, tier, country, description,
                    market_share, confidence
             FROM industry_nodes
@@ -60,8 +68,9 @@ def _category_stats(db) -> list[dict]:
             ORDER BY COALESCE(market_share, 0) DESC, confidence DESC, tier ASC, name ASC
             LIMIT 4
             """,
-            [cat],
-        ).fetchall()]
+                [cat],
+            ).fetchall()
+        ]
     return rows
 
 
@@ -79,7 +88,9 @@ async def graph(
         wheres = []
         params = []
         if ticker:
-            wheres.append("(source_ticker = ? OR target_node_id IN (SELECT id FROM industry_nodes WHERE source_ticker = ?))")
+            wheres.append(
+                "(source_ticker = ? OR target_node_id IN (SELECT id FROM industry_nodes WHERE source_ticker = ?))"
+            )
             params.extend([ticker, ticker])
         if category:
             wheres.append("category = ?")
@@ -89,23 +100,29 @@ async def graph(
             params.append(country.upper())
 
         where = " AND ".join(wheres) if wheres else "1=1"
-        nodes = [dict(r) for r in db.execute(
-            f"SELECT * FROM industry_nodes WHERE confidence >= ? AND ({where}) ORDER BY tier, confidence DESC",
-            [min_confidence] + params,
-        ).fetchall()]
+        nodes = [
+            dict(r)
+            for r in db.execute(
+                f"SELECT * FROM industry_nodes WHERE confidence >= ? AND ({where}) ORDER BY tier, confidence DESC",
+                [min_confidence] + params,
+            ).fetchall()
+        ]
 
         node_ids = {n["id"] for n in nodes}
         edges = []
         if node_ids:
             placeholders = ",".join("?" for _ in node_ids)
-            edges = [dict(r) for r in db.execute(
-                f"SELECT e.*, s.name AS source_name, t.name AS target_name "
-                f"FROM industry_edges e "
-                f"JOIN industry_nodes s ON e.source_node_id = s.id "
-                f"JOIN industry_nodes t ON e.target_node_id = t.id "
-                f"WHERE e.source_node_id IN ({placeholders}) OR e.target_node_id IN ({placeholders})",
-                list(node_ids) + list(node_ids),
-            ).fetchall()]
+            edges = [
+                dict(r)
+                for r in db.execute(
+                    f"SELECT e.*, s.name AS source_name, t.name AS target_name "
+                    f"FROM industry_edges e "
+                    f"JOIN industry_nodes s ON e.source_node_id = s.id "
+                    f"JOIN industry_nodes t ON e.target_node_id = t.id "
+                    f"WHERE e.source_node_id IN ({placeholders}) OR e.target_node_id IN ({placeholders})",
+                    list(node_ids) + list(node_ids),
+                ).fetchall()
+            ]
 
         # Expand by depth: include nodes reachable from current set
         if depth > 1 and edges:
@@ -116,10 +133,13 @@ async def graph(
             new_ids = expanded_ids - node_ids
             if new_ids:
                 placeholders2 = ",".join("?" for _ in new_ids)
-                extra = [dict(r) for r in db.execute(
-                    f"SELECT * FROM industry_nodes WHERE id IN ({placeholders2})",
-                    list(new_ids),
-                ).fetchall()]
+                extra = [
+                    dict(r)
+                    for r in db.execute(
+                        f"SELECT * FROM industry_nodes WHERE id IN ({placeholders2})",
+                        list(new_ids),
+                    ).fetchall()
+                ]
                 nodes.extend(extra)
 
     # Search
@@ -127,7 +147,8 @@ async def graph(
     if q:
         ql = q.lower()
         results = [
-            n for n in nodes
+            n
+            for n in nodes
             if ql in n["name"].lower()
             or ql in n.get("description", "").lower()
             or ql in n.get("category", "").lower()
@@ -155,8 +176,9 @@ async def graph(
 async def overview():
     """Aggregated industry-map overview for the research workbench."""
     with get_db() as db:
-        totals = dict(db.execute(
-            """
+        totals = dict(
+            db.execute(
+                """
             SELECT
                 COUNT(DISTINCT category) AS industry_count,
                 COUNT(*) AS node_count,
@@ -165,12 +187,15 @@ async def overview():
                 ROUND(AVG(confidence), 3) AS avg_confidence
             FROM industry_nodes
             """
-        ).fetchone())
+            ).fetchone()
+        )
         edge_total = db.execute("SELECT COUNT(*) AS cnt FROM industry_edges").fetchone()["cnt"]
         totals["edge_count"] = edge_total
         categories = _category_stats(db)
-        countries = [dict(r) for r in db.execute(
-            """
+        countries = [
+            dict(r)
+            for r in db.execute(
+                """
             SELECT
                 country,
                 COUNT(*) AS node_count,
@@ -181,9 +206,12 @@ async def overview():
             GROUP BY country
             ORDER BY node_count DESC, country ASC
             """
-        ).fetchall()]
-        nodes = [dict(r) for r in db.execute(
-            """
+            ).fetchall()
+        ]
+        nodes = [
+            dict(r)
+            for r in db.execute(
+                """
             WITH deg AS (
                 SELECT id, SUM(cnt) AS degree FROM (
                     SELECT source_node_id AS id, COUNT(*) AS cnt
@@ -203,7 +231,8 @@ async def overview():
                      n.name ASC
             LIMIT 18
             """
-        ).fetchall()]
+            ).fetchall()
+        ]
     return {
         "totals": totals,
         "categories": categories,
@@ -223,9 +252,10 @@ async def live_context(request: Request):
 async def geo():
     """Return geo-region data for world-map rendering."""
     with get_db() as db:
-        regions = [dict(r) for r in db.execute(
-            "SELECT * FROM geo_regions ORDER BY continent, country_name"
-        ).fetchall()]
+        regions = [
+            dict(r)
+            for r in db.execute("SELECT * FROM geo_regions ORDER BY continent, country_name").fetchall()
+        ]
     # Attach node counts per country
     with get_db() as db:
         counts = {}
@@ -251,8 +281,10 @@ async def search(q: str = "", limit: int = 20):
     if len(q) > 40:
         q = q[:40]
     with get_db() as db:
-        rows = [dict(r) for r in db.execute(
-            """
+        rows = [
+            dict(r)
+            for r in db.execute(
+                """
             SELECT * FROM industry_nodes
             WHERE name LIKE ?
                OR description LIKE ?
@@ -269,8 +301,9 @@ async def search(q: str = "", limit: int = 20):
                 name ASC
             LIMIT ?
             """,
-            [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", q, f"{q}%", f"{q}%", limit],
-        ).fetchall()]
+                [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", q, f"{q}%", f"{q}%", limit],
+            ).fetchall()
+        ]
     return {"results": rows}
 
 
@@ -278,21 +311,27 @@ async def search(q: str = "", limit: int = 20):
 async def ticker_chain(ticker: str):
     """Return the complete upstream/downstream chain for a ticker."""
     with get_db() as db:
-        nodes = [dict(r) for r in db.execute(
-            "SELECT * FROM industry_nodes WHERE source_ticker = ? ORDER BY tier, confidence DESC",
-            [ticker],
-        ).fetchall()]
+        nodes = [
+            dict(r)
+            for r in db.execute(
+                "SELECT * FROM industry_nodes WHERE source_ticker = ? ORDER BY tier, confidence DESC",
+                [ticker],
+            ).fetchall()
+        ]
         node_ids = {n["id"] for n in nodes}
         edges = []
         if node_ids:
             placeholders = ",".join("?" for _ in node_ids)
-            edges = [dict(r) for r in db.execute(
-                f"SELECT e.*, s.name AS source_name, t.name AS target_name FROM industry_edges e "
-                f"JOIN industry_nodes s ON e.source_node_id = s.id "
-                f"JOIN industry_nodes t ON e.target_node_id = t.id "
-                f"WHERE e.source_node_id IN ({placeholders}) OR e.target_node_id IN ({placeholders})",
-                list(node_ids) + list(node_ids),
-            ).fetchall()]
+            edges = [
+                dict(r)
+                for r in db.execute(
+                    f"SELECT e.*, s.name AS source_name, t.name AS target_name FROM industry_edges e "
+                    f"JOIN industry_nodes s ON e.source_node_id = s.id "
+                    f"JOIN industry_nodes t ON e.target_node_id = t.id "
+                    f"WHERE e.source_node_id IN ({placeholders}) OR e.target_node_id IN ({placeholders})",
+                    list(node_ids) + list(node_ids),
+                ).fetchall()
+            ]
             expanded_ids = set(node_ids)
             for edge in edges:
                 expanded_ids.add(edge["source_node_id"])
@@ -300,10 +339,15 @@ async def ticker_chain(ticker: str):
             missing_ids = expanded_ids - node_ids
             if missing_ids:
                 placeholders2 = ",".join("?" for _ in missing_ids)
-                nodes.extend([dict(r) for r in db.execute(
-                    f"SELECT * FROM industry_nodes WHERE id IN ({placeholders2}) ORDER BY tier, confidence DESC",
-                    list(missing_ids),
-                ).fetchall()])
+                nodes.extend(
+                    [
+                        dict(r)
+                        for r in db.execute(
+                            f"SELECT * FROM industry_nodes WHERE id IN ({placeholders2}) ORDER BY tier, confidence DESC",
+                            list(missing_ids),
+                        ).fetchall()
+                    ]
+                )
     return {"ticker": ticker, "nodes": nodes, "edges": edges}
 
 
@@ -323,14 +367,24 @@ async def node_detail(node_id: str):
         if not row:
             raise HTTPException(404, "节点不存在")
         node = dict(row)
-        upstream = [dict(r) for r in db.execute(
-            "SELECT n.*, e.relation FROM industry_edges e "
-            "JOIN industry_nodes n ON e.source_node_id = n.id "
-            "WHERE e.target_node_id = ?", [node_id]).fetchall()]
-        downstream = [dict(r) for r in db.execute(
-            "SELECT n.*, e.relation FROM industry_edges e "
-            "JOIN industry_nodes n ON e.target_node_id = n.id "
-            "WHERE e.source_node_id = ?", [node_id]).fetchall()]
+        upstream = [
+            dict(r)
+            for r in db.execute(
+                "SELECT n.*, e.relation FROM industry_edges e "
+                "JOIN industry_nodes n ON e.source_node_id = n.id "
+                "WHERE e.target_node_id = ?",
+                [node_id],
+            ).fetchall()
+        ]
+        downstream = [
+            dict(r)
+            for r in db.execute(
+                "SELECT n.*, e.relation FROM industry_edges e "
+                "JOIN industry_nodes n ON e.target_node_id = n.id "
+                "WHERE e.source_node_id = ?",
+                [node_id],
+            ).fetchall()
+        ]
     return {"node": node, "upstream": upstream, "downstream": downstream}
 
 
@@ -339,9 +393,11 @@ async def reseed(request: Request):
     """Reload curated seed chains (admin). Clears existing seed rows first."""
     u = require_auth(request)
     from .config import ADMIN_USERS
+
     if ADMIN_USERS and u not in ADMIN_USERS:
         raise HTTPException(403, "仅管理员可执行此操作")
     from .industry_seed import seed_all
+
     with get_db() as db:
         db.execute("DELETE FROM industry_edges WHERE evidence = 'seed'")
         db.execute("DELETE FROM industry_nodes WHERE source_date = 'seed'")

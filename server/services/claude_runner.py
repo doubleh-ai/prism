@@ -1,11 +1,13 @@
 """Claude Code CLI — interactive subprocess with resume + stdin support"""
-import os
-import json
+
 import asyncio
-import logging
 import codecs
+import contextlib
+import json
+import logging
+import os
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator, Optional
 
 from ..config import (
     CHAT_STREAM_HEARTBEAT_SECONDS,
@@ -13,9 +15,9 @@ from ..config import (
     CLAUDE_BIN,
     DEFAULT_MODEL,
     MODELS,
-    SKILLS_HOME,
     SKILL_FALLBACK_ROOTS,
     SKILL_MAP,
+    SKILLS_HOME,
 )
 from ..proxy import get_proxy_config
 
@@ -43,7 +45,7 @@ def _candidate_skill_dirs(dir_name: str) -> list[Path]:
     return candidates
 
 
-def _resolve_skill_dir(dir_name: str) -> tuple[Optional[Path], list[Path]]:
+def _resolve_skill_dir(dir_name: str) -> tuple[Path | None, list[Path]]:
     """Resolve a skill directory, tolerating stale ~/.claude symlinks."""
     candidates = _candidate_skill_dirs(dir_name)
     for path in candidates:
@@ -56,10 +58,10 @@ async def run_claude_stream(
     question: str,
     skill_name: str = "bottleneck-hunter",
     user: str = "anon",
-    model_cfg: Optional[dict] = None,
-    session_id: Optional[str] = None,
-    conv_id: Optional[str] = None,
-    extra_skills: Optional[list] = None,
+    model_cfg: dict | None = None,
+    session_id: str | None = None,
+    conv_id: str | None = None,
+    extra_skills: list | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Spawn Claude CLI and stream JSON events.
 
@@ -101,10 +103,8 @@ async def run_claude_stream(
             continue
         es_md = es_dir / "CLAUDE.md"
         if es_md.exists():
-            try:
+            with contextlib.suppress(Exception):
                 append_prompts.append(es_md.read_text(encoding="utf-8"))
-            except Exception:
-                pass
 
     # v0.6 market-tag directive: tell the model to embed [[quote:TICKER]]
     # tokens in its output so the frontend can render live price chips.
@@ -136,11 +136,14 @@ async def run_claude_stream(
     # Build command — clean question, system instructions via --append-system-prompt
     cmd = [
         CLAUDE_BIN,
-        "-p", question,
+        "-p",
+        question,
         "--print",
-        "--output-format", "stream-json",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--model", model_cfg["model"],
+        "--model",
+        model_cfg["model"],
     ]
     for ap in append_prompts:
         cmd.extend(["--append-system-prompt", ap])
@@ -153,18 +156,23 @@ async def run_claude_stream(
     # explicitly allowed. The Claude CLI subprocess should only see the
     # credentials we deliberately pass to it — not anything else sitting
     # in os.environ.
-    sensitive_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
-                      "MINIMAX_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}
-    env = {
-        k: v for k, v in os.environ.items()
-        if k not in sensitive_keys
+    sensitive_keys = {
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MINIMAX_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
     }
-    env.update({
-        "HOME": str(Path.home()),
-        "NO_COLOR": "1",
-        "ANTHROPIC_BASE_URL": model_cfg.get("base_url", ""),
-        "ANTHROPIC_AUTH_TOKEN": model_cfg.get("api_key", ""),
-    })
+    env = {k: v for k, v in os.environ.items() if k not in sensitive_keys}
+    env.update(
+        {
+            "HOME": str(Path.home()),
+            "NO_COLOR": "1",
+            "ANTHROPIC_BASE_URL": model_cfg.get("base_url", ""),
+            "ANTHROPIC_AUTH_TOKEN": model_cfg.get("api_key", ""),
+        }
+    )
     if proxy_config:
         env.update(proxy_config)
 
@@ -193,7 +201,7 @@ async def run_claude_stream(
         while True:
             try:
                 chunk = await asyncio.wait_for(proc.stdout.read(256), timeout=heartbeat_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 idle_for = asyncio.get_running_loop().time() - last_activity
                 if idle_for >= idle_timeout_seconds:
                     timed_out = True
@@ -237,10 +245,8 @@ async def run_claude_stream(
                 except json.JSONDecodeError:
                     pass
         if not timed_out:
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=1)
-            except asyncio.TimeoutError:
-                pass
             if proc.returncode not in (None, 0):
                 err_text = ""
                 try:
@@ -258,10 +264,8 @@ async def run_claude_stream(
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=3)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     proc.kill()
-                except Exception:
-                    pass
 
 
 async def respond_to_question(conv_id: str, answer: str) -> bool:
@@ -296,10 +300,8 @@ async def cancel_process(conv_id: str) -> bool:
         proc.terminate()
         await asyncio.wait_for(proc.wait(), timeout=3)
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             proc.kill()
-        except Exception:
-            pass
     _active_procs.pop(conv_id, None)
     log.info(f"Cancelled Claude process for conv={conv_id}")
     return True

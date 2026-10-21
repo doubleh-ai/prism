@@ -1,11 +1,10 @@
 """Test frontend rendering logic — run with Node.js or as pure logic tests"""
-import json
-from pathlib import Path
-import pytest
 
+from pathlib import Path
 
 # Simulate the frontend _renderMsg logic in Python for testing
 # This mirrors app.js _renderMsg (post-refactor: no stable/live split)
+
 
 def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -37,22 +36,28 @@ def render_msg(chunks, full_text="", streaming=False, refs=None):
             done = pending_tools[:-1]
             html += '<div class="step-bar">'
             if done:
-                html += '<details class="step-fold"><summary>已完成 ' + str(len(done)) + ' 步</summary>'
+                html += '<details class="step-fold"><summary>已完成 ' + str(len(done)) + " 步</summary>"
             for td in done:
-                detail_html = ' <i>' + esc(td["detail"]) + '</i>' if td.get("detail") else ""
-                html += '<span class="step-tag"><b>' + esc(td["name"]) + '</b>' + detail_html + '</span>'
+                detail_html = " <i>" + esc(td["detail"]) + "</i>" if td.get("detail") else ""
+                html += '<span class="step-tag"><b>' + esc(td["name"]) + "</b>" + detail_html + "</span>"
             if done:
-                html += '</details>'
+                html += "</details>"
             last = pending_tools[-1]
-            ld = ' <i>' + esc(last["detail"]) + '</i>' if last.get("detail") else ""
-            html += '<span class="step-tag now step-now"><b>' + esc(last["name"]) + '</b>' + ld + '</span></div>'
+            ld = " <i>" + esc(last["detail"]) + "</i>" if last.get("detail") else ""
+            html += (
+                '<span class="step-tag now step-now"><b>' + esc(last["name"]) + "</b>" + ld + "</span></div>"
+            )
         else:
             # Non-streaming or completed: fold all steps
-            html += '<div class="step-bar stable"><details class="step-fold"><summary>已完成 ' + str(n) + ' 步</summary>'
+            html += (
+                '<div class="step-bar stable"><details class="step-fold"><summary>已完成 '
+                + str(n)
+                + " 步</summary>"
+            )
             for td in pending_tools:
-                detail_html = ' <i>' + esc(td["detail"]) + '</i>' if td.get("detail") else ""
-                html += '<span class="step-tag"><b>' + esc(td["name"]) + '</b>' + detail_html + '</span>'
-            html += '</details></div>'
+                detail_html = " <i>" + esc(td["detail"]) + "</i>" if td.get("detail") else ""
+                html += '<span class="step-tag"><b>' + esc(td["name"]) + "</b>" + detail_html + "</span>"
+            html += "</details></div>"
         pending_tools.clear()
 
     def flush_thinks():
@@ -60,29 +65,40 @@ def render_msg(chunks, full_text="", streaming=False, refs=None):
         if not pending_thinks:
             return
         for think_text in pending_thinks:
-            html += '<details class="think-box" open><summary>Thinking</summary><div class="think-content">' + esc(think_text) + '</div></details>'
+            html += (
+                '<details class="think-box" open><summary>Thinking</summary><div class="think-content">'
+                + esc(think_text)
+                + "</div></details>"
+            )
         pending_thinks.clear()
 
     for ci, c in enumerate(chunks):
         t = c.get("t")
         if t == "tool":
-            pending_tools.append({
-                "name": c.get("c", "?"),
-                "detail": clean_detail(c.get("d", ""))
-            })
+            pending_tools.append({"name": c.get("c", "?"), "detail": clean_detail(c.get("d", ""))})
         elif t == "think":
             flush_tools(False)
             pending_thinks.append(c.get("c", ""))
         elif t == "ask":
             flush_tools(False)
             flush_thinks()
-            html += '<div class="ask-card"><div class="ask-q">💬 ' + esc(c.get("q", "")) + '</div><div class="ask-opts">'
+            html += (
+                '<div class="ask-card"><div class="ask-q">💬 '
+                + esc(c.get("q", ""))
+                + '</div><div class="ask-opts">'
+            )
             for opt in c.get("opts", []):
-                html += '<button class="ask-opt">' + esc(opt) + '</button>'
-            html += '</div></div>'
+                html += '<button class="ask-opt">' + esc(opt) + "</button>"
+            html += "</div></div>"
         elif t == "ref":
             # Reference citation — skip during streaming, shown at end
-            collected_refs.append({"url": c.get("url", ""), "title": c.get("title", c.get("url", "")), "snippet": c.get("snippet", "")})
+            collected_refs.append(
+                {
+                    "url": c.get("url", ""),
+                    "title": c.get("title", c.get("url", "")),
+                    "snippet": c.get("snippet", ""),
+                }
+            )
         else:
             is_last_text = streaming and ci == len(chunks) - 1
             # Also check: if there are trailing non-text chunks, it's not the last text
@@ -92,12 +108,12 @@ def render_msg(chunks, full_text="", streaming=False, refs=None):
                     break
             flush_tools(False)
             flush_thinks()
-            html += c.get("c", "") + ('<span class="stream-cursor"></span>' if is_last_text else '')
+            html += c.get("c", "") + ('<span class="stream-cursor"></span>' if is_last_text else "")
 
     if streaming:
         flush_tools(True)
         flush_thinks()
-        if html == '':
+        if html == "":
             html = '<div class="shimmer-bar" style="width:60%"></div>'
     else:
         flush_tools(False)
@@ -105,19 +121,30 @@ def render_msg(chunks, full_text="", streaming=False, refs=None):
 
     # Append reference section if we have refs and this is the final render
     if collected_refs and not streaming:
-        html += '<div class="ref-section"><div class="ref-title">参考来源 (' + str(len(collected_refs)) + ')</div><div class="ref-list">'
+        html += (
+            '<div class="ref-section"><div class="ref-title">参考来源 ('
+            + str(len(collected_refs))
+            + ')</div><div class="ref-list">'
+        )
         for ri, ref in enumerate(collected_refs):
-            html += '<div class="ref-item"><span class="ref-idx">' + str(ri + 1) + '</span><div><a class="ref-link" href="' + esc(ref["url"]) + '" target="_blank" rel="noopener">' + esc(ref["title"]) + '</a>'
+            html += (
+                '<div class="ref-item"><span class="ref-idx">'
+                + str(ri + 1)
+                + '</span><div><a class="ref-link" href="'
+                + esc(ref["url"])
+                + '" target="_blank" rel="noopener">'
+                + esc(ref["title"])
+                + "</a>"
+            )
             if ref.get("snippet"):
-                html += '<div class="ref-snippet">' + esc(ref["snippet"]) + '</div>'
-            html += '</div></div>'
-        html += '</div></div>'
+                html += '<div class="ref-snippet">' + esc(ref["snippet"]) + "</div>"
+            html += "</div></div>"
+        html += "</div></div>"
 
     return html
 
 
 class TestRenderMsg:
-
     def test_empty_chunks_returns_text(self):
         assert render_msg([], "plain text") == "plain text"
 
@@ -302,7 +329,7 @@ class TestStreamingStability:
 
         # Count 'step-now' occurrences — must be exactly 1
         now_count = html.count("step-now")
-        assert now_count == 1, "Expected 1 'step-now', got {}".format(now_count)
+        assert now_count == 1, f"Expected 1 'step-now', got {now_count}"
 
     def test_summary_has_no_triangle_char(self):
         """Summary text must NOT contain ▸ (CSS ::after provides ▾ instead)."""
@@ -376,6 +403,7 @@ class TestSmartScroll:
     def test_user_scrolled_up_flag_in_js(self):
         """Smart scroll flag lives across app.core.js + app.chat.js (v0.8 split)."""
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js_content = ""
         for f in ("app.core.js", "app.chat.js"):
@@ -388,6 +416,7 @@ class TestSmartScroll:
     def test_stop_button_in_js(self):
         """Stop generation logic lives in app.chat.js (v0.8 split)."""
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "js", "app.chat.js"), encoding="utf-8") as f:
             js_content = f.read()
@@ -397,6 +426,7 @@ class TestSmartScroll:
     def test_error_classification_in_js(self):
         """Error classification lives in app.chat.js (v0.8 split)."""
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "js", "app.chat.js"), encoding="utf-8") as f:
             js_content = f.read()
@@ -455,6 +485,7 @@ class TestNoFlickerStable:
     def test_no_stable_key_in_js(self):
         """The _stableKey/_stableHtml split logic must be removed (check all v0.8 modules)."""
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js_content = ""
         for f in ("app.util.js", "app.core.js", "app.chat.js", "app.market.js"):
@@ -466,6 +497,7 @@ class TestNoFlickerStable:
     def test_prism_byline_in_js(self):
         """The assistant byline must use 'Prism' branding (not CapitalLens). Check all v0.8 modules."""
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js_content = ""
         for f in ("app.util.js", "app.core.js", "app.chat.js", "app.market.js"):
@@ -473,11 +505,14 @@ class TestNoFlickerStable:
                 js_content += fh.read()
         assert "Prism" in js_content, "JS must use Prism branding"
         assert "CapitalLens" not in js_content, "JS must not contain old CapitalLens branding"
+
+
 class TestReleaseMarkdownRendering:
     """Release notes should render markdown instead of escaped source text."""
 
     def test_release_notes_use_safe_inline_markdown_renderer(self):
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "js", "app.release.js"), encoding="utf-8") as fh:
             js = fh.read()
@@ -552,6 +587,7 @@ class TestServiceWorkerCachePolicy:
 
     def test_sw_uses_network_first_for_navigation(self):
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
@@ -563,6 +599,7 @@ class TestServiceWorkerCachePolicy:
 
     def test_app_registers_sw_without_update_cache(self):
         import os
+
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "js", "app.core.js"), encoding="utf-8") as fh:
             js = fh.read()
@@ -573,7 +610,7 @@ class TestServiceWorkerCachePolicy:
 def test_indicator_overlay_reuses_current_chart_kline():
     """Indicator overlay should not refetch K-line when the chart already has data."""
     with open("templates/app.html", encoding="utf-8") as f:
-      template = f.read()
+        template = f.read()
     with open("static/js/app.indicators.js", encoding="utf-8") as f:
         js = f.read()
     with open("static/js/app.indicator-chart.js", encoding="utf-8") as f:
@@ -587,7 +624,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
-    assert "period = this._currentPeriod || \"1d\"" in js
+    assert 'period = this._currentPeriod || "1d"' in js
     assert "params: params || {}" in js
     assert "_indicatorTracks" in js
     assert "_updateIndicatorParam" in js
@@ -716,8 +753,8 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert 'app.css?v=77' in login
-    assert 'app.css?v=77' in app
+    assert "app.css?v=77" in login
+    assert "app.css?v=77" in app
 
 
 def test_astock_fast_mode_controls_and_metadata_are_wired():
@@ -744,7 +781,7 @@ def test_astock_fast_mode_controls_and_metadata_are_wired():
     assert "_analysisMetaHtml" in js
     assert "_analysisTextValue" in js
     assert 'replace(/^\\s*\\[object Object\\]\\s*$/gm, "")' in js
-    assert "App._renderMarkdown(ar[ak] || \"\")" in js
+    assert 'App._renderMarkdown(ar[ak] || "")' in js
     assert ".analysis-options" in css
     assert ".analysis-mode-segment" in css
     assert ".analysis-mode-btn.active" in css
@@ -942,7 +979,9 @@ def test_chat_inline_report_reader_contract():
     assert "_inlineReportCard" in chat
     assert "_toggleInlineReport" in chat
     assert 'sandbox="allow-scripts"' in chat
-    assert "allow-same-origin" not in chat[chat.index("_inlineReportCard"):chat.index("_toggleInlineReport")]
+    assert (
+        "allow-same-origin" not in chat[chat.index("_inlineReportCard") : chat.index("_toggleInlineReport")]
+    )
     assert "分析过程" in renderer
     assert ".chat-inline-report" in css
     assert ".chat-inline-report-body" in css

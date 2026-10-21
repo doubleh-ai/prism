@@ -1,10 +1,10 @@
 """Release metadata helpers for Prism."""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
 from typing import Any
-
 
 APP_VERSION = "v0.19.7"
 ROOT_DIR = Path(__file__).resolve().parent.parent

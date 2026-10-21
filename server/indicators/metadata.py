@@ -5,12 +5,12 @@ context so a period, threshold and multiplier do not all become the same
 anonymous slider.  This module enriches both new definitions and legacy rows
 without changing the stored DSL contract.
 """
+
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+from copy import deepcopy
 from typing import Any
-
 
 _PARAM_SPECS: dict[str, dict[str, Any]] = {
     "fast": {
@@ -152,7 +152,9 @@ def _logic_template(family: str, root: str, kind: str, description: str) -> str:
         return "在 {sync_window} 个交易日内 MA{fast} 上穿 MA{mid} 且 MA{mid} 上穿 MA{slow}；两个条件全部满足才触发"
     if family == "ma_volume_cross":
         direction = "下穿" if root == "cross_down" else "上穿"
-        return f"MA{{fast}} {direction} MA{{slow}}，且成交量超过 {{vol_window}} 日均量的 {{multiplier}} 倍时触发"
+        return (
+            f"MA{{fast}} {direction} MA{{slow}}，且成交量超过 {{vol_window}} 日均量的 {{multiplier}} 倍时触发"
+        )
     if family == "ma_cross":
         direction = "下穿" if root == "cross_down" else "上穿"
         return f"MA{{fast}} {direction} MA{{slow}} 时触发"
@@ -181,9 +183,36 @@ def _preset(label: str, note: str, **values: float) -> dict[str, Any]:
 def _presets(family: str, keys: set[str]) -> list[dict[str, Any]]:
     candidates: dict[str, list[dict[str, Any]]] = {
         "ma_stack_volume": [
-            _preset("同日严格", "两次上穿必须同日且成交量显著放大", fast=5, mid=10, slow=20, sync_window=1, baseline_window=5, multiplier=3),
-            _preset("三日共振", "允许两次上穿在三个交易日内先后完成", fast=5, mid=10, slow=20, sync_window=3, baseline_window=5, multiplier=2),
-            _preset("中期趋势", "使用更慢均线过滤短期噪声", fast=10, mid=20, slow=60, sync_window=5, baseline_window=10, multiplier=2),
+            _preset(
+                "同日严格",
+                "两次上穿必须同日且成交量显著放大",
+                fast=5,
+                mid=10,
+                slow=20,
+                sync_window=1,
+                baseline_window=5,
+                multiplier=3,
+            ),
+            _preset(
+                "三日共振",
+                "允许两次上穿在三个交易日内先后完成",
+                fast=5,
+                mid=10,
+                slow=20,
+                sync_window=3,
+                baseline_window=5,
+                multiplier=2,
+            ),
+            _preset(
+                "中期趋势",
+                "使用更慢均线过滤短期噪声",
+                fast=10,
+                mid=20,
+                slow=60,
+                sync_window=5,
+                baseline_window=10,
+                multiplier=2,
+            ),
         ],
         "ma_stack": [
             _preset("同日", "两次上穿必须在同一个交易日发生", fast=5, mid=10, slow=20, sync_window=1),

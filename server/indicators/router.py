@@ -1,4 +1,5 @@
 """Indicator API: translate, per-user library CRUD, evaluate, scan."""
+
 import json
 import logging
 import time
@@ -10,10 +11,10 @@ from fastapi.responses import JSONResponse
 from ..auth import require_auth
 from ..config import RATE_EXPLAIN_PER_MIN
 from ..database import check_rate_limit, get_db
+from . import scanner
 from .dsl import DSLError, evaluate, is_signal, validate
 from .metadata import enrich_indicator
 from .models import EvalRequest, IndicatorCreate, IndicatorUpdate, ScanRequest, TranslateRequest
-from . import scanner
 from .translator import translate
 
 log = logging.getLogger("prism.indicators")
@@ -21,7 +22,15 @@ router = APIRouter(prefix="/api/indicators")
 
 
 def _param(key, label, value, min_v, max_v, step=1, unit=""):
-    return {"key": key, "label": label, "value": value, "min": min_v, "max": max_v, "step": step, "unit": unit}
+    return {
+        "key": key,
+        "label": label,
+        "value": value,
+        "min": min_v,
+        "max": max_v,
+        "step": step,
+        "unit": unit,
+    }
 
 
 def _default_plan(kind="signal"):
@@ -61,49 +70,78 @@ BUILTIN = [
         "name": "多级均线放量共振(5/10/20)",
         "kind": "signal",
         "description": "MA5 上穿 MA10、MA10 上穿 MA20，且当日成交量大于前 5 日均量 3 倍",
-        "dsl": {"and": [
-            {"and": [
-                {"within": [
-                    {"cross_up": [
-                        {"ma": {"param": ["fast", 5]}},
-                        {"ma": {"param": ["mid", 10]}},
-                    ]},
-                    {"param": ["sync_window", 1]},
-                ]},
-                {"within": [
-                    {"cross_up": [
-                        {"ma": {"param": ["mid", 10]}},
-                        {"ma": {"param": ["slow", 20]}},
-                    ]},
-                    {"param": ["sync_window", 1]},
-                ]},
-            ]},
-            {"gt": [
-                {"vol": 0},
-                {"mul": [
-                    {"param": ["multiplier", 3]},
-                    {"ref": [
-                        {"ma_vol": {"param": ["baseline_window", 5]}},
-                        1,
-                    ]},
-                ]},
-            ]},
-        ]},
-        "params": {"items": [
-            _param("fast", "短期均线", 5, 2, 30, 1, "日"),
-            _param("mid", "中期均线", 10, 3, 120, 1, "日"),
-            _param("slow", "长期均线", 20, 5, 250, 1, "日"),
-            _param("sync_window", "交叉共振窗口", 1, 1, 10, 1, "日"),
-            _param("baseline_window", "前序均量窗口", 5, 2, 60, 1, "日"),
-            _param("multiplier", "放量倍数", 3, 1, 10, 0.1, "x"),
-        ]},
+        "dsl": {
+            "and": [
+                {
+                    "and": [
+                        {
+                            "within": [
+                                {
+                                    "cross_up": [
+                                        {"ma": {"param": ["fast", 5]}},
+                                        {"ma": {"param": ["mid", 10]}},
+                                    ]
+                                },
+                                {"param": ["sync_window", 1]},
+                            ]
+                        },
+                        {
+                            "within": [
+                                {
+                                    "cross_up": [
+                                        {"ma": {"param": ["mid", 10]}},
+                                        {"ma": {"param": ["slow", 20]}},
+                                    ]
+                                },
+                                {"param": ["sync_window", 1]},
+                            ]
+                        },
+                    ]
+                },
+                {
+                    "gt": [
+                        {"vol": 0},
+                        {
+                            "mul": [
+                                {"param": ["multiplier", 3]},
+                                {
+                                    "ref": [
+                                        {"ma_vol": {"param": ["baseline_window", 5]}},
+                                        1,
+                                    ]
+                                },
+                            ]
+                        },
+                    ]
+                },
+            ]
+        },
+        "params": {
+            "items": [
+                _param("fast", "短期均线", 5, 2, 30, 1, "日"),
+                _param("mid", "中期均线", 10, 3, 120, 1, "日"),
+                _param("slow", "长期均线", 20, 5, 250, 1, "日"),
+                _param("sync_window", "交叉共振窗口", 1, 1, 10, 1, "日"),
+                _param("baseline_window", "前序均量窗口", 5, 2, 60, 1, "日"),
+                _param("multiplier", "放量倍数", 3, 1, 10, 0.1, "x"),
+            ]
+        },
         "plan": dict(
             _default_plan("signal"),
             universe="market",
             lookback=180,
             trigger_window=5,
-            steps=["计算三条均线", "检查两次上穿是否在共振窗口内", "用前序均量验证当日放量", "扫描全市场并按最近信号排序"],
-            risk_controls=["三条均线参数建议保持短期 < 中期 < 长期", "成交量基准不包含触发当日", "停牌、复牌首日和除权数据需要人工复核"],
+            steps=[
+                "计算三条均线",
+                "检查两次上穿是否在共振窗口内",
+                "用前序均量验证当日放量",
+                "扫描全市场并按最近信号排序",
+            ],
+            risk_controls=[
+                "三条均线参数建议保持短期 < 中期 < 长期",
+                "成交量基准不包含触发当日",
+                "停牌、复牌首日和除权数据需要人工复核",
+            ],
         ),
         "visual": _default_visual("signal", "#d6332f"),
         "seed_version": 1,
@@ -113,7 +151,12 @@ BUILTIN = [
         "kind": "signal",
         "description": "5 日均线上穿 20 日均线",
         "dsl": {"cross_up": [{"ma": {"param": ["fast", 5]}}, {"ma": {"param": ["slow", 20]}}]},
-        "params": {"items": [_param("fast", "短均线", 5, 2, 60, 1, "日"), _param("slow", "长均线", 20, 5, 250, 1, "日")]},
+        "params": {
+            "items": [
+                _param("fast", "短均线", 5, 2, 60, 1, "日"),
+                _param("slow", "长均线", 20, 5, 250, 1, "日"),
+            ]
+        },
         "visual": _default_visual("signal", "#22c55e"),
     },
     {
@@ -121,7 +164,12 @@ BUILTIN = [
         "kind": "signal",
         "description": "5 日均线下穿 20 日均线",
         "dsl": {"cross_down": [{"ma": {"param": ["fast", 5]}}, {"ma": {"param": ["slow", 20]}}]},
-        "params": {"items": [_param("fast", "短均线", 5, 2, 60, 1, "日"), _param("slow", "长均线", 20, 5, 250, 1, "日")]},
+        "params": {
+            "items": [
+                _param("fast", "短均线", 5, 2, 60, 1, "日"),
+                _param("slow", "长均线", 20, 5, 250, 1, "日"),
+            ]
+        },
         "visual": _default_visual("signal", "#ef4444"),
     },
     {
@@ -129,15 +177,30 @@ BUILTIN = [
         "kind": "signal",
         "description": "RSI 上穿低位阈值",
         "dsl": {"cross_up": [{"rsi": {"param": ["window", 14]}}, {"param": ["threshold", 30]}]},
-        "params": {"items": [_param("window", "RSI周期", 14, 2, 60, 1, "日"), _param("threshold", "阈值", 30, 5, 50, 1)]},
+        "params": {
+            "items": [
+                _param("window", "RSI周期", 14, 2, 60, 1, "日"),
+                _param("threshold", "阈值", 30, 5, 50, 1),
+            ]
+        },
         "visual": _default_visual("signal", "#f59e0b"),
     },
     {
         "name": "放量突破",
         "kind": "signal",
         "description": "成交量超过 5 日均量 2 倍",
-        "dsl": {"gt": [{"vol": 0}, {"mul": [{"param": ["multiplier", 2]}, {"ma_vol": {"param": ["vol_window", 5]}}]}]},
-        "params": {"items": [_param("vol_window", "均量窗口", 5, 2, 60, 1, "日"), _param("multiplier", "放量倍数", 2, 1, 5, 0.1, "x")]},
+        "dsl": {
+            "gt": [
+                {"vol": 0},
+                {"mul": [{"param": ["multiplier", 2]}, {"ma_vol": {"param": ["vol_window", 5]}}]},
+            ]
+        },
+        "params": {
+            "items": [
+                _param("vol_window", "均量窗口", 5, 2, 60, 1, "日"),
+                _param("multiplier", "放量倍数", 2, 1, 5, 0.1, "x"),
+            ]
+        },
         "visual": _default_visual("signal", "#ef4444"),
     },
     {
@@ -145,7 +208,12 @@ BUILTIN = [
         "kind": "plot",
         "description": "MACD DIF 线",
         "dsl": {"macd_dif": [{"param": ["fast", 12]}, {"param": ["slow", 26]}]},
-        "params": {"items": [_param("fast", "快线 EMA", 12, 3, 30, 1, "日"), _param("slow", "慢线 EMA", 26, 5, 80, 1, "日")]},
+        "params": {
+            "items": [
+                _param("fast", "快线 EMA", 12, 3, 30, 1, "日"),
+                _param("slow", "慢线 EMA", 26, 5, 80, 1, "日"),
+            ]
+        },
         "visual": _default_visual("plot", "#60a5fa"),
     },
     {
@@ -153,7 +221,12 @@ BUILTIN = [
         "kind": "plot",
         "description": "20 日布林带上轨",
         "dsl": {"boll_upper": [{"param": ["window", 20]}, {"param": ["std", 2]}]},
-        "params": {"items": [_param("window", "布林周期", 20, 5, 120, 1, "日"), _param("std", "标准差倍数", 2, 1, 4, 0.1)]},
+        "params": {
+            "items": [
+                _param("window", "布林周期", 20, 5, 120, 1, "日"),
+                _param("std", "标准差倍数", 2, 1, 4, 0.1),
+            ]
+        },
         "visual": _default_visual("plot", "#f59e0b"),
     },
 ]
@@ -197,9 +270,7 @@ def _insert_builtin(db, username, definition, now):
 
 def _ensure_builtin_library(db, username):
     """Seed new accounts and backfill newly released templates exactly once."""
-    count = db.execute(
-        "SELECT COUNT(*) FROM indicators WHERE username=?", [username]
-    ).fetchone()[0]
+    count = db.execute("SELECT COUNT(*) FROM indicators WHERE username=?", [username]).fetchone()[0]
     seed_row = db.execute(
         "SELECT version FROM indicator_seed_versions WHERE username=?", [username]
     ).fetchone()
@@ -208,10 +279,7 @@ def _ensure_builtin_library(db, username):
     if seed_row is None and count == 0:
         pending = BUILTIN
     else:
-        pending = [
-            definition for definition in BUILTIN
-            if int(definition.get("seed_version") or 0) > current
-        ]
+        pending = [definition for definition in BUILTIN if int(definition.get("seed_version") or 0) > current]
 
     now = int(time.time())
     for definition in pending:
@@ -317,15 +385,17 @@ def _df_from_kline_rows(kline_rows, limit=500):
         close = k.get("close")
         volume = k.get("volume")
         amount = k.get("amount", k.get("turnover"))
-        rows.append({
-            "t": k.get("timestamp") or k.get("ts") or k.get("t"),
-            "open": k.get("open"),
-            "high": k.get("high"),
-            "low": k.get("low"),
-            "close": close,
-            "volume": volume,
-            "amount": amount if amount is not None else None,
-        })
+        rows.append(
+            {
+                "t": k.get("timestamp") or k.get("ts") or k.get("t"),
+                "open": k.get("open"),
+                "high": k.get("high"),
+                "low": k.get("low"),
+                "close": close,
+                "volume": volume,
+                "amount": amount if amount is not None else None,
+            }
+        )
     if not rows:
         return None
     df = pd.DataFrame(rows)
@@ -368,15 +438,17 @@ async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
     rows = []
     for k in kls:
         d = k.model_dump()
-        rows.append({
-            "t": d.get("timestamp"),
-            "open": d.get("open"),
-            "high": d.get("high"),
-            "low": d.get("low"),
-            "close": d.get("close"),
-            "volume": d.get("volume"),
-            "amount": d.get("turnover"),
-        })
+        rows.append(
+            {
+                "t": d.get("timestamp"),
+                "open": d.get("open"),
+                "high": d.get("high"),
+                "low": d.get("low"),
+                "close": d.get("close"),
+                "volume": d.get("volume"),
+                "amount": d.get("turnover"),
+            }
+        )
     df = _df_from_kline_rows(rows, limit=max(fallback_limits))
     if df is None:
         return None, {}
@@ -419,15 +491,17 @@ def _signal_events(ind, df, res, limit=60):
     events = []
     for idx in idxs[-limit:]:
         days_ago = max(0, len(df) - 1 - idx)
-        events.append({
-            "t": int(df["t"].iloc[idx]),
-            "label": marker,
-            "name": ind["name"],
-            "reason": _event_reason(ind, idx, df, res),
-            "strength": max(30, 100 - days_ago * 12),
-            "price": float(df["close"].iloc[idx]),
-            "color": color,
-        })
+        events.append(
+            {
+                "t": int(df["t"].iloc[idx]),
+                "label": marker,
+                "name": ind["name"],
+                "reason": _event_reason(ind, idx, df, res),
+                "strength": max(30, 100 - days_ago * 12),
+                "price": float(df["close"].iloc[idx]),
+                "color": color,
+            }
+        )
     return events
 
 
@@ -442,12 +516,14 @@ def _signal_zones(ind, df, res, limit=10):
             start = i
         if start is not None and (not hit or i == len(res) - 1):
             end = i if hit and i == len(res) - 1 else i - 1
-            zones.append({
-                "start": int(df["t"].iloc[start]),
-                "end": int(df["t"].iloc[end]),
-                "name": ind["name"],
-                "color": color,
-            })
+            zones.append(
+                {
+                    "start": int(df["t"].iloc[start]),
+                    "end": int(df["t"].iloc[end]),
+                    "name": ind["name"],
+                    "color": color,
+                }
+            )
             start = None
     return zones[-limit:]
 
@@ -456,7 +532,9 @@ def _signal_zones(ind, df, res, limit=10):
 async def translate_endpoint(req: TranslateRequest, request: Request):
     u = require_auth(request)
     if not check_rate_limit(f"indtr:{u}", 8, RATE_EXPLAIN_PER_MIN):
-        return JSONResponse({"error": "请求太频繁，请稍后再试"}, status_code=429, headers={"Retry-After": "60"})
+        return JSONResponse(
+            {"error": "请求太频繁，请稍后再试"}, status_code=429, headers={"Retry-After": "60"}
+        )
     out = translate(req.input)
     if not out:
         return JSONResponse({"error": "翻译失败，请换种说法或在 DSL 里手动编辑"}, status_code=422)
@@ -468,7 +546,9 @@ async def list_indicators(request: Request):
     u = require_auth(request)
     with get_db() as db:
         _ensure_builtin_library(db, u)
-        rows = db.execute("SELECT * FROM indicators WHERE username=? ORDER BY updated_at DESC", [u]).fetchall()
+        rows = db.execute(
+            "SELECT * FROM indicators WHERE username=? ORDER BY updated_at DESC", [u]
+        ).fetchall()
     return {"indicators": [_row_to_dict(r) for r in rows]}
 
 
@@ -516,9 +596,8 @@ async def update_indicator(ind_id: str, req: IndicatorUpdate, request: Request):
             params.append(v)
     new_dsl = req.dsl if req.dsl is not None else current["dsl"]
     new_params = req.params if req.params is not None else current.get("params", {})
-    if req.dsl is not None or req.params is not None:
-        if not validate(new_dsl, _param_values(new_params)):
-            raise HTTPException(400, "DSL 无效")
+    if (req.dsl is not None or req.params is not None) and not validate(new_dsl, _param_values(new_params)):
+        raise HTTPException(400, "DSL 无效")
     if req.dsl is not None:
         sets.append("dsl_json=?")
         params.append(_json_dump(req.dsl))
@@ -641,7 +720,7 @@ async def eval_indicator(ind_id: str, req: EvalRequest, request: Request):
     try:
         res = evaluate(ind["dsl"], df, fund, pvals)
     except DSLError as exc:
-        return JSONResponse({"error": "指标计算错误: %s" % exc}, status_code=400)
+        return JSONResponse({"error": f"指标计算错误: {exc!s}"}, status_code=400)
     ts = df["t"].tolist()
     if is_signal(res):
         events = _signal_events(ind, df, res)
@@ -651,7 +730,13 @@ async def eval_indicator(ind_id: str, req: EvalRequest, request: Request):
             "kind": "signal",
             "triggers": triggers,
             "events": events,
-            "tracks": [{"name": ind["name"], "color": (ind.get("visual") or {}).get("color") or "#22c55e", "events": events}],
+            "tracks": [
+                {
+                    "name": ind["name"],
+                    "color": (ind.get("visual") or {}).get("color") or "#22c55e",
+                    "events": events,
+                }
+            ],
             "zones": _signal_zones(ind, df, res),
             "latest": latest,
             "reason": events[-1]["reason"] if events else "最近没有触发",
@@ -701,18 +786,20 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
             res = evaluate(ind["dsl"], df, fund, pvals)
         except DSLError:
             continue
-        window = res.iloc[-req.trigger_window:] if len(res) >= req.trigger_window else res
+        window = res.iloc[-req.trigger_window :] if len(res) >= req.trigger_window else res
         if bool(window.fillna(False).any()):
             idxs = [i for i in range(len(res)) if bool(res.iloc[i])]
             idx = idxs[-1] if idxs else len(res) - 1
             days_ago = max(0, len(df) - 1 - idx)
-            matches.append({
-                "ticker": tk,
-                "triggered_at": int(df["t"].iloc[idx]),
-                "price": float(df["close"].iloc[-1]),
-                "turnover": turnover,
-                "strength": max(30, 100 - days_ago * 12),
-                "reason": _event_reason(ind, idx, df, res),
-            })
+            matches.append(
+                {
+                    "ticker": tk,
+                    "triggered_at": int(df["t"].iloc[idx]),
+                    "price": float(df["close"].iloc[-1]),
+                    "turnover": turnover,
+                    "strength": max(30, 100 - days_ago * 12),
+                    "reason": _event_reason(ind, idx, df, res),
+                }
+            )
     matches.sort(key=lambda x: (x.get("strength", 0), x.get("triggered_at", 0)), reverse=True)
     return {"matches": matches, "scanned": len(tickers)}

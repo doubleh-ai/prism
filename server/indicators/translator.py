@@ -1,4 +1,5 @@
 """Translate free-form indicator descriptions into the Prism indicator DSL."""
+
 import logging
 import re
 
@@ -140,8 +141,19 @@ def _ma_numbers(raw, compact):
     return seen
 
 
-_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-              "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_DIGITS = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 
 
 def _small_number(token, default=None):
@@ -186,26 +198,36 @@ def _volume_terms(raw):
 
 
 def _ma_cross(left_key, left, right_key, right, sync_window=1):
-    return {"within": [
-        {"cross_up": [
-            {"ma": {"param": [left_key, left]}},
-            {"ma": {"param": [right_key, right]}},
-        ]},
-        {"param": ["sync_window", sync_window]},
-    ]}
+    return {
+        "within": [
+            {
+                "cross_up": [
+                    {"ma": {"param": [left_key, left]}},
+                    {"ma": {"param": [right_key, right]}},
+                ]
+            },
+            {"param": ["sync_window", sync_window]},
+        ]
+    }
 
 
 def _prior_volume_condition(window, multiplier):
-    return {"gt": [
-        {"vol": 0},
-        {"mul": [
-            {"param": ["multiplier", multiplier]},
-            {"ref": [
-                {"ma_vol": {"param": ["baseline_window", window]}},
-                1,
-            ]},
-        ]},
-    ]}
+    return {
+        "gt": [
+            {"vol": 0},
+            {
+                "mul": [
+                    {"param": ["multiplier", multiplier]},
+                    {
+                        "ref": [
+                            {"ma_vol": {"param": ["baseline_window", window]}},
+                            1,
+                        ]
+                    },
+                ]
+            },
+        ]
+    }
 
 
 def _rule_translate(user_input: str) -> dict | None:
@@ -213,38 +235,63 @@ def _rule_translate(user_input: str) -> dict | None:
     upper = raw.upper()
     compact = re.sub(r"\s+", "", upper)
 
-    if "MACD" in compact and any(x in raw for x in ("金叉", "上穿", "上叉")) or "MACD" in compact and "CROSS" in compact:
-        params = {"items": [
-            _param("fast", "快线 EMA", 12, 3, 30, 1, "日"),
-            _param("slow", "慢线 EMA", 26, 5, 80, 1, "日"),
-            _param("signal", "信号线", 9, 3, 30, 1, "日"),
-        ]}
-        dsl = {"cross_up": [
-            {"macd_dif": [{"param": ["fast", 12]}, {"param": ["slow", 26]}]},
-            {"macd_dea": [{"param": ["fast", 12]}, {"param": ["slow", 26]}, {"param": ["signal", 9]}]},
-        ]}
-        return _out("MACD金叉", "signal", "DIF 上穿 DEA", dsl, params, _base_plan("signal"), _visual("signal_track", "#60a5fa"))
+    if (
+        "MACD" in compact
+        and any(x in raw for x in ("金叉", "上穿", "上叉"))
+        or "MACD" in compact
+        and "CROSS" in compact
+    ):
+        params = {
+            "items": [
+                _param("fast", "快线 EMA", 12, 3, 30, 1, "日"),
+                _param("slow", "慢线 EMA", 26, 5, 80, 1, "日"),
+                _param("signal", "信号线", 9, 3, 30, 1, "日"),
+            ]
+        }
+        dsl = {
+            "cross_up": [
+                {"macd_dif": [{"param": ["fast", 12]}, {"param": ["slow", 26]}]},
+                {"macd_dea": [{"param": ["fast", 12]}, {"param": ["slow", 26]}, {"param": ["signal", 9]}]},
+            ]
+        }
+        return _out(
+            "MACD金叉",
+            "signal",
+            "DIF 上穿 DEA",
+            dsl,
+            params,
+            _base_plan("signal"),
+            _visual("signal_track", "#60a5fa"),
+        )
 
     ma_nums = _ma_numbers(raw, compact)
-    wants_cross = any(x in raw for x in ("金叉", "上穿", "上叉")) or "CROSS" in compact or "CROSSOVER" in compact
+    wants_cross = (
+        any(x in raw for x in ("金叉", "上穿", "上叉")) or "CROSS" in compact or "CROSSOVER" in compact
+    )
     has_volume, baseline_window, volume_multiplier = _volume_terms(raw)
     if len(ma_nums) >= 3 and wants_cross:
         fast, mid, slow = sorted(ma_nums[:3])
-        params = {"items": [
-            _param("fast", "短期均线", fast, 2, 30, 1, "日"),
-            _param("mid", "中期均线", mid, 3, 120, 1, "日"),
-            _param("slow", "长期均线", slow, 5, 250, 1, "日"),
-            _param("sync_window", "交叉共振窗口", 1, 1, 10, 1, "日"),
-        ]}
-        cross_pair = {"and": [
-            _ma_cross("fast", fast, "mid", mid),
-            _ma_cross("mid", mid, "slow", slow),
-        ]}
+        params = {
+            "items": [
+                _param("fast", "短期均线", fast, 2, 30, 1, "日"),
+                _param("mid", "中期均线", mid, 3, 120, 1, "日"),
+                _param("slow", "长期均线", slow, 5, 250, 1, "日"),
+                _param("sync_window", "交叉共振窗口", 1, 1, 10, 1, "日"),
+            ]
+        }
+        cross_pair = {
+            "and": [
+                _ma_cross("fast", fast, "mid", mid),
+                _ma_cross("mid", mid, "slow", slow),
+            ]
+        }
         if has_volume:
-            params["items"].extend([
-                _param("baseline_window", "前序均量窗口", baseline_window, 2, 60, 1, "日"),
-                _param("multiplier", "放量倍数", volume_multiplier, 1, 10, 0.1, "x"),
-            ])
+            params["items"].extend(
+                [
+                    _param("baseline_window", "前序均量窗口", baseline_window, 2, 60, 1, "日"),
+                    _param("multiplier", "放量倍数", volume_multiplier, 1, 10, 0.1, "x"),
+                ]
+            )
             dsl = {"and": [cross_pair, _prior_volume_condition(baseline_window, volume_multiplier)]}
             return _out(
                 f"多级均线放量共振({fast}/{mid}/{slow})",
@@ -267,85 +314,176 @@ def _rule_translate(user_input: str) -> dict | None:
 
     if len(ma_nums) >= 2 and wants_cross:
         fast, slow = sorted(ma_nums[:2])
-        params = {"items": [
-            _param("fast", "短均线", fast, 2, 60, 1, "日"),
-            _param("slow", "长均线", slow, 5, 250, 1, "日"),
-        ]}
+        params = {
+            "items": [
+                _param("fast", "短均线", fast, 2, 60, 1, "日"),
+                _param("slow", "长均线", slow, 5, 250, 1, "日"),
+            ]
+        }
         dsl = {"cross_up": [{"ma": {"param": ["fast", fast]}}, {"ma": {"param": ["slow", slow]}}]}
         if has_volume:
             mult = volume_multiplier
-            params["items"].extend([
-                _param("vol_window", "均量窗口", baseline_window, 2, 60, 1, "日"),
-                _param("multiplier", "放量倍数", mult, 1, 10, 0.1, "x"),
-            ])
-            dsl = {"and": [
+            params["items"].extend(
+                [
+                    _param("vol_window", "均量窗口", baseline_window, 2, 60, 1, "日"),
+                    _param("multiplier", "放量倍数", mult, 1, 10, 0.1, "x"),
+                ]
+            )
+            dsl = {
+                "and": [
+                    dsl,
+                    {
+                        "gt": [
+                            {"vol": 0},
+                            {
+                                "mul": [
+                                    {"param": ["multiplier", mult]},
+                                    {"ref": [{"ma_vol": {"param": ["vol_window", baseline_window]}}, 1]},
+                                ]
+                            },
+                        ]
+                    },
+                ]
+            }
+            return _out(
+                "放量均线金叉",
+                "signal",
+                "短均线上穿长均线且成交量放大",
                 dsl,
-                {"gt": [{"vol": 0}, {"mul": [
-                    {"param": ["multiplier", mult]},
-                    {"ref": [{"ma_vol": {"param": ["vol_window", baseline_window]}}, 1]},
-                ]}]},
-            ]}
-            return _out("放量均线金叉", "signal", "短均线上穿长均线且成交量放大", dsl, params, _base_plan("signal"), _visual("signal_track", "#22c55e"))
-        return _out(f"均线金叉({fast}/{slow})", "signal", "短均线上穿长均线", dsl, params, _base_plan("signal"), _visual("signal_track", "#22c55e"))
+                params,
+                _base_plan("signal"),
+                _visual("signal_track", "#22c55e"),
+            )
+        return _out(
+            f"均线金叉({fast}/{slow})",
+            "signal",
+            "短均线上穿长均线",
+            dsl,
+            params,
+            _base_plan("signal"),
+            _visual("signal_track", "#22c55e"),
+        )
 
     if ma_nums and any(x in raw for x in ("站上", "突破", "高于")) or ma_nums and ">" in compact:
         n = ma_nums[0]
         params = {"items": [_param("window", "均线周期", n, 2, 250, 1, "日")]}
         dsl = {"gt": [{"price": "close"}, {"ma": {"param": ["window", n]}}]}
-        return _out(f"收盘站上MA{n}", "signal", "收盘价高于指定均线", dsl, params, _base_plan("signal"), _visual("signal_track", "#34d399"))
+        return _out(
+            f"收盘站上MA{n}",
+            "signal",
+            "收盘价高于指定均线",
+            dsl,
+            params,
+            _base_plan("signal"),
+            _visual("signal_track", "#34d399"),
+        )
 
     rsi = re.search(r"RSI\s*\(?\s*(\d+)?\s*\)?", compact)
     if rsi:
         n = int(rsi.group(1) or 14)
         threshold = 30 if any(x in raw for x in ("超卖", "低于", "小于")) or "<" in compact else 50
-        params = {"items": [
-            _param("window", "RSI周期", n, 2, 60, 1, "日"),
-            _param("threshold", "阈值", threshold, 5, 95, 1),
-        ]}
+        params = {
+            "items": [
+                _param("window", "RSI周期", n, 2, 60, 1, "日"),
+                _param("threshold", "阈值", threshold, 5, 95, 1),
+            ]
+        }
         if any(x in raw for x in ("上穿", "反弹", "金叉")) or "CROSS" in compact:
             dsl = {"cross_up": [{"rsi": {"param": ["window", n]}}, {"param": ["threshold", threshold]}]}
             name, desc = "RSI反弹", "RSI 上穿阈值"
         else:
             dsl = {"lt": [{"rsi": {"param": ["window", n]}}, {"param": ["threshold", threshold]}]}
             name, desc = "RSI低位", "RSI 低于阈值"
-        return _out(name, "signal", desc, dsl, params, _base_plan("signal"), _visual("signal_track", "#f59e0b"))
+        return _out(
+            name, "signal", desc, dsl, params, _base_plan("signal"), _visual("signal_track", "#f59e0b")
+        )
 
     if has_volume or "MA(VOL" in compact:
         mult = volume_multiplier
-        params = {"items": [
-            _param("vol_window", "均量窗口", baseline_window, 2, 60, 1, "日"),
-            _param("multiplier", "放量倍数", mult, 1, 10, 0.1, "x"),
-        ]}
-        dsl = {"gt": [{"vol": 0}, {"mul": [
-            {"param": ["multiplier", mult]},
-            {"ref": [{"ma_vol": {"param": ["vol_window", baseline_window]}}, 1]},
-        ]}]}
-        return _out("放量突破", "signal", "成交量大于指定均量倍数", dsl, params, _base_plan("signal"), _visual("signal_track", "#ef4444"))
+        params = {
+            "items": [
+                _param("vol_window", "均量窗口", baseline_window, 2, 60, 1, "日"),
+                _param("multiplier", "放量倍数", mult, 1, 10, 0.1, "x"),
+            ]
+        }
+        dsl = {
+            "gt": [
+                {"vol": 0},
+                {
+                    "mul": [
+                        {"param": ["multiplier", mult]},
+                        {"ref": [{"ma_vol": {"param": ["vol_window", baseline_window]}}, 1]},
+                    ]
+                },
+            ]
+        }
+        return _out(
+            "放量突破",
+            "signal",
+            "成交量大于指定均量倍数",
+            dsl,
+            params,
+            _base_plan("signal"),
+            _visual("signal_track", "#ef4444"),
+        )
 
     high = re.search(r"(?:突破|新高|最高).{0,8}?(\d+)", raw)
     if high:
         n = int(high.group(1))
         params = {"items": [_param("window", "突破窗口", n, 5, 250, 1, "日")]}
         dsl = {"ge": [{"price": "close"}, {"highest": [{"price": "close"}, {"param": ["window", n]}]}]}
-        return _out(f"{n}日收盘新高", "signal", "收盘价接近或突破窗口新高", dsl, params, _base_plan("signal"), _visual("signal_track", "#8b5cf6"))
+        return _out(
+            f"{n}日收盘新高",
+            "signal",
+            "收盘价接近或突破窗口新高",
+            dsl,
+            params,
+            _base_plan("signal"),
+            _visual("signal_track", "#8b5cf6"),
+        )
 
     pct = re.search(r"(?:涨幅|收益|PCT).{0,8}?(\d+(?:\.\d+)?)\s*%", raw, re.I)
     if pct:
         threshold = float(pct.group(1))
-        params = {"items": [
-            _param("window", "回看窗口", 20, 2, 120, 1, "日"),
-            _param("threshold", "涨幅阈值", threshold, 1, 80, 0.5, "%"),
-        ]}
-        dsl = {"gt": [{"pct_change": [{"price": "close"}, {"param": ["window", 20]}]}, {"param": ["threshold", threshold]}]}
-        return _out("阶段涨幅突破", "signal", "指定窗口涨幅超过阈值", dsl, params, _base_plan("signal"), _visual("signal_track", "#0ea5e9"))
+        params = {
+            "items": [
+                _param("window", "回看窗口", 20, 2, 120, 1, "日"),
+                _param("threshold", "涨幅阈值", threshold, 1, 80, 0.5, "%"),
+            ]
+        }
+        dsl = {
+            "gt": [
+                {"pct_change": [{"price": "close"}, {"param": ["window", 20]}]},
+                {"param": ["threshold", threshold]},
+            ]
+        }
+        return _out(
+            "阶段涨幅突破",
+            "signal",
+            "指定窗口涨幅超过阈值",
+            dsl,
+            params,
+            _base_plan("signal"),
+            _visual("signal_track", "#0ea5e9"),
+        )
 
     if "BOLL" in compact or "布林" in raw:
-        params = {"items": [
-            _param("window", "布林周期", 20, 5, 120, 1, "日"),
-            _param("std", "标准差倍数", 2, 1, 4, 0.1),
-        ]}
+        params = {
+            "items": [
+                _param("window", "布林周期", 20, 5, 120, 1, "日"),
+                _param("std", "标准差倍数", 2, 1, 4, 0.1),
+            ]
+        }
         dsl = {"boll_upper": [{"param": ["window", 20]}, {"param": ["std", 2]}]}
-        return _out("BOLL上轨", "plot", "布林带上轨", dsl, params, _base_plan("plot"), _visual("overlay", "#f59e0b", ""))
+        return _out(
+            "BOLL上轨",
+            "plot",
+            "布林带上轨",
+            dsl,
+            params,
+            _base_plan("plot"),
+            _visual("overlay", "#f59e0b", ""),
+        )
 
     return None
 
@@ -357,6 +495,7 @@ def translate(user_input: str) -> dict | None:
         return rule
 
     import subprocess
+
     from server.config import CLAUDE_BIN
 
     prompt = f"{_SCHEMA}\n{_EXAMPLES}\n输入「{user_input}」:"
@@ -398,6 +537,8 @@ def translate(user_input: str) -> dict | None:
         "dsl": dsl,
         "params": params,
         "plan": data.get("plan") if isinstance(data.get("plan"), dict) else _base_plan(kind),
-        "visual": data.get("visual") if isinstance(data.get("visual"), dict) else _visual("signal_track" if kind == "signal" else "overlay"),
+        "visual": data.get("visual")
+        if isinstance(data.get("visual"), dict)
+        else _visual("signal_track" if kind == "signal" else "overlay"),
         "source": "llm",
     }

@@ -4,24 +4,24 @@ Uses Tencent qt.gtimg.cn for real-time quotes (batch, sub-100ms) and
 Sina money.finance.sina.com.cn for daily K-line. Both endpoints are
 confirmed reachable in the prod network (no akshare/baostock dependency).
 """
+
 import asyncio
-import re
 import json
-import time
 import logging
+import re
+import time
 import urllib.parse
 import urllib.request
-from typing import List
-from .provider import ProviderUnavailable, ProviderNotFound
-from .models import Quote, KLine, Fundamentals, SearchHit
+
+from .models import Fundamentals, KLine, Quote, SearchHit
+from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
 
 log = logging.getLogger("stock-app")
 
 _TENCENT_URL = "https://qt.gtimg.cn/q="
 _SINA_KLINE_URL = (
-    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-    "CN_MarketData.getKLineData"
+    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 )
 
 
@@ -55,7 +55,7 @@ def _decode_gbk(raw: bytes) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
-def _fetch_tencent_quotes(codes: List[str], timeout: float = 8) -> dict:
+def _fetch_tencent_quotes(codes: list[str], timeout: float = 8) -> dict:
     """Batch-fetch real-time quotes from Tencent. Returns {ticker: fields_list}."""
     if not codes:
         return {}
@@ -120,18 +120,14 @@ class TencentProvider:
         except (ValueError, IndexError) as e:
             raise ProviderUnavailable(f"tencent: bad quote data: {e}") from e
 
-    async def get_kline(
-        self, ticker: str, period: str = "1d", limit: int = 120
-    ) -> List[KLine]:
+    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
         if period not in {"1d", "1w", "1m"}:
             raise ProviderUnavailable(f"tencent: unsupported K-line period {period}")
         symbol = _sina_symbol(ticker)
         source_limit = daily_fetch_limit(period, limit)
         # Sina exposes daily bars here. Weekly/monthly requests fetch enough
         # source history and are aggregated after normalization.
-        url = (
-            f"{_SINA_KLINE_URL}?symbol={urllib.parse.quote(symbol)}&scale=240&ma=no&datalen={source_limit}"
-        )
+        url = f"{_SINA_KLINE_URL}?symbol={urllib.parse.quote(symbol)}&scale=240&ma=no&datalen={source_limit}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
             # Run sync urllib in a worker thread so the event loop is free.
@@ -144,18 +140,20 @@ class TencentProvider:
             raise ProviderUnavailable(f"Sina kline bad JSON: {e}") from e
         if not bars or not isinstance(bars, list):
             return []
-        out: List[KLine] = []
+        out: list[KLine] = []
         for b in bars:
             try:
                 ts = int(time.mktime(time.strptime(b["day"], "%Y-%m-%d")))
-                out.append(KLine(
-                    timestamp=ts,
-                    open=float(b["open"]),
-                    high=float(b["high"]),
-                    low=float(b["low"]),
-                    close=float(b["close"]),
-                    volume=float(b["volume"]),
-                ))
+                out.append(
+                    KLine(
+                        timestamp=ts,
+                        open=float(b["open"]),
+                        high=float(b["high"]),
+                        low=float(b["low"]),
+                        close=float(b["close"]),
+                        volume=float(b["volume"]),
+                    )
+                )
             except (KeyError, ValueError):
                 continue
         return resample_kline(out, period, limit)
@@ -163,7 +161,7 @@ class TencentProvider:
     async def get_fundamentals(self, ticker: str) -> Fundamentals:
         raise ProviderUnavailable("tencent: fundamentals not available via Sina")
 
-    async def search(self, query: str, limit: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
         return []  # fall through to akshare for search
 
     async def health(self) -> bool:

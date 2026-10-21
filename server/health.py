@@ -1,7 +1,7 @@
 """Operational health checks for the admin console."""
+
 from __future__ import annotations
 
-import os
 import platform
 import shutil
 import subprocess
@@ -38,18 +38,19 @@ def _check_claude_cli() -> dict[str, Any]:
     try:
         proc = subprocess.run(
             [resolved, "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=3,
             check=False,
         )
         output = (proc.stdout or proc.stderr or "").strip().splitlines()
-        result.update({
-            "status": "ok" if proc.returncode == 0 else "error",
-            "returncode": proc.returncode,
-            "version": output[0][:120] if output else "",
-        })
+        result.update(
+            {
+                "status": "ok" if proc.returncode == 0 else "error",
+                "returncode": proc.returncode,
+                "version": output[0][:120] if output else "",
+            }
+        )
     except subprocess.TimeoutExpired:
         result.update({"status": "timeout"})
     except Exception as exc:
@@ -63,15 +64,17 @@ def _skill_checks() -> list[dict[str, Any]]:
         dir_name = info["dir"]
         path, checked = _resolve_skill_dir(dir_name)
         claude_md = path / "CLAUDE.md" if path else None
-        out.append({
-            "id": skill_id,
-            "name": info.get("name", skill_id),
-            "dir": dir_name,
-            "status": "ok" if path and path.exists() else "missing",
-            "path": str(path) if path else "",
-            "has_claude_md": bool(claude_md and claude_md.exists()),
-            "checked_paths": [str(p) for p in checked],
-        })
+        out.append(
+            {
+                "id": skill_id,
+                "name": info.get("name", skill_id),
+                "dir": dir_name,
+                "status": "ok" if path and path.exists() else "missing",
+                "path": str(path) if path else "",
+                "has_claude_md": bool(claude_md and claude_md.exists()),
+                "checked_paths": [str(p) for p in checked],
+            }
+        )
     return out
 
 

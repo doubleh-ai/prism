@@ -1,4 +1,5 @@
 """market_cache table exists with the expected schema."""
+
 from server.database import get_db
 
 

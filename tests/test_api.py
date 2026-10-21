@@ -1,20 +1,24 @@
 """Test API endpoints"""
+
 import json
+
 import pytest
 
 
 def test_chat_report_protocol_cleanup_and_file_priority():
     from server.chat import _clean_object_artifacts, _prioritize_report_files
 
-    cleaned = _clean_object_artifacts('主题：液冷产能。 \">供应链上游瓶颈')
+    cleaned = _clean_object_artifacts('主题：液冷产能。 ">供应链上游瓶颈')
     assert cleaned == "主题：液冷产能。 供应链上游瓶颈"
-    files = _prioritize_report_files([
-        "prices.csv",
-        "audit.json",
-        "完整报告.html",
-        "摘要.md",
-        "附录.pdf",
-    ])
+    files = _prioritize_report_files(
+        [
+            "prices.csv",
+            "audit.json",
+            "完整报告.html",
+            "摘要.md",
+            "附录.pdf",
+        ]
+    )
     assert files == ["完整报告.html", "附录.pdf", "摘要.md", "prices.csv", "audit.json"]
 
 
@@ -56,18 +60,15 @@ class TestAuthEndpoints:
     """Endpoints that require authentication"""
 
     async def test_login_success(self, client, test_user):
-        r = await client.post("/api/login", json={
-            "username": test_user["username"],
-            "password": test_user["password"]
-        })
+        r = await client.post(
+            "/api/login", json={"username": test_user["username"], "password": test_user["password"]}
+        )
         assert r.status_code == 200
         data = r.json()
         assert data.get("user") == test_user["username"]
 
     async def test_login_failure(self, client):
-        r = await client.post("/api/login", json={
-            "username": "nonexistent", "password": "wrong"
-        })
+        r = await client.post("/api/login", json={"username": "nonexistent", "password": "wrong"})
         assert r.status_code in (401, 403)  # rate limiter may return 403
 
     async def test_me_authenticated(self, client, auth_cookies):
@@ -91,8 +92,7 @@ class TestConversationCRUD:
     """Conversation create/read/delete/list"""
 
     async def test_create_conv(self, client, auth_cookies):
-        r = await client.post("/api/convs", cookies=auth_cookies,
-                              json={"skill": "bottleneck-hunter"})
+        r = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         assert r.status_code == 200
         data = r.json()
         assert "id" in data
@@ -105,8 +105,7 @@ class TestConversationCRUD:
 
     async def test_list_convs_with_data(self, client, auth_cookies):
         # Create a conversation
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         r = await client.get("/api/convs", cookies=auth_cookies)
@@ -121,8 +120,7 @@ class TestConversationCRUD:
         assert r.status_code == 404
 
     async def test_get_conv(self, client, auth_cookies):
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         r = await client.get(f"/api/convs/{cid}", cookies=auth_cookies)
@@ -134,21 +132,25 @@ class TestConversationCRUD:
 
     async def test_get_conv_sanitizes_legacy_db_messages(self, client, auth_cookies):
         """Stored DB messages from older builds should be cleaned on read."""
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
-        dirty = json.dumps({
-            "text": "answer [object Object] done",
-            "chunks": [
-                {"t": "think", "c": "[object Object]\n\n[object Object]"},
-                {"t": "think", "c": "[object Object]\nvisible thought"},
-                {"t": "text", "c": "answer [object Object] done"},
-            ],
-        }, ensure_ascii=False)
+        dirty = json.dumps(
+            {
+                "text": "answer [object Object] done",
+                "chunks": [
+                    {"t": "think", "c": "[object Object]\n\n[object Object]"},
+                    {"t": "think", "c": "[object Object]\nvisible thought"},
+                    {"t": "text", "c": "answer [object Object] done"},
+                ],
+            },
+            ensure_ascii=False,
+        )
         from server.database import get_db
+
         with get_db() as db:
-            db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                       [cid, "assistant", dirty])
+            db.execute(
+                "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [cid, "assistant", dirty]
+            )
 
         r = await client.get(f"/api/convs/{cid}", cookies=auth_cookies)
         assert r.status_code == 200
@@ -161,8 +163,7 @@ class TestConversationCRUD:
 
     async def test_delete_conv_soft(self, client, auth_cookies):
         """DELETE now soft-deletes (moves to trash). GET returns 404 for trashed items."""
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         r = await client.delete(f"/api/convs/{cid}", cookies=auth_cookies)
@@ -181,17 +182,16 @@ class TestConversationCRUD:
         assert trash[0]["id"] == cid
 
     async def test_update_skill(self, client, auth_cookies):
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
-        r = await client.put(f"/api/convs/{cid}/skill", cookies=auth_cookies,
-                             json={"skill": "serenity"})
+        r = await client.put(f"/api/convs/{cid}/skill", cookies=auth_cookies, json={"skill": "serenity"})
         assert r.status_code == 200
 
         # Verify
         r2 = await client.get(f"/api/convs/{cid}", cookies=auth_cookies)
         assert r2.json()["skill"] == "serenity"
+
 
 class TestRecycleBin:
     """Soft delete / restore / permanent delete / trash list"""
@@ -202,8 +202,7 @@ class TestRecycleBin:
         assert r.json() == []
 
     async def test_restore_conv(self, client, auth_cookies):
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Soft delete
@@ -222,8 +221,7 @@ class TestRecycleBin:
         assert r3.json() == []
 
     async def test_permanent_delete(self, client, auth_cookies):
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Permanent delete
@@ -239,8 +237,7 @@ class TestRecycleBin:
         assert r3.json() == []
 
     async def test_trash_has_deleted_at(self, client, auth_cookies):
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         await client.delete(f"/api/convs/{cid}", cookies=auth_cookies)
@@ -264,8 +261,7 @@ class TestChatControl:
 
     async def test_chat_cancel_no_process(self, client, auth_cookies):
         """Cancel returns ok even when no process running."""
-        r = await client.post("/api/chat/cancel", cookies=auth_cookies,
-                              json={"conv_id": "nonexistent"})
+        r = await client.post("/api/chat/cancel", cookies=auth_cookies, json={"conv_id": "nonexistent"})
         assert r.status_code == 200
         assert r.json() == {"ok": False}
 
@@ -274,19 +270,28 @@ class TestChatControl:
         from server import chat as chat_mod
 
         async def fake_run_claude_stream(*args, **kwargs):
-            yield {"type": "assistant", "message": {"content": [
-                {"type": "thinking", "thinking": "[object Object]\nvisible thought\n[object Object]"},
-                {"type": "tool_use", "name": "Bash", "input": {"command": "[object Object]\nls"}},
-                {"type": "text", "text": "answer [object Object] done"},
-            ]}}
+            yield {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "[object Object]\nvisible thought\n[object Object]"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "[object Object]\nls"}},
+                        {"type": "text", "text": "answer [object Object] done"},
+                    ]
+                },
+            }
             yield {"type": "result", "duration_ms": 1, "stop_reason": "end_turn"}
 
         monkeypatch.setattr(chat_mod, "run_claude_stream", fake_run_claude_stream)
 
-        r = await client.post("/api/chat/stream", cookies=auth_cookies, json={
-            "question": "hi",
-            "skill": "bottleneck-hunter",
-        })
+        r = await client.post(
+            "/api/chat/stream",
+            cookies=auth_cookies,
+            json={
+                "question": "hi",
+                "skill": "bottleneck-hunter",
+            },
+        )
         assert r.status_code == 200
         assert "[object Object]" not in r.text
         assert "visible thought" in r.text
@@ -307,33 +312,40 @@ class TestChatControl:
 
         monkeypatch.setattr(chat_mod, "run_claude_stream", fake_run_claude_stream)
 
-        r = await client.post("/api/chat/stream", cookies=auth_cookies, json={
-            "question": "hi",
-            "skill": "bottleneck-hunter",
-        })
+        r = await client.post(
+            "/api/chat/stream",
+            cookies=auth_cookies,
+            json={
+                "question": "hi",
+                "skill": "bottleneck-hunter",
+            },
+        )
 
         assert r.status_code == 200
         assert "报告已交付" in r.text
         assert '"report_status": "complete"' in r.text
 
-
     async def test_conv_isolation(self, client, auth_cookies, test_user):
         """Different users can't see each other's conversations."""
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Login as different user
-        from server.database import get_db
         from server.auth import hash_password
+        from server.database import get_db
+
         with get_db() as db:
-            db.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
-                       ["other", hash_password("pass")])
+            db.execute(
+                "INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
+                ["other", hash_password("pass")],
+            )
         from server.auth import create_session
+
         token2 = create_session("other")
 
         r = await client.get(f"/api/convs/{cid}", cookies={"token": token2})
         assert r.status_code == 404
+
 
 class TestReleaseMetadata:
     """Release metadata endpoint."""
@@ -350,6 +362,7 @@ class TestReleaseMetadata:
         assert data["latest"]["version"] == "v0.19.7"
         assert data["releases"]
         assert data["releases"][0]["sections"]
+
     async def test_app_shell_is_not_cached(self, client, auth_cookies):
         r = await client.get("/", cookies=auth_cookies)
         assert r.status_code == 200
@@ -364,19 +377,25 @@ class TestReleaseMetadata:
 class TestAnalysisApi:
     """Astock API options should be wired through to the engine."""
 
-    async def test_analysis_start_accepts_mode_force_refresh_and_reports_cache(self, client, auth_cookies, monkeypatch):
+    async def test_analysis_start_accepts_mode_force_refresh_and_reports_cache(
+        self, client, auth_cookies, monkeypatch
+    ):
         from server import main
 
         captured = {}
 
-        async def fake_start_analysis(ticker, name="", date="", username="", mode="deep", force_refresh=False):
-            captured.update({
-                "ticker": ticker,
-                "name": name,
-                "username": username,
-                "mode": mode,
-                "force_refresh": force_refresh,
-            })
+        async def fake_start_analysis(
+            ticker, name="", date="", username="", mode="deep", force_refresh=False
+        ):
+            captured.update(
+                {
+                    "ticker": ticker,
+                    "name": name,
+                    "username": username,
+                    "mode": mode,
+                    "force_refresh": force_refresh,
+                }
+            )
             main._store["fakeaid"] = {
                 "id": "fakeaid",
                 "mode": "fast",
@@ -437,6 +456,7 @@ class TestSavedReports:
 
         from server.auth import create_session, hash_password
         from server.database import get_db
+
         with get_db() as db:
             db.execute(
                 "INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
@@ -523,6 +543,7 @@ class TestSavedReports:
         reports = listed.json()["reports"]
         assert any(r.get("kind") == "saved" and r.get("report_id") == report_id for r in reports)
 
+
 class TestAdminDefaults:
     """Default admin policy and session behavior."""
 
@@ -546,6 +567,7 @@ class TestAdminDefaults:
         assert login1.status_code == 200
         assert login2.status_code == 200
         from server.database import get_db
+
         with get_db() as db:
             row = db.execute(
                 "SELECT COUNT(*) AS c FROM sessions WHERE username=? AND expires > strftime('%s','now')",
@@ -556,18 +578,23 @@ class TestAdminDefaults:
     async def test_bootstrap_creates_configured_admin_user(self, client, monkeypatch):
         monkeypatch.setenv("ADMIN_USER", "bootstrap_admin")
         monkeypatch.setenv("ADMIN_PASS", "bootstrappass123")
-        from server.main import ensure_configured_admin_user
         from server.database import get_db
+        from server.main import ensure_configured_admin_user
 
         ensure_configured_admin_user()
 
         with get_db() as db:
-            row = db.execute("SELECT username, disabled_at FROM users WHERE username=?", ["bootstrap_admin"]).fetchone()
+            row = db.execute(
+                "SELECT username, disabled_at FROM users WHERE username=?", ["bootstrap_admin"]
+            ).fetchone()
         assert row is not None
         assert row["disabled_at"] is None
 
-        login = await client.post("/api/login", json={"username": "bootstrap_admin", "password": "bootstrappass123"})
+        login = await client.post(
+            "/api/login", json={"username": "bootstrap_admin", "password": "bootstrappass123"}
+        )
         assert login.status_code == 200
+
 
 class TestAdminAccountManagement:
     """Admin account management endpoints."""
@@ -575,6 +602,7 @@ class TestAdminAccountManagement:
     @pytest.fixture(autouse=True)
     def _allow_testuser_admin(self):
         from server import auth
+
         old = set(auth.ADMIN_USERS)
         auth.ADMIN_USERS.add("testuser")
         try:
@@ -593,25 +621,29 @@ class TestAdminAccountManagement:
         assert data["users"][0]["is_admin"] is True
 
     async def test_admin_create_disable_enable_reset_and_delete_user(self, client, auth_cookies):
-        r = await client.post("/api/admin/users", cookies=auth_cookies,
-                              json={"username": "managed", "password": "firstpass123"})
+        r = await client.post(
+            "/api/admin/users", cookies=auth_cookies, json={"username": "managed", "password": "firstpass123"}
+        )
         assert r.status_code == 200
 
         login_ok = await client.post("/api/login", json={"username": "managed", "password": "firstpass123"})
         assert login_ok.status_code == 200
 
-        r = await client.put("/api/admin/users/managed/status", cookies=auth_cookies,
-                             json={"disabled": True})
+        r = await client.put("/api/admin/users/managed/status", cookies=auth_cookies, json={"disabled": True})
         assert r.status_code == 200
-        login_disabled = await client.post("/api/login", json={"username": "managed", "password": "firstpass123"})
+        login_disabled = await client.post(
+            "/api/login", json={"username": "managed", "password": "firstpass123"}
+        )
         assert login_disabled.status_code == 403
 
-        r = await client.put("/api/admin/users/managed/status", cookies=auth_cookies,
-                             json={"disabled": False})
+        r = await client.put(
+            "/api/admin/users/managed/status", cookies=auth_cookies, json={"disabled": False}
+        )
         assert r.status_code == 200
 
-        r = await client.put("/api/admin/users/managed/password", cookies=auth_cookies,
-                             json={"password": "secondpass123"})
+        r = await client.put(
+            "/api/admin/users/managed/password", cookies=auth_cookies, json={"password": "secondpass123"}
+        )
         assert r.status_code == 200
         login_old = await client.post("/api/login", json={"username": "managed", "password": "firstpass123"})
         assert login_old.status_code == 403
@@ -620,16 +652,18 @@ class TestAdminAccountManagement:
 
         r = await client.delete("/api/admin/users/managed", cookies=auth_cookies)
         assert r.status_code == 200
-        login_deleted = await client.post("/api/login", json={"username": "managed", "password": "secondpass123"})
+        login_deleted = await client.post(
+            "/api/login", json={"username": "managed", "password": "secondpass123"}
+        )
         assert login_deleted.status_code == 403
 
     async def test_admin_cannot_disable_or_delete_self(self, client, auth_cookies):
-        r = await client.put("/api/admin/users/testuser/status", cookies=auth_cookies,
-                             json={"disabled": True})
+        r = await client.put(
+            "/api/admin/users/testuser/status", cookies=auth_cookies, json={"disabled": True}
+        )
         assert r.status_code == 400
         r = await client.delete("/api/admin/users/testuser", cookies=auth_cookies)
         assert r.status_code == 400
-
 
     async def test_admin_stats_endpoint(self, client, auth_cookies):
         r = await client.get("/api/admin/stats", cookies=auth_cookies)
@@ -696,27 +730,48 @@ class TestAdminAccountManagement:
 
     async def test_admin_activity_insights_and_event_search(self, client, auth_cookies):
         import time
+
         from server.database import record_activity
 
         now = int(time.time())
         record_activity(
-            username="testuser", feature="market", action="search",
-            target_type="query", target_id="600519", target_label="600519",
-            duration_ms=35, created_at=now - 2 * 86400,
+            username="testuser",
+            feature="market",
+            action="search",
+            target_type="query",
+            target_id="600519",
+            target_label="600519",
+            duration_ms=35,
+            created_at=now - 2 * 86400,
         )
         record_activity(
-            username="testuser", feature="market", action="quote",
-            target_type="ticker", target_id="600519", target_label="贵州茅台",
-            duration_ms=120, created_at=now - 86400,
+            username="testuser",
+            feature="market",
+            action="quote",
+            target_type="ticker",
+            target_id="600519",
+            target_label="贵州茅台",
+            duration_ms=120,
+            created_at=now - 86400,
         )
         record_activity(
-            username="testuser", feature="analysis", action="start",
-            target_type="ticker", target_id="600519", target_label="贵州茅台",
-            duration_ms=5100, created_at=now - 3600,
+            username="testuser",
+            feature="analysis",
+            action="start",
+            target_type="ticker",
+            target_id="600519",
+            target_label="贵州茅台",
+            duration_ms=5100,
+            created_at=now - 3600,
         )
         record_activity(
-            username="testuser", feature="analysis", action="open_report",
-            status="failed", duration_ms=6200, meta={"status_code": 504}, created_at=now - 1800,
+            username="testuser",
+            feature="analysis",
+            action="open_report",
+            status="failed",
+            duration_ms=6200,
+            meta={"status_code": 504},
+            created_at=now - 1800,
         )
 
         response = await client.get("/api/admin/analytics/insights?range=7d", cookies=auth_cookies)
@@ -748,8 +803,13 @@ class TestAdminAccountManagement:
         tracked = await client.post(
             "/api/activity",
             cookies=auth_cookies,
-            json={"feature": "market", "action": "watchlist_add", "target_type": "ticker",
-                  "target_id": "300750", "target_label": "宁德时代"},
+            json={
+                "feature": "market",
+                "action": "watchlist_add",
+                "target_type": "ticker",
+                "target_id": "300750",
+                "target_label": "宁德时代",
+            },
         )
         assert tracked.status_code == 200
         with get_db() as db:
@@ -762,7 +822,8 @@ class TestAdminAccountManagement:
         assert json.loads(row["meta_json"])["source"] == "ui"
 
         rejected = await client.post(
-            "/api/activity", cookies=auth_cookies,
+            "/api/activity",
+            cookies=auth_cookies,
             json={"feature": "market", "action": "arbitrary_event"},
         )
         assert rejected.status_code == 422
@@ -784,8 +845,10 @@ class TestAdminAccountManagement:
         assert row is not None
         assert row["username"] == "testuser"
         assert row["status"] == "success"
+
     async def test_admin_endpoint_respects_admin_users_allowlist(self, client, auth_cookies):
         from server import auth
+
         old = set(auth.ADMIN_USERS)
         auth.ADMIN_USERS.clear()
         auth.ADMIN_USERS.add("admin")

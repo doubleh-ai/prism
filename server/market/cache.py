@@ -4,16 +4,18 @@ Stored as JSON. ``get_or_fetch`` semantics are NOT here — providers
 call ``get`` / ``set`` and the chain decides when to fall back to
 stale. This keeps the cache free of provider-specific logic.
 """
+
 import json
 import time
-from typing import Any, Optional
+from typing import Any
+
 from ..database import get_db
 
 
 class MarketCache:
     """TTL cache keyed by string. Values are JSON-serializable."""
 
-    def get(self, key: str) -> tuple[Optional[Any], bool]:
+    def get(self, key: str) -> tuple[Any | None, bool]:
         """Return (value, stale).
 
         ``stale`` is always False here — use :meth:`get_stale` for the
@@ -30,7 +32,7 @@ class MarketCache:
             return None, False
         return json.loads(row["value_json"]), False
 
-    def get_stale(self, key: str) -> tuple[Optional[Any], bool]:
+    def get_stale(self, key: str) -> tuple[Any | None, bool]:
         """Return (value, True) even if expired, for fallback after provider failure."""
         with get_db() as db:
             row = db.execute(

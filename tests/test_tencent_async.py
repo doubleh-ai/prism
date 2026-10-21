@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 """Tencent provider's urllib calls must not block the event loop.
 
 Strategy: mock urlopen to do a non-trivial amount of work, then call
 get_quote. During the call, schedule another coroutine on the loop and
 verify it runs — i.e. the loop is not blocked.
 """
+
 import asyncio
 import json
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_get_quote_does_not_block_event_loop():
@@ -54,7 +54,7 @@ def test_get_quote_does_not_block_event_loop():
     # The elapsed time should be <= 250ms (200ms upstream + 50ms scheduling
     # overhead), NOT 200ms + 200ms (which would mean the side task was
     # blocked behind the upstream call). Allow 300ms for CI noise.
-    assert elapsed < 0.3, f"Loop appears blocked: {elapsed*1000:.0f} ms elapsed"
+    assert elapsed < 0.3, f"Loop appears blocked: {elapsed * 1000:.0f} ms elapsed"
 
 
 def test_get_quote_returns_valid_quote():
@@ -89,7 +89,9 @@ def test_get_kline_does_not_block_event_loop():
     def fake_urlopen(req, timeout):
         time.sleep(0.2)
         m = MagicMock()
-        m.read.return_value = b'[{"day":"2024-01-01","open":1.0,"high":2.0,"low":0.5,"close":1.5,"volume":1000.0}]'
+        m.read.return_value = (
+            b'[{"day":"2024-01-01","open":1.0,"high":2.0,"low":0.5,"close":1.5,"volume":1000.0}]'
+        )
         m.__enter__ = lambda s: s
         m.__exit__ = lambda s, *a: None
         return m
@@ -105,7 +107,7 @@ def test_get_kline_does_not_block_event_loop():
     kline, elapsed = asyncio.run(main())
     assert len(kline) == 1
     assert kline[0].close == 1.5
-    assert elapsed < 0.3, f"K-line loop appears blocked: {elapsed*1000:.0f} ms"
+    assert elapsed < 0.3, f"K-line loop appears blocked: {elapsed * 1000:.0f} ms"
 
 
 def test_get_kline_builds_weekly_bars_and_fetches_enough_daily_history():

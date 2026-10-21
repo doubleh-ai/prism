@@ -4,11 +4,13 @@ Each conversation's tool-call / text / think / ref chunks become graph
 nodes connected by ``flows_to`` edges. The user can view the relationship
 graph to trace the analysis's reasoning chain.
 """
+
 import json
-import uuid
-from fastapi import APIRouter, Request, HTTPException
-from .database import get_db
+
+from fastapi import APIRouter, HTTPException, Request
+
 from .auth import require_auth
+from .database import get_db
 
 router = APIRouter(prefix="/api")
 
@@ -33,11 +35,16 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
         if role == "user":
             qid = f"{conv_id}-q{mi}"
             label = msg.get("content", "")[:120]
-            nodes.append(dict(
-                id=qid, conv_id=conv_id, node_type="question",
-                label=f"Q: {label}", content=msg.get("content", "")[:2000],
-                skill=skill,
-            ))
+            nodes.append(
+                dict(
+                    id=qid,
+                    conv_id=conv_id,
+                    node_type="question",
+                    label=f"Q: {label}",
+                    content=msg.get("content", "")[:2000],
+                    skill=skill,
+                )
+            )
             if prev_id:
                 edges.append(dict(source_node_id=prev_id, target_node_id=qid, edge_type="asks"))
             prev_id = qid
@@ -56,33 +63,48 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
             if t == "tool":
                 tool_name = c.get("c", "tool")
                 detail = c.get("d", "")[:120]
-                nodes.append(dict(
-                    id=nid, conv_id=conv_id, node_type="tool_call",
-                    label=f"🔧 {tool_name}", content=detail,
-                    skill=skill,
-                ))
+                nodes.append(
+                    dict(
+                        id=nid,
+                        conv_id=conv_id,
+                        node_type="tool_call",
+                        label=f"🔧 {tool_name}",
+                        content=detail,
+                        skill=skill,
+                    )
+                )
                 if prev_id:
                     edges.append(dict(source_node_id=prev_id, target_node_id=nid, edge_type="calls"))
                 prev_id = nid
 
             elif t == "think":
                 label = (c.get("c", "") or "")[:100]
-                nodes.append(dict(
-                    id=nid, conv_id=conv_id, node_type="think",
-                    label=f"💭 思考: {label}", content=c.get("c", "")[:4000],
-                    skill=skill,
-                ))
+                nodes.append(
+                    dict(
+                        id=nid,
+                        conv_id=conv_id,
+                        node_type="think",
+                        label=f"💭 思考: {label}",
+                        content=c.get("c", "")[:4000],
+                        skill=skill,
+                    )
+                )
                 if prev_id:
                     edges.append(dict(source_node_id=prev_id, target_node_id=nid, edge_type="thinks"))
                 prev_id = nid
 
             elif t == "text":
                 label = (c.get("c", "") or "")[:100]
-                nodes.append(dict(
-                    id=nid, conv_id=conv_id, node_type="analysis",
-                    label=f"📝 {label}", content=c.get("c", "")[:4000],
-                    skill=skill,
-                ))
+                nodes.append(
+                    dict(
+                        id=nid,
+                        conv_id=conv_id,
+                        node_type="analysis",
+                        label=f"📝 {label}",
+                        content=c.get("c", "")[:4000],
+                        skill=skill,
+                    )
+                )
                 if prev_id:
                     edges.append(dict(source_node_id=prev_id, target_node_id=nid, edge_type="generates"))
                 prev_id = nid
@@ -90,22 +112,32 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
             elif t == "ref":
                 title = c.get("title", "")[:80]
                 url = c.get("url", "")
-                nodes.append(dict(
-                    id=nid, conv_id=conv_id, node_type="reference",
-                    label=f"📎 {title}", content=url,
-                    skill=skill,
-                ))
+                nodes.append(
+                    dict(
+                        id=nid,
+                        conv_id=conv_id,
+                        node_type="reference",
+                        label=f"📎 {title}",
+                        content=url,
+                        skill=skill,
+                    )
+                )
                 if prev_id:
                     edges.append(dict(source_node_id=prev_id, target_node_id=nid, edge_type="references"))
                 prev_id = nid
 
             elif t == "ask":
                 q = c.get("q", "")[:120]
-                nodes.append(dict(
-                    id=nid, conv_id=conv_id, node_type="question",
-                    label=f"❓ {q}", content=json.dumps(c.get("opts", [])),
-                    skill=skill,
-                ))
+                nodes.append(
+                    dict(
+                        id=nid,
+                        conv_id=conv_id,
+                        node_type="question",
+                        label=f"❓ {q}",
+                        content=json.dumps(c.get("opts", [])),
+                        skill=skill,
+                    )
+                )
                 if prev_id:
                     edges.append(dict(source_node_id=prev_id, target_node_id=nid, edge_type="asks"))
                 prev_id = nid
@@ -157,12 +189,14 @@ async def api_graph(conv_id: str, request: Request):
         if row["username"] != u:
             raise HTTPException(403, "无权访问该对话")
         nodes = [
-            dict(r) for r in
-            db.execute("SELECT * FROM analysis_nodes WHERE conv_id=? ORDER BY created_at", [conv_id]).fetchall()
+            dict(r)
+            for r in db.execute(
+                "SELECT * FROM analysis_nodes WHERE conv_id=? ORDER BY created_at", [conv_id]
+            ).fetchall()
         ]
         edges = [
-            dict(r) for r in
-            db.execute(
+            dict(r)
+            for r in db.execute(
                 "SELECT e.* FROM analysis_edges e JOIN analysis_nodes n ON e.source_node_id=n.id WHERE n.conv_id=?",
                 [conv_id],
             ).fetchall()

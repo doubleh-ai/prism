@@ -1,6 +1,8 @@
 """Indicator library CRUD + translate endpoint."""
-import pytest
+
 from unittest.mock import patch
+
+import pytest
 
 
 @pytest.mark.asyncio
@@ -55,27 +57,16 @@ async def test_existing_library_gets_composite_once_and_deletion_is_respected(cl
     assert created.status_code == 200
 
     first = await client.get("/api/indicators", cookies=auth_cookies)
-    composites = [
-        item for item in first.json()["indicators"]
-        if item["name"] == "多级均线放量共振(5/10/20)"
-    ]
+    composites = [item for item in first.json()["indicators"] if item["name"] == "多级均线放量共振(5/10/20)"]
     assert len(composites) == 1
 
     second = await client.get("/api/indicators", cookies=auth_cookies)
-    assert sum(
-        item["name"] == "多级均线放量共振(5/10/20)"
-        for item in second.json()["indicators"]
-    ) == 1
+    assert sum(item["name"] == "多级均线放量共振(5/10/20)" for item in second.json()["indicators"]) == 1
 
-    deleted = await client.delete(
-        "/api/indicators/" + composites[0]["id"], cookies=auth_cookies
-    )
+    deleted = await client.delete("/api/indicators/" + composites[0]["id"], cookies=auth_cookies)
     assert deleted.status_code == 200
     after_delete = await client.get("/api/indicators", cookies=auth_cookies)
-    assert not any(
-        item["name"] == "多级均线放量共振(5/10/20)"
-        for item in after_delete.json()["indicators"]
-    )
+    assert not any(item["name"] == "多级均线放量共振(5/10/20)" for item in after_delete.json()["indicators"])
 
 
 @pytest.mark.asyncio
@@ -88,9 +79,7 @@ async def test_legacy_indicator_params_are_enriched_without_rewrite(client, auth
             "kind": "plot",
             "dsl": {"ma": {"param": ["window", 20]}},
             "params": {
-                "items": [
-                    {"key": "window", "label": "周期", "value": 20, "min": 2, "max": 120, "step": 1}
-                ]
+                "items": [{"key": "window", "label": "周期", "value": 20, "min": 2, "max": 120, "step": 1}]
             },
         },
     )
@@ -107,8 +96,11 @@ async def test_legacy_indicator_params_are_enriched_without_rewrite(client, auth
 
 @pytest.mark.asyncio
 async def test_create_and_delete(client, auth_cookies):
-    r = await client.post("/api/indicators", cookies=auth_cookies, json={
-        "name": "myMA", "kind": "plot", "dsl": {"ma": 10}, "description": "x"})
+    r = await client.post(
+        "/api/indicators",
+        cookies=auth_cookies,
+        json={"name": "myMA", "kind": "plot", "dsl": {"ma": 10}, "description": "x"},
+    )
     assert r.status_code == 200
     iid = r.json()["id"]
     r = await client.get("/api/indicators", cookies=auth_cookies)
@@ -119,18 +111,24 @@ async def test_create_and_delete(client, auth_cookies):
 
 @pytest.mark.asyncio
 async def test_create_rejects_non_whitelist_dsl(client, auth_cookies):
-    r = await client.post("/api/indicators", cookies=auth_cookies, json={
-        "name": "bad", "kind": "plot", "dsl": {"exec": ["malicious"]}})
+    r = await client.post(
+        "/api/indicators",
+        cookies=auth_cookies,
+        json={"name": "bad", "kind": "plot", "dsl": {"exec": ["malicious"]}},
+    )
     assert r.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_translate_passthrough(client, auth_cookies):
     with patch("server.indicators.router.translate") as tr:
-        tr.return_value = {"name": "金叉", "kind": "signal", "description": "d",
-                           "dsl": {"cross_up": [{"ma": 5}, {"ma": 20}]}}
-        r = await client.post("/api/indicators/translate", cookies=auth_cookies,
-                              json={"input": "均线金叉"})
+        tr.return_value = {
+            "name": "金叉",
+            "kind": "signal",
+            "description": "d",
+            "dsl": {"cross_up": [{"ma": 5}, {"ma": 20}]},
+        }
+        r = await client.post("/api/indicators/translate", cookies=auth_cookies, json={"input": "均线金叉"})
     assert r.status_code == 200
     assert r.json()["dsl"]["cross_up"] is not None
 
@@ -144,14 +142,17 @@ async def test_translate_requires_auth(client):
 @pytest.mark.asyncio
 async def test_isolation_between_users(client, auth_cookies):
     # user A creates an indicator
-    await client.post("/api/indicators", cookies=auth_cookies, json={
-        "name": "privateA", "kind": "plot", "dsl": {"ma": 5}})
+    await client.post(
+        "/api/indicators", cookies=auth_cookies, json={"name": "privateA", "kind": "plot", "dsl": {"ma": 5}}
+    )
     # user B (different session) should NOT see it
     from server.auth import create_session, hash_password
     from server.database import get_db
+
     with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO users(username,password_hash) VALUES(?,?)",
-                   ["userB", hash_password("p")])
+        db.execute(
+            "INSERT OR REPLACE INTO users(username,password_hash) VALUES(?,?)", ["userB", hash_password("p")]
+        )
     b_cookies = {"token": create_session("userB")}
     r = await client.get("/api/indicators", cookies=b_cookies)
     assert "privateA" not in [i["name"] for i in r.json()["indicators"]]
@@ -285,7 +286,9 @@ async def test_eval_signal_returns_chart_events_and_params(client, auth_cookies,
             "kind": "signal",
             "description": "close > ma",
             "dsl": {"gt": [{"price": "close"}, {"ma": {"param": ["window", 2]}}]},
-            "params": {"items": [{"key": "window", "label": "窗口", "value": 2, "min": 2, "max": 20, "step": 1}]},
+            "params": {
+                "items": [{"key": "window", "label": "窗口", "value": 2, "min": 2, "max": 20, "step": 1}]
+            },
             "visual": {"style": "signal_track", "color": "#22c55e", "marker": "▲", "track": True},
             "plan": {"period": "1d", "lookback": 120},
         },
@@ -334,11 +337,14 @@ def test_market_universe_filters_market_board_and_st():
         {"ticker": "920000", "name": "安徽凤凰", "market": "BJ", "board": "bse"},
     ]
 
-    selected = filter_universe(rows, {
-        "markets": ["SH", "SZ"],
-        "boards": ["main", "gem"],
-        "exclude_st": True,
-    })
+    selected = filter_universe(
+        rows,
+        {
+            "markets": ["SH", "SZ"],
+            "boards": ["main", "gem"],
+            "exclude_st": True,
+        },
+    )
 
     assert [row["ticker"] for row in selected] == ["600000", "300001"]
 
@@ -394,6 +400,7 @@ async def test_scan_job_api_persists_full_market_config(client, auth_cookies, mo
 @pytest.mark.asyncio
 async def test_background_scan_returns_partial_signal_results():
     import pandas as pd
+
     from server.indicators import scanner
 
     indicator = {
@@ -423,15 +430,17 @@ async def test_background_scan_returns_partial_signal_results():
 
     async def fake_build_df(ticker, period, limit, include_fundamentals=True):
         closes = [1.0, 2.0, 3.0] if ticker == "000001" else [3.0, 2.0, 1.0]
-        return pd.DataFrame({
-            "t": [1, 2, 3],
-            "open": closes,
-            "high": [x + 0.2 for x in closes],
-            "low": [x - 0.2 for x in closes],
-            "close": closes,
-            "volume": [1000, 1200, 1400],
-            "amount": [10000, 24000, 42000],
-        }), {}
+        return pd.DataFrame(
+            {
+                "t": [1, 2, 3],
+                "open": closes,
+                "high": [x + 0.2 for x in closes],
+                "low": [x - 0.2 for x in closes],
+                "close": closes,
+                "volume": [1000, 1200, 1400],
+                "amount": [10000, 24000, 42000],
+            }
+        ), {}
 
     await scanner._run_job(job, indicator, fake_build_df, fast_fetch=False)
     completed = scanner.get_job(job["id"], "testuser")

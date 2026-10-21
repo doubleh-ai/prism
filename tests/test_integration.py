@@ -1,6 +1,4 @@
 """Integration tests — end-to-end flows"""
-import json
-import pytest
 
 
 class TestFullConversationFlow:
@@ -8,8 +6,7 @@ class TestFullConversationFlow:
 
     async def test_create_and_read_conv(self, client, auth_cookies):
         # Create
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Read back (empty)
@@ -19,22 +16,19 @@ class TestFullConversationFlow:
 
     async def test_multiple_convs_ordering(self, client, auth_cookies):
         """Conversations are returned and all created IDs present."""
-        ids = set()
+        _ids = set()
         for i in range(3):
-            await client.post("/api/convs", cookies=auth_cookies,
-                              json={"skill": "bottleneck-hunter"})
+            await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         # Can't test exact ordering without time delays; just verify all exist
 
         convs = (await client.get("/api/convs", cookies=auth_cookies)).json()
         assert len(convs) >= 3
 
     async def test_skill_update_persists(self, client, auth_cookies):
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
-        await client.put(f"/api/convs/{cid}/skill", cookies=auth_cookies,
-                         json={"skill": "serenity"})
+        await client.put(f"/api/convs/{cid}/skill", cookies=auth_cookies, json={"skill": "serenity"})
 
         # Verify via GET
         r = await client.get(f"/api/convs/{cid}", cookies=auth_cookies)
@@ -48,15 +42,17 @@ class TestFullConversationFlow:
 
 class TestErrorHandling:
     async def test_empty_question_rejected(self, client, auth_cookies):
-        r = await client.post("/api/chat/stream", cookies=auth_cookies,
-                              json={"question": "", "skill": "bottleneck-hunter"})
+        r = await client.post(
+            "/api/chat/stream", cookies=auth_cookies, json={"question": "", "skill": "bottleneck-hunter"}
+        )
         assert r.status_code == 422
 
     async def test_invalid_json_body(self, client):
         # Sending non-JSON with JSON content-type — FastAPI rejects before our handler
         try:
-            r = await client.post("/api/login", content="not json",
-                                  headers={"Content-Type": "application/json"})
+            r = await client.post(
+                "/api/login", content="not json", headers={"Content-Type": "application/json"}
+            )
             assert r.status_code in (400, 403, 422)
         except Exception:
             # FastAPI may raise JSONDecodeError internally; that's expected
@@ -68,8 +64,8 @@ class TestErrorHandling:
 
     async def test_rate_limit_enforced(self, client, auth_cookies):
         """Rate limiter kicks in after too many requests."""
-        import time
-        key = f"chat:testuser"
+
+        key = "chat:testuser"
         from server.database import check_rate_limit
 
         # Exhaust rate limit
@@ -77,8 +73,9 @@ class TestErrorHandling:
             check_rate_limit(key, max_req=20, window=60)
 
         # Next request should be rate limited
-        r = await client.post("/api/chat/stream", cookies=auth_cookies,
-                              json={"question": "测试", "skill": "bottleneck-hunter"})
+        r = await client.post(
+            "/api/chat/stream", cookies=auth_cookies, json={"question": "测试", "skill": "bottleneck-hunter"}
+        )
         assert r.status_code == 429
 
 
@@ -86,18 +83,19 @@ class TestMultiUserIsolation:
     """Users can't access each other's data"""
 
     async def test_cross_user_access_denied(self, client, auth_cookies, test_user):
+        from server.auth import create_session, hash_password
         from server.database import get_db
-        from server.auth import hash_password, create_session
 
         # Create conversation as testuser
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Create another user
         with get_db() as db:
-            db.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
-                       ["intruder", hash_password("pass")])
+            db.execute(
+                "INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
+                ["intruder", hash_password("pass")],
+            )
         token2 = create_session("intruder")
 
         # Intruder can't access testuser's conversation
@@ -117,8 +115,7 @@ class TestRecycleBinFlow:
 
     async def test_full_trash_flow(self, client, auth_cookies):
         # Create
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Delete (soft)
@@ -145,8 +142,7 @@ class TestRecycleBinFlow:
 
     async def test_permanent_delete_flow(self, client, auth_cookies):
         # Create
-        c1 = await client.post("/api/convs", cookies=auth_cookies,
-                               json={"skill": "bottleneck-hunter"})
+        c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
         # Soft delete first
@@ -169,46 +165,53 @@ class TestImportSanity:
 
     def test_import_config(self):
         import server.config
-        assert hasattr(server.config, 'PROJECT_ROOT')
-        assert hasattr(server.config, 'MODELS')
-        assert hasattr(server.config, 'SKILL_MAP')
+
+        assert hasattr(server.config, "PROJECT_ROOT")
+        assert hasattr(server.config, "MODELS")
+        assert hasattr(server.config, "SKILL_MAP")
 
     def test_import_database(self):
         import server.database
-        assert hasattr(server.database, 'get_db')
-        assert hasattr(server.database, 'init_db')
+
+        assert hasattr(server.database, "get_db")
+        assert hasattr(server.database, "init_db")
 
     def test_import_auth(self):
         import server.auth
-        assert hasattr(server.auth, 'hash_password')
-        assert hasattr(server.auth, 'verify_password')
+
+        assert hasattr(server.auth, "hash_password")
+        assert hasattr(server.auth, "verify_password")
 
     def test_import_conversations(self):
         import server.conversations
-        assert hasattr(server.conversations, 'list_convs')
-        assert hasattr(server.conversations, 'get_conv')
-        assert hasattr(server.conversations, 'delete_conv')
-        assert hasattr(server.conversations, 'restore_conv')
-        assert hasattr(server.conversations, 'permanent_delete_conv')
-        assert hasattr(server.conversations, 'list_trash')
-        assert hasattr(server.conversations, '_read_jsonl_messages')
+
+        assert hasattr(server.conversations, "list_convs")
+        assert hasattr(server.conversations, "get_conv")
+        assert hasattr(server.conversations, "delete_conv")
+        assert hasattr(server.conversations, "restore_conv")
+        assert hasattr(server.conversations, "permanent_delete_conv")
+        assert hasattr(server.conversations, "list_trash")
+        assert hasattr(server.conversations, "_read_jsonl_messages")
 
     def test_import_chat(self):
         import server.chat
-        assert hasattr(server.chat, 'chat_stream')
-        assert hasattr(server.chat, 'chat_respond')
-        assert hasattr(server.chat, 'chat_cancel')
-        assert hasattr(server.chat, '_cwd_to_project_dir')
-        assert hasattr(server.chat, '_read_jsonl_messages')
-        assert hasattr(server.chat, '_extract_refs_from_tool_result')
+
+        assert hasattr(server.chat, "chat_stream")
+        assert hasattr(server.chat, "chat_respond")
+        assert hasattr(server.chat, "chat_cancel")
+        assert hasattr(server.chat, "_cwd_to_project_dir")
+        assert hasattr(server.chat, "_read_jsonl_messages")
+        assert hasattr(server.chat, "_extract_refs_from_tool_result")
 
     def test_import_proxy(self):
         import server.proxy
-        assert hasattr(server.proxy, 'get_proxy_config')
-        assert hasattr(server.proxy, 'clear_proxy_cache')
+
+        assert hasattr(server.proxy, "get_proxy_config")
+        assert hasattr(server.proxy, "clear_proxy_cache")
 
     def test_import_claude_runner(self):
-        from server.services.claude_runner import run_claude_stream, respond_to_question, cancel_process
+        from server.services.claude_runner import cancel_process, respond_to_question, run_claude_stream
+
         assert run_claude_stream is not None
         assert respond_to_question is not None
         assert cancel_process is not None
@@ -216,6 +219,7 @@ class TestImportSanity:
     def test_skills_registered(self):
         """Core skills (serenity family) must be in SKILL_MAP."""
         import server.config
+
         assert "bottleneck-hunter" in server.config.SKILL_MAP
         assert "serenity" in server.config.SKILL_MAP
         for key in ["bottleneck-hunter", "serenity"]:
@@ -226,6 +230,7 @@ class TestImportSanity:
     def test_all_models_have_required_fields(self):
         """Every model entry must have name, base_url, api_key, model."""
         import server.config
+
         for model_id, cfg in server.config.MODELS.items():
             assert "name" in cfg, f"{model_id} missing name"
             assert "base_url" in cfg, f"{model_id} missing base_url"
@@ -235,6 +240,7 @@ class TestImportSanity:
     def test_minimax_models_present(self):
         """MiniMax M3, M2.7, M2.7-fast must be in MODELS."""
         import server.config
+
         assert "minimax-m3" in server.config.MODELS
         assert "minimax-m2.7" in server.config.MODELS
         assert "minimax-m2.7-fast" in server.config.MODELS
@@ -243,11 +249,13 @@ class TestImportSanity:
 
     def test_default_model_is_minimax(self):
         import server.config
+
         assert server.config.DEFAULT_MODEL == "minimax-m3"
 
     def test_import_main(self):
         import server.main
-        assert hasattr(server.main, 'app')
+
+        assert hasattr(server.main, "app")
 
 
 class TestReferenceExtraction:
@@ -255,6 +263,7 @@ class TestReferenceExtraction:
 
     def test_extract_simple_markdown_links(self):
         from server.chat import _extract_refs_from_tool_result
+
         text = """
         Search results:
         1. [Example Site](https://example.com/article) - A great article
@@ -270,6 +279,7 @@ class TestReferenceExtraction:
 
     def test_extract_dedup_urls(self):
         from server.chat import _extract_refs_from_tool_result
+
         text = """
         1. [Same Site](https://example.com) - First mention
         2. [Same Site Again](https://example.com) - Duplicate
@@ -280,12 +290,14 @@ class TestReferenceExtraction:
 
     def test_extract_no_links(self):
         from server.chat import _extract_refs_from_tool_result
+
         text = "No links here, just plain text."
         refs = _extract_refs_from_tool_result(text)
         assert refs == []
 
     def test_extract_skips_internal_links(self):
         from server.chat import _extract_refs_from_tool_result
+
         text = "[Internal](#section) and [Real](https://real.com)"
         refs = _extract_refs_from_tool_result(text)
         assert len(refs) == 1

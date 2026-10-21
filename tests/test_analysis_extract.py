@@ -1,6 +1,8 @@
 """Tests for analysis_engine structured-extraction (dashboard data)."""
+
 import json
 import subprocess
+
 from server import analysis_engine as ae
 
 
@@ -120,9 +122,16 @@ class _Proc:
 
 
 def test_extract_structured_ok(monkeypatch):
-    payload = {"signal": "买入", "confidence": 82, "thesis": "龙头订单饱满",
-               "metrics": {"valuation": "合理"}, "trade": {}, "analyst_digests": [],
-               "bull_bear": {}, "verdict_summary": "加仓"}
+    payload = {
+        "signal": "买入",
+        "confidence": 82,
+        "thesis": "龙头订单饱满",
+        "metrics": {"valuation": "合理"},
+        "trade": {},
+        "analyst_digests": [],
+        "bull_bear": {},
+        "verdict_summary": "加仓",
+    }
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(json.dumps(payload)))
     out = ae._extract_structured({"final_decision": "x"}, "300750", "宁德时代")
     assert out and out["signal"] == "买入" and out["confidence"] == 82
@@ -131,6 +140,7 @@ def test_extract_structured_ok(monkeypatch):
 def test_extract_structured_timeout_returns_none(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
     monkeypatch.setattr(subprocess, "run", boom)
     assert ae._extract_structured({"final_decision": "x"}, "300750", "n") is None
 

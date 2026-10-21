@@ -1,22 +1,24 @@
 """聊天流式端点 — Claude Code JSONL 集成 + 双向交互 + 参考引用"""
+
 import json
-import time
 import logging
-import asyncio
 import re
+import time
 from pathlib import Path
+
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from .config import RATE_CHAT_PER_MIN, MODELS, DEFAULT_MODEL
-from .database import get_db, check_rate_limit
+
+from .analysis_graph import persist_graph
 from .auth import require_auth
+from .config import DEFAULT_MODEL, MODELS, RATE_CHAT_PER_MIN
+from .database import check_rate_limit, get_db
 from .services.claude_runner import (
     _resolve_skill_dir,
-    run_claude_stream,
-    respond_to_question,
     cancel_process,
+    respond_to_question,
+    run_claude_stream,
 )
-from .analysis_graph import persist_graph
 
 log = logging.getLogger("stock-app")
 
@@ -56,7 +58,7 @@ def _prepare_chat_report(text: str, skill_name: str = "") -> tuple[str, str]:
     cleaned = _clean_object_artifacts(text)
     matches = list(_REPORT_DELIVERY_RE.finditer(cleaned))
     if matches:
-        return cleaned[matches[-1].start():].strip(), "complete"
+        return cleaned[matches[-1].start() :].strip(), "complete"
     if skill_name or _REPORT_FAILURE_RE.search(cleaned):
         return cleaned, "incomplete"
     return cleaned, "complete"
@@ -127,28 +129,26 @@ def _extract_refs_from_tool_result(content_text: str) -> list[dict]:
     """
     refs = []
     # Match markdown links: [title](url)
-    url_pattern = re.compile(r'\[([^\]]+)\]\((https?://[^)\s]+)\)')
+    url_pattern = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
     seen_urls = set()
     for match in url_pattern.finditer(content_text):
         title = match.group(1).strip()
         url = match.group(2).strip()
         # Skip internal anchor links and non-web URLs
-        if not url.startswith(('http://', 'https://')):
+        if not url.startswith(("http://", "https://")):
             continue
         if url in seen_urls:
             continue
         seen_urls.add(url)
         # Extract a snippet after the link (up to 120 chars)
         after_pos = match.end()
-        snippet = content_text[after_pos:after_pos + 160].strip()
+        snippet = content_text[after_pos : after_pos + 160].strip()
         # Clean up snippet: remove leading dash/bullet
-        snippet = re.sub(r'^[\s\-•·–—]+', '', snippet)
+        snippet = re.sub(r"^[\s\-•·–—]+", "", snippet)
         if len(snippet) > 120:
-            snippet = snippet[:120] + '…'
+            snippet = snippet[:120] + "…"
         refs.append({"url": url, "title": title, "snippet": snippet})
     return refs
-
-
 
 
 def _content_to_text(value) -> str:
@@ -178,6 +178,7 @@ def _content_to_text(value) -> str:
             return _clean_object_artifacts(str(value))
     return _clean_object_artifacts(str(value))
 
+
 async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
     """Read Claude Code JSONL, merging consecutive assistant events into single turns.
 
@@ -189,6 +190,7 @@ async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
     as 'ref' chunks.
     """
     import aiofiles
+
     jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
@@ -237,7 +239,11 @@ async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                             continue  # Skip tool_result — don't add as user message
 
                 content_str = _content_to_text(content_blocks)
-                if content_str and not content_str.startswith("[{'type':") and not content_str.startswith("[{'tool_use_id':"):
+                if (
+                    content_str
+                    and not content_str.startswith("[{'type':")
+                    and not content_str.startswith("[{'tool_use_id':")
+                ):
                     messages.append({"role": "user", "content": content_str})
 
             elif t == "assistant":
@@ -280,7 +286,14 @@ async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
             if messages[i]["role"] == "assistant":
                 prev = json.loads(messages[i]["content"])
                 for ref in collected_refs:
-                    prev.setdefault("chunks", []).append({"t": "ref", "url": ref["url"], "title": ref["title"], "snippet": ref.get("snippet", "")})
+                    prev.setdefault("chunks", []).append(
+                        {
+                            "t": "ref",
+                            "url": ref["url"],
+                            "title": ref["title"],
+                            "snippet": ref.get("snippet", ""),
+                        }
+                    )
                 messages[i]["content"] = json.dumps(prev, ensure_ascii=False)
                 break
 
@@ -292,6 +305,7 @@ async def chat_stream(request: Request):
     Returns: ``StreamingResponse`` with the SSE stream, or ``JSONResponse`` for
     early validation/rate-limit errors."""
     from .models import ChatStreamRequest, validation_error_message
+
     user = require_auth(request)
     if not check_rate_limit(f"chat:{user}", RATE_CHAT_PER_MIN, 60):
         return JSONResponse({"error": "请求太频繁"}, status_code=429)
@@ -318,8 +332,7 @@ async def chat_stream(request: Request):
     if conv_id:
         with get_db() as db:
             row = db.execute(
-                "SELECT session_id, project_dir FROM conversations WHERE id=? AND username=?",
-                [conv_id, user]
+                "SELECT session_id, project_dir FROM conversations WHERE id=? AND username=?", [conv_id, user]
             ).fetchone()
             if row and row["session_id"]:
                 resume_session_id = row["session_id"]
@@ -327,16 +340,20 @@ async def chat_stream(request: Request):
     # Save user message
     if conv_id:
         with get_db() as db:
-            db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                       [conv_id, "user", question])
-            db.execute("UPDATE conversations SET title=? WHERE id=? AND title='新对话'",
-                       [question[:40], conv_id])
+            db.execute(
+                "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [conv_id, "user", question]
+            )
+            db.execute(
+                "UPDATE conversations SET title=? WHERE id=? AND title='新对话'", [question[:40], conv_id]
+            )
 
     async def generate():
         session_id = resume_session_id  # May be None for first message
         project_dir = None
+
         def _emit(event):
             """Emit JSON-safe SSE data without lossy object stringification."""
+
             def _json_safe(v):
                 if v is None:
                     return ""
@@ -349,6 +366,7 @@ async def chat_stream(request: Request):
                 if isinstance(v, dict):
                     return {str(k): _json_safe(val) for k, val in v.items()}
                 return _content_to_text(v)
+
             clean = {str(k): _json_safe(v) for k, v in event.items()}
             return f"data: {json.dumps(clean, ensure_ascii=False)}\n\n"
 
@@ -360,11 +378,15 @@ async def chat_stream(request: Request):
         delivery_note = ""
         report_files_before = _skill_report_snapshot(skill_name)
 
-        yield _emit({'pulse': 'start'})
+        yield _emit({"pulse": "start"})
 
         async for ev in run_claude_stream(
-            question, skill_name, user=user, model_cfg=model_cfg,
-            session_id=resume_session_id, conv_id=conv_id,
+            question,
+            skill_name,
+            user=user,
+            model_cfg=model_cfg,
+            session_id=resume_session_id,
+            conv_id=conv_id,
             extra_skills=extra_skills,
         ):
             t = ev.get("type", "")
@@ -406,7 +428,7 @@ async def chat_stream(request: Request):
                                 if ref["url"] not in seen_ref_urls:
                                     seen_ref_urls.add(ref["url"])
                                     collected_refs.append(ref)
-                                    yield _emit({'ref': ref})
+                                    yield _emit({"ref": ref})
 
             # tool_use event (top-level)
             if t == "tool_use":
@@ -415,10 +437,17 @@ async def chat_stream(request: Request):
                 inp = tool.get("input", {})
                 step_num += 1
                 if name == "AskUserQuestion":
-                    yield _emit({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])})
+                    yield _emit(
+                        {
+                            "tool": name,
+                            "n": step_num,
+                            "ask": inp.get("question", ""),
+                            "opts": inp.get("options", []),
+                        }
+                    )
                 else:
                     detail = _content_to_text(list(inp.values())[:1]) if inp else ""
-                    yield _emit({'tool': name, 'n': step_num, 'd': detail})
+                    yield _emit({"tool": name, "n": step_num, "d": detail})
 
             # assistant message
             elif t == "assistant":
@@ -429,42 +458,51 @@ async def chat_stream(request: Request):
                         if not txt:
                             continue
                         full_text += txt
-                        yield _emit({'text': txt})
+                        yield _emit({"text": txt})
                     elif bt == "tool_use":
                         step_num += 1
                         name = b.get("name", "?")
                         inp = b.get("input", {})
                         if name == "AskUserQuestion":
-                            yield _emit({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])})
+                            yield _emit(
+                                {
+                                    "tool": name,
+                                    "n": step_num,
+                                    "ask": inp.get("question", ""),
+                                    "opts": inp.get("options", []),
+                                }
+                            )
                         else:
                             detail = _content_to_text(list(inp.values())[:1]) if inp else ""
-                            yield _emit({'tool': name, 'n': step_num, 'd': detail})
+                            yield _emit({"tool": name, "n": step_num, "d": detail})
                     elif bt == "thinking":
-                        thought = _content_to_text(b.get('thinking', ''))
+                        thought = _content_to_text(b.get("thinking", ""))
                         if thought:
-                            yield _emit({'think': thought})
+                            yield _emit({"think": thought})
 
             # Error from Claude
             elif t == "error":
                 stream_error = _content_to_text(ev.get("message")) or "AI引擎异常"
                 log.error(f"[{user}] Claude error: {stream_error}")
-                yield _emit({'error': stream_error})
+                yield _emit({"error": stream_error})
 
             elif t == "result":
-                log.info(f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}")
+                log.info(
+                    f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}"
+                )
                 terminal_text = _result_payload_text(ev)
                 if terminal_text and terminal_text not in full_text:
                     if full_text and terminal_text.startswith(full_text):
-                        terminal_text = terminal_text[len(full_text):]
+                        terminal_text = terminal_text[len(full_text) :]
                     elif full_text.endswith(terminal_text):
                         terminal_text = ""
                     if terminal_text:
                         addition = terminal_text if not full_text else "\n\n" + terminal_text
                         full_text += addition
-                        yield _emit({'text': addition, 'recovered': True})
+                        yield _emit({"text": addition, "recovered": True})
 
             elif t == "heartbeat":
-                yield _emit({'pulse': 'wait', 'idle_ms': ev.get('idle_ms', 0)})
+                yield _emit({"pulse": "wait", "idle_ms": ev.get("idle_ms", 0)})
 
         report_files_after = _skill_report_snapshot(skill_name)
         changed_reports = _changed_report_files(report_files_before, report_files_after)
@@ -476,11 +514,10 @@ async def chat_stream(request: Request):
             else:
                 reason = _clean_object_artifacts(stream_error) or "Agent 在形成最终结论前结束"
                 delivery_note = (
-                    "\n\n> **研究未完成**："
-                    f"{reason}。已保留研究过程，可在本对话中发送“继续完成报告”恢复。"
+                    f"\n\n> **研究未完成**：{reason}。已保留研究过程，可在本对话中发送“继续完成报告”恢复。"
                 )
             full_text += delivery_note
-            yield _emit({'text': delivery_note, 'delivery': True})
+            yield _emit({"text": delivery_note, "delivery": True})
 
         elapsed = time.time() - t0
         log.info(f"[{user}] DONE {elapsed:.1f}s len={len(full_text)} refs={len(collected_refs)}")
@@ -490,35 +527,41 @@ async def chat_stream(request: Request):
         if conv_id and full_text.strip():
             try:
                 from .reports import save_report_snapshot
+
                 clean_text = " ".join(report_text.split())
                 title = question[:80] + ("..." if len(question) > 80 else "")
-                save_report_snapshot(user, {
-                    "source": "chat",
-                    "source_id": conv_id,
-                    "conv_id": conv_id,
-                    "title": title or "Chat report",
-                    "summary": (
-                        clean_text[:240]
-                        if report_status == "complete"
-                        else "研究过程已保存，但任务在形成最终报告前中止。"
-                    ),
-                    "report": {
-                        "question": question,
-                        "final_decision": report_text,
-                        "status": report_status,
-                        "model": model_id,
-                        "skill": skill_name,
-                        "references": collected_refs,
+                save_report_snapshot(
+                    user,
+                    {
+                        "source": "chat",
+                        "source_id": conv_id,
+                        "conv_id": conv_id,
+                        "title": title or "Chat report",
+                        "summary": (
+                            clean_text[:240]
+                            if report_status == "complete"
+                            else "研究过程已保存，但任务在形成最终报告前中止。"
+                        ),
+                        "report": {
+                            "question": question,
+                            "final_decision": report_text,
+                            "status": report_status,
+                            "model": model_id,
+                            "skill": skill_name,
+                            "references": collected_refs,
+                        },
                     },
-                })
+                )
             except Exception as e:
                 log.warning(f"[{user}] Failed to save chat report snapshot: {e}")
 
         # Save structured messages from JSONL
         if conv_id and session_id and project_dir:
             with get_db() as db:
-                db.execute("UPDATE conversations SET session_id=?, project_dir=? WHERE id=?",
-                           [session_id, project_dir, conv_id])
+                db.execute(
+                    "UPDATE conversations SET session_id=?, project_dir=? WHERE id=?",
+                    [session_id, project_dir, conv_id],
+                )
             jsonl_msgs = await _read_jsonl_messages(session_id, project_dir)
             assistant_indices = [i for i, item in enumerate(jsonl_msgs) if item.get("role") == "assistant"]
             if delivery_note and assistant_indices:
@@ -533,23 +576,37 @@ async def chat_stream(request: Request):
                         parsed = json.loads(m["content"])
                         txt_parts = [c["c"] for c in parsed.get("chunks", []) if c["t"] == "text"]
                         full = "".join(txt_parts)
-                        payload = json.dumps({
-                            "text": full,
-                            "chunks": parsed.get("chunks", []),
-                            "report_status": report_status if message_index == assistant_indices[-1] else "",
-                            "report_files": delivery_reports[:5] if message_index == assistant_indices[-1] else [],
-                        }, ensure_ascii=False)
-                        db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                                   [conv_id, "assistant", payload])
+                        payload = json.dumps(
+                            {
+                                "text": full,
+                                "chunks": parsed.get("chunks", []),
+                                "report_status": report_status
+                                if message_index == assistant_indices[-1]
+                                else "",
+                                "report_files": delivery_reports[:5]
+                                if message_index == assistant_indices[-1]
+                                else [],
+                            },
+                            ensure_ascii=False,
+                        )
+                        db.execute(
+                            "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                            [conv_id, "assistant", payload],
+                        )
                 if not assistant_indices and full_text.strip():
-                    payload = json.dumps({
-                        "text": full_text,
-                        "chunks": [{"t": "text", "c": full_text}],
-                        "report_status": report_status,
-                        "report_files": delivery_reports[:5],
-                    }, ensure_ascii=False)
-                    db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                               [conv_id, "assistant", payload])
+                    payload = json.dumps(
+                        {
+                            "text": full_text,
+                            "chunks": [{"t": "text", "c": full_text}],
+                            "report_status": report_status,
+                            "report_files": delivery_reports[:5],
+                        },
+                        ensure_ascii=False,
+                    )
+                    db.execute(
+                        "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                        [conv_id, "assistant", payload],
+                    )
             log.info(f"[{user}] Saved {len(jsonl_msgs)} messages + {len(collected_refs)} refs from JSONL")
 
         # Auto-extract analysis graph from saved messages
@@ -561,7 +618,9 @@ async def chat_stream(request: Request):
                     if row:
                         skill = row["skill"]
                 with get_db() as db:
-                    rows = db.execute("SELECT content, role FROM messages WHERE conv_id=? ORDER BY id", [conv_id]).fetchall()
+                    rows = db.execute(
+                        "SELECT content, role FROM messages WHERE conv_id=? ORDER BY id", [conv_id]
+                    ).fetchall()
                     messages_json = []
                     for r in rows:
                         try:
@@ -574,11 +633,13 @@ async def chat_stream(request: Request):
             except Exception as e:
                 log.warning(f"[{user}] Failed to extract analysis graph: {e}")
 
-        yield _emit({
-            'report_status': report_status,
-            'report_files': delivery_reports[:5],
-            'elapsed': round(elapsed, 1),
-        })
+        yield _emit(
+            {
+                "report_status": report_status,
+                "report_files": delivery_reports[:5],
+                "elapsed": round(elapsed, 1),
+            }
+        )
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -587,7 +648,8 @@ async def chat_stream(request: Request):
 async def chat_respond(request: Request):
     """POST /api/chat/respond — Send user's answer to a running AskUserQuestion."""
     from .models import ChatRespondRequest, validation_error_message
-    user = require_auth(request)
+
+    require_auth(request)
     body = await request.json()
     try:
         req = ChatRespondRequest(**(body or {}))
@@ -608,7 +670,8 @@ async def chat_respond(request: Request):
 async def chat_cancel(request: Request):
     """POST /api/chat/cancel — Cancel a running Claude process."""
     from .models import ChatCancelRequest, validation_error_message
-    user = require_auth(request)
+
+    require_auth(request)
     body = await request.json()
     try:
         req = ChatCancelRequest(**(body or {}))

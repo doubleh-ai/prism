@@ -1,12 +1,14 @@
 """SQLite database — thread-local connection reuse + WAL + performance PRAGMAs."""
+
 import hashlib
 import json
-import sqlite3
-import time
 import secrets
+import sqlite3
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
+
 from .config import DATA_DIR, SQLITE_MMAP_SIZE
 
 DB_PATH = DATA_DIR / "chat.db"
@@ -53,6 +55,7 @@ def _make_connection() -> sqlite3.Connection:
                 # sqlite3 can fall back to regular I/O if mmap is unsupported.
                 # Don't kill the connection for this — log and continue.
                 import logging
+
                 logging.getLogger("prism.db").warning(
                     "PRAGMA failed (non-fatal, falling back to regular I/O): %s", pragma
                 )
@@ -74,10 +77,8 @@ def reset_connection() -> None:
     """
     conn = getattr(_LOCAL, "conn", None)
     if conn is not None:
-        try:
+        with suppress(sqlite3.Error):
             conn.close()
-        except sqlite3.Error:
-            pass
         _LOCAL.conn = None
 
 
@@ -262,20 +263,16 @@ def init_db():
                 ON diagnostic_events(fingerprint, version, username);
         """)
         # Migrations
-        try:
+        with suppress(sqlite3.OperationalError):
             conn.execute("ALTER TABLE users ADD COLUMN disabled_at INTEGER")
-        except sqlite3.OperationalError:
-            pass
         try:
             conn.execute("ALTER TABLE sessions ADD COLUMN created_at INTEGER")
             conn.execute("UPDATE sessions SET created_at=strftime('%s','now') WHERE created_at IS NULL")
         except sqlite3.OperationalError:
             pass
         for col, col_type in [("session_id", "TEXT"), ("project_dir", "TEXT"), ("deleted_at", "INTEGER")]:
-            try:
+            with suppress(sqlite3.OperationalError):
                 conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError:
-                pass
         # ── Phase 6: Industry chain graph ──
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS industry_nodes (
@@ -324,10 +321,8 @@ def init_db():
         """)
         # geo_regions lat/lng migration (added after the initial Phase 6 rollout)
         for _col in ["lat", "lng"]:
-            try:
+            with suppress(sqlite3.OperationalError):
                 conn.execute(f"ALTER TABLE geo_regions ADD COLUMN {_col} REAL")
-            except sqlite3.OperationalError:
-                pass
         # Per-user indicator library (v0.11)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS indicators (
@@ -390,19 +385,19 @@ def init_db():
             "visual_json": "TEXT NOT NULL DEFAULT '{}'",
             "source": "TEXT DEFAULT ''",
         }.items():
-            try:
+            with suppress(sqlite3.OperationalError):
                 conn.execute(f"ALTER TABLE indicators ADD COLUMN {_col} {_spec}")
-            except sqlite3.OperationalError:
-                pass
         # Seed geo data + curated industry chains
         _seed_geo_regions(conn)
         from .industry_seed import seed_all as _seed_industry
+
         _seed_industry(conn)
     finally:
         conn.close()
 
 
 # ── User / session helpers (unchanged) ──
+
 
 def create_user(username: str, password_hash: str):
     with get_db() as db:
@@ -439,7 +434,9 @@ def user_exists(username: str) -> bool:
 
 def set_user_password(username: str, password_hash: str) -> bool:
     with get_db() as db:
-        cur = db.execute("UPDATE users SET password_hash=?, disabled_at=NULL WHERE username=?", [password_hash, username])
+        cur = db.execute(
+            "UPDATE users SET password_hash=?, disabled_at=NULL WHERE username=?", [password_hash, username]
+        )
         if cur.rowcount:
             db.execute("DELETE FROM sessions WHERE username=?", [username])
         return cur.rowcount > 0
@@ -460,8 +457,6 @@ def delete_user_account(username: str) -> bool:
         db.execute("DELETE FROM sessions WHERE username=?", [username])
         db.execute("DELETE FROM indicator_seed_versions WHERE username=?", [username])
         return cur.rowcount > 0
-
-
 
 
 def admin_usage_stats() -> dict:
@@ -684,8 +679,9 @@ def admin_activity_overview(range_key: str = "7d") -> dict:
     prev_cutoff = cutoff - days * 86400
     day_ago = now - 86400
     with get_db() as db:
-        totals = dict(db.execute(
-            """
+        totals = dict(
+            db.execute(
+                """
             SELECT
                 COUNT(*) AS events,
                 COUNT(DISTINCT NULLIF(username, '')) AS active_users,
@@ -698,18 +694,21 @@ def admin_activity_overview(range_key: str = "7d") -> dict:
             FROM activity_events
             WHERE created_at >= ?
             """,
-            [day_ago, day_ago, cutoff],
-        ).fetchone())
-        previous = dict(db.execute(
-            """
+                [day_ago, day_ago, cutoff],
+            ).fetchone()
+        )
+        previous = dict(
+            db.execute(
+                """
             SELECT
                 COUNT(*) AS events,
                 COUNT(DISTINCT NULLIF(username, '')) AS active_users
             FROM activity_events
             WHERE created_at >= ? AND created_at < ?
             """,
-            [prev_cutoff, cutoff],
-        ).fetchone())
+                [prev_cutoff, cutoff],
+            ).fetchone()
+        )
         feature_rows = db.execute(
             """
             SELECT
@@ -807,9 +806,7 @@ def admin_activity_overview(range_key: str = "7d") -> dict:
         item["avg_dau"] = round(sum(daily_active) / max(1, days), 1)
         item["peak_dau"] = max(daily_active) if daily_active else 0
         item["event_share"] = round(int(item["events"] or 0) * 100 / max(1, int(totals["events"] or 0)), 1)
-        item["events_per_user"] = round(
-            int(item["events"] or 0) / max(1, int(item["active_users"] or 0)), 1
-        )
+        item["events_per_user"] = round(int(item["events"] or 0) / max(1, int(item["active_users"] or 0)), 1)
         feature_items.append(item)
     return {
         "range": range_key,
@@ -860,10 +857,12 @@ def admin_activity_events(
     offset = max(0, min(int(offset or 0), 10000))
     where_sql = " AND ".join(clauses)
     with get_db() as db:
-        total = int(db.execute(
-            f"SELECT COUNT(*) FROM activity_events WHERE {where_sql}",
-            params,
-        ).fetchone()[0])
+        total = int(
+            db.execute(
+                f"SELECT COUNT(*) FROM activity_events WHERE {where_sql}",
+                params,
+            ).fetchone()[0]
+        )
         rows = db.execute(
             f"""
             SELECT id, created_at, username, feature, action, target_type,
@@ -996,10 +995,7 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
     active_users: set[str] = set()
     user_days: dict[str, set[str]] = {}
     duration_values: list[int] = []
-    hourly = [
-        {"hour": hour, "events": 0, "failed_events": 0, "users": set()}
-        for hour in range(24)
-    ]
+    hourly = [{"hour": hour, "events": 0, "failed_events": 0, "users": set()} for hour in range(24)]
     action_stats: dict[tuple[str, str], dict] = {}
     target_stats: dict[tuple[str, str, str], dict] = {}
     error_stats: dict[tuple[str, str, str], dict] = {}
@@ -1033,10 +1029,18 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
                 session["events"] += 1
 
         action_key = (event.get("feature") or "api", event.get("action") or "open")
-        action_item = action_stats.setdefault(action_key, {
-            "feature": action_key[0], "action": action_key[1], "events": 0,
-            "failed_events": 0, "users": set(), "durations": [], "last_event_at": 0,
-        })
+        action_item = action_stats.setdefault(
+            action_key,
+            {
+                "feature": action_key[0],
+                "action": action_key[1],
+                "events": 0,
+                "failed_events": 0,
+                "users": set(),
+                "durations": [],
+                "last_event_at": 0,
+            },
+        )
         action_item["events"] += 1
         action_item["last_event_at"] = max(action_item["last_event_at"], created_at)
         if username:
@@ -1050,10 +1054,16 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
             except Exception:
                 status_code = "-"
             error_key = (action_key[0], action_key[1], status_code)
-            error_item = error_stats.setdefault(error_key, {
-                "feature": action_key[0], "action": action_key[1], "status_code": status_code,
-                "events": 0, "last_event_at": 0,
-            })
+            error_item = error_stats.setdefault(
+                error_key,
+                {
+                    "feature": action_key[0],
+                    "action": action_key[1],
+                    "status_code": status_code,
+                    "events": 0,
+                    "last_event_at": 0,
+                },
+            )
             error_item["events"] += 1
             error_item["last_event_at"] = max(error_item["last_event_at"], created_at)
 
@@ -1062,10 +1072,18 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
         target_label = event.get("target_label") or target_id
         if target_type and target_id and target_type not in {"path", "user", "conversation", "analysis"}:
             target_key = (action_key[0], target_type, target_id)
-            target_item = target_stats.setdefault(target_key, {
-                "feature": action_key[0], "target_type": target_type, "target_id": target_id,
-                "target_label": target_label, "events": 0, "users": set(), "last_event_at": 0,
-            })
+            target_item = target_stats.setdefault(
+                target_key,
+                {
+                    "feature": action_key[0],
+                    "target_type": target_type,
+                    "target_id": target_id,
+                    "target_label": target_label,
+                    "events": 0,
+                    "users": set(),
+                    "last_event_at": 0,
+                },
+            )
             target_item["events"] += 1
             target_item["last_event_at"] = max(target_item["last_event_at"], created_at)
             if username:
@@ -1078,12 +1096,14 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
 
     hourly_output = []
     for item in hourly:
-        hourly_output.append({
-            "hour": item["hour"],
-            "events": item["events"],
-            "failed_events": item["failed_events"],
-            "active_users": len(item["users"]),
-        })
+        hourly_output.append(
+            {
+                "hour": item["hour"],
+                "events": item["events"],
+                "failed_events": item["failed_events"],
+                "active_users": len(item["users"]),
+            }
+        )
 
     top_targets = []
     for item in target_stats.values():
@@ -1108,9 +1128,7 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
             "last_event_at": item["last_event_at"],
         }
         slow_actions.append(output)
-    slow_actions.sort(
-        key=lambda item: (-item["failure_rate"], -item["p95_duration_ms"], -item["events"])
-    )
+    slow_actions.sort(key=lambda item: (-item["failure_rate"], -item["p95_duration_ms"], -item["events"]))
 
     funnel_specs = [
         {
@@ -1118,7 +1136,10 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
             "label": "行情研究到分析",
             "steps": [
                 {"label": "搜索标的", "matches": {("market", "search")}},
-                {"label": "查看行情", "matches": {("market", "quote"), ("market", "kline"), ("market", "fundamentals")}},
+                {
+                    "label": "查看行情",
+                    "matches": {("market", "quote"), ("market", "kline"), ("market", "fundamentals")},
+                },
                 {"label": "启动分析", "matches": {("analysis", "start")}},
             ],
         },
@@ -1157,19 +1178,21 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
                 reached[index].add(username)
                 state[username] = index + 1
         base = len(reached[0])
-        funnels.append({
-            "id": spec["id"],
-            "label": spec["label"],
-            "steps": [
-                {
-                    "label": step["label"],
-                    "users": len(reached[index]),
-                    "events": stage_events[index],
-                    "conversion": round(len(reached[index]) * 100 / max(1, base), 1),
-                }
-                for index, step in enumerate(spec["steps"])
-            ],
-        })
+        funnels.append(
+            {
+                "id": spec["id"],
+                "label": spec["label"],
+                "steps": [
+                    {
+                        "label": step["label"],
+                        "users": len(reached[index]),
+                        "events": stage_events[index],
+                        "conversion": round(len(reached[index]) * 100 / max(1, base), 1),
+                    }
+                    for index, step in enumerate(spec["steps"])
+                ],
+            }
+        )
 
     error_breakdown = sorted(
         error_stats.values(),
@@ -1192,7 +1215,9 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
             "events_per_active_user": round(len(events) / max(1, active_count), 1),
             "events_per_session": round(len(events) / max(1, len(sessions)), 1),
             "avg_session_duration_sec": round(sum(session_durations) / max(1, len(session_durations))),
-            "avg_active_days": round(sum(len(value) for value in user_days.values()) / max(1, active_count), 1),
+            "avg_active_days": round(
+                sum(len(value) for value in user_days.values()) / max(1, active_count), 1
+            ),
             "avg_daily_active": avg_daily_active,
             "stickiness": round(avg_daily_active * 100 / max(1, active_count), 1),
             "success_rate": round(successful_events * 100 / max(1, len(events)), 1),
@@ -1205,6 +1230,7 @@ def admin_activity_insights(range_key: str = "7d") -> dict:
         "slow_actions": slow_actions[:15],
         "errors": error_breakdown,
     }
+
 
 def check_rate_limit(key: str, max_req: int = 20, window: int = 60) -> bool:
     """Return True if request is allowed, False if rate limited.
@@ -1267,8 +1293,10 @@ def create_session(username: str) -> str:
     token = secrets.token_hex(32)
     with get_db() as db:
         now = int(time.time())
-        db.execute("INSERT INTO sessions (token, username, expires, created_at) VALUES (?,?,?,?)",
-                   [token, username, now + 30 * 86400, now])
+        db.execute(
+            "INSERT INTO sessions (token, username, expires, created_at) VALUES (?,?,?,?)",
+            [token, username, now + 30 * 86400, now],
+        )
     return token
 
 
@@ -1283,7 +1311,13 @@ _GEO_SEED = [
     ("TW", "台湾", "Asia", '["先进制程芯片","封装测试","电子代工","PCB"]', "芯片法案限制对华出口"),
     ("KR", "韩国", "Asia", '["存储芯片","显示面板","造船","动力电池"]', "CHIPS法案补贴，对华设备出口管制"),
     ("JP", "日本", "Asia", '["半导体材料","精密设备","汽车","工业机器人"]', "半导体材料出口管制"),
-    ("US", "美国", "North America", '["芯片设计","航空航天","制药","AI","云计算"]', "CHIPS法案，对华技术封锁"),
+    (
+        "US",
+        "美国",
+        "North America",
+        '["芯片设计","航空航天","制药","AI","云计算"]',
+        "CHIPS法案，对华技术封锁",
+    ),
     ("DE", "德国", "Europe", '["汽车","工业自动化","化工","精密机械"]', "能源转型，供应链多元化"),
     ("AU", "澳大利亚", "Oceania", '["锂矿","铁矿石","煤炭","天然气"]', "关键矿产战略，限制中资收购"),
     ("CL", "智利", "South America", '["锂矿","铜矿"]', "锂矿国有化讨论"),
@@ -1297,10 +1331,8 @@ _GEO_SEED = [
 def _seed_geo_regions(conn):
     now = int(__import__("time").time())
     for code, name, continent, industries, policy in _GEO_SEED:
-        try:
+        with suppress(Exception):
             conn.execute(
                 "INSERT OR IGNORE INTO geo_regions (country_code, country_name, continent, key_industries, industrial_policy_summary, updated_at) VALUES (?,?,?,?,?,?)",
                 [code, name, continent, industries, policy, now],
             )
-        except Exception:
-            pass

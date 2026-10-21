@@ -1,9 +1,9 @@
 """K-line aggregation shared by daily-only market data providers."""
+
 import datetime as dt
 
 from server.market.models import KLine
 from server.market.resample import daily_fetch_limit, resample_kline
-
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 

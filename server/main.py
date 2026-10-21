@@ -1,36 +1,84 @@
 """Prism — FastAPI 主入口"""
-import logging
-import sys
-import os
+
+import asyncio
 import html
+import logging
+import os
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from lru import LRU
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from .config import (TEMPLATE_DIR, STATIC_DIR, LOG_FILE, MODELS, SKILL_MAP,
-                     SKILLS_HOME, CLAUDE_BIN, CORS_ORIGINS, CORS_ALLOW_CREDENTIALS,
-                     RATE_EXPLAIN_PER_MIN)
-from .database import (init_db, get_db, check_rate_limit, list_users, user_exists,
-                       create_user, set_user_password, set_user_disabled,
-                       delete_user_account, admin_usage_stats,
-                       admin_activity_overview, admin_activity_events,
-                       admin_activity_users, admin_activity_insights,
-                       record_activity)
-from .auth import (login as auth_login, logout as auth_logout, require_auth,
-                   require_admin, is_admin_user, hash_password, verify_csrf)
-from .release import release_payload
-from .health import admin_health_payload
+from starlette.responses import StreamingResponse
+
 from .activity import ActivityMiddleware
+from .analysis_engine import _sse as _analysis_sse
+from .analysis_engine import _store, get_report, start_analysis, stream_events
+from .analysis_graph import router as graph_router
+from .auth import hash_password, is_admin_user, require_admin, require_auth, verify_csrf
+from .auth import login as auth_login
+from .auth import logout as auth_logout
+from .chat import chat_cancel, chat_respond, chat_stream
+from .config import (
+    CLAUDE_BIN,
+    CORS_ALLOW_CREDENTIALS,
+    CORS_ORIGINS,
+    LOG_FILE,
+    MODELS,
+    RATE_EXPLAIN_PER_MIN,
+    SKILL_MAP,
+    SKILLS_HOME,
+    STATIC_DIR,
+    TEMPLATE_DIR,
+)
+from .conversations import (
+    batch_delete_convs,
+    create_conv,
+    delete_conv,
+    get_conv,
+    list_convs,
+    list_trash,
+    permanent_delete_conv,
+    restore_conv,
+    update_skill,
+)
+from .database import (
+    admin_activity_events,
+    admin_activity_insights,
+    admin_activity_overview,
+    admin_activity_users,
+    admin_usage_stats,
+    check_rate_limit,
+    create_user,
+    delete_user_account,
+    get_db,
+    init_db,
+    list_users,
+    record_activity,
+    set_user_disabled,
+    set_user_password,
+    user_exists,
+)
+from .diagnostics import router as diagnostics_router
+from .health import admin_health_payload
+from .indicators.router import router as indicators_router
+from .industry_router import router as industry_router
+from .market.router import router as market_router
+from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
+from .release import release_payload
+from .reports import list_saved_reports_for_conv
+from .reports import router as reports_router
+from .vibe import router as vibe_router
 
 # ── Logging ──
 LOG_PATH = Path(LOG_FILE)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 # Log level can be overridden via env, e.g. PRISM_LOG_LEVEL=DEBUG
 log_level = os.environ.get("PRISM_LOG_LEVEL", "INFO")
-from .middleware import (configure_logging, install_request_id_middleware,
-                          install_error_handlers)
+
 log = configure_logging(str(LOG_PATH), level=log_level)
 
 # ── Init ──
@@ -59,13 +107,13 @@ install_error_handlers(app)
 # ── CORS (only when explicitly configured) ──
 if CORS_ORIGINS:
     from fastapi.middleware.cors import CORSMiddleware
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ORIGINS,
         allow_credentials=CORS_ALLOW_CREDENTIALS,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Requested-With", "X-CSRF-Token",
-                       "X-Request-ID"],
+        allow_headers=["Content-Type", "X-Requested-With", "X-CSRF-Token", "X-Request-ID"],
         max_age=600,
     )
 
@@ -76,11 +124,11 @@ if CORS_ORIGINS:
 _CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline'; "  # app.js + inline onclick handlers
-    "style-src 'self' 'unsafe-inline'; "   # inline <style> + dynamic styles
-    "img-src 'self' data: https:; "         # data: URIs for SVG icons
+    "style-src 'self' 'unsafe-inline'; "  # inline <style> + dynamic styles
+    "img-src 'self' data: https:; "  # data: URIs for SVG icons
     "font-src 'self' data:; "
     "connect-src 'self'; "
-    "frame-src 'self'; "                    # report viewer iframe
+    "frame-src 'self'; "  # report viewer iframe
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
     "form-action 'self'; "
@@ -141,12 +189,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     _EXEMPT_PATHS = frozenset(["/api/login"])
 
     async def dispatch(self, request: Request, call_next):
-        if (request.method.upper() in ("POST", "PUT", "DELETE", "PATCH")
-                and request.url.path not in self._EXEMPT_PATHS):
+        if (
+            request.method.upper() in ("POST", "PUT", "DELETE", "PATCH")
+            and request.url.path not in self._EXEMPT_PATHS
+        ):
             try:
                 verify_csrf(request)
             except HTTPException as e:
                 from fastapi.responses import JSONResponse
+
                 return JSONResponse({"detail": e.detail}, status_code=e.status_code)
         return await call_next(request)
 
@@ -225,6 +276,7 @@ async def api_track_activity(request: Request):
     """Record allowlisted UI-only events without storing prompts or page contents."""
     username = require_auth(request)
     from .models import ActivityTrackRequest, validation_error_message
+
     try:
         payload = ActivityTrackRequest(**((await request.json()) or {}))
     except Exception as exc:
@@ -311,15 +363,17 @@ async def api_admin_list_users(request: Request):
     current = require_admin(request)
     users = []
     for row in list_users():
-        users.append({
-            "username": row["username"],
-            "created_at": row["created_at"],
-            "disabled_at": row["disabled_at"],
-            "active_sessions": row["active_sessions"],
-            "conversation_count": row["conversation_count"],
-            "is_admin": is_admin_user(row["username"]),
-            "is_current": row["username"] == current,
-        })
+        users.append(
+            {
+                "username": row["username"],
+                "created_at": row["created_at"],
+                "disabled_at": row["disabled_at"],
+                "active_sessions": row["active_sessions"],
+                "conversation_count": row["conversation_count"],
+                "is_admin": is_admin_user(row["username"]),
+                "is_current": row["username"] == current,
+            }
+        )
     return {"users": users, "current_user": current}
 
 
@@ -327,6 +381,7 @@ async def api_admin_list_users(request: Request):
 async def api_admin_create_user(request: Request):
     require_admin(request)
     from .models import AdminUserCreateRequest, validation_error_message
+
     body = await request.json()
     try:
         req = AdminUserCreateRequest(**(body or {}))
@@ -343,6 +398,7 @@ async def api_admin_create_user(request: Request):
 async def api_admin_reset_password(username: str, request: Request):
     require_admin(request)
     from .models import AdminPasswordResetRequest, validation_error_message
+
     body = await request.json()
     try:
         req = AdminPasswordResetRequest(**(body or {}))
@@ -357,6 +413,7 @@ async def api_admin_reset_password(username: str, request: Request):
 async def api_admin_set_user_status(username: str, request: Request):
     current = require_admin(request)
     from .models import AdminUserStatusRequest, validation_error_message
+
     body = await request.json()
     try:
         req = AdminUserStatusRequest(**(body or {}))
@@ -380,10 +437,6 @@ async def api_admin_delete_user(username: str, request: Request):
 
 
 # ── Conversations ──
-from .conversations import (
-    list_convs, create_conv, get_conv, delete_conv, update_skill,
-    restore_conv, permanent_delete_conv, list_trash, batch_delete_convs,
-)
 
 
 @app.get("/api/convs")
@@ -432,7 +485,6 @@ async def api_batch_delete_convs(request: Request):
 
 
 # ── Chat ──
-from .chat import chat_stream, chat_respond, chat_cancel
 
 
 @app.get("/api/models")
@@ -461,13 +513,6 @@ async def api_chat_cancel(request: Request):
 
 
 # ── Market data (v0.6) ──
-from .market.router import router as market_router
-from .analysis_graph import router as graph_router
-from .industry_router import router as industry_router
-from .indicators.router import router as indicators_router
-from .reports import router as reports_router, list_saved_reports_for_conv
-from .vibe import router as vibe_router
-from .diagnostics import router as diagnostics_router
 
 app.include_router(market_router)
 app.include_router(graph_router)
@@ -498,8 +543,7 @@ async def api_list_reports(conv_id: str, request: Request):
     u = require_auth(request)
     with get_db() as db:
         row = db.execute(
-            "SELECT skill FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
-            [conv_id, u]
+            "SELECT skill FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL", [conv_id, u]
         ).fetchone()
     if not row:
         return {"reports": []}
@@ -520,44 +564,52 @@ async def api_list_reports(conv_id: str, request: Request):
                         st = p.stat()
                     except OSError:
                         continue
-                    out.append({
-                        "filename": p.name,
-                        "title": p.name,
-                        "size": st.st_size,
-                        "mtime": int(st.st_mtime),
-                        "kind": _REPORT_KIND.get(ext, "file"),
-                    })
+                    out.append(
+                        {
+                            "filename": p.name,
+                            "title": p.name,
+                            "size": st.st_size,
+                            "mtime": int(st.st_mtime),
+                            "kind": _REPORT_KIND.get(ext, "file"),
+                        }
+                    )
             except OSError:
                 pass
 
     for rep in list_saved_reports_for_conv(u, conv_id, limit=50):
-        out.append({
-            "filename": rep.get("title") or "Saved report",
-            "title": rep.get("title") or "Saved report",
-            "size": 0,
-            "mtime": rep.get("updated_at") or rep.get("created_at") or 0,
-            "kind": "saved",
-            "report_id": rep["id"],
-            "summary": rep.get("summary") or "",
-        })
+        out.append(
+            {
+                "filename": rep.get("title") or "Saved report",
+                "title": rep.get("title") or "Saved report",
+                "size": 0,
+                "mtime": rep.get("updated_at") or rep.get("created_at") or 0,
+                "kind": "saved",
+                "report_id": rep["id"],
+                "summary": rep.get("summary") or "",
+            }
+        )
     return {"reports": out}
 
+
 # ── Term explanation cache ──
-import asyncio
+
 # 256-entry LRU cap so long-running processes don't grow unbounded.
 # lru-dict is thread-safe; O(1) get/set.
-from lru import LRU  # local import to avoid module-load cost when unused
+
 _term_cache: LRU = LRU(256)
+
 
 @app.post("/api/explain-term")
 async def api_explain_term(request: Request):
     """Generate a brief AI explanation for a financial/professional term."""
     from .models import ExplainTermRequest, validation_error_message
+
     u = require_auth(request)
     # Rate limit: 10 req/min per user to protect the 15s subprocess timeout.
     if not check_rate_limit(f"explain:{u}", RATE_EXPLAIN_PER_MIN, 60):
-        return JSONResponse({"error": "请求太频繁，请稍后再试"}, status_code=429,
-                            headers={"Retry-After": "60"})
+        return JSONResponse(
+            {"error": "请求太频繁，请稍后再试"}, status_code=429, headers={"Retry-After": "60"}
+        )
     body = await request.json()
     try:
         req = ExplainTermRequest(**(body or {}))
@@ -579,9 +631,15 @@ async def api_explain_term(request: Request):
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p", prompt,
-            "--model", "minimax-m2.7-fast", "--max-tokens", "200",
-            "--output-format", "text",
+            CLAUDE_BIN,
+            "-p",
+            prompt,
+            "--model",
+            "minimax-m2.7-fast",
+            "--max-tokens",
+            "200",
+            "--output-format",
+            "text",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -590,11 +648,11 @@ async def api_explain_term(request: Request):
         # Filter out common prefixes Claude adds
         for prefix in ["好的", "以下是", "这是", "解释：", "答案："]:
             if explanation.startswith(prefix):
-                explanation = explanation[len(prefix):].strip()
+                explanation = explanation[len(prefix) :].strip()
         if explanation:
             _term_cache[cache_key] = explanation
             return {"term": term, "explanation": explanation, "cached": False}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     except Exception:
         pass
@@ -604,8 +662,6 @@ async def api_explain_term(request: Request):
 
 
 # ── Astock Analysis Engine ──
-from .analysis_engine import start_analysis, stream_events, get_report, _store, _sse as _analysis_sse
-from starlette.responses import StreamingResponse
 
 
 @app.post("/api/analysis/start")
@@ -647,12 +703,16 @@ async def api_analysis_stream(analysis_id: str, request: Request):
             iter([_analysis_sse({"type": "error", "message": "分析不存在或无权访问"})]),
             media_type="text/event-stream",
         )
+
     async def _generate():
         async for event in stream_events(analysis_id):
             yield event
-    return StreamingResponse(_generate(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/analysis/{analysis_id}/report")
@@ -696,8 +756,7 @@ async def api_view_report(conv_id: str, filename: str, request: Request):
     # Resolve conversation → skill → skill directory
     with get_db() as db:
         row = db.execute(
-            "SELECT skill FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
-            [conv_id, u]
+            "SELECT skill FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL", [conv_id, u]
         ).fetchone()
     if not row:
         return HTMLResponse("<h1>404</h1><p>对话不存在或已删除</p>", status_code=404)
@@ -716,7 +775,9 @@ async def api_view_report(conv_id: str, filename: str, request: Request):
         log.warning(f"Path traversal attempt: conv={conv_id} file={filename}")
         raise HTTPException(400, "非法文件路径")
 
-    log.info(f"Report request: conv={conv_id} skill={row['skill']} path={file_path} exists={file_path.exists()}")
+    log.info(
+        f"Report request: conv={conv_id} skill={row['skill']} path={file_path} exists={file_path.exists()}"
+    )
 
     if not file_path.exists():
         # html.escape() defends against reflected XSS via filename query path
@@ -755,4 +816,5 @@ async def api_view_report(conv_id: str, filename: str, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("server.main:app", host="127.0.0.1", port=8088, reload=True)

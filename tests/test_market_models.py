@@ -1,7 +1,9 @@
 """Pydantic model validation for market data layer."""
+
 import pytest
 from pydantic import ValidationError
-from server.market.models import Quote, KLine, Fundamentals, SearchHit
+
+from server.market.models import Fundamentals, KLine, Quote, SearchHit
 
 
 def test_quote_minimal_required_fields():

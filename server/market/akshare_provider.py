@@ -8,21 +8,23 @@ All upstream calls are wrapped with :func:`asyncio.wait_for` using
 ``AKSHARE_TIMEOUT`` from config so a hung remote service can't tie up
 FastAPI workers indefinitely.
 """
+
 import asyncio
+import logging
 import math
 import re
 import time
-import logging
-from typing import List
-from .provider import ProviderUnavailable, ProviderNotFound
-from .models import Quote, KLine, Fundamentals, SearchHit
-from .resample import daily_fetch_limit, resample_kline
+
 from ..config import AKSHARE_TIMEOUT
+from .models import Fundamentals, KLine, Quote, SearchHit
+from .provider import ProviderNotFound, ProviderUnavailable
+from .resample import daily_fetch_limit, resample_kline
 
 log = logging.getLogger("stock-app")
 
 try:
     import akshare as ak
+
     _AKSHARE_AVAILABLE = True
 except ImportError:
     _AKSHARE_AVAILABLE = False
@@ -42,7 +44,7 @@ async def _with_timeout(coro):
     """Run ``coro`` (a to_thread call) under AKSHARE_TIMEOUT. TimeoutError → ProviderUnavailable."""
     try:
         return await asyncio.wait_for(coro, timeout=AKSHARE_TIMEOUT)
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         raise ProviderUnavailable(f"akshare timeout after {AKSHARE_TIMEOUT}s") from e
 
 
@@ -56,12 +58,29 @@ _STOCK_LIST_CACHE_TTL = 1800  # 30 minutes
 
 
 _GBK_INITIALS = [
-    (-20319, "a"), (-20283, "b"), (-19775, "c"), (-19218, "d"),
-    (-18710, "e"), (-18526, "f"), (-18239, "g"), (-17922, "h"),
-    (-17417, "j"), (-16474, "k"), (-16212, "l"), (-15640, "m"),
-    (-15165, "n"), (-14922, "o"), (-14914, "p"), (-14630, "q"),
-    (-14149, "r"), (-14090, "s"), (-13318, "t"), (-12838, "w"),
-    (-12556, "x"), (-11847, "y"), (-11055, "z"),
+    (-20319, "a"),
+    (-20283, "b"),
+    (-19775, "c"),
+    (-19218, "d"),
+    (-18710, "e"),
+    (-18526, "f"),
+    (-18239, "g"),
+    (-17922, "h"),
+    (-17417, "j"),
+    (-16474, "k"),
+    (-16212, "l"),
+    (-15640, "m"),
+    (-15165, "n"),
+    (-14922, "o"),
+    (-14914, "p"),
+    (-14630, "q"),
+    (-14149, "r"),
+    (-14090, "s"),
+    (-13318, "t"),
+    (-12838, "w"),
+    (-12556, "x"),
+    (-11847, "y"),
+    (-11055, "z"),
 ]
 
 
@@ -183,9 +202,13 @@ class AkshareProvider:
         _akshare_or_raise()
         symbol = _sina_symbol(ticker)
         try:
-            df = await _with_timeout(asyncio.to_thread(
-                ak.stock_zh_a_daily, symbol=symbol, adjust="qfq",
-            ))
+            df = await _with_timeout(
+                asyncio.to_thread(
+                    ak.stock_zh_a_daily,
+                    symbol=symbol,
+                    adjust="qfq",
+                )
+            )
         except ProviderUnavailable:
             raise
         except Exception as e:
@@ -226,35 +249,39 @@ class AkshareProvider:
             source=self.name,
         )
 
-    async def get_kline(
-        self, ticker: str, period: str = "1d", limit: int = 120
-    ) -> List[KLine]:
+    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
         if period not in {"1d", "1w", "1m"}:
             raise ProviderUnavailable(f"akshare: unsupported K-line period {period}")
         _akshare_or_raise()
         symbol = _sina_symbol(ticker)
         try:
-            df = await _with_timeout(asyncio.to_thread(
-                ak.stock_zh_a_daily, symbol=symbol, adjust="qfq",
-            ))
+            df = await _with_timeout(
+                asyncio.to_thread(
+                    ak.stock_zh_a_daily,
+                    symbol=symbol,
+                    adjust="qfq",
+                )
+            )
         except ProviderUnavailable:
             raise
         except Exception as e:
             raise ProviderUnavailable(f"akshare stock_zh_a_daily failed: {e}") from e
         if df is None or df.empty:
             return []
-        out: List[KLine] = []
+        out: list[KLine] = []
         for _, r in df.tail(daily_fetch_limit(period, limit)).iterrows():
             try:
-                out.append(KLine(
-                    timestamp=int(_pd_timestamp(r["date"])),
-                    open=float(r["open"]),
-                    high=float(r["high"]),
-                    low=float(r["low"]),
-                    close=float(r["close"]),
-                    volume=float(r["volume"]),
-                    turnover=float(r.get("amount", 0)) if r.get("amount") is not None else None,
-                ))
+                out.append(
+                    KLine(
+                        timestamp=int(_pd_timestamp(r["date"])),
+                        open=float(r["open"]),
+                        high=float(r["high"]),
+                        low=float(r["low"]),
+                        close=float(r["close"]),
+                        volume=float(r["volume"]),
+                        turnover=float(r.get("amount", 0)) if r.get("amount") is not None else None,
+                    )
+                )
             except Exception:
                 continue
         return resample_kline(out, period, limit)
@@ -263,7 +290,7 @@ class AkshareProvider:
         _akshare_or_raise()
         raise ProviderUnavailable("akshare fundamentals not available (eastmoney CDN blocked)")
 
-    async def search(self, query: str, limit: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
         _akshare_or_raise()
         df = _stock_list_cache()
         if df is None or df.empty:
@@ -274,13 +301,24 @@ class AkshareProvider:
             name = str(r.get("name", ""))
             rank = _search_rank(code, name, query)
             if rank[0] < 99:
-                ranked.append((
-                    rank,
-                    SearchHit(
-                        ticker=code, name=name,
-                        market=("SH" if code.startswith("6") else "BJ" if code.startswith(("4", "8", "92")) else "SZ" if code.startswith(("0", "3")) else None),
-                    ),
-                ))
+                ranked.append(
+                    (
+                        rank,
+                        SearchHit(
+                            ticker=code,
+                            name=name,
+                            market=(
+                                "SH"
+                                if code.startswith("6")
+                                else "BJ"
+                                if code.startswith(("4", "8", "92"))
+                                else "SZ"
+                                if code.startswith(("0", "3"))
+                                else None
+                            ),
+                        ),
+                    )
+                )
         ranked.sort(key=lambda item: item[0])
         return [hit for _, hit in ranked[:limit]]
 
@@ -291,6 +329,7 @@ class AkshareProvider:
 def _pd_timestamp(s):
     """Convert '2024-01-15' style string to unix seconds."""
     import datetime
+
     if isinstance(s, (int, float)):
         return int(s)
     return int(datetime.datetime.strptime(str(s), "%Y-%m-%d").timestamp())

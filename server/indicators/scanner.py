@@ -1,4 +1,5 @@
 """Persistent background scanner for indicator-based A-share selection."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +11,8 @@ import re
 import time
 import uuid
 from collections import Counter
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..database import get_db
 from .dsl import DSLError, evaluate, is_signal
@@ -23,8 +25,7 @@ _UNIVERSE_TTL = 1800
 _TASKS: dict[str, asyncio.Task] = {}
 _GATES: dict[int, asyncio.Semaphore] = {}
 _SINA_KLINE_URL = (
-    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-    "CN_MarketData.getKLineData"
+    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 )
 
 
@@ -63,12 +64,14 @@ def _universe_from_frame(frame) -> list[dict[str, str]]:
         if market not in {"SH", "SZ", "BJ"}:
             continue
         seen.add(code)
-        rows.append({
-            "ticker": code,
-            "name": str(raw.get(name_col, code) if name_col else code).strip() or code,
-            "market": market,
-            "board": _board_for_code(code),
-        })
+        rows.append(
+            {
+                "ticker": code,
+                "name": str(raw.get(name_col, code) if name_col else code).strip() or code,
+                "market": market,
+                "board": _board_for_code(code),
+            }
+        )
     return rows
 
 
@@ -93,7 +96,7 @@ def _load_universe_sync() -> list[dict[str, str]]:
         fields = list(getattr(rs, "fields", []) or [])
         while getattr(rs, "error_code", "1") == "0" and rs.next():
             values = rs.get_row_data()
-            row = dict(zip(fields, values))
+            row = dict(zip(fields, values, strict=False))
             if row.get("type") not in (None, "", "1") or row.get("status") == "0":
                 continue
             code = str(row.get("code", "")).split(".")[-1]
@@ -325,15 +328,17 @@ async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
             day = datetime.date.fromisoformat(str(bar["day"])[:10])
             close = float(bar["close"])
             volume = float(bar.get("volume") or 0)
-            rows.append({
-                "t": int(datetime.datetime.combine(day, datetime.time()).timestamp()),
-                "open": float(bar["open"]),
-                "high": float(bar["high"]),
-                "low": float(bar["low"]),
-                "close": close,
-                "volume": volume,
-                "amount": volume * close,
-            })
+            rows.append(
+                {
+                    "t": int(datetime.datetime.combine(day, datetime.time()).timestamp()),
+                    "open": float(bar["open"]),
+                    "high": float(bar["high"]),
+                    "low": float(bar["low"]),
+                    "close": close,
+                    "volume": volume,
+                    "amount": volume * close,
+                }
+            )
         except (KeyError, TypeError, ValueError):
             continue
     if not rows:
@@ -341,15 +346,23 @@ async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
     frame = pd.DataFrame(rows).sort_values("t")
     if period in {"1w", "1m"}:
         frame["date"] = pd.to_datetime(frame["t"], unit="s")
-        frame = frame.set_index("date").resample("W-FRI" if period == "1w" else "ME").agg({
-            "t": "last",
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-            "amount": "sum",
-        }).dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+        frame = (
+            frame.set_index("date")
+            .resample("W-FRI" if period == "1w" else "ME")
+            .agg(
+                {
+                    "t": "last",
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                    "amount": "sum",
+                }
+            )
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index(drop=True)
+        )
     return frame.tail(lookback).reset_index(drop=True)
 
 
@@ -392,12 +405,14 @@ async def _run_job(
                     if not re.fullmatch(r"\d{6}", ticker) or ticker in seen:
                         continue
                     seen.add(ticker)
-                    rows.append({
-                        "ticker": ticker,
-                        "name": str((config.get("ticker_names") or {}).get(ticker) or ticker)[:80],
-                        "market": _market_for_code(ticker),
-                        "board": _board_for_code(ticker),
-                    })
+                    rows.append(
+                        {
+                            "ticker": ticker,
+                            "name": str((config.get("ticker_names") or {}).get(ticker) or ticker)[:80],
+                            "market": _market_for_code(ticker),
+                            "board": _board_for_code(ticker),
+                        }
+                    )
             job["total"] = len(rows)
             _persist_job(job, status="running")
             if not rows:
@@ -459,7 +474,9 @@ async def _run_job(
                         result = evaluate(indicator["dsl"], df, fund, params)
                         match = None
                         if is_signal(result):
-                            window = result.iloc[-trigger_window:] if len(result) >= trigger_window else result
+                            window = (
+                                result.iloc[-trigger_window:] if len(result) >= trigger_window else result
+                            )
                             if bool(window.fillna(False).any()):
                                 indexes = [idx for idx in range(len(result)) if bool(result.iloc[idx])]
                                 idx = indexes[-1]
@@ -471,7 +488,7 @@ async def _run_job(
                                     "turnover": turnover,
                                     "days_ago": days_ago,
                                     "strength": max(30, 100 - days_ago * 12),
-                                    "reason": f"{indicator.get('name','指标')}：{days_ago} 根 K 线内触发",
+                                    "reason": f"{indicator.get('name', '指标')}：{days_ago} 根 K 线内触发",
                                 }
                         else:
                             clean = result.dropna()
@@ -484,7 +501,7 @@ async def _run_job(
                                     "turnover": turnover,
                                     "value": value,
                                     "strength": 0,
-                                    "reason": f"{indicator.get('name','指标')} 最新值 {value:.4g}",
+                                    "reason": f"{indicator.get('name', '指标')} 最新值 {value:.4g}",
                                 }
                         if match:
                             async with progress_lock:
@@ -495,7 +512,7 @@ async def _run_job(
                                     del job["matches"][max_keep:]
                     except asyncio.CancelledError:
                         raise
-                    except (DSLError, asyncio.TimeoutError, RuntimeError):
+                    except (TimeoutError, DSLError, RuntimeError):
                         job["failed"] += 1
                     except Exception as exc:
                         job["failed"] += 1

@@ -5,10 +5,13 @@ All endpoints require authentication (the existing middleware
 enforces that for any non-``/api/login`` path). The endpoints are
 GET-only so no CSRF header is required.
 """
-import re
+
 import logging
-from fastapi import APIRouter, Request, HTTPException
+import re
+
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+
 from .factory import get_chain
 from .models import SearchHit
 from .provider import NoProviderAvailable, ProviderNotFound
@@ -84,8 +87,10 @@ async def api_quotes_batch(request: Request, tickers: str = ""):
 
 @router.get("/quote/{ticker}/kline")
 async def api_kline(
-    ticker: str, request: Request,
-    period: str = "1d", limit: int = 120,
+    ticker: str,
+    request: Request,
+    period: str = "1d",
+    limit: int = 120,
 ):
     ticker = _validate_ticker(ticker)
     if period not in ("1d", "1w", "1m", "5m", "15m", "30m", "60m"):

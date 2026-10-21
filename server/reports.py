@@ -1,4 +1,5 @@
 """Saved report library endpoints and persistence helpers."""
+
 from __future__ import annotations
 
 import json
@@ -11,7 +12,6 @@ from fastapi import APIRouter, HTTPException, Request
 from .auth import require_auth
 from .database import get_db
 from .models import SavedReportCreateRequest, SavedReportSaveRequest, validation_error_message
-
 
 router = APIRouter(prefix="/api")
 
@@ -39,9 +39,18 @@ def _text_from_value(value: Any) -> str:
         if isinstance(message, dict) and "content" in message:
             return _text_from_value(message.get("content"))
         for key in (
-            "markdown", "text", "content", "summary", "thesis",
-            "verdict_summary", "final_decision", "rationale", "decision",
-            "plan", "output", "description",
+            "markdown",
+            "text",
+            "content",
+            "summary",
+            "thesis",
+            "verdict_summary",
+            "final_decision",
+            "rationale",
+            "decision",
+            "plan",
+            "output",
+            "description",
         ):
             if key in value:
                 text = _text_from_value(value.get(key))
@@ -59,9 +68,22 @@ def _text_from_value(value: Any) -> str:
 
 
 _REPORT_TEXT_KEYS = {
-    "markdown", "text", "content", "summary", "thesis", "verdict_summary",
-    "final_decision", "final_trade_decision", "trader_plan", "trade_plan",
-    "decision", "rationale", "reason", "plan", "output", "description",
+    "markdown",
+    "text",
+    "content",
+    "summary",
+    "thesis",
+    "verdict_summary",
+    "final_decision",
+    "final_trade_decision",
+    "trader_plan",
+    "trade_plan",
+    "decision",
+    "rationale",
+    "reason",
+    "plan",
+    "output",
+    "description",
     "question",
 }
 
@@ -176,8 +198,16 @@ def save_report_snapshot(username: str, payload: dict) -> dict:
                 WHERE id=? AND username=?
                 """,
                 [
-                    title, ticker, name, signal, summary, report_json,
-                    payload.get("conv_id"), now, rid, username,
+                    title,
+                    ticker,
+                    name,
+                    signal,
+                    summary,
+                    report_json,
+                    payload.get("conv_id"),
+                    now,
+                    rid,
+                    username,
                 ],
             )
         else:
@@ -190,8 +220,19 @@ def save_report_snapshot(username: str, payload: dict) -> dict:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 [
-                    rid, username, source, source_id, payload.get("conv_id"),
-                    ticker, name, title, signal, summary, report_json, now, now,
+                    rid,
+                    username,
+                    source,
+                    source_id,
+                    payload.get("conv_id"),
+                    ticker,
+                    name,
+                    title,
+                    signal,
+                    summary,
+                    report_json,
+                    now,
+                    now,
                 ],
             )
     saved = get_saved_report(username, rid)

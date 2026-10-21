@@ -1,5 +1,7 @@
 """MarketCache — TTL, hit/miss, stale-fallback semantics."""
+
 import time
+
 from server.market.cache import MarketCache
 
 
@@ -57,6 +59,7 @@ def test_set_cleans_up_expired_rows():
     """set() must drop expired rows before writing, so the table
     doesn't grow unbounded under repeated writes of fresh + expired keys."""
     from server.database import get_db
+
     c = MarketCache()
     # Seed: one fresh, one already-expired
     c.set("fresh", {"v": 1}, ttl=60)
@@ -68,9 +71,7 @@ def test_set_cleans_up_expired_rows():
     # Next set() must clean up "old"
     c.set("another", {"v": 3}, ttl=60)
     with get_db() as db:
-        rows = db.execute(
-            "SELECT cache_key FROM market_cache ORDER BY cache_key"
-        ).fetchall()
+        rows = db.execute("SELECT cache_key FROM market_cache ORDER BY cache_key").fetchall()
     keys = [r["cache_key"] for r in rows]
     assert "old" not in keys, f"expired row leaked: {keys}"
     assert "fresh" in keys

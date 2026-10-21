@@ -1,7 +1,9 @@
 """Prism integration for the official HKUDS/Vibe-Trading research engine."""
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -53,8 +55,18 @@ _TOOL_LABELS = {
     "run_swarm": "启动多 Agent 协作",
 }
 _SAFE_ARGUMENT_KEYS = {
-    "q", "query", "symbol", "ticker", "skill", "name", "topic",
-    "start_date", "end_date", "period", "interval", "preset_name",
+    "q",
+    "query",
+    "symbol",
+    "ticker",
+    "skill",
+    "name",
+    "topic",
+    "start_date",
+    "end_date",
+    "period",
+    "interval",
+    "preset_name",
 }
 
 
@@ -146,23 +158,34 @@ def build_vibe_plan(req: VibePlanRequest) -> dict[str, Any]:
         "depth_label": _depth_label(req.research_depth),
         "iteration_budget": _engine_iteration_budget(req.research_depth),
         "estimated_duration_label": _ENGINE_DURATION_LABELS.get(req.research_depth, "约 3-6 分钟"),
-        "tags": [req.market, _horizon_label(req.horizon), _risk_label(req.risk_level), _depth_label(req.research_depth)],
+        "tags": [
+            req.market,
+            _horizon_label(req.horizon),
+            _risk_label(req.risk_level),
+            _depth_label(req.research_depth),
+        ],
         "engine": _engine_meta(),
         "engine_status": "queued" if req.agent else "not_started",
         "agent_status": "official_queued" if req.agent else "not_started",
-        "agent_summary": "官方研究引擎已排队，尚未产生结论。" if req.agent else "仅保存研究题目，未运行引擎。",
+        "agent_summary": "官方研究引擎已排队，尚未产生结论。"
+        if req.agent
+        else "仅保存研究题目，未运行引擎。",
         "status": "queued" if req.agent else "draft",
         "stage": "queued" if req.agent else "draft",
         "stage_label": "正在建立研究任务" if req.agent else "研究题目草稿",
         "progress": 2 if req.agent else 0,
-        "activity": [{
-            "id": secrets.token_hex(5),
-            "kind": "system",
-            "label": "研究任务已创建",
-            "status": "queued",
-            "summary": "等待官方 Vibe-Trading 引擎接手",
-            "at": now,
-        }] if req.agent else [],
+        "activity": [
+            {
+                "id": secrets.token_hex(5),
+                "kind": "system",
+                "label": "研究任务已创建",
+                "status": "queued",
+                "summary": "等待官方 Vibe-Trading 引擎接手",
+                "at": now,
+            }
+        ]
+        if req.agent
+        else [],
         "candidates": [],
         "report_markdown": "",
         "followups": [],
@@ -206,12 +229,14 @@ def _research_prompt(plan: dict[str, Any]) -> str:
             "Auto-select the most appropriate preset.\n\n"
         )
 
-    return prefix + f"""你是 Prism 中的研究型交易 Agent。请深入研究下面的用户问题，不执行交易，不给个性化投资指令。
+    return (
+        prefix
+        + f"""你是 Prism 中的研究型交易 Agent。请深入研究下面的用户问题，不执行交易，不给个性化投资指令。
 
-用户问题：{plan.get('prompt', '')}
-市场：{plan.get('market', 'A股')}
-研究周期：{_horizon_label(str(plan.get('horizon', 'swing')))}
-风险观察偏好：{plan.get('risk_label', '均衡')}
+用户问题：{plan.get("prompt", "")}
+市场：{plan.get("market", "A股")}
+研究周期：{_horizon_label(str(plan.get("horizon", "swing")))}
+风险观察偏好：{plan.get("risk_label", "均衡")}
 当前日期：{date.today().isoformat()}
 
 {depth_spec}
@@ -238,6 +263,7 @@ def _research_prompt(plan: dict[str, Any]) -> str:
 - 下一步可执行的研究动作
 - 本次实际使用的工具、成功/失败情况和数据截止日期
 """
+    )
 
 
 def _followup_prompt(plan: dict[str, Any], question: str) -> str:
@@ -291,9 +317,14 @@ def _insert_vibe_plan(username: str, plan: dict[str, Any]) -> None:
             "INSERT INTO vibe_plans(id, username, prompt, market, horizon, risk_level, plan_json, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
             [
-                plan["id"], username, plan["prompt"], plan["market"],
-                plan["horizon"], plan["risk_level"],
-                json.dumps(payload, ensure_ascii=False), plan["created_at"],
+                plan["id"],
+                username,
+                plan["prompt"],
+                plan["market"],
+                plan["horizon"],
+                plan["risk_level"],
+                json.dumps(payload, ensure_ascii=False),
+                plan["created_at"],
             ],
         )
 
@@ -336,10 +367,16 @@ def _tool_result_summary(tool: str, preview: str, status: str) -> str:
     lower = preview.lower()
 
     if status == "error":
-        if any(token in lower for token in (
-            "httpconnectionpool", "max retries exceeded", "connection refused",
-            "name or service not known", "temporary failure in name resolution",
-        )):
+        if any(
+            token in lower
+            for token in (
+                "httpconnectionpool",
+                "max retries exceeded",
+                "connection refused",
+                "name or service not known",
+                "temporary failure in name resolution",
+            )
+        ):
             return "外部数据源暂时不可达，已跳过并记录缺口"
         if "timed out" in lower or "timeout" in lower:
             return "外部数据源响应超时，已记录为数据缺口"
@@ -382,7 +419,9 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
     tool = _clean_text(data.get("tool"), 80)
 
     if event_type == "attempt.started":
-        plan.update(stage="planning", stage_label="正在拆解研究问题", progress=max(6, int(plan.get("progress") or 0)))
+        plan.update(
+            stage="planning", stage_label="正在拆解研究问题", progress=max(6, int(plan.get("progress") or 0))
+        )
     elif event_type == "tool_call":
         quality["tool_calls"] += 1
         plan.update(
@@ -390,14 +429,17 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
             stage_label=f"正在{_tool_label(tool)}",
             progress=min(78, 12 + quality["tool_calls"] * 4),
         )
-        _append_activity(plan, {
-            "kind": "tool",
-            "tool": tool,
-            "label": _tool_label(tool),
-            "status": "running",
-            "summary": _argument_summary(data.get("arguments")),
-            "event_id": event_id,
-        })
+        _append_activity(
+            plan,
+            {
+                "kind": "tool",
+                "tool": tool,
+                "label": _tool_label(tool),
+                "status": "running",
+                "summary": _argument_summary(data.get("arguments")),
+                "event_id": event_id,
+            },
+        )
     elif event_type == "tool_result":
         preview = _structured_text(data.get("preview"))
         failed_payload = bool(
@@ -428,16 +470,19 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
                 matched = True
                 break
         if not matched:
-            _append_activity(plan, {
-                "kind": "tool",
-                "tool": tool,
-                "label": _tool_label(tool),
-                "status": status,
-                "result": result_summary,
-                "detail": result_detail,
-                "elapsed_ms": int(data.get("elapsed_ms") or 0),
-                "event_id": event_id,
-            })
+            _append_activity(
+                plan,
+                {
+                    "kind": "tool",
+                    "tool": tool,
+                    "label": _tool_label(tool),
+                    "status": status,
+                    "result": result_summary,
+                    "detail": result_detail,
+                    "elapsed_ms": int(data.get("elapsed_ms") or 0),
+                    "event_id": event_id,
+                },
+            )
         else:
             plan["activity"] = activity[-80:]
     elif event_type == "tool_progress":
@@ -508,7 +553,7 @@ def _extract_candidates(report: str) -> list[dict[str, str]]:
             continue
         detail_lines = []
         role = "报告候选"
-        for following in lines[index + 1:index + 7]:
+        for following in lines[index + 1 : index + 7]:
             if following.lstrip().startswith("#"):
                 break
             raw_following = following.strip()
@@ -534,13 +579,15 @@ def _extract_candidates(report: str) -> list[dict[str, str]]:
             if len(detail_lines) >= 2:
                 break
         seen.add(code)
-        candidates.append({
-            "ticker": code,
-            "name": _clean_markdown_cell(match.group("name"), 80),
-            "role": role or "报告候选",
-            "why": "；".join(detail_lines)[:500] or "详见完整报告中的证据与风险说明。",
-            "source": "official_report",
-        })
+        candidates.append(
+            {
+                "ticker": code,
+                "name": _clean_markdown_cell(match.group("name"), 80),
+                "role": role or "报告候选",
+                "why": "；".join(detail_lines)[:500] or "详见完整报告中的证据与风险说明。",
+                "source": "official_report",
+            }
+        )
         if len(candidates) >= 12:
             return candidates
 
@@ -567,16 +614,18 @@ def _extract_candidates(report: str) -> list[dict[str, str]]:
         if not name or _A_SHARE_CODE_RE.match(name):
             name = code
         role = cells[code_index + 3] if code_index + 3 < len(cells) else "研究候选"
-        detail_cells = [cell for cell in cells[code_index + 4:] if cell]
+        detail_cells = [cell for cell in cells[code_index + 4 :] if cell]
         why = "；".join(detail_cells[:2])[:500]
         seen.add(code)
-        candidates.append({
-            "ticker": code,
-            "name": name[:80],
-            "role": role[:160] or "研究候选",
-            "why": why or "详见完整报告中的证据与风险说明。",
-            "source": "official_report",
-        })
+        candidates.append(
+            {
+                "ticker": code,
+                "name": name[:80],
+                "role": role[:160] or "研究候选",
+                "why": why or "详见完整报告中的证据与风险说明。",
+                "source": "official_report",
+            }
+        )
         if len(candidates) >= 12:
             break
     return candidates
@@ -636,7 +685,8 @@ async def _answer_for_attempt(session_id: str, attempt_id: str, retries: int = 1
     for index in range(retries):
         messages = await engine_get_messages(session_id, limit=100)
         assistants = [
-            item for item in messages
+            item
+            for item in messages
             if item.get("role") == "assistant" and item.get("linked_attempt_id") == attempt_id
         ]
         if assistants:
@@ -708,12 +758,15 @@ def _mark_failed(plan: dict[str, Any], message: str) -> None:
         stage_label=message,
         current_turn_id="",
     )
-    _append_activity(plan, {
-        "kind": "system",
-        "label": "研究未完成",
-        "status": "error",
-        "summary": message,
-    })
+    _append_activity(
+        plan,
+        {
+            "kind": "system",
+            "label": "研究未完成",
+            "status": "error",
+            "summary": message,
+        },
+    )
 
 
 async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt_id: str) -> None:
@@ -849,10 +902,8 @@ def _start_task(plan_id: str, username: str, resume: bool = False, force_after: 
             return
 
         async def _after_existing() -> None:
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await existing
-            except (asyncio.CancelledError, Exception):
-                pass
             await _run_official_research(plan_id, username, resume=resume)
 
         task = asyncio.create_task(_after_existing())
@@ -864,10 +915,8 @@ def _start_task(plan_id: str, username: str, resume: bool = False, force_after: 
         if _TASKS.get(plan_id) is done:
             _TASKS.pop(plan_id, None)
         if not done.cancelled():
-            try:
+            with contextlib.suppress(Exception):
                 done.exception()
-            except Exception:
-                pass
 
     task.add_done_callback(_cleanup)
 
@@ -950,13 +999,15 @@ async def follow_up_vibe_plan(plan_id: str, request: Request):
         raise HTTPException(409, "complete the first official research report before following up")
     turn_id = secrets.token_hex(8)
     followups = list(plan.get("followups") or [])
-    followups.append({
-        "id": turn_id,
-        "question": _clean_text(req.question, 3000),
-        "answer_markdown": "",
-        "status": "queued",
-        "created_at": _now(),
-    })
+    followups.append(
+        {
+            "id": turn_id,
+            "question": _clean_text(req.question, 3000),
+            "answer_markdown": "",
+            "status": "queued",
+            "created_at": _now(),
+        }
+    )
     plan.update(
         followups=followups,
         current_turn_id=turn_id,
@@ -968,12 +1019,15 @@ async def follow_up_vibe_plan(plan_id: str, request: Request):
         progress=3,
         started_at=_now(),
     )
-    _append_activity(plan, {
-        "kind": "turn",
-        "label": "开始上下文追问",
-        "status": "queued",
-        "summary": _clean_text(req.question, 180),
-    })
+    _append_activity(
+        plan,
+        {
+            "kind": "turn",
+            "label": "开始上下文追问",
+            "status": "queued",
+            "summary": _clean_text(req.question, 180),
+        },
+    )
     _update_vibe_plan(username, plan_id, plan)
     _start_task(plan_id, username, force_after=True)
     plan.pop("_username", None)
@@ -1009,12 +1063,15 @@ async def cancel_vibe_plan(plan_id: str, request: Request):
     for item in plan.get("followups") or []:
         if item.get("status") in {"queued", "running"}:
             item.update(status="cancelled", completed_at=_now())
-    _append_activity(plan, {
-        "kind": "system",
-        "label": "研究已由用户停止",
-        "status": "cancelled",
-        "summary": "已向官方引擎发送取消请求",
-    })
+    _append_activity(
+        plan,
+        {
+            "kind": "system",
+            "label": "研究已由用户停止",
+            "status": "cancelled",
+            "summary": "已向官方引擎发送取消请求",
+        },
+    )
     _update_vibe_plan(username, plan_id, plan)
     plan.pop("_username", None)
     return {"plan": plan, "cancelled": True}

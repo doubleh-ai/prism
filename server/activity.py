@@ -4,6 +4,7 @@ The tracker records coarse product events only. It intentionally avoids
 request bodies so prompts, passwords, API keys, and report contents never land
 in the activity table.
 """
+
 from __future__ import annotations
 
 import logging
@@ -118,7 +119,9 @@ def classify_activity(request: Request) -> ActivityEventSpec | None:
     if path.startswith("/api/quote/"):
         ticker = _part(path, 2)
         if path.endswith("/kline"):
-            return ActivityEventSpec("market", "kline", "ticker", ticker, meta={"period": q.get("period") or "1d"})
+            return ActivityEventSpec(
+                "market", "kline", "ticker", ticker, meta={"period": q.get("period") or "1d"}
+            )
         return ActivityEventSpec("market", "quote", "ticker", ticker)
     if path.startswith("/api/fundamentals/"):
         ticker = _part(path, 2)
@@ -159,7 +162,9 @@ def classify_activity(request: Request) -> ActivityEventSpec | None:
         return ActivityEventSpec("report", "create" if method == "POST" else "list_library")
     if path.startswith("/api/reports/library/"):
         report_id = _part(path, 3)
-        return ActivityEventSpec("report", "delete" if method == "DELETE" else "open_saved", "report", report_id)
+        return ActivityEventSpec(
+            "report", "delete" if method == "DELETE" else "open_saved", "report", report_id
+        )
     if path.startswith("/api/reports/"):
         return ActivityEventSpec("report", "open_file")
 
@@ -169,7 +174,9 @@ def classify_activity(request: Request) -> ActivityEventSpec | None:
         return ActivityEventSpec("vibe", "list_plans")
     if path.startswith("/api/vibe/plans/"):
         plan_id = _part(path, 3)
-        return ActivityEventSpec("vibe", "delete_plan" if method == "DELETE" else "open_plan", "vibe_plan", plan_id)
+        return ActivityEventSpec(
+            "vibe", "delete_plan" if method == "DELETE" else "open_plan", "vibe_plan", plan_id
+        )
 
     if path.startswith("/api/industry/"):
         action = _part(path, 2) or "open"
@@ -189,6 +196,7 @@ class ActivityMiddleware(BaseHTTPMiddleware):
         except Exception as exc:
             try:
                 from .diagnostics import record_diagnostic
+
                 record_diagnostic(
                     username=username_from_request_token(request.cookies.get("token") or "") or "",
                     kind="server_exception",
@@ -208,6 +216,7 @@ class ActivityMiddleware(BaseHTTPMiddleware):
         if response.status_code >= 500:
             try:
                 from .diagnostics import record_diagnostic
+
                 record_diagnostic(
                     username=username_from_request_token(request.cookies.get("token") or "") or "",
                     kind="server_http_5xx",

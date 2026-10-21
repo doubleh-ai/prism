@@ -1,4 +1,5 @@
 """Static files are gzipped when client accepts it, and have immutable cache headers."""
+
 import pytest
 
 
@@ -6,7 +7,9 @@ import pytest
 async def test_static_js_gzipped_when_accepted(client):
     """/static/js/*.js with Accept-Encoding: gzip returns gzipped body."""
     import httpx
+
     from server.main import app
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as raw_client:
         r = await raw_client.get(

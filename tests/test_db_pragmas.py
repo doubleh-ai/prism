@@ -2,6 +2,7 @@
 
 WAL + NORMAL + cache_size + mmap + busy_timeout + temp_store=MEMORY.
 """
+
 from server.database import get_db
 
 
@@ -52,7 +53,8 @@ def test_mmap_size_set():
 
 def test_connection_survives_mmap_failure():
     """If mmap fails, the connection is still usable for queries."""
-    from server.database import _make_connection, DB_PATH
+    from server.database import _make_connection
+
     conn = _make_connection()
     try:
         # Should be able to query regardless of mmap status

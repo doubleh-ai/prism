@@ -1,4 +1,6 @@
 """Prism — 应用配置"""
+
+import contextlib
 import os
 import secrets
 from pathlib import Path
@@ -21,10 +23,8 @@ else:
     # Restrict permissions: only the owner can read the secret. This
     # is best-effort on POSIX; ignored on Windows. In containers,
     # run as a non-root user so the file isn't world-readable.
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(SECRET_KEY_FILE, 0o600)
-    except OSError:
-        pass
 
 # ── LLM API Keys（每个平台独立配置）──
 # 兼容旧变量 LLM_API_KEY 作为 fallback
@@ -73,19 +73,15 @@ MODELS = {
 DEFAULT_MODEL = "minimax-m3"
 
 # ── Claude Code CLI ──
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN",
-    os.path.expanduser("~/.npm-global/bin/claude"))
-SKILLS_HOME = Path(os.environ.get("CLAUDE_SKILLS_HOME",
-    Path.home() / ".claude" / "skills"))
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", os.path.expanduser("~/.npm-global/bin/claude"))
+SKILLS_HOME = Path(os.environ.get("CLAUDE_SKILLS_HOME", Path.home() / ".claude" / "skills"))
 
 _DEFAULT_SKILL_FALLBACK_ROOTS = [
     PROJECT_ROOT / "skills",
     Path.home() / "skills",
 ]
 _ENV_SKILL_FALLBACK_ROOTS = [
-    Path(p.strip())
-    for p in os.environ.get("CLAUDE_SKILL_FALLBACKS", "").split(os.pathsep)
-    if p.strip()
+    Path(p.strip()) for p in os.environ.get("CLAUDE_SKILL_FALLBACKS", "").split(os.pathsep) if p.strip()
 ]
 SKILL_FALLBACK_ROOTS = []
 for _root in [*_ENV_SKILL_FALLBACK_ROOTS, *_DEFAULT_SKILL_FALLBACK_ROOTS]:
@@ -95,8 +91,8 @@ for _root in [*_ENV_SKILL_FALLBACK_ROOTS, *_DEFAULT_SKILL_FALLBACK_ROOTS]:
 # ── Skill 映射（Claude Code 加载时用目录名查找） ──
 SKILL_MAP = {
     "bottleneck-hunter": {"dir": "serenity-bottleneck-hunter", "name": "瓶颈猎手"},
-    "serenity":           {"dir": "serenity-skill",            "name": "Serenity 卡点分析"},
-    "cn":                 {"dir": "force-chinese",             "name": "强制中文输出"},
+    "serenity": {"dir": "serenity-skill", "name": "Serenity 卡点分析"},
+    "cn": {"dir": "force-chinese", "name": "强制中文输出"},
 }
 
 # ── 速率限制 ──
@@ -150,8 +146,8 @@ LOG_FILE = os.environ.get("STOCK_LOG_FILE", str(PROJECT_ROOT / "app.log"))
 # 在本机被拦，作为兜底，待其可达时自动顶上。
 # 链路对单个 provider 的任意异常都做 failover，故顺序只影响首试延迟。
 MARKET_PROVIDERS = [
-    p.strip() for p in
-    os.environ.get("PRISM_MARKET_PROVIDERS", "tencent,akshare,baostock").split(",")
+    p.strip()
+    for p in os.environ.get("PRISM_MARKET_PROVIDERS", "tencent,akshare,baostock").split(",")
     if p.strip()
 ]
 # 各数据类型的 TTL（秒）。QUOTE 短、KLINE 中、FUNDAMENTALS 长。
@@ -180,24 +176,29 @@ ASTOCK_RESULTS_DIR = os.environ.get("ASTOCK_RESULTS_DIR", str(DATA_DIR / "analys
 ASTOCK_HARD_TIMEOUT_SECONDS = int(os.environ.get("PRISM_ASTOCK_HARD_TIMEOUT", "1800"))
 ASTOCK_CACHE_TTL_SECONDS = int(os.environ.get("PRISM_ASTOCK_CACHE_TTL", "86400"))
 ASTOCK_FAST_ANALYSTS = [
-    a.strip() for a in os.environ.get("PRISM_ASTOCK_FAST_ANALYSTS", "market,fundamentals").split(",")
+    a.strip()
+    for a in os.environ.get("PRISM_ASTOCK_FAST_ANALYSTS", "market,fundamentals").split(",")
     if a.strip()
 ]
 ASTOCK_DEEP_ANALYSTS = [
-    a.strip() for a in os.environ.get(
+    a.strip()
+    for a in os.environ.get(
         "PRISM_ASTOCK_DEEP_ANALYSTS",
         "market,social,news,fundamentals,policy,hot_money,lockup",
-    ).split(",") if a.strip()
+    ).split(",")
+    if a.strip()
 ]
 ASTOCK_FAST_DEBATE_ROUNDS = int(os.environ.get("PRISM_ASTOCK_FAST_DEBATE_ROUNDS", "0"))
 ASTOCK_FAST_RISK_ROUNDS = int(os.environ.get("PRISM_ASTOCK_FAST_RISK_ROUNDS", "0"))
 ASTOCK_NO_PROXY_DOMAINS = [
-    d.strip() for d in os.environ.get(
+    d.strip()
+    for d in os.environ.get(
         "PRISM_ASTOCK_NO_PROXY",
         "eastmoney.com,push2.eastmoney.com,quote.eastmoney.com,"
         "ths.com,thsi.cn,10jqka.com.cn,cls.cn,finance.sina.com.cn,"
         "hq.sinajs.cn,sina.com.cn",
-    ).split(",") if d.strip()
+    ).split(",")
+    if d.strip()
 ]
 
 # Official HKUDS/Vibe-Trading sidecar. It is intentionally loopback-only in

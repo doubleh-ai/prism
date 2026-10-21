@@ -1,4 +1,5 @@
 """Industry chain panel — API + seed tests."""
+
 import json
 import time
 
@@ -17,7 +18,9 @@ async def test_categories_seeded(client):
     assert all(c["node_count"] > 0 for c in cats)
     assert all("edge_count" in c for c in cats)
     assert all("top_nodes" in c for c in cats)
-    assert all(c["upstream_count"] + c["midstream_count"] + c["downstream_count"] == c["node_count"] for c in cats)
+    assert all(
+        c["upstream_count"] + c["midstream_count"] + c["downstream_count"] == c["node_count"] for c in cats
+    )
 
 
 @pytest.mark.asyncio
@@ -32,7 +35,9 @@ async def test_overview_returns_research_workbench_metrics(client):
     assert data["countries"]
     assert data["key_nodes"]
     first = data["categories"][0]
-    assert {"category", "node_count", "edge_count", "country_count", "ticker_count", "top_nodes"} <= set(first)
+    assert {"category", "node_count", "edge_count", "country_count", "ticker_count", "top_nodes"} <= set(
+        first
+    )
     assert data["key_nodes"][0]["degree"] >= 0
 
 
@@ -65,7 +70,18 @@ async def test_live_context_fuses_private_cross_module_signals(client, auth_cook
                 (id,username,source,ticker,name,title,signal,summary,report_json,updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
-            ["r1", "testuser", "analysis", "300750", "宁德时代", "宁德时代分析", "BUY", "需求仍在验证", "{}", now - 10],
+            [
+                "r1",
+                "testuser",
+                "analysis",
+                "300750",
+                "宁德时代",
+                "宁德时代分析",
+                "BUY",
+                "需求仍在验证",
+                "{}",
+                now - 10,
+            ],
         )
         db.execute(
             """
@@ -73,7 +89,16 @@ async def test_live_context_fuses_private_cross_module_signals(client, auth_cook
                 (id,username,prompt,market,horizon,risk_level,plan_json,created_at)
             VALUES (?,?,?,?,?,?,?,?)
             """,
-            ["v1", "testuser", "锂电池", "A股", "swing", "balanced", json.dumps(vibe_plan, ensure_ascii=False), now - 20],
+            [
+                "v1",
+                "testuser",
+                "锂电池",
+                "A股",
+                "swing",
+                "balanced",
+                json.dumps(vibe_plan, ensure_ascii=False),
+                now - 20,
+            ],
         )
         db.execute(
             """
@@ -115,7 +140,10 @@ async def test_live_context_fuses_private_cross_module_signals(client, auth_cook
     assert data["summary"]["linked_tickers"] == 1
     assert data["summary"]["unlinked_tickers"] == 1
     assert data["summary"]["source_totals"] == {
-        "analysis": 1, "vibe": 2, "report": 1, "watchlist": 1,
+        "analysis": 1,
+        "vibe": 2,
+        "report": 1,
+        "watchlist": 1,
     }
     linked = data["tickers"]["300750"]
     assert linked["linked"] is True

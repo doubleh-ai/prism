@@ -1,19 +1,26 @@
 """ProviderChain — failover order, dead-provider skip, stale fallback."""
-import pytest
+
 import asyncio
-from server.market.chain import ProviderChain
+
+import pytest
+
 from server.market.cache import MarketCache
+from server.market.chain import ProviderChain
+from server.market.models import Fundamentals, KLine, Quote
 from server.market.provider import (
-    MarketDataProvider, ProviderUnavailable, NoProviderAvailable,
+    NoProviderAvailable,
+    ProviderUnavailable,
 )
-from server.market.models import Quote, KLine, Fundamentals, SearchHit
 
 
 class FakeProvider:
     def __init__(self, name, quote=None, fail=False, raise_notfound=False):
         self.name = name
         self._quote = quote or Quote(
-            ticker="X", price=1.0, timestamp=1, source=name,
+            ticker="X",
+            price=1.0,
+            timestamp=1,
+            source=name,
         )
         self._fail = fail
         self._raise_notfound = raise_notfound
@@ -78,8 +85,12 @@ async def test_stale_fallback_when_all_fail():
     # (chain.py checks fresh cache first and returns immediately; only when
     # cache.get() returns None does it try providers and fall back to get_stale).
     import time
-    cache.set("quote:akshare:600519", {"ticker": "600519", "price": 999.0,
-                                        "timestamp": 1, "source": "akshare"}, ttl=1)
+
+    cache.set(
+        "quote:akshare:600519",
+        {"ticker": "600519", "price": 999.0, "timestamp": 1, "source": "akshare"},
+        ttl=1,
+    )
     time.sleep(1.2)
     a = FakeProvider("akshare", fail=True)
     b = FakeProvider("baostock", fail=True)
@@ -141,10 +152,17 @@ async def test_concurrent_requests_coalesce_to_single_upstream_call():
             await asyncio.sleep(0.2)
             return Quote(ticker=ticker, price=10.0, timestamp=1, source=self.name)
 
-        async def get_kline(self, *a, **k): return []
-        async def get_fundamentals(self, *a, **k): return Fundamentals(ticker=a[0], timestamp=1, source=self.name)
-        async def search(self, *a, **k): return []
-        async def health(self): return True
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_fundamentals(self, *a, **k):
+            return Fundamentals(ticker=a[0], timestamp=1, source=self.name)
+
+        async def search(self, *a, **k):
+            return []
+
+        async def health(self):
+            return True
 
     p = SlowProvider()
     chain = ProviderChain([p], cache=cache)

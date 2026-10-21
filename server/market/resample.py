@@ -1,11 +1,11 @@
 """Shared K-line period aggregation for providers that expose daily bars."""
+
 from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterable
 
 from .models import KLine
-
 
 _MARKET_TZ = dt.timezone(dt.timedelta(hours=8), name="Asia/Shanghai")
 
@@ -45,13 +45,15 @@ def resample_kline(bars: Iterable[KLine], period: str, limit: int) -> list[KLine
     for group in grouped:
         first, last = group[0], group[-1]
         turnovers = [bar.turnover for bar in group if bar.turnover is not None]
-        result.append(KLine(
-            timestamp=last.timestamp,
-            open=first.open,
-            high=max(bar.high for bar in group),
-            low=min(bar.low for bar in group),
-            close=last.close,
-            volume=sum(bar.volume for bar in group),
-            turnover=sum(turnovers) if turnovers else None,
-        ))
+        result.append(
+            KLine(
+                timestamp=last.timestamp,
+                open=first.open,
+                high=max(bar.high for bar in group),
+                low=min(bar.low for bar in group),
+                close=last.close,
+                volume=sum(bar.volume for bar in group),
+                turnover=sum(turnovers) if turnovers else None,
+            )
+        )
     return result[-limit:]

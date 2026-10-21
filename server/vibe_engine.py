@@ -1,4 +1,5 @@
 """HTTP adapter for the official HKUDS/Vibe-Trading session runtime."""
+
 from __future__ import annotations
 
 import json
@@ -96,30 +97,32 @@ async def engine_events(session_id: str) -> AsyncIterator[tuple[str, dict[str, A
     """Yield normalized SSE event tuples from one active official session."""
     try:
         timeout = _timeout(float(VIBE_ENGINE_TIMEOUT_SECONDS))
-        async with httpx.AsyncClient(base_url=VIBE_ENGINE_URL, timeout=timeout) as client:
-            async with client.stream(
+        async with (
+            httpx.AsyncClient(base_url=VIBE_ENGINE_URL, timeout=timeout) as client,
+            client.stream(
                 "GET",
                 f"/sessions/{session_id}/events",
                 params={"replay": "active"},
-            ) as response:
-                response.raise_for_status()
-                event_type = "message"
-                event_id = ""
-                async for line in response.aiter_lines():
-                    if line.startswith("id:"):
-                        event_id = line.split(":", 1)[1].strip()
-                    elif line.startswith("event:"):
-                        event_type = line.split(":", 1)[1].strip()
-                    elif line.startswith("data:"):
-                        raw = line.split(":", 1)[1].strip()
-                        try:
-                            payload = json.loads(raw)
-                        except json.JSONDecodeError:
-                            payload = {"preview": raw[:300]}
-                        if not isinstance(payload, dict):
-                            payload = {"value": payload}
-                        yield event_type, payload, event_id
-                        event_type = "message"
-                        event_id = ""
+            ) as response,
+        ):
+            response.raise_for_status()
+            event_type = "message"
+            event_id = ""
+            async for line in response.aiter_lines():
+                if line.startswith("id:"):
+                    event_id = line.split(":", 1)[1].strip()
+                elif line.startswith("event:"):
+                    event_type = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    raw = line.split(":", 1)[1].strip()
+                    try:
+                        payload = json.loads(raw)
+                    except json.JSONDecodeError:
+                        payload = {"preview": raw[:300]}
+                    if not isinstance(payload, dict):
+                        payload = {"value": payload}
+                    yield event_type, payload, event_id
+                    event_type = "message"
+                    event_id = ""
     except Exception as exc:
         raise _raise_engine_error(exc) from exc

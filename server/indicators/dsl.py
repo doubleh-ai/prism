@@ -11,6 +11,7 @@ Example — "5日线上穿20日线 且 量>5日均量2倍":
       {"gt":[{"vol"},{"mul":[2,{"ma_vol":5}]}]}
     ]}
 """
+
 import pandas as pd
 
 
@@ -27,10 +28,11 @@ def _align(df, x):
 
 # ── base indicators: (df, fund, arg) -> Series ──
 
+
 def _b_price(df, fund, col):
     if col in df.columns:
         return df[col].astype(float)
-    raise DSLError("unknown price field: %r" % col)
+    raise DSLError(f"unknown price field: {col!r}")
 
 
 def _b_ma(df, fund, n):
@@ -72,6 +74,7 @@ def _b_kdj_k(df, fund, n):
 
 def _boll(sign):
     """Build a boll_mid/upper/lower builder. sign: 0 mid, +1 upper, -1 lower."""
+
     def fn(df, fund, args):
         n = int(args[0]) if isinstance(args, (list, tuple)) else int(args)
         k = float(args[1]) if isinstance(args, (list, tuple)) and len(args) > 1 else 2.0
@@ -80,6 +83,7 @@ def _boll(sign):
         if sign == 0:
             return mid
         return mid + sign * k * std
+
     return fn
 
 
@@ -97,14 +101,24 @@ def _b_macd_dea(df, fund, args):
 _FUNDS = {"pe", "pb", "roe", "revenue_growth", "market_cap", "dividend_yield"}
 
 _BASE = {
-    "price": _b_price, "ma": _b_ma, "ema": _b_ema, "vol": _b_vol, "amount": _b_amount, "ma_vol": _b_mavol,
-    "rsi": _b_rsi, "kdj_k": _b_kdj_k,
-    "boll_mid": _boll(0), "boll_upper": _boll(1), "boll_lower": _boll(-1),
-    "macd_dif": _b_macd_dif, "macd_dea": _b_macd_dea,
+    "price": _b_price,
+    "ma": _b_ma,
+    "ema": _b_ema,
+    "vol": _b_vol,
+    "amount": _b_amount,
+    "ma_vol": _b_mavol,
+    "rsi": _b_rsi,
+    "kdj_k": _b_kdj_k,
+    "boll_mid": _boll(0),
+    "boll_upper": _boll(1),
+    "boll_lower": _boll(-1),
+    "macd_dif": _b_macd_dif,
+    "macd_dea": _b_macd_dea,
 }
 
 
 # ── operators ──
+
 
 def _cross_up(df, a, b):
     return (a > b) & (a.shift(1) <= b.shift(1))
@@ -124,7 +138,7 @@ def _to_int(node):
         return int(node["const"])
     if isinstance(node, (int, float)):
         return int(node)
-    raise DSLError("expected a window size, got %r" % (node,))
+    raise DSLError(f"expected a window size, got {node!r}")
 
 
 def _to_float(node):
@@ -133,7 +147,7 @@ def _to_float(node):
         return float(node.dropna().iloc[-1]) if len(node.dropna()) else 0.0
     if isinstance(node, (int, float)):
         return float(node)
-    raise DSLError("expected a scalar, got %r" % (node,))
+    raise DSLError(f"expected a scalar, got {node!r}")
 
 
 # operator -> (arity, fn). fn takes (df, *aligned_or_int_args).
@@ -163,7 +177,12 @@ _OPS = {
     "slope": (2, lambda df, a, n: a - a.shift(_to_int(n))),
     "count": (2, lambda df, a, n: a.astype(bool).rolling(_to_int(n)).sum()),
     "within": (2, lambda df, a, n: a.astype(bool).rolling(_to_int(n)).max().fillna(0).astype(bool)),
-    "range_pct": (2, lambda df, a, n: (a.rolling(_to_int(n)).max() - a.rolling(_to_int(n)).min()) / a.replace(0, pd.NA) * 100),
+    "range_pct": (
+        2,
+        lambda df, a, n: (
+            (a.rolling(_to_int(n)).max() - a.rolling(_to_int(n)).min()) / a.replace(0, pd.NA) * 100
+        ),
+    ),
 }
 
 
@@ -175,7 +194,7 @@ def _param_value(arg, params):
     elif isinstance(arg, dict):
         key, default = str(arg.get("key", "")), arg.get("default")
     else:
-        raise DSLError("invalid param node: %r" % (arg,))
+        raise DSLError(f"invalid param node: {arg!r}")
     if not key:
         raise DSLError("empty param key")
     return params.get(key, default)
@@ -192,7 +211,7 @@ def _resolve_base_arg(arg, df, fund, params):
         if set(arg.keys()) == {"param"}:
             val = _param_value(arg["param"], params)
             if val is None:
-                raise DSLError("missing param: %r" % (arg["param"],))
+                raise DSLError(f"missing param: {arg['param']!r}")
             return val
         return {k: _resolve_base_arg(v, df, fund, params) for k, v in arg.items()}
     if isinstance(arg, list):
@@ -212,7 +231,7 @@ def eval_node(node, df, fund, params=None):
     if isinstance(node, (int, float)):
         return _align(df, node)
     if not isinstance(node, dict) or len(node) != 1:
-        raise DSLError("invalid node: %r" % (node,))
+        raise DSLError(f"invalid node: {node!r}")
     op, arg = next(iter(node.items()))
 
     if op == "const":
@@ -220,11 +239,11 @@ def eval_node(node, df, fund, params=None):
     if op == "param":
         val = _param_value(arg, params)
         if val is None:
-            raise DSLError("missing param: %r" % (arg,))
+            raise DSLError(f"missing param: {arg!r}")
         return _align(df, val)
     if op == "fund":
         if arg not in _FUNDS:
-            raise DSLError("unknown fundamental: %r" % arg)
+            raise DSLError(f"unknown fundamental: {arg!r}")
         v = fund.get(arg)
         return pd.Series([float("nan") if v in (None, "") else float(v)] * len(df), index=df.index)
     if op in _BASE:
@@ -232,11 +251,11 @@ def eval_node(node, df, fund, params=None):
     if op in _OPS:
         arity, fn = _OPS[op]
         if not isinstance(arg, list) or len(arg) != arity:
-            raise DSLError("%s expects %d args, got %r" % (op, arity, arg))
+            raise DSLError(f"{op!s} expects {arity:d} args, got {arg!r}")
         vals = [eval_node(a, df, fund, params) for a in arg]
         aligned = [_align(df, v) for v in vals]
         return fn(df, *aligned)
-    raise DSLError("unknown operator: %r" % op)
+    raise DSLError(f"unknown operator: {op!r}")
 
 
 def evaluate(dsl, df, fund=None, params=None):
@@ -249,7 +268,7 @@ def evaluate(dsl, df, fund=None, params=None):
         fund = {}
     for col in ("close", "high", "low", "volume"):
         if col not in df.columns:
-            raise DSLError("df missing column: %s" % col)
+            raise DSLError(f"df missing column: {col!s}")
     return eval_node(dsl, df, fund, params or {})
 
 
@@ -262,15 +281,18 @@ def validate(dsl, params=None):
     """Dry-run a DSL against synthetic OHLCV + fundamentals. Returns True iff
     it evaluates without DSLError (i.e. only uses whitelisted ops/base)."""
     import numpy as np
+
     n = 60
-    df = pd.DataFrame({
-        "open": np.linspace(10, 15, n),
-        "high": np.linspace(11, 16, n),
-        "low": np.linspace(9, 14, n),
-        "close": np.linspace(10, 15, n),
-        "volume": np.linspace(1e6, 2e6, n),
-        "amount": np.linspace(1e7, 2e7, n),
-    })
+    df = pd.DataFrame(
+        {
+            "open": np.linspace(10, 15, n),
+            "high": np.linspace(11, 16, n),
+            "low": np.linspace(9, 14, n),
+            "close": np.linspace(10, 15, n),
+            "volume": np.linspace(1e6, 2e6, n),
+            "amount": np.linspace(1e7, 2e7, n),
+        }
+    )
     fund = {k: 10.0 for k in _FUNDS}
     try:
         r = evaluate(dsl, df, fund, params or {})

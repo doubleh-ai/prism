@@ -18,20 +18,22 @@ baostock connects directly.
 All upstream calls are also capped with :func:`asyncio.wait_for` using
 ``BAOSTOCK_TIMEOUT`` so a stuck remote can't tie up workers.
 """
-import os
+
 import asyncio
-import time
-import logging
 import datetime
-from typing import List
-from .provider import ProviderUnavailable, ProviderNotFound
-from .models import Quote, KLine, Fundamentals, SearchHit
+import logging
+import os
+import time
+
 from ..config import BAOSTOCK_TIMEOUT
+from .models import Fundamentals, KLine, Quote, SearchHit
+from .provider import ProviderNotFound, ProviderUnavailable
 
 log = logging.getLogger("stock-app")
 
 try:
     import baostock as bs
+
     _BS_AVAILABLE = True
 except ImportError:
     _BS_AVAILABLE = False
@@ -40,8 +42,12 @@ except ImportError:
 # Env vars that tell socket-based clients to use an HTTP proxy.
 # baostock must NOT go through the proxy, so we strip these per-call.
 _PROXY_ENV_KEYS = (
-    "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
-    "all_proxy", "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
 )
 
 
@@ -86,7 +92,7 @@ class BaostockProvider:
                 asyncio.to_thread(_run_blocking, func, *args, **kwargs),
                 timeout=BAOSTOCK_TIMEOUT,
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise ProviderUnavailable(f"baostock timeout after {BAOSTOCK_TIMEOUT}s") from e
 
     async def _ensure_login(self):
@@ -114,9 +120,13 @@ class BaostockProvider:
             await self._ensure_login()
             try:
                 rs = await self._call(
-                    bs.query_history_k_data_plus, code, fields,
-                    start_date=start, end_date="2099-12-31",
-                    frequency=frequency, adjustflag=adjustflag,
+                    bs.query_history_k_data_plus,
+                    code,
+                    fields,
+                    start_date=start,
+                    end_date="2099-12-31",
+                    frequency=frequency,
+                    adjustflag=adjustflag,
                 )
             except ProviderUnavailable:
                 # Session may have died — reset so the next call re-logs in.
@@ -140,7 +150,9 @@ class BaostockProvider:
         rows = await self._query(
             code,
             "date,code,open,high,low,close,preclose,volume,amount,pctChg,turn",
-            start, "d", "3",
+            start,
+            "d",
+            "3",
         )
         if not rows:
             raise ProviderNotFound(f"baostock: no data for {ticker}")
@@ -182,35 +194,40 @@ class BaostockProvider:
             source=self.name,
         )
 
-    async def get_kline(
-        self, ticker: str, period: str = "1d", limit: int = 120
-    ) -> List[KLine]:
+    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
         _bs_or_raise()
         if period not in _PERIOD_MAP:
             raise ProviderUnavailable(f"baostock: unsupported K-line period {period}")
         bs_period = _PERIOD_MAP[period]
         code = self._prefix(ticker)
         calendar_days_per_bar = {"1d": 2, "1w": 8, "1m": 35}[period]
-        start = (datetime.date.today() - datetime.timedelta(
-            days=limit * calendar_days_per_bar + 45,
-        )).strftime("%Y-%m-%d")
+        start = (
+            datetime.date.today()
+            - datetime.timedelta(
+                days=limit * calendar_days_per_bar + 45,
+            )
+        ).strftime("%Y-%m-%d")
         rows = await self._query(
             code,
             "date,open,high,low,close,volume,amount",
-            start, bs_period, "2",  # forward-adjusted (qfq)
+            start,
+            bs_period,
+            "2",  # forward-adjusted (qfq)
         )
-        out: List[KLine] = []
+        out: list[KLine] = []
         for r in rows[-limit:]:
             try:
-                out.append(KLine(
-                    timestamp=self._date_to_ts(r.get("date")),
-                    open=float(r["open"]),
-                    high=float(r["high"]),
-                    low=float(r["low"]),
-                    close=float(r["close"]),
-                    volume=float(r.get("volume") or 0),
-                    turnover=float(r.get("amount") or 0) or None,
-                ))
+                out.append(
+                    KLine(
+                        timestamp=self._date_to_ts(r.get("date")),
+                        open=float(r["open"]),
+                        high=float(r["high"]),
+                        low=float(r["low"]),
+                        close=float(r["close"]),
+                        volume=float(r.get("volume") or 0),
+                        turnover=float(r.get("amount") or 0) or None,
+                    )
+                )
             except (TypeError, ValueError, KeyError):
                 continue
         return out
@@ -222,7 +239,9 @@ class BaostockProvider:
         rows = await self._query(
             code,
             "date,close,pctChg,turn,peTTM,pbMRQ",
-            start, "d", "3",
+            start,
+            "d",
+            "3",
         )
         if not rows:
             raise ProviderNotFound(f"baostock: no fundamentals for {ticker}")
@@ -246,7 +265,7 @@ class BaostockProvider:
             source=self.name,
         )
 
-    async def search(self, query: str, limit: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
         # baostock has no fuzzy name search over the wire; the chain falls
         # through to akshare (whose search endpoint is on a reachable host).
         return []
@@ -263,7 +282,7 @@ class BaostockProvider:
         while (rs.error_code == "0") and rs.next():
             row = rs.get_row_data()
             if fields and len(row) == len(fields):
-                out.append(dict(zip(fields, row)))
+                out.append(dict(zip(fields, row, strict=False)))
             else:
                 out.append(row)
         return out
