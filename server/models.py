@@ -119,7 +119,7 @@ class VibeFollowUpRequest(BaseModel):
 
 # ── Conversations ──
 class CreateConvRequest(BaseModel):
-    skill: str | None = Field(default="bottleneck-hunter", max_length=64)
+    skill: str | None = Field(default="prism-research", max_length=64)
 
 
 class UpdateSkillRequest(BaseModel):
@@ -141,7 +141,7 @@ class BatchDeleteRequest(BaseModel):
 # ── Chat ──
 class ChatStreamRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=32000)
-    skill: str = Field(default="bottleneck-hunter", max_length=64)
+    skill: str = Field(default="prism-research", max_length=64)
     conv_id: str | None = Field(default=None, max_length=128)
     model: str | None = Field(default=None, max_length=64)
     extra_skills: list[str] | None = Field(default=None, max_length=16)

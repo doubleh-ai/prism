@@ -16,11 +16,12 @@ from starlette.responses import StreamingResponse
 
 from .activity import ActivityMiddleware
 from .analysis_engine import _sse as _analysis_sse
-from .analysis_engine import _store, get_report, start_analysis, stream_events
+from .analysis_engine import _store, get_analysis_record, start_analysis, stream_events
 from .analysis_graph import router as graph_router
 from .auth import hash_password, is_admin_user, require_admin, require_auth, verify_csrf
 from .auth import login as auth_login
 from .auth import logout as auth_logout
+from .capabilities import router as capabilities_router
 from .chat import chat_cancel, chat_respond, chat_stream
 from .config import (
     CLAUDE_BIN,
@@ -515,6 +516,7 @@ async def api_chat_cancel(request: Request):
 # ── Market data (v0.6) ──
 
 app.include_router(market_router)
+app.include_router(capabilities_router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)
@@ -698,13 +700,20 @@ async def api_analysis_stream(analysis_id: str, request: Request):
     """SSE stream of analysis progress events."""
     u = require_auth(request)
     entry = _store.get(analysis_id)
-    if not entry or entry.get("username") != u:
+    record = get_analysis_record(analysis_id, u)
+    if not record:
         return StreamingResponse(
             iter([_analysis_sse({"type": "error", "message": "分析不存在或无权访问"})]),
             media_type="text/event-stream",
         )
 
     async def _generate():
+        if not entry or record["status"] in {"done", "error"}:
+            if record["status"] == "done":
+                yield _analysis_sse({"type": "done", **record})
+            else:
+                yield _analysis_sse({"type": "error", "message": record.get("error") or "研究已结束"})
+            return
         async for event in stream_events(analysis_id):
             yield event
 
@@ -719,12 +728,11 @@ async def api_analysis_stream(analysis_id: str, request: Request):
 async def api_analysis_report(analysis_id: str, request: Request):
     """Return the final structured analysis report."""
     u = require_auth(request)
-    entry = _store.get(analysis_id)
-    if not entry or entry.get("username") != u:
+    report = get_analysis_record(analysis_id, u)
+    if not report:
         return JSONResponse({"error": "分析不存在或无权访问"}, status_code=404)
-    report = get_report(analysis_id)
-    if report is None:
-        return JSONResponse({"error": "分析尚未完成或不存在"}, status_code=404)
+    if report["status"] in {"starting", "running"}:
+        return JSONResponse(report, status_code=202)
     return report
 
 

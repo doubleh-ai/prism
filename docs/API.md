@@ -48,7 +48,7 @@ List active (non-deleted) conversations for the current user.
 
 Create a new conversation.
 
-Body: `{"skill": "bottleneck-hunter"}` (optional)
+Body: `{"skill": "prism-research"}` (optional; the built-in default).
 
 - 200: `{"id": "..."}`
 
@@ -105,17 +105,74 @@ List soft-deleted conversations.
 
 ### `POST /api/chat/stream`
 
-Stream an AI response using Server-Sent Events. The first event is
-`{"pulse": "start"}`, then a series of `text`, `tool`, `think`, and
-`ref` events, finally `[DONE]`.
+Stream an AI response using Server-Sent Events. A per-run `research` event
+precedes `{"pulse": "start"}`, followed by `text`, `tool`, `think`, `ref`,
+optional `status` and `platform_call` events, and finally `[DONE]`.
 
-Body: `{"question": "...", "skill": "bottleneck-hunter",
+Body: `{"question": "...", "skill": "prism-research",
 "conv_id": "...", "model": "minimax-m3", "extra_skills": []}`
 
 - 200: `Content-Type: text/event-stream`
 - 400: empty question.
 - 422: malformed body.
 - 429: rate-limited.
+
+`{"research": context}` carries `schema_version`, `run_id`, `as_of` (the
+actual request timestamp with a UTC offset), `timezone: "Asia/Shanghai"`,
+`date`, and `engine`. The assistant message persists both `research` and a
+`{"t":"research","research":context}` chunk. This is the research cutoff,
+not a claim that all underlying data is current to that time.
+
+Sources remain individual `{"ref": source}` events / `{"t":"ref", ...source}`
+chunks. In addition to `url`, `title`, and `snippet`, they may include
+`run_id`, `tool`, `tool_call_id`, `source_kind`, `evidence_status`,
+`retrieved_at`, and `published_at`. `external_web`, `platform_data`, and
+`historical_research` distinguish provenance. `retrieved` means successful
+collection, **not verified factual accuracy**. Unknown publication or
+collection dates remain null / absent; do not substitute the current date.
+Historical sources without reliable run information are not reassigned to
+the latest response.
+
+`{"platform_call": record}` reports actual platform tool execution. Updates
+with the same `call_id` replace the previous running state. Persisted chunks
+use `{"t":"platform_call","call":record}`. `{"status":"..."}` carries visible
+operational notices, including fallback from a missing external skill to
+the built-in `prism-research` method; it is not model reasoning.
+
+### Platform capabilities and call history
+
+These read endpoints require the normal authenticated session and return
+only records owned by the current user.
+
+| Endpoint | Result |
+|---|---|
+| `GET /api/capabilities` | `{"capabilities":[...]}` — actual Agent tool catalog |
+| `GET /api/convs/{conv_id}/capability-calls` | `{"calls":[record]}` for an owned conversation |
+| `GET /api/capability-calls?view=market&limit=20` | `{"calls":[record]}` filtered by workspace; `view` is optional |
+
+Each catalog entry includes `id`, `label`, `description`, `input_schema`,
+`source_kind`, `read_only`, and `target_view`.
+
+Each call record includes `call_id`, `run_id`, `capability_id`, `label`,
+`status` (`running`, `completed`, or `failed`), `conv_id`, `created_at`,
+`completed_at`, `input_summary`, `result_summary`, `source_kind`, and
+`target: {"view": "...", "id": "...", "ticker": "..."}`. Optional target
+fields are omitted when they do not apply. Views are `market`, `industry`,
+`indicators`, `screener`, `reports`, `analysis`, and `vibe`.
+
+Capability results link to existing records; **navigation does not execute
+the capability again**. `analysis_start`, `vibe_start`, and `scan_start`
+create tasks and advertise `read_only: false`. A completed *start call*
+means that a task was accepted, not that the underlying research finished;
+open the task or use its status capability to inspect progress. Platform
+call records are not original external evidence.
+
+The Agent uses a per-run stdio MCP bridge to the authenticated internal
+capability endpoints. These are not browser-facing execution APIs. The
+bridge base is `PRISM_INTERNAL_API_URL` (default
+`http://127.0.0.1:8088`), which must point to the same Prism instance using
+a numeric loopback host and explicit port. Custom service ports require
+updating this variable; external hosts and redirects are rejected.
 
 ### `POST /api/chat/respond`
 

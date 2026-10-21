@@ -6,20 +6,26 @@
 function escHtml(s) { return String(s||'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function escAttr(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
-function safeUrl(u) { if (!u) return ''; var s=String(u).trim(); return /^(javascript|vbscript|data):/i.test(s) ? '' : s; }
+function safeUrl(u) {
+  if (!u) return '';
+  var s = String(u).trim();
+  // Browsers remove tabs/newlines before resolving a URL's scheme. Reject
+  // those bytes before parsing so an obfuscated script URL cannot become a link.
+  if (!s || /[\u0000-\u001f\u007f]/.test(s)) return '';
+  try {
+    var parsed = new URL(s, 'https://prism.invalid/');
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    if (parsed.username || parsed.password) return '';
+    return s;
+  } catch(e) { return ''; }
+}
 
 /* ── Marked 安全配置 + HTML 净化 ──
    防御 AI 输出 / 第三方 skill 报告里的 XSS 攻击。
    marked 本身不做 HTML 净化，必须我们自己处理。 */
 (function configureMarked() {
   if (typeof marked === 'undefined') return;
-  // 仅允许安全的 URL scheme。javascript:/vbscript:/data:text/html 一律放空。
-  function safeUrl(url) {
-    if (!url) return '';
-    const s = String(url).trim();
-    if (/^(javascript|vbscript|data):/i.test(s)) return '';
-    return url;
-  }
+  // Use the same parsed protocol allowlist for Markdown links and images.
   const renderer = new marked.Renderer();
   const origLink = renderer.link.bind(renderer);
   const origImage = renderer.image.bind(renderer);

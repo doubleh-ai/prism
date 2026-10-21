@@ -78,7 +78,7 @@ Object.assign(App, {
                    '<span class="market-qv-chg market-qv-chg--' + cls + '">' + chg + ' / ' + pct + '%</span>' +
                    staleTag + '</div>' +
                    '<div class="market-qv-row market-qv-src">来源: ' + esc(q.source || '—') + ' · ' +
-                   new Date((q.timestamp || 0) * 1000).toLocaleString('zh-CN') + '</div>';
+                   esc(this._quoteTimeLabel(q)) + '</div>';
   },
 
   /* ═══ v0.7 — 独立行情面板 ═══ */
@@ -453,7 +453,20 @@ Object.assign(App, {
         cell('成交额', q.turnover != null ? self._fmtVolume(q.turnover) : null) +
       '</div>' +
       '<div class="market-qc-src">数据来源: ' + esc(q.source || '—') + ' · ' +
-        new Date((q.timestamp || 0) * 1000).toLocaleString('zh-CN') + '</div>';
+        esc(this._quoteTimeLabel(q)) + '</div>';
+  },
+  _quoteTimeLabel: function(q) {
+    var timestamp = q.data_timestamp;
+    var label = '行情时间';
+    if (timestamp && q.data_kind === 'daily_close') {
+      return '行情日期（日线收盘数据）：' + new Date(timestamp * 1000).toLocaleDateString('zh-CN', {timeZone:'Asia/Shanghai'}) + ' 北京时间';
+    }
+    if (!timestamp) {
+      timestamp = q.retrieved_at || q.timestamp;
+      label = '采集时间（行情时刻未知）';
+    }
+    if (!timestamp) return '行情时间未知';
+    return label + '：' + new Date(timestamp * 1000).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'}) + ' 北京时间';
   },
   _renderKline: async function(ticker, period, limit) {
     this._currentPeriod = period;
@@ -532,7 +545,9 @@ Object.assign(App, {
       var k = kline[i];
       var ts = k.ts || k.timestamp || 0;
       var d = new Date(ts * 1000);
-      var ds = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+      var dateParts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(d);
+      var fields = {}; dateParts.forEach(function(part) { fields[part.type] = part.value; });
+      var ds = fields.year + '-' + fields.month + '-' + fields.day;
       dates.push(ds);
       ohlc.push([+k.open, +k.close, +k.low, +k.high]);
       vols.push(+k.volume || 0);

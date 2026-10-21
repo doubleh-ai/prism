@@ -5,6 +5,8 @@ without ad-hoc dict manipulation. Optional fields default to ``None``
 to accommodate partial responses from real-world data providers.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -23,6 +25,10 @@ class Quote(BaseModel):
     open: float | None = Field(default=None, ge=0)
     prev_close: float | None = Field(default=None, ge=0)
     timestamp: int = Field(..., gt=0)  # unix seconds
+    data_timestamp: int | None = Field(default=None, gt=0)
+    retrieved_at: int | None = Field(default=None, gt=0)
+    timestamp_kind: Literal["trade", "retrieved", "unknown"] = "unknown"
+    data_kind: Literal["quote", "daily_close", "unknown"] = "unknown"
     source: str = Field(..., min_length=1, max_length=32)
     stale: bool = False  # True when served from expired cache after provider failure
 
@@ -53,6 +59,9 @@ class Fundamentals(BaseModel):
     net_profit: float | None = None
     market_cap: float | None = None
     timestamp: int = Field(..., gt=0)
+    data_timestamp: int | None = Field(default=None, gt=0)
+    retrieved_at: int | None = Field(default=None, gt=0)
+    stale: bool = False
     source: str = Field(..., min_length=1, max_length=32)
 
 

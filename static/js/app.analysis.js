@@ -8,6 +8,7 @@ Object.assign(App, {
   _analysisReader: null,
   _analysisEvents: [],
   _analysisStartTime: 0,
+  _analysisElapsedSeconds: null,
   _analysisCurrentStage: "",
   _analysisProgressPct: 0,
   _analysisAttachAttempted: false,
@@ -64,6 +65,7 @@ Object.assign(App, {
     this._analysisCurrentStage = "";
     this._analysisProgressPct = 0;
     this._analysisStartTime = Date.now();
+    this._analysisElapsedSeconds = null;
 
     document.getElementById("analysisPanelInner").innerHTML =
       '<div class="ap-container">' +
@@ -104,7 +106,7 @@ Object.assign(App, {
     this._analysisId = null;
     try { sessionStorage.removeItem('prism_analysis'); } catch(e) {}
     document.getElementById("analysisPanelInner").innerHTML =
-      '<div class="market-empty-state">分析已取消</div>';
+      '<div class="market-empty-state">已停止查看；后台研究可能仍在运行，请从记录继续查看，避免重复启动。</div>';
   },
 
   /* ── Progress bar ── */
@@ -177,7 +179,8 @@ Object.assign(App, {
   _tickElapsed: function() {
     var el = document.getElementById("apElapsed");
     if (el && this._analysisStartTime) {
-      var secs = Math.round((Date.now() - this._analysisStartTime) / 1000);
+      if (!this._analysisStreaming && this._analysisElapsedSeconds === null) { el.textContent = '耗时未记录'; return; }
+      var secs = this._analysisElapsedSeconds !== null ? Math.round(this._analysisElapsedSeconds) : Math.round((Date.now() - this._analysisStartTime) / 1000);
       el.textContent = "已用 " + (secs >= 60 ? Math.floor(secs/60) + "分" + (secs%60) + "秒" : secs + "秒");
     }
   },
@@ -223,17 +226,73 @@ Object.assign(App, {
   },
 
   /* ── SSE ── */
+  _openAnalysisRecord: async function(id, ticker) {
+    if (!id) return;
+    if (this._analysisReader) { this._analysisReader.abort(); this._analysisReader = null; }
+    this._analysisStreaming = false;
+    this.switchMode('analysis');
+    this._analysisId = id;
+    this._analysisTicker = ticker || '';
+    this._analysisEvents = [];
+    this._analysisAgentDone = {};
+    var response;
+    try { response = await this.api('/api/analysis/' + encodeURIComponent(id) + '/report'); }
+    catch (e) {
+      if (this._analysisId === id) document.getElementById('analysisPanelInner').textContent = '暂时无法读取研究记录，请稍后重试。';
+      return;
+    }
+    if (this._analysisId !== id) return;
+    if (!response.ok) {
+      document.getElementById('analysisPanelInner').textContent = '研究记录不存在或无权访问；没有重新启动任务。';
+      return;
+    }
+    var data = await response.json();
+    if (this._analysisId !== id) return;
+    this._analysisTicker = data.ticker || ticker || '';
+    this._analysisName = data.name || '';
+    this._setAnalysisMode(data.mode || 'fast');
+    this._analysisSelectedAgents = data.selected_analysts || this._analysisAgentsForMode(this._analysisMode);
+    this._analysisStartTime = data.started_at ? data.started_at * 1000 : Date.now();
+    this._analysisElapsedSeconds = typeof data.elapsed === 'number' ? data.elapsed : null;
+    document.getElementById('analysisPanelInner').innerHTML =
+      '<div class="ap-container">' + this._buildProgressBar() +
+      '<div class="ap-status" id="apStatus">正在查看已有研究…</div>' +
+      '<div class="ap-agent-grid" id="apAgentGrid"></div>' +
+      '<div class="ap-stream" id="apStream"><div class="ap-stream-body" id="apStreamBody"></div></div></div>' +
+      '<div class="ap-report" id="apReport" style="display:none"></div>';
+    this._renderAgentGrid();
+    if (data.report) this._renderFinalReport(data.report, data.signal);
+    if (response.status === 202) {
+      this._analysisStreaming = true;
+      this._saveAnalysisState();
+      this._connectAnalysisStream();
+    } else if (data.status === 'done') {
+      this._handleAnalysisEvent({type:'done', report:data.report, signal:data.signal, mode:data.mode, timings:data.timings, elapsed:data.elapsed});
+    } else {
+      document.getElementById('apStatus').textContent = data.error || '研究未完成，未自动重新启动。';
+    }
+  },
   _connectAnalysisStream: function() {
     var self = this, aid = this._analysisId;
     if (!aid) return;
     fetch("/api/analysis/" + aid + "/stream").then(function(response) {
+      if (self._analysisId !== aid) return;
+      if (!response.ok || !response.body) throw new Error('研究流暂不可用');
       var reader = response.body.getReader();
       self._analysisReader = {abort: function() { reader.cancel(); }};
       var dec = new TextDecoder(), buf = "";
       function pump() {
-        if (!self._analysisStreaming) return;
+        if (!self._analysisStreaming || self._analysisId !== aid) return;
         reader.read().then(function(r) {
-          if (r.done) return;
+          if (self._analysisId !== aid) { reader.cancel(); return; }
+          if (r.done) {
+            if (self._analysisStreaming) {
+              self._analysisStreaming = false;
+              var disconnected = document.getElementById('apStatus');
+              if (disconnected) disconnected.textContent = '连接已断开，可从研究记录继续查看。';
+            }
+            return;
+          }
           buf += dec.decode(r.value, {stream: true});
           var parts = buf.split("\n\n"); buf = parts.pop();
           for (var i = 0; i < parts.length; i++) {
@@ -242,10 +301,22 @@ Object.assign(App, {
             try { self._handleAnalysisEvent(JSON.parse(line.substring(6))); } catch(e) {}
           }
           pump();
-        }).catch(function() { self._analysisStreaming = false; });
+        }).catch(function() {
+          if (self._analysisId === aid) {
+            self._analysisStreaming = false;
+            var disconnected = document.getElementById('apStatus');
+            if (disconnected) disconnected.textContent = '暂时无法连接，可从研究记录重新查看。';
+          }
+        });
       }
       pump();
-    }).catch(function() { self._analysisStreaming = false; });
+    }).catch(function() {
+      if (self._analysisId === aid) {
+        self._analysisStreaming = false;
+        var failed = document.getElementById('apStatus');
+        if (failed) failed.textContent = '暂时无法连接，可从研究记录重新查看。';
+      }
+    });
   },
 
   _handleAnalysisEvent: function(ev) {
@@ -287,7 +358,18 @@ Object.assign(App, {
       case "timing":
         this._appendTimingItem(ev);
         break;
+      case "report":
+        // The narrative is usable while optional dashboard extraction finishes.
+        this._lastReport = ev.report;
+        this._lastSignal = ev.signal;
+        this._renderFinalReport(ev.report, ev.signal);
+        var reportStatus = document.getElementById("apStatus");
+        if (reportStatus) reportStatus.textContent = "正文已生成，正在整理报告视图…";
+        break;
       case "done":
+        var recordedDuration = ev.timings && ev.timings.total_seconds;
+        if (typeof recordedDuration !== 'number') recordedDuration = ev.elapsed;
+        this._analysisElapsedSeconds = typeof recordedDuration === 'number' ? recordedDuration : null;
         this._analysisStreaming = false;
         this._updateProgress(100);
         var s = document.getElementById("apStatus");
@@ -308,7 +390,7 @@ Object.assign(App, {
         try { sessionStorage.removeItem('prism_analysis'); } catch(e) {}
         break;
       case "structured":
-        // Dashboard upgrade — structured extraction arrived after done.
+        // Dashboard upgrade arrives before the terminal done event.
         // Re-render the report area as a full dashboard.
         if (ev.structured) {
           if (this._lastReport) this._lastReport.structured = ev.structured;
@@ -359,7 +441,7 @@ Object.assign(App, {
     var bits = [
       this._analysisModeLabels[meta.mode] || meta.mode || "分析",
       meta.cached ? "缓存命中" : "实时生成",
-      meta.trade_date ? "交易日 " + meta.trade_date : "",
+      meta.trade_date ? "研究日期 " + meta.trade_date : "",
       agents ? "Agent " + agents : "",
       total ? "耗时 " + total : ""
     ].filter(Boolean);
@@ -445,7 +527,8 @@ Object.assign(App, {
   _renderDashboard: function(st, report, signal) {
     var sig = this._analysisTextValue(st.signal || signal) || "—";
     var sc = /买入|buy/i.test(sig) ? "up" : /卖出|sell/i.test(sig) ? "dn" : "neutral";
-    var conf = Math.max(0, Math.min(100, parseInt(st.confidence, 10) || 0));
+    // Legacy model scores are not calibrated probabilities.
+    var conf = null;
     var h = '<div class="ap-dash">';
 
     h += '<div class="ap-hero ap-hero--' + sc + '">' +
@@ -500,6 +583,7 @@ Object.assign(App, {
   },
 
   _confRing: function(pct) {
+    if (pct === null || pct === undefined) return '<div class="ap-evidence-status">来源待核验</div>';
     var r = 26, c = 2 * Math.PI * r, off = c * (1 - pct / 100);
     return '<div class="ap-conf"><svg width="64" height="64" viewBox="0 0 64 64">' +
       '<circle cx="32" cy="32" r="' + r + '" fill="none" stroke="var(--bg3)" stroke-width="6"/>' +

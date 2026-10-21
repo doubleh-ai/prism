@@ -112,6 +112,12 @@ Object.assign(App, {
   _bindGlossClicks: function() {
     var self = this;
     document.addEventListener('click', function(e) {
+      var answerOption = e.target.closest('.ask-opt[data-ask-answer]');
+      if (answerOption && !answerOption.disabled) {
+        e.preventDefault();
+        self.answerAsk(answerOption.dataset.askAnswer);
+        return;
+      }
       var termEl = e.target.closest('.gloss-term');
       if (termEl) {
         e.preventDefault();
@@ -182,6 +188,7 @@ Object.assign(App, {
   },
 
   _stopTypewriter: function(sid) {
+    if (sid && sid !== this.convId && Streams[this.convId] && Streams[this.convId].active) return;
     if (this._twTimer) {
       cancelAnimationFrame(this._twTimer);
       this._twTimer = null;
@@ -199,6 +206,7 @@ Object.assign(App, {
      from where it was left off. */
   _reattachStream: function() {
     var s = Streams[this.convId];
+    this._syncChatStreamControls();
     if (s && s.active) {
       var m = s.msgs[s.msgIdx];
       if (m && m.role === 'assistant' && m._chunks) {
@@ -206,6 +214,18 @@ Object.assign(App, {
       }
     }
     if (!this._twTimer) this._startTypewriter();
+  },
+
+  _syncChatStreamControls: function() {
+    var stream = Streams[this.convId], running = !!(stream && stream.active);
+    var button = document.getElementById('sendBtn');
+    if (button) {
+      button.disabled = false; button.classList.toggle('stop-mode', running);
+      button.onclick = running ? function() { App.stopStream(); } : function() { App.send(); };
+      button.title = running ? '停止生成' : '发送 (Enter)';
+    }
+    var bar = document.getElementById('loadingBar'); if (bar) bar.classList.toggle('active', running);
+    this._activeReader = running ? stream.reader || null : null;
   },
 
   /* ═══ Quote tags ([[quote:TICKER]]) ═══
@@ -278,34 +298,46 @@ Object.assign(App, {
 
   /* ═══ Rendering ═══ */
   _renderMsg: function(chunks, fullText, streaming, msgObj) {
-    chunks = chunks || [];
-    var directReportFiles = streaming ? [] : this._reportFilesForMessage(msgObj, chunks, fullText);
-    if (!chunks.length) {
-      var directText = directReportFiles.length ? this._compactDeliveredReportText(fullText) : fullText;
-      return ChatRender.renderContent(directText) + (directReportFiles.length ? this._inlineReportCard(directReportFiles) : '');
-    }
-    try { var html = '', pending = [], refs = (msgObj && msgObj._refs) || [];
-    var reportFiles = directReportFiles;
-    var safeChunks = [];
-    for (var _i=0; _i<chunks.length; _i++) {
-      var _src = chunks[_i] || {}, _dst = {};
-      for (var _k in _src) {
-        if (_k === 'opts' && Array.isArray(_src[_k])) _dst[_k] = _src[_k].map(ChatRender.stringify);
-        else _dst[_k] = ChatRender.stringify(_src[_k]);
+    chunks = Array.isArray(chunks) ? chunks : [];
+    var refs = ChatRender.collectRefs((msgObj && msgObj._refs) || [], chunks);
+    var research = msgObj && (msgObj.research || msgObj._research);
+    var calls = {}, callOrder = [];
+    chunks.forEach(function(chunk) {
+      if (!chunk) return;
+      if (chunk.t === 'research' && chunk.research) research = chunk.research;
+      if (chunk.t === 'platform_call' && chunk.call && chunk.call.call_id) {
+        if (!calls[chunk.call.call_id]) callOrder.push(chunk.call.call_id);
+        calls[chunk.call.call_id] = chunk.call;
       }
-      safeChunks.push(_dst);
-    }
-    for (var ci=0; ci<safeChunks.length; ci++) { var c = safeChunks[ci];
-      if (c.t === 'tool') { pending.push(c); }
-      else if (c.t === 'think') { html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderChunk(c, {open:streaming}); }
-      else if (c.t === 'ask' || c.t === 'ref') { if (c.t==='ref') refs.push(c); else html += ChatRender.renderChunk(c); }
-      else { var chunkText = reportFiles.length ? this._compactDeliveredReportText(c.c) : c.c; html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderContent(chunkText) + (streaming && ci===chunks.length-1 ? '<span class="stream-cursor"></span>' : ''); }
-    }
-    html += ChatRender.renderSteps(pending, streaming);
-    if (streaming && html==='') html = '<div class="shimmer-bar" style="width:60%"></div>';
-    if (reportFiles.length) html += this._inlineReportCard(reportFiles);
-    if (refs.length && !streaming) { html += '<div class="ref-section"><div class="ref-title">参考来源 ('+refs.length+')</div>'; for (var ri=0;ri<refs.length;ri++) html += ChatRender.renderChunk(refs[ri]); html += '</div>'; }
-    return html; } catch(e) { console.error('_renderMsg:',e); return ChatRender.renderContent(fullText); }
+    });
+    var reportFiles = streaming ? [] : this._reportFilesForMessage(msgObj, chunks, fullText);
+    var html = ChatRender.renderResearch(research), pending = [];
+    try {
+      if (!chunks.some(function(c) { return c && (c.t === 'text' || !c.t); })) html += ChatRender.renderContent(reportFiles.length ? this._compactDeliveredReportText(fullText) : fullText);
+      chunks.forEach(function(c, index) {
+        if (!c || c.t === 'ref' || c.t === 'research' || c.t === 'platform_call') return;
+        if (c.t === 'tool') { pending.push(c); return; }
+        html += ChatRender.renderSteps(pending); pending = [];
+        if (c.t === 'think' || c.t === 'ask') html += ChatRender.renderChunk(c, {open:streaming});
+        else if (c.t === 'status') html += '<div class="research-status-notice" role="status">'+esc(ChatRender.stringify(c.c))+'</div>';
+        else if (c.t === 'text' || !c.t) {
+          var text = reportFiles.length ? this._compactDeliveredReportText(ChatRender.stringify(c.c)) : c.c;
+          html += ChatRender.renderContent(text) + (streaming && index === chunks.length - 1 ? '<span class="stream-cursor"></span>' : '');
+        }
+      }, this);
+      html += ChatRender.renderSteps(pending, streaming);
+      if (streaming && !html) html = '<div class="shimmer-bar" style="width:60%"></div>';
+      if (reportFiles.length) html += this._inlineReportCard(reportFiles);
+      if (callOrder.length && this._renderPlatformCallHTML) {
+        html += '<section class="platform-call-section"><h4>平台能力与记录</h4>' + callOrder.map(function(id) { return this._renderPlatformCallHTML(calls[id]); }, this).join('') + '</section>';
+      }
+      if (refs.length && !streaming) {
+        html += '<section class="ref-section"><div class="ref-title">采集来源 ('+refs.length+')</div><p class="ref-boundary">工具采集成功不等于事实已核验；平台数据、历史研究与外部网页保留各自来源。</p>';
+        refs.forEach(function(ref) { html += ChatRender.renderChunk(ref); });
+        html += '</section>';
+      }
+      return html;
+    } catch(e) { console.error('_renderMsg:',e); return ChatRender.renderContent(fullText); }
   },
 
   _sanitizeRenderedArtifacts: function(container) {
@@ -347,7 +379,7 @@ Object.assign(App, {
           chunks = m._chunks;
           text = m.content || '';
         } else if (typeof text === 'string' && text.startsWith('{"text":')) {
-          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; m._chunks = chunks; m._reportFiles = p.report_files || m._reportFiles || []; m._reportStatus = p.report_status || m._reportStatus || ''; } catch(e) { chunks = []; }
+          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; m._chunks = chunks; m._reportFiles = p.report_files || m._reportFiles || []; m._reportStatus = p.report_status || m._reportStatus || ''; m.research = p.research || m.research; } catch(e) { chunks = []; }
         } else {
           chunks = [];
         }
@@ -359,7 +391,7 @@ Object.assign(App, {
           }
         }
         // Attach refs to the plain msg object so _renderMsg can see them
-        var bubble = self._renderMsg(chunks, text, false, m);
+        var bubble = self._renderMsg(chunks, text, idx === streamingLastIdx, m);
         bubble = self.renderQuoteTags(bubble);
         bubble = self._glossifyTerms(self._linkifyReports(bubble));
         var htmlOut = '<div class="msg assistant"><div class="msg-inner"><div class="msg-card">' +
@@ -418,13 +450,15 @@ Object.assign(App, {
         var c = chunks[ci];
         if (c.t === 'text') {
           var remaining = displayLen - charCount;
-          if (remaining <= 0) break;
-          var portion = c.c.substring(0, remaining);
+          var textValue = ChatRender.stringify(c.c);
+          var portion = remaining > 0 ? textValue.substring(0, remaining) : '';
+          // Keep a text placeholder so metadata-only rendering cannot expose
+          // the full response before the typewriter reaches it.
           displayChunks.push({t: 'text', c: portion});
           displayContent += portion;
-          charCount += portion.length;
-          if (charCount >= displayLen) break;
+          charCount += textValue.length;
         } else {
+          // Capability/status events must remain visible while prose streams.
           displayChunks.push(c);
         }
       }
@@ -872,6 +906,10 @@ Object.assign(App, {
   selectSkill: function(id) { var inp = document.getElementById('input'), val = inp.value, pos = inp.selectionStart, before = val.substring(0,pos), after = val.substring(pos); before = before.replace(/\/\S*$/, ''); inp.value = before.trim()?before.trim()+' '+after:after; this.setSkill(id); if (id !== 'cn') this._activeSkills.add(id); this.renderSkillsBar(); this.hideAC(); inp.focus(); },
 
   send: async function() {
+    if (this._sendStarting || (Streams[this.convId] && Streams[this.convId].active)) {
+      if (this._toast) this._toast('当前会话仍在生成，请等待完成或先停止');
+      return;
+    }
     if (this.selectAC()) return;
     var inp = document.getElementById('input'), q = inp.value.trim(); if (!q) return;
     var m = q.match(/^\/([a-zA-Z一-龥-]+)\s*(.*)/);
@@ -893,10 +931,14 @@ Object.assign(App, {
       if (sid !== 'cn' && !primary) primary = sid;
       else if (sid !== primary) extra.push(sid);
     });
-    var skillForReq = primary || this.skill || 'bottleneck-hunter';
+    var skillForReq = primary || this.skill || 'prism-research';
     var extraSkills = extra.length ? extra : null;
     var wasNew = !this.convId;
-    if (!this.convId) await this.newConv(true);
+    if (!this.convId) {
+      this._sendStarting = true;
+      try { if (!(await this.newConv(true))) return; }
+      finally { this._sendStarting = false; }
+    }
     this.msgs.push({role:'user',content:q}); this.msgs.push({role:'assistant',content:'',_chunks:[],_refs:[]});
     inp.value = ''; inp.style.height = 'auto'; this.renderAll();
     // Reset smart scroll for new message
@@ -915,19 +957,23 @@ Object.assign(App, {
     }
 
     var btn = document.getElementById('sendBtn');
-    btn.disabled = false; btn.classList.add('stop-mode'); btn.onclick = App.stopStream; btn.title = '停止生成';
+    btn.disabled = false; btn.classList.add('stop-mode'); btn.onclick = function() { App.stopStream(); }; btn.title = '停止生成';
     // Activate loading bar
     var loadingBar = document.getElementById('loadingBar');
     if (loadingBar) loadingBar.classList.add('active');
     var msgIdx = this.msgs.length-1, full = '', chunks = [];
     var sid = this.convId;
+    var requestMessages = this.msgs;
+    var requestModel = this.model;
+    var requestStream;
 
-    // Inner stream runner so SSE reconnect can re-invoke without code duplication (P5)
+    // Keep ownership attached to the original message array across navigation.
     var _runStream = async function(_full, _chunks) {
       full = _full; chunks = _chunks;
-      var stream = {msgs: self.msgs, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, active: true};
+      var stream = {msgs: requestMessages, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, active: true};
+      requestStream = stream;
       Streams[sid] = stream;
-      self.msgs[msgIdx]._displayLen = 0;
+      stream.msgs[msgIdx]._displayLen = 0;
       if (!_full) self._startTypewriter();
 
       try {
@@ -938,17 +984,19 @@ Object.assign(App, {
           'X-Requested-With': 'XMLHttpRequest',
           'X-CSRF-Token': self._getCookie('csrf_token'),
         },
-        body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: self.model, extra_skills: extraSkills})
+        body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: requestModel, extra_skills: extraSkills})
       });
       if (resp.status===401){window.location.href='/login'; delete Streams[sid]; self._streamDone(sid, btn); return;}
       if (!resp.ok){
         var errText = '服务异常 (' + resp.status + ')';
         try { var eb = await resp.json(); errText = eb.error || errText; } catch(e) {}
-        self.msgs[msgIdx].content = errText; self.renderAll(); delete Streams[sid]; self._streamDone(sid, btn); return;
+        stream.msgs[msgIdx].content = errText; if (App.convId === sid) self.renderAll(); delete Streams[sid]; self._streamDone(sid, btn); return;
       }
       var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
+      if (stream.cancelled) { await reader.cancel(); return; }
       var lastStreamEventAt = Date.now(), streamTimedOut = false, streamGuard = null;
-      self._activeReader = reader;
+      stream.reader = reader;
+      if (App.convId === sid) self._activeReader = reader;
       try {
       streamGuard = setInterval(function() {
         if (!Streams[sid]) return;
@@ -959,6 +1007,7 @@ Object.assign(App, {
       }, 15000);
       while (true) {
         var ck = await reader.read(); if (ck.done) break;
+        if (stream.cancelled) break;
         lastStreamEventAt = Date.now();
         buf += dec.decode(ck.value,{stream:true});
         var lines = buf.split('\n'); buf = lines.pop()||'';
@@ -973,6 +1022,7 @@ Object.assign(App, {
               stream.error = streamError;
             }
             if (p.pulse) { /* loading pulse */ }
+            if (p.status) chunks.push({t:'status', c:ChatRender.clean(p.status)});
             if (p.tool) {
               var toolName = ChatRender.clean(p.tool || '');
               if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
@@ -989,9 +1039,17 @@ Object.assign(App, {
             }
             if (p.ref) {
               // Reference citation from WebSearch/WebFetch tool results
-              chunks.push({t:'ref',url:p.ref.url,title:p.ref.title||p.ref.url,snippet:p.ref.snippet||''});
-              if (!self.msgs[msgIdx]._refs) self.msgs[msgIdx]._refs = [];
-              self.msgs[msgIdx]._refs.push(p.ref);
+              chunks.push(Object.assign({}, p.ref, {t:'ref'}));
+              stream.msgs[msgIdx]._refs = ChatRender.collectRefs(stream.msgs[msgIdx]._refs || [], [{t:'ref', ...p.ref}]);
+            }
+            if (p.research && typeof p.research === 'object') {
+              stream.msgs[msgIdx].research = p.research;
+              chunks.push({t:'research', research:p.research});
+            }
+            if (p.platform_call && p.platform_call.call_id) {
+              chunks.push({t:'platform_call', call:p.platform_call});
+              stream.msgs[msgIdx]._lastSig = null;
+              if (self._receivePlatformCall) self._receivePlatformCall(p.platform_call);
             }
             if (p.report_status) {
               stream.reportStatus = p.report_status;
@@ -1025,25 +1083,16 @@ Object.assign(App, {
       var errorMsg = '网络异常';
       if (e.name === 'AbortError') {
         errorMsg = '已停止生成';
-      } else if (e.name === 'TypeError' && e.message.indexOf('fetch') >= 0) {
-        // Transient network error — attempt SSE reconnect with backoff (P5)
-        var curStream = Streams[sid];
-        var retries = (curStream ? curStream._reconnectRetries : 0) || 0;
-        if (retries < 5) {
-          if (curStream) curStream._reconnectRetries = retries + 1;
-          var delay = Math.min(1000 * Math.pow(2, retries), 30000);
-          self.msgs[msgIdx].content = full + '\n\n⚠ 网络中断，' + (delay/1000).toFixed(0) + 's 后重连 (' + (retries+1) + '/5)…';
-          if (App.convId === sid) App.renderAll();
-          await new Promise(function(r) { setTimeout(r, delay); });
-          self._activeReader = null;
-          await _runStream(full, chunks);
-          return;
-        }
-        errorMsg = '⚠ 网络连接失败，多次重试无效，请检查网络后重试';
+      } else if (e.name === 'TypeError') {
+        // A POST may already be running on the server. Never resubmit a paid
+        // research job automatically after an ambiguous transport failure.
+        errorMsg = '网络连接失败或中断。请重新打开本会话核对已保存内容；本次不会自动重复提交研究。';
       } else if (e.message && e.message.indexOf('timeout') >= 0) {
         errorMsg = '⚠ 响应超时，请重试';
       }
-      self.msgs[msgIdx].content = errorMsg;
+      stream.msgs[msgIdx].content = full + (full ? '\n\n' : '') + errorMsg;
+      chunks.push({t:'text', c:(full ? '\n\n' : '') + errorMsg});
+      stream.msgs[msgIdx]._chunks = chunks;
       if (App.convId === sid) App.renderAll();
     }
   }; // end _runStream
@@ -1059,8 +1108,10 @@ Object.assign(App, {
     s.msgs[s.msgIdx]._displayLen = undefined;
     s.msgs[s.msgIdx]._lastSig = null;
   }
-  delete Streams[sid];
-  self._streamDone(sid, btn);
+  if (Streams[sid] === requestStream) {
+    delete Streams[sid];
+    self._streamDone(sid, btn);
+  }
     if (App.convId === sid) {
       App._buildTOC();
       App.loadConvs();
@@ -1074,10 +1125,12 @@ Object.assign(App, {
   },
 
   _streamDone: function(sid, btn) {
-    btn.disabled = false; btn.classList.remove('stop-mode'); btn.onclick = App.send; btn.title = '发送 (Enter)';
-    var loadingBar = document.getElementById('loadingBar');
-    if (loadingBar) loadingBar.classList.remove('active');
-    this._activeReader = null;
+    if (App.convId === sid) {
+      btn.disabled = false; btn.classList.remove('stop-mode'); btn.onclick = function() { App.send(); }; btn.title = '发送 (Enter)';
+      var loadingBar = document.getElementById('loadingBar');
+      if (loadingBar) loadingBar.classList.remove('active');
+      this._activeReader = null;
+    }
     this._stopTypewriter(sid);
     // Final full render for the completed message.
     // Access msg via App.msgs (Streams[sid] may have been deleted already).
@@ -1093,28 +1146,35 @@ Object.assign(App, {
 
   /* ═══ Stop Generation ═══ */
   stopStream: async function() {
-    if (this._activeReader) {
-      try { this._activeReader.cancel(); } catch(e) {}
-      this._activeReader = null;
-    }
     var sid = this.convId;
+    var activeStream = Streams[sid];
+    if (activeStream) activeStream.cancelled = true;
+    var reader = activeStream && activeStream.reader;
+    if (reader) { try { await reader.cancel(); } catch(e) {} }
+    if (this.convId === sid) this._activeReader = null;
     if (sid) {
-      await this.api('/api/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:sid})});
+      try {
+        var response = await this.api('/api/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:sid})});
+        if (!response.ok) throw new Error('Cancellation failed');
+      } catch(error) {
+        if (this._toast) this._toast('显示已停止，但未确认后台取消成功。请查看原会话状态');
+      }
     }
     // Clear _displayLen on the stopped stream so the final render shows the
     // full text we already have, not whatever the typewriter had reached.
-    if (sid && Streams[sid] && Streams[sid].msgs && Streams[sid].msgIdx != null) {
-      Streams[sid].msgs[Streams[sid].msgIdx]._displayLen = undefined;
+    if (activeStream && activeStream.msgs && activeStream.msgIdx != null) {
+      activeStream.msgs[activeStream.msgIdx]._displayLen = undefined;
     }
-    delete Streams[sid];
+    if (Streams[sid] === activeStream) delete Streams[sid];
     this._stopTypewriter(sid);
+    if (this.convId !== sid || Streams[sid]) return;
     // Re-render the message that was being generated.
     if (this.msgs.length) {
       var lastIdx = this.msgs.length - 1;
       if (this.msgs[lastIdx] && this.msgs[lastIdx].role === 'assistant') this.renderOne(lastIdx);
     }
     var btn = document.getElementById('sendBtn');
-    btn.disabled = false; btn.classList.remove('stop-mode'); btn.onclick = App.send; btn.title = '发送 (Enter)';
+    btn.disabled = false; btn.classList.remove('stop-mode'); btn.onclick = function() { App.send(); }; btn.title = '发送 (Enter)';
     var loadingBar = document.getElementById('loadingBar');
     if (loadingBar) loadingBar.classList.remove('active');
     this.loadConvs();

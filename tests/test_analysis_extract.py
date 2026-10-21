@@ -134,7 +134,8 @@ def test_extract_structured_ok(monkeypatch):
     }
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(json.dumps(payload)))
     out = ae._extract_structured({"final_decision": "x"}, "300750", "宁德时代")
-    assert out and out["signal"] == "买入" and out["confidence"] == 82
+    assert out and out["signal"] == "买入"
+    assert out["confidence"] is None
 
 
 def test_extract_structured_timeout_returns_none(monkeypatch):

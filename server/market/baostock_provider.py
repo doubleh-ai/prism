@@ -26,6 +26,7 @@ import os
 import time
 
 from ..config import BAOSTOCK_TIMEOUT
+from .clock import market_timestamp
 from .models import Fundamentals, KLine, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 
@@ -191,6 +192,10 @@ class BaostockProvider:
             open=_f(r.get("open")),
             prev_close=preclose,
             timestamp=ts or int(time.time()),
+            data_timestamp=ts or None,
+            retrieved_at=int(time.time()),
+            timestamp_kind="trade" if ts else "retrieved",
+            data_kind="daily_close",
             source=self.name,
         )
 
@@ -289,10 +294,5 @@ class BaostockProvider:
 
     @staticmethod
     def _date_to_ts(s) -> int:
-        """Convert 'YYYY-MM-DD' to unix seconds (UTC midnight → local naive)."""
-        if not s:
-            return 0
-        try:
-            return int(datetime.datetime.strptime(str(s), "%Y-%m-%d").timestamp())
-        except (TypeError, ValueError):
-            return 0
+        """Convert the source's Shanghai market date to Unix seconds."""
+        return market_timestamp(s) or 0

@@ -40,7 +40,8 @@ function _sanitizeConvPayload(data) {
 var _idb = (function() {
   if (!window.indexedDB) return null;
   var _db = null;
-  var DB_VERSION = 2; // v2 clears pre-v0.14.9 cached conversations with raw object placeholders.
+  var DB_VERSION = 3; // Clear legacy shared caches; all current keys include the signed-in account.
+  function cacheKey(id) { return String(App.user || '') + ':' + String(id); }
   function open() {
     return new Promise(function(resolve, reject) {
       if (_db) return resolve(_db);
@@ -59,7 +60,7 @@ var _idb = (function() {
       return open().then(function(db) {
         return new Promise(function(resolve) {
           var tx = db.transaction('convs', 'readonly');
-          var req = tx.objectStore('convs').get(id);
+          var req = tx.objectStore('convs').get(cacheKey(id));
           req.onsuccess = function() { resolve(req.result ? _sanitizeConvPayload(req.result.data) : null); };
           req.onerror = function() { resolve(null); };
         });
@@ -68,8 +69,17 @@ var _idb = (function() {
     putConv: function(id, data) {
       return open().then(function(db) {
         var tx = db.transaction('convs', 'readwrite');
-        tx.objectStore('convs').put({id: id, data: _sanitizeConvPayload(data), ts: Date.now()});
+        tx.objectStore('convs').put({id: cacheKey(id), data: _sanitizeConvPayload(data), ts: Date.now()});
       }).catch(function(){});
+    },
+    clear: function() {
+      return open().then(function(db) {
+        return new Promise(function(resolve, reject) {
+          var tx = db.transaction('convs', 'readwrite');
+          tx.objectStore('convs').clear();
+          tx.oncomplete = resolve; tx.onerror = reject;
+        });
+      });
     },
     listConvs: function() {
       return open().then(function(db) {
@@ -108,7 +118,7 @@ var App = {
     var saved = localStorage.getItem('cl-theme');
     if (saved === 'dark') document.documentElement.className = 'dark';
     else if (saved === 'light') document.documentElement.className = 'light';
-    else { var h = new Date().getHours(); document.documentElement.className = (h >= 7 && h < 19) ? 'light' : 'dark'; }
+    else document.documentElement.className = 'light';
     if (localStorage.getItem('cl-wide') === 'true') document.documentElement.classList.add('wide');
     this.loadSkills(); this.loadModels(); this.loadConvs(); this.showWelcome();
     this.renderSkillsBar();
@@ -120,6 +130,7 @@ var App = {
     this._bindMarketPanel();
     this._bindAnalysisSearch();
     this._trackUiEvent('chat', 'open');
+    if (this._initWorkbench) this._initWorkbench();
     // Register Service Worker for offline cache (P5). Bypass HTTP cache for
     // the SW script itself so deployments can replace stale app shells.
     if ('serviceWorker' in navigator) {
@@ -227,7 +238,7 @@ var App = {
   },
 
   _isCompactViewport: function() {
-    return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches);
+    return !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
   },
 
   toggleSidebar: function(force) {
@@ -353,44 +364,66 @@ var App = {
   },
 
   newConv: async function(skipWelcome) {
-    var skillForNew = this.skill || 'bottleneck-hunter';
+    var requestId = this._convRequestId = (this._convRequestId || 0) + 1;
+    var skillForNew = this.skill || 'prism-research';
     var r = await this.api('/api/convs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({skill: skillForNew})});
-    if (!r.ok) return; var c = await r.json();
+    if (!r.ok) return false; var c = await r.json();
+    if (requestId !== this._convRequestId) return false;
     this.convId = c.id; this.msgs = [];
+    if (this._syncChatStreamControls) this._syncChatStreamControls();
+    if (this.switchMode) this.switchMode('chat');
     if (!skipWelcome) this.showWelcome();
     await this.loadConvs();
     this._refreshReportsButton();
     this._closeMobileSidebar();
+    return requestId === this._convRequestId;
   },
 
   openConv: async function(id) {
+    var requestId = this._convRequestId = (this._convRequestId || 0) + 1;
     var prevId = this.convId, prevMsgs = this.msgs, prevSkill = this.skill;
     this.convId = id;
+    if (this._syncChatStreamControls) this._syncChatStreamControls();
     var s = Streams[id];
     if (s && s.active) {
-      this.msgs = s.msgs; this.skill = s.skill || 'bottleneck-hunter';
+      this.msgs = s.msgs; this.skill = s.skill || 'prism-research';
       this.renderAll(); this.loadConvs();
       this._reattachStream();
       this._refreshReportsButton();
       this._closeMobileSidebar();
+      if (this._loadConversationCalls) this._loadConversationCalls(id);
       return;
     }
     // Try IndexedDB cache first for instant render (P5)
     var cached = _idb ? await _idb.getConv(id) : null;
+    if (requestId !== this._convRequestId || this.convId !== id) return;
     if (cached) {
       this.msgs = cached.messages || [];
-      this.skill = cached.skill || 'bottleneck-hunter';
+      this.skill = cached.skill || 'prism-research';
       this.renderAll();
     }
-    var r = await this.api('/api/convs/'+id);
+    var r;
+    try { r = await this.api('/api/convs/'+encodeURIComponent(id)); }
+    catch (error) {
+      if (requestId !== this._convRequestId || this.convId !== id) return;
+      this.convId = prevId; this.msgs = prevMsgs; this.skill = prevSkill;
+      if (this._syncChatStreamControls) this._syncChatStreamControls();
+      this.renderAll();
+      if (this._toast) this._toast('会话加载失败，请检查连接后重试');
+      return;
+    }
+    if (requestId !== this._convRequestId || this.convId !== id) return;
     if (!r.ok) {
-      if (!cached) {
-        this.convId = prevId; this.msgs = prevMsgs; this.skill = prevSkill;
-      }
+      this.convId = prevId; this.msgs = prevMsgs; this.skill = prevSkill;
+      if (this._syncChatStreamControls) this._syncChatStreamControls();
+      this.renderAll();
+      if (this._toast) this._toast('该会话不可用，已返回上一会话');
       console.error('openConv failed: ' + r.status + ' for ' + id);
       return;
     }
-    var c = await r.json(); this.msgs = c.messages; this.skill = c.skill || 'bottleneck-hunter';
+    var c = await r.json();
+    if (requestId !== this._convRequestId || this.convId !== id) return;
+    this.msgs = c.messages; this.skill = c.skill || 'prism-research';
     // Cache in IndexedDB for next time
     if (_idb) _idb.putConv(id, c).catch(function(){});
     if (cached) this.renderAll(); // re-render with fresh data
@@ -398,6 +431,7 @@ var App = {
     this.loadConvs();
     this._refreshReportsButton();
     this._closeMobileSidebar();
+    if (this._loadConversationCalls) this._loadConversationCalls(id);
   },
 
   /* Show/hide the reports button in the input zone based on what reports
@@ -453,7 +487,19 @@ var App = {
   setSkill: function(s) { this.skill = s; },
 
   /* ═══ Smart Scroll ═══ */
-  logout: function() { document.cookie = 'token=;path=/;max-age=0'; window.location.href = '/login'; },
+  logout: async function() {
+    try {
+      var response = await this.api('/api/logout', {method:'POST'});
+      if (!response.ok) throw new Error('Logout failed');
+      this._convRequestId = (this._convRequestId || 0) + 1;
+      if (_idb && _idb.clear) { try { await _idb.clear(); } catch(e) {} }
+      this.msgs = []; this.convId = ''; this.user = '';
+      try { sessionStorage.removeItem('prism_analysis'); } catch(e) {}
+      window.location.href = '/login';
+    } catch (error) {
+      if (this._toast) this._toast('退出未完成，请检查网络后重试');
+    }
+  },
 
   /* ═══ Preferences (used by the guided tour) ═══ */
   _prefs: null,

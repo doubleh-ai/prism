@@ -90,6 +90,7 @@ for _root in [*_ENV_SKILL_FALLBACK_ROOTS, *_DEFAULT_SKILL_FALLBACK_ROOTS]:
 
 # ── Skill 映射（Claude Code 加载时用目录名查找） ──
 SKILL_MAP = {
+    "prism-research": {"dir": "prism-research", "name": "Prism研究"},
     "bottleneck-hunter": {"dir": "serenity-bottleneck-hunter", "name": "瓶颈猎手"},
     "serenity": {"dir": "serenity-skill", "name": "Serenity 卡点分析"},
     "cn": {"dir": "force-chinese", "name": "强制中文输出"},
@@ -207,3 +208,7 @@ VIBE_ENGINE_URL = os.environ.get("PRISM_VIBE_ENGINE_URL", "http://127.0.0.1:8899
 VIBE_ENGINE_TIMEOUT_SECONDS = int(os.environ.get("PRISM_VIBE_ENGINE_TIMEOUT", "1200"))
 VIBE_ENGINE_REVISION = os.environ.get("PRISM_VIBE_ENGINE_REVISION", "d456025")
 VIBE_ENGINE_VERSION = os.environ.get("PRISM_VIBE_ENGINE_VERSION", "0.1.11")
+
+# The stdio bridge may only call this same Prism server over numeric loopback.
+CAPABILITY_INTERNAL_URL = os.environ.get("PRISM_INTERNAL_API_URL", "http://127.0.0.1:8088").rstrip("/")
+CAPABILITY_TOKEN_TTL = max(60, min(3600, int(os.environ.get("PRISM_CAPABILITY_TOKEN_TTL", "1800"))))

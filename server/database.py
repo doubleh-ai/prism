@@ -378,6 +378,50 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_vibe_plans_user_created
                 ON vibe_plans(username, created_at DESC);
+            CREATE TABLE IF NOT EXISTS capability_runs (
+                run_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                conv_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at INTEGER NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS capability_calls (
+                call_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                conv_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                arguments_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_summary TEXT NOT NULL DEFAULT '',
+                result_summary TEXT NOT NULL DEFAULT '',
+                target_json TEXT NOT NULL DEFAULT '{}',
+                response_json TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                UNIQUE(run_id, request_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_capability_calls_user_conv
+                ON capability_calls(username,conv_id,created_at);
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                mode TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                report_json TEXT,
+                signal TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                started_at REAL NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_analysis_runs_user_started
+                ON analysis_runs(username,started_at DESC);
         """)
         for _col, _spec in {
             "params_json": "TEXT NOT NULL DEFAULT '{}'",

@@ -9,7 +9,6 @@ import logging
 import re
 import secrets
 import time
-from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -22,6 +21,7 @@ from .config import (
 )
 from .database import get_db
 from .models import VibeFollowUpRequest, VibePlanRequest, validation_error_message
+from .research_context import build_research_context, build_research_prompt, source_timestamp
 from .vibe_engine import (
     VibeEngineError,
     engine_cancel,
@@ -150,6 +150,7 @@ def build_vibe_plan(req: VibePlanRequest) -> dict[str, Any]:
         "id": "",
         "title": title,
         "prompt": prompt,
+        "research": build_research_context(engine="vibe"),
         "market": req.market,
         "horizon": req.horizon,
         "risk_level": req.risk_level,
@@ -207,17 +208,17 @@ def _research_prompt(plan: dict[str, Any]) -> str:
     depth = plan.get("research_depth") or "deep"
     if depth == "focused":
         depth_spec = (
-            "这是聚焦研究：优先回答最关键的一个范围，实际调用 4-6 次高价值数据/检索工具，"
+            "这是聚焦研究：优先回答最关键的一个范围，按关键事实选择真实数据/检索工具，"
             "给出 3-5 个候选，并明确哪些问题尚未验证。达到证据门槛后立即输出报告。"
         )
     elif depth == "swarm":
         depth_spec = (
             "这是多 Agent 研究：使用 swarm 工具组织产业链、数据核验和反方审查角色，"
-            "总工具调用控制在 12-20 次，合并冲突证据后给出 8-12 个候选。"
+            "围绕核心事实分工核验，合并冲突证据后给出有依据的候选；不得为了数量编造候选。"
         )
     else:
         depth_spec = (
-            "这是深度研究：实际调用 8-14 次市场数据、财务、新闻或网页检索工具，"
+            "这是深度研究：按研究问题调用市场数据、财务、新闻或网页检索工具，"
             "交叉核验关键结论，并给出 6-10 个候选。不要重复调用同一失败来源；"
             "达到证据门槛后立即收敛并输出报告。"
         )
@@ -237,7 +238,7 @@ def _research_prompt(plan: dict[str, Any]) -> str:
 市场：{plan.get("market", "A股")}
 研究周期：{_horizon_label(str(plan.get("horizon", "swing")))}
 风险观察偏好：{plan.get("risk_label", "均衡")}
-当前日期：{date.today().isoformat()}
+{build_research_prompt(plan.get("research") or build_research_context(engine="vibe"))}
 
 {depth_spec}
 
@@ -255,7 +256,7 @@ def _research_prompt(plan: dict[str, Any]) -> str:
 - 核心结论摘要
 - 需求驱动与产业链分层
 - 真正的约束、卡点及价值迁移
-- 证据账本（事实/来源链接/日期/置信度/是否交叉验证）
+- 证据账本（事实或推断/来源链接/发布时间或未知/数据所属期间/是否交叉验证）
 - 候选池（代码、名称、角色、纯度、证据、催化、风险）
 - 多方与反方论证
 - 正向验证、负向验证与失效条件
@@ -267,7 +268,9 @@ def _research_prompt(plan: dict[str, Any]) -> str:
 
 
 def _followup_prompt(plan: dict[str, Any], question: str) -> str:
-    return f"""这是对同一研究会话的追问，请沿用此前上下文，但只回答新增问题：
+    return f"""{build_research_prompt(plan.get("research") or build_research_context(engine="vibe"))}
+
+这是对同一研究会话的追问，请沿用此前上下文，但只回答新增问题：
 
 {question}
 
@@ -287,7 +290,13 @@ def _row_to_plan(row: Any) -> dict[str, Any]:
     plan.setdefault("engine", _engine_meta())
     plan.setdefault("activity", [])
     plan.setdefault("followups", [])
-    plan.setdefault("quality", {})
+    if not isinstance(plan.get("quality"), dict):
+        plan["quality"] = {}
+    # Old persisted heuristic grades are not evidence of source verification either.
+    if plan["quality"].get("grade") in {"证据较充分", "有工具验证"}:
+        plan["quality"].update(
+            grade="来源待核验", grade_basis="legacy_heuristic_not_verification", verified_sources=0
+        )
     return plan
 
 
@@ -410,8 +419,41 @@ def _append_activity(plan: dict[str, Any], item: dict[str, Any]) -> None:
     plan["activity"] = activity[-80:]
 
 
+def _begin_attempt(plan: dict[str, Any], attempt_id: str) -> None:
+    """Telemetry is scoped to an attempt; reconnecting the same attempt preserves it."""
+    if (plan.get("quality") or {}).get("attempt_id") == attempt_id:
+        return
+    plan["quality"] = {
+        "attempt_id": attempt_id,
+        "tool_calls": 0,
+        "tool_success": 0,
+        "tool_errors": 0,
+        "tool_degraded": 0,
+        "tool_unmatched": 0,
+        "source_links": 0,
+        "verified_sources": 0,
+        "grade": "来源待核验",
+        "warnings": [],
+    }
+    plan["attempt_event_ids"] = []
+    plan["last_engine_event_id"] = ""
+
+
 def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, Any], event_id: str) -> None:
+    attempt_id = str(plan.get("engine_attempt_id") or "")
+    event_attempt = str(data.get("attempt_id") or data.get("linked_attempt_id") or "")
+    if event_attempt and attempt_id and event_attempt != attempt_id:
+        return
     quality = dict(plan.get("quality") or {})
+    seen = list(plan.get("attempt_event_ids") or [])
+    call_id = str(data.get("tool_call_id") or data.get("call_id") or "")
+    event_key = (
+        f"{event_type}:{call_id}" if call_id and event_type in {"tool_call", "tool_result"} else event_id
+    )
+    if event_key and event_key in seen:
+        return
+    if event_key:
+        plan["attempt_event_ids"] = [*seen, event_key]
     quality.setdefault("tool_calls", 0)
     quality.setdefault("tool_success", 0)
     quality.setdefault("tool_errors", 0)
@@ -438,37 +480,56 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
                 "status": "running",
                 "summary": _argument_summary(data.get("arguments")),
                 "event_id": event_id,
+                "attempt_id": attempt_id,
+                "tool_call_id": call_id or None,
             },
         )
     elif event_type == "tool_result":
         preview = _structured_text(data.get("preview"))
         failed_payload = bool(
-            data.get("status") == "error"
+            data.get("status") in {"error", "failed"}
             or re.search(r'(?i)"(?:ok|success)"\s*:\s*false|"status"\s*:\s*"error"', preview)
         )
         degraded_payload = bool(
             not failed_payload
-            and re.search(r'(?i)no results found|"error"\s*:|not available|unavailable|timed out', preview)
+            and (
+                not preview.strip()
+                or re.search(
+                    r'(?i)no results found|"error"\s*:|not available|unavailable|timed out|无(?:可用)?(?:结果|数据)|未(?:找到|获取)|不可达|超时',
+                    preview,
+                )
+            )
         )
         status = "error" if failed_payload else ("warning" if degraded_payload else "complete")
         result_summary = _tool_result_summary(tool, preview, status)
         result_detail = _clean_text(preview, 800)
-        if status == "error":
-            quality["tool_errors"] += 1
-        elif status == "warning":
-            quality["tool_degraded"] += 1
-        else:
-            quality["tool_success"] += 1
         activity = list(plan.get("activity") or [])
-        matched = False
-        for item in reversed(activity):
-            if item.get("kind") == "tool" and item.get("tool") == tool and item.get("status") == "running":
-                item["status"] = status
-                item["elapsed_ms"] = int(data.get("elapsed_ms") or 0)
-                item["result"] = result_summary
-                item["detail"] = result_detail
-                matched = True
-                break
+        running = [
+            item
+            for item in activity
+            if item.get("kind") == "tool"
+            and item.get("tool") == tool
+            and item.get("status") == "running"
+            and item.get("attempt_id", "") == attempt_id
+            and (not call_id or item.get("tool_call_id") == call_id)
+        ]
+        # Tool names alone cannot distinguish simultaneous calls to the same provider.
+        matched = len(running) == 1
+        if matched:
+            item = running[0]
+            item.update(
+                status=status,
+                elapsed_ms=int(data.get("elapsed_ms") or 0),
+                result=result_summary,
+                detail=result_detail,
+                retrieved_at=source_timestamp(data.get("timestamp")),
+                observed_at=build_research_context()["as_of"],
+                published_at=None,
+            )
+            key = {"error": "tool_errors", "warning": "tool_degraded", "complete": "tool_success"}[status]
+            quality[key] += 1
+        else:
+            quality["tool_unmatched"] = int(quality.get("tool_unmatched") or 0) + 1
         if not matched:
             _append_activity(
                 plan,
@@ -481,6 +542,12 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
                     "detail": result_detail,
                     "elapsed_ms": int(data.get("elapsed_ms") or 0),
                     "event_id": event_id,
+                    "attempt_id": attempt_id,
+                    "tool_call_id": call_id or None,
+                    "association": "unmatched",
+                    "retrieved_at": source_timestamp(data.get("timestamp")),
+                    "observed_at": build_research_context()["as_of"],
+                    "published_at": None,
                 },
             )
         else:
@@ -490,7 +557,7 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
         if message:
             plan["stage_label"] = message
     elif event_type == "thinking_done":
-        plan.update(stage="synthesizing", stage_label="证据收集完成，正在撰写报告", progress=88)
+        plan.update(stage="synthesizing", stage_label="正在整理采集记录并撰写报告", progress=88)
     elif event_type == "attempt.completed":
         plan.update(stage="finalizing", stage_label="正在整理完整报告", progress=96)
     elif event_type in {"attempt.failed", "attempt.cancelled"}:
@@ -658,25 +725,24 @@ def _quality_after_report(plan: dict[str, Any], report: str) -> dict[str, Any]:
                 gap_lines.append(cleaned)
     reported_gaps = min(99, len(dict.fromkeys(gap_lines)))
     quality["reported_gaps"] = reported_gaps
-    if calls < 4:
-        warnings.append("有效工具调用偏少，结论需要补充验证。")
-    if links < 2:
-        warnings.append("正文中的可点击来源链接不足，请把关键数字视为待复核。")
+    warnings.append("报告中的链接与工具次数不代表事实已经核验；关键结论仍需对照原始披露和数据期间复核。")
+    if not links:
+        warnings.append("正文未提供可追溯链接，来源待补充。")
+    if quality.get("tool_unmatched"):
+        warnings.append("部分工具返回无法关联到本轮具体调用，未计为成功采集。")
     if errors:
         warnings.append(f"有 {errors} 次工具调用失败，报告已要求保留数据缺口。")
     if degraded:
         warnings.append(f"有 {degraded} 次工具返回空结果或降级数据，不计为有效成功。")
     if reported_gaps:
         warnings.append(f"报告披露 {reported_gaps} 项数据源或验证缺口，请结合对应章节复核。")
-    if len(report) < 1800:
-        warnings.append("报告篇幅偏短，可能未覆盖完整研究协议。")
-    if calls >= 8 and success >= 6 and links >= 3 and errors <= max(1, calls // 4):
-        grade = "证据较充分"
-    elif calls >= 4 and success >= 3:
-        grade = "有工具验证"
-    else:
-        grade = "需要复核"
-    quality.update(grade=grade, warnings=warnings)
+    quality.update(
+        grade="来源待核验",
+        grade_basis="unverified_report_links",
+        reported_links=links,
+        verified_sources=0,
+        warnings=warnings,
+    )
     return quality
 
 
@@ -707,11 +773,15 @@ def _finish_with_report(plan: dict[str, Any], report: str, attempt_id: str) -> N
                     status="complete",
                     completed_at=_now(),
                     attempt_id=attempt_id,
+                    research=plan.get("research"),
+                    quality=_quality_after_report(plan, report),
                 )
                 break
         plan["followups"] = followups
     else:
         plan["report_markdown"] = report
+        plan["report_research"] = plan.get("research")
+        plan["report_quality"] = _quality_after_report(plan, report)
         report_title = _extract_report_title(report)
         if report_title:
             plan["title"] = report_title
@@ -786,6 +856,9 @@ async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt
         plan = _load_vibe_plan(plan_id, username)
         if not plan or plan.get("status") not in _ACTIVE_STATUSES:
             return
+        event_attempt = str(data.get("attempt_id") or data.get("linked_attempt_id") or "")
+        if event_attempt and event_attempt != attempt_id:
+            continue
         _apply_engine_event(plan, event_type, data, event_id)
         _update_vibe_plan(username, plan_id, plan)
         if event_type in {"attempt.completed", "attempt.failed", "attempt.cancelled"}:
@@ -826,6 +899,8 @@ async def _run_official_research(plan_id: str, username: str, resume: bool = Fal
                 _mark_failed(plan, "研究任务在 Prism 重启后已超过恢复时限")
                 _update_vibe_plan(username, plan_id, plan)
                 return
+            _begin_attempt(plan, attempt_id)
+            _update_vibe_plan(username, plan_id, plan)
             await _monitor_attempt(plan_id, username, session_id, attempt_id)
             return
 
@@ -855,6 +930,8 @@ async def _run_official_research(plan_id: str, username: str, resume: bool = Fal
             plan["engine_session_id"] = session_id
             _update_vibe_plan(username, plan_id, plan)
 
+        plan.setdefault("research", build_research_context(engine="vibe"))
+        _update_vibe_plan(username, plan_id, plan)
         turn_id = str(plan.get("current_turn_id") or "")
         if turn_id:
             followup = next((item for item in plan.get("followups") or [] if item.get("id") == turn_id), None)
@@ -868,6 +945,7 @@ async def _run_official_research(plan_id: str, username: str, resume: bool = Fal
         if not attempt_id:
             raise VibeEngineError("engine did not return an attempt id")
         plan = _load_vibe_plan(plan_id, username) or plan
+        _begin_attempt(plan, attempt_id)
         plan.update(
             status="running",
             engine_status="running",
@@ -997,19 +1075,26 @@ async def follow_up_vibe_plan(plan_id: str, request: Request):
         raise HTTPException(409, "research is already running")
     if not plan.get("engine_session_id") or not plan.get("report_markdown"):
         raise HTTPException(409, "complete the first official research report before following up")
+    plan.setdefault("report_research", plan.get("research"))
+    plan.setdefault("report_quality", dict(plan.get("quality") or {}))
     turn_id = secrets.token_hex(8)
+    research = build_research_context(engine="vibe")
+    _begin_attempt(plan, "")
     followups = list(plan.get("followups") or [])
     followups.append(
         {
             "id": turn_id,
             "question": _clean_text(req.question, 3000),
             "answer_markdown": "",
+            "research": research,
             "status": "queued",
             "created_at": _now(),
         }
     )
     plan.update(
         followups=followups,
+        research=research,
+        engine_attempt_id="",
         current_turn_id=turn_id,
         status="queued",
         engine_status="queued",

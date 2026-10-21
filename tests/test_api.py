@@ -224,7 +224,8 @@ class TestRecycleBin:
         c1 = await client.post("/api/convs", cookies=auth_cookies, json={"skill": "bottleneck-hunter"})
         cid = c1.json()["id"]
 
-        # Permanent delete
+        # Permanent deletion is only available for owned conversations in the trash.
+        await client.delete(f"/api/convs/{cid}", cookies=auth_cookies)
         r = await client.delete(f"/api/convs/{cid}/permanent", cookies=auth_cookies)
         assert r.status_code == 200
 
@@ -260,8 +261,11 @@ class TestChatControl:
         assert r.status_code == 422
 
     async def test_chat_cancel_no_process(self, client, auth_cookies):
-        """Cancel returns ok even when no process running."""
-        r = await client.post("/api/chat/cancel", cookies=auth_cookies, json={"conv_id": "nonexistent"})
+        """An owned active conversation can be cancelled when no process is running."""
+        created = await client.post("/api/convs", cookies=auth_cookies, json={})
+        r = await client.post(
+            "/api/chat/cancel", cookies=auth_cookies, json={"conv_id": created.json()["id"]}
+        )
         assert r.status_code == 200
         assert r.json() == {"ok": False}
 
