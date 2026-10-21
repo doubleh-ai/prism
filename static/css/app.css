@@ -1971,7 +1971,8 @@ html.dark .quote-chip--down .quote-chip__pct,html.dark .market-qv-chg--down,html
   .qa-chip{text-align:left}
   .composer-bar>select{max-width:none;order:3;flex-basis:100%}
   #reportsBtn{order:2}
-  .market-qc-grid,.market-fund-grid{grid-template-columns:1fr}
+  .market-qc-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .market-fund-grid{grid-template-columns:1fr}
   .ap-progress-hd{gap:8px}
   .ap-progress-pct{min-width:38px}
   .vibe-followup-compose{grid-template-columns:1fr}

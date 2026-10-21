@@ -110,6 +110,16 @@ def sandbox_policy(boot: Path, image: Path, port: int, operator_home: Path) -> s
     def quoted(path):
         return json.dumps(str(path))
 
+    def outside_reads(tree):
+        # SQLite resolves each ancestor before opening its private database.
+        # Allow only metadata on that exact chain, never external file data.
+        scope = f"(subpath {quoted(tree)}) (require-not (subpath {quoted(boot)}))"
+        ancestors = " ".join(f"(require-not (literal {quoted(parent)}))" for parent in boot.parents)
+        return (
+            f"(deny file-read-data (require-all {scope}))\n"
+            f"(deny file-read-metadata (require-all {scope} {ancestors}))\n"
+        )
+
     protected = [
         operator_home / ".ssh",
         operator_home / ".aws",
@@ -126,8 +136,8 @@ def sandbox_policy(boot: Path, image: Path, port: int, operator_home: Path) -> s
         f'(allow network-inbound (local ip "localhost:{port}"))\n'
         f'(deny file-write* (require-all (require-not (subpath {quoted(boot)})) (require-not (literal "/dev/null"))))\n'
         f"(deny file-read* {reads} (literal {quoted(operator_home / '.claude.json')}))\n"
-        f"(deny file-read* (require-all (subpath {quoted(operator_home / 'Backups')}) (require-not (subpath {quoted(boot)}))))\n"
-        f"(deny file-read* (require-all (subpath {quoted(image)}) (require-not (subpath {quoted(boot)}))))\n"
+        + outside_reads(operator_home / "Backups")
+        + outside_reads(image)
     )
 
 
@@ -205,7 +215,14 @@ def _request(
             result = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             result = {}
-        return response.status, result, dict(response.getheaders())
+        response_headers = response.getheaders()
+        headers = {key: value for key, value in response_headers if key.lower() != "set-cookie"}
+        # Login sets both the session and CSRF cookies. A dict of header pairs
+        # silently discarded the earlier session cookie in the actual backup.
+        cookies = [value for key, value in response_headers if key.lower() == "set-cookie"]
+        if cookies:
+            headers["set-cookie"] = "\n".join(cookies)
+        return response.status, result, headers
     finally:
         connection.close()
 
@@ -225,11 +242,37 @@ def _expected_version(app: Path) -> str | None:
     return None
 
 
+def profile_matches_owner(status: int, profile: dict, expected: str) -> bool:
+    # The existing /api/me contract uses "user", not "username".
+    return status == 200 and isinstance(profile, dict) and profile.get("user") == expected
+
+
+def startup_diagnostic(status: int, response, nonce: str, pid: int) -> dict:
+    """Keep only fixed booleans/status; never retain an HTTP body or its text."""
+    body = response if isinstance(response, dict) else {}
+    raw_checks = body.get("checks") if isinstance(body.get("checks"), dict) else {}
+    return {
+        "http_status": status,
+        "nonce_matches": body.get("nonce") == nonce,
+        "pid_matches": body.get("pid") == pid,
+        "isolation_checks": {
+            key: raw_checks.get(key) is True
+            for key in ("outbound_denied", "credential_reads_denied", "outside_writes_denied")
+        },
+    }
+
+
 def verify_boot(
     archive_path: Path, recovery: Path, image: Path, manifest: dict, expected_archive_sha256: str
 ) -> dict:
     """Return honest boolean evidence; failures retain private logs and backup."""
-    result = {"requested": True, "ok": False, "live_models_tested": False, "production_untouched": True}
+    result = {
+        "requested": True,
+        "ok": False,
+        "live_models_tested": False,
+        "production_untouched": True,
+        "stage": "validate_source",
+    }
     process = None
     boot = image / "boot-verification"
     original_hashes = {}
@@ -265,6 +308,7 @@ def verify_boot(
         write_probe.write_text("unchanged")
         policy = boot / "sandbox.sb"
         policy.write_text(sandbox_policy(boot, image, port, Path.home()))
+        result["stage"] = "isolated_startup"
         with (boot / "logs/process.log").open("wb") as log:
             process = subprocess.Popen(
                 ["/usr/bin/sandbox-exec", "-f", str(policy), str(VENV / "bin/python"), "-c", BOOTSTRAP],
@@ -282,6 +326,9 @@ def verify_boot(
             while time.monotonic() < deadline and process.poll() is None:
                 try:
                     status, response, _ = _request(port, "GET", "/__restore_probe/" + configuration["nonce"])
+                    result["startup_probe"] = startup_diagnostic(
+                        status, response, configuration["nonce"], process.pid
+                    )
                     if (
                         status == 200
                         and response.get("nonce") == configuration["nonce"]
@@ -299,7 +346,10 @@ def verify_boot(
             if not connected:
                 raise RuntimeError("Restored application did not pass its isolation and identity probes")
             checks = {"isolated_startup": True}
+            result["checks"] = checks
+            result["stage"] = "anonymous_authentication"
             checks["protected_api_denies_anonymous"] = _request(port, "GET", "/api/me")[0] == 401
+            result["stage"] = "synthetic_login"
             status, _, headers = _request(
                 port,
                 "POST",
@@ -308,17 +358,26 @@ def verify_boot(
             )
             cookies = SimpleCookie()
             cookies.load(headers.get("set-cookie", headers.get("Set-Cookie", "")))
+            result["login_http_status"] = status
+            result["login_cookie_present"] = "token" in cookies
             if status != 200 or "token" not in cookies:
                 raise RuntimeError("Restored login failed")
             cookie = "token=" + cookies["token"].value
+            result["stage"] = "synthetic_owner_profile"
             status, profile, _ = _request(port, "GET", "/api/me", cookie=cookie)
-            checks["login_and_owner_profile"] = (
-                status == 200 and profile.get("username") == configuration["username"]
+            checks["login_and_owner_profile"] = profile_matches_owner(
+                status, profile, configuration["username"]
             )
+            result["stage"] = "empty_conversation_create"
             status, created, _ = _request(port, "POST", "/api/convs", {}, cookie)
             conv_id = created.get("id") if isinstance(created, dict) else None
+            result["conversation_create_http_status"] = status
+            result["conversation_create_id_valid"] = (
+                isinstance(conv_id, str) and conv_id.replace("-", "").isalnum()
+            )
             if status != 200 or not isinstance(conv_id, str) or not conv_id.replace("-", "").isalnum():
                 raise RuntimeError("Restored empty conversation creation failed")
+            result["stage"] = "empty_conversation_crud"
             status, conversation, _ = _request(port, "GET", "/api/convs/" + conv_id, cookie=cookie)
             checks["empty_conversation_read"] = (
                 status == 200 and isinstance(conversation, dict) and not conversation.get("messages")
@@ -336,6 +395,7 @@ def verify_boot(
                 status, release, _ = _request(port, "GET", "/api/releases", cookie=cookie)
                 checks["served_source_version"] = status == 200 and release.get("version") == expected_version
             result.update(checks=checks, ok=all(checks.values()))
+            result["stage"] = "completed_http_checks"
         result["outside_probe_unchanged"] = write_probe.read_text() == "unchanged"
         if not result["outside_probe_unchanged"]:
             result["ok"] = False

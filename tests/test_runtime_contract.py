@@ -271,7 +271,7 @@ async def test_scan_tool_uses_account_watchlist_and_all_real_conditions(owners, 
         assert output["config"][field] == getattr(args, field)
 
 
-async def test_vibe_page_and_agent_resume_same_attempt_never_resend(owners, monkeypatch):
+async def test_vibe_page_and_agent_read_only_history_without_resuming_or_rewriting(owners, monkeypatch):
     from server import vibe
     from server.models import VibePlanRequest
 
@@ -284,12 +284,12 @@ async def test_vibe_page_and_agent_resume_same_attempt_never_resend(owners, monk
     vibe._insert_vibe_plan(owners["user"], plan)
     vibe.get_owned_plan(owners["user"], plan["id"])
     result, _, _ = await cap._execute("vibe_status", cap.IdArgs(id=plan["id"]), {"username": owners["user"]})
-    assert result["plan"]["id"] == plan["id"] and len(starts) == 2
-    assert all(kwargs == {"resume": True} for _, kwargs in starts)
+    assert result["plan"]["id"] == plan["id"] and starts == []
+    assert result["plan"]["status"] == "running"
     plan.update(id="uncertain-vibe", engine_attempt_id="")
     vibe._insert_vibe_plan(owners["user"], plan)
-    assert vibe.get_owned_plan(owners["user"], plan["id"])["status"] == "interrupted"
-    assert len(starts) == 2
+    assert vibe.get_owned_plan(owners["user"], plan["id"])["status"] == "running"
+    assert starts == []
 
 
 async def test_vibe_cancel_requires_confirmation_and_does_not_overwrite_completion(owners, monkeypatch):
@@ -312,7 +312,7 @@ async def test_vibe_cancel_requires_confirmation_and_does_not_overwrite_completi
         vibe._update_vibe_plan(owners["user"], plan["id"], current)
         with pytest.raises(HTTPException) as blocked:
             vibe.start_owned_followup(owners["user"], plan["id"], "New follow up")
-        assert blocked.value.status_code == 409
+        assert blocked.value.status_code == 503
         await asyncio.sleep(0)
         return {"status": "cancelled"}
 

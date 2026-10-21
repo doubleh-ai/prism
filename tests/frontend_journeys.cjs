@@ -55,8 +55,9 @@ async function vibeSelectionAndAction() {
   assert.equal(app._activeVibePlanId,'B');assert.equal(app._activeVibePlan.id,'B');const cancel=app._cancelVibePlan();assert(queue[2].url.includes('/B/cancel'));queue[2].resolve(response({plan:{id:'B',status:'cancelled'}}));await cancel;
 }
 async function stoppedVibeRequestCannotReturn() {
-  const {app}=env(),queue=delayed(app);app._activeVibePlanId='A';app._pollVibePlan('A');app._stopVibePolling('A');queue[0].resolve(response({plan:{id:'A',status:'running'}}));await tick();assert.equal(app._vibePlans.length,0);assert.equal(app._activeVibePlan,null);
+  const {app}=env(),queue=delayed(app);app._activeVibePlanId='A';app._pollVibePlan('A');app._stopVibePolling('A');await tick();assert.equal(queue.length,0);assert.equal(app._vibePlans.length,0);assert.equal(app._activeVibePlan,null);
 }
+
 async function scanSelectionAndReconnect() {
   const {app,doc,timers}=env(),queue=delayed(app);app._loadRecentScans=()=>{};
   const a=app._openScanJob('A'),b=app._openScanJob('B');queue[1].resolve(response({job:{id:'B',status:'running',matches:[]}}));await b;queue[0].resolve(response({job:{id:'A',status:'completed',matches:[]}}));await a;assert.equal(app._scanJobId,'B');

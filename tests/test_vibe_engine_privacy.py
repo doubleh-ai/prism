@@ -136,9 +136,9 @@ async def test_health_route_never_echoes_sidecar_exception(client, auth_cookies,
     async def failure():
         raise vibe_engine.VibeEngineError(OPAQUE + SECRET)
 
-    monkeypatch.setattr(vibe, "engine_health", failure)
+    monkeypatch.setattr(vibe_engine, "engine_health", failure)
     response = await client.get("/api/vibe/engine", cookies=auth_cookies)
     assert response.status_code == 200
-    assert response.json()["status"] == "unavailable"
+    assert response.json()["status"] == "execution_unavailable"
     assert OPAQUE not in response.text
     assert SECRET not in response.text

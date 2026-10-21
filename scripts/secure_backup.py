@@ -545,7 +545,10 @@ def main():
         print(
             json.dumps(
                 {
-                    "ok": True,
+                    "ok": bool(not args.verify_boot or boot["ok"]),
+                    "encrypted_archive_verified": True,
+                    "application_restore_verified": boot["ok"],
+                    "release_gate_ready": receipt["release_gate_ready"],
                     "report": str(report),
                     "receipt_sha256": digest(report),
                     "verification": verified,
@@ -554,6 +557,8 @@ def main():
                 }
             )
         )
+        if args.verify_boot and not boot["ok"]:
+            raise SystemExit(2)
     finally:
         if mounted:
             _hdi("detach", mount)

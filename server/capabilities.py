@@ -291,7 +291,7 @@ _TOOLS = (
     Capability(
         "vibe_start",
         "发起 Vibe 研究",
-        "启动后台主题研究，立即返回记录；仅在用户请求研究时使用。",
+        "本版暂停执行：Vibe 隔离环境尚待验收；可读取本账号已有历史。",
         VibeArgs,
         "platform_research",
         "vibe",
@@ -300,7 +300,7 @@ _TOOLS = (
     Capability(
         "vibe_status",
         "查看 Vibe 研究",
-        "读取当前用户的主题研究状态和报告。",
+        "只读取当前用户已保存的主题研究状态和报告；不是旧引擎实时状态，不恢复执行。",
         IdArgs,
         "platform_research",
         "vibe",
@@ -367,7 +367,7 @@ _TOOLS = (
     Capability(
         "vibe_list",
         "查看已有主题研究",
-        "列出当前用户主题研究，恢复同一attempt的监控，不重发研究。",
+        "只读取当前用户已保存的主题研究历史，不恢复或查询共享侧车。",
         ListArgs,
         "platform_research",
         "vibe",
@@ -375,7 +375,7 @@ _TOOLS = (
     Capability(
         "vibe_followup",
         "追问主题研究",
-        "对用户指定的已完成主题研究追问，保留原报告和时间。",
+        "本版暂停追问：Vibe 隔离环境尚待验收；原报告和时间保持不变。",
         FollowupArgs,
         "platform_research",
         "vibe",
@@ -436,6 +436,7 @@ _TOOLS = (
     ),
 )
 REGISTRY = {tool.id: tool for tool in _TOOLS}
+_PAUSED_VIBE_TOOLS = frozenset({"vibe_start", "vibe_followup"})
 
 
 def capability_catalog() -> list[dict]:
@@ -449,6 +450,11 @@ def capability_catalog() -> list[dict]:
             "view": t.view,
             "target_view": t.view,
             "read_only": t.read_only,
+            **(
+                {"available": False, "unavailable_reason": "Vibe 隔离执行环境尚待验收"}
+                if t.id in _PAUSED_VIBE_TOOLS
+                else {}
+            ),
         }
         for t in _TOOLS
     ]
@@ -617,6 +623,10 @@ def list_calls(
 
 async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dict, str]:
     """Dispatch only explicitly named application functions, in this server process."""
+    if name in _PAUSED_VIBE_TOOLS:
+        from .vibe import require_vibe_execution
+
+        require_vibe_execution()
     user = context["username"]
     data = args.model_dump()
     target = {"view": REGISTRY[name].view}
@@ -908,6 +918,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             _start_task,
             build_vibe_plan,
             cancel_owned_plan,
+            execution_status,
             get_owned_plan,
             list_owned_plans,
             start_owned_followup,
@@ -927,7 +938,11 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             records = [
                 {key: plan.get(key) for key in fields} for plan in list_owned_plans(user, data["limit"])
             ]
-            return {"plans": records}, target, f"找到 {len(records)} 条已有主题研究"
+            return (
+                {"plans": records, "history_only": True, "execution": execution_status()},
+                target,
+                f"找到 {len(records)} 条已保存主题研究；本版不连接旧引擎补取或恢复执行",
+            )
         if name == "vibe_cancel":
             result = await cancel_owned_plan(user, data["id"])
             return result, target, "研究已停止" if result["cancelled"] else "尚未确认引擎停止，请核对当前任务"
@@ -963,14 +978,22 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             )
         }
         return (
-            {"plan": result},
+            {"plan": result, "history_only": True, "execution": execution_status()},
             target,
-            "Vibe 研究已启动" if name == "vibe_start" else f"Vibe 状态：{plan.get('status', 'unknown')}",
+            "Vibe 研究已启动"
+            if name == "vibe_start"
+            else f"已保存 Vibe 记录状态：{plan.get('status', 'unknown')}；不是旧引擎实时状态，本版暂停执行",
         )
     raise HTTPException(404)
 
 
 async def dispatch_call(context: dict, request: CallRequest) -> dict:
+    if request.name in _PAUSED_VIBE_TOOLS:
+        from .vibe import require_vibe_execution
+
+        # Reject before audit/task creation and before idempotent replay of an
+        # earlier execution response can imply that this release starts Vibe.
+        require_vibe_execution()
     tool = REGISTRY.get(request.name)
     if not tool:
         raise HTTPException(404, "平台能力不存在")
@@ -1160,6 +1183,7 @@ async def api_bridge_tools(request: Request):
                 "annotations": {"readOnlyHint": t.read_only, "destructiveHint": False},
             }
             for t in _TOOLS
+            if t.id not in _PAUSED_VIBE_TOOLS
         ]
     }
 

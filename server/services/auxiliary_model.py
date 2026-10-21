@@ -67,6 +67,8 @@ def _invocation(prompt: str, directory: str, output_format: str, model_id: str |
             "TMP": directory,
             "TEMP": directory,
             "NO_COLOR": "1",
+            "DISABLE_UPDATES": "1",
+            "DISABLE_AUTOUPDATER": "1",
             "ANTHROPIC_AUTH_TOKEN": model["api_key"],
             "ANTHROPIC_BASE_URL": model["base_url"],
         }

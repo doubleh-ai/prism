@@ -10,7 +10,9 @@ import pathlib
 import sqlite3
 import stat
 import tarfile
+from http.cookies import SimpleCookie
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +26,76 @@ boot_spec = importlib.util.spec_from_file_location(
 )
 boot = importlib.util.module_from_spec(boot_spec)
 boot_spec.loader.exec_module(boot)
+
+
+async def test_restore_identity_probe_uses_actual_profile_contract(client, auth_cookies):
+    response = await client.get("/api/me", cookies=auth_cookies)
+    assert boot.profile_matches_owner(response.status_code, response.json(), "testuser")
+    assert not boot.profile_matches_owner(200, {"username": "testuser"}, "testuser")
+    assert not boot.profile_matches_owner(200, {"user": "other-owner"}, "testuser")
+    assert not boot.profile_matches_owner(401, {"user": "testuser"}, "testuser")
+
+
+def test_boot_startup_diagnostic_cannot_retain_response_body_or_private_fields():
+    diagnostic = boot.startup_diagnostic(
+        200,
+        {
+            "nonce": "synthetic-nonce",
+            "pid": 123,
+            "credential": "must-not-retain",
+            "checks": {
+                "outbound_denied": True,
+                "credential_reads_denied": True,
+                "outside_writes_denied": False,
+                "private_content": "must-not-retain",
+            },
+        },
+        "synthetic-nonce",
+        123,
+    )
+    assert diagnostic["http_status"] == 200
+    assert diagnostic["nonce_matches"] and diagnostic["pid_matches"]
+    assert diagnostic["isolation_checks"]["outside_writes_denied"] is False
+    assert "must-not-retain" not in str(diagnostic)
+    assert not any(boot.startup_diagnostic(401, ["private-content"], "nonce", 1)["isolation_checks"].values())
+
+
+def test_old_backup_login_contract_preserves_both_session_and_csrf_cookies(monkeypatch):
+    # The verified old auth source returns {user, csrf_token}; authentication is
+    # the token cookie, followed by a separate CSRF cookie. Header duplicates
+    # must survive even when the final Set-Cookie has the same exact spelling.
+    class Response:
+        status = 200
+
+        def read(self, _):
+            return b'{"user":"synthetic-owner","csrf_token":"synthetic-csrf"}'
+
+        def getheaders(self):
+            return [
+                ("Set-Cookie", "token=synthetic-session; HttpOnly; Path=/; SameSite=lax"),
+                ("Set-Cookie", "csrf_token=synthetic-csrf; Path=/; SameSite=lax"),
+            ]
+
+    class Connection:
+        def __init__(self, *a, **kw):
+            self.closed = False
+
+        def request(self, *a, **kw):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(boot.http.client, "HTTPConnection", Connection)
+    status, result, headers = boot._request(12345, "POST", "/api/login", {})
+    cookies = SimpleCookie()
+    cookies.load(headers["set-cookie"])
+    assert status == 200 and result["user"] == "synthetic-owner"
+    assert set(cookies) == {"token", "csrf_token"}
+    assert cookies["token"].value == "synthetic-session"
 
 
 def test_real_capture_modes_round_trip_without_false_source_changes(tmp_path):
@@ -319,6 +391,9 @@ def test_failed_boot_is_false_does_not_spawn_or_modify_restored_database(monkeyp
 
 
 def test_plan_mode_never_reads_keychain_or_claims_boot_passed(monkeypatch, tmp_path, capsys):
+    # This command deliberately requires the operator Mac, including in plan mode.
+    # Model that precondition explicitly so Linux CI tests the plan's no-write contract.
+    monkeypatch.setattr(backup.os, "uname", lambda: SimpleNamespace(sysname="Darwin"))
     base = tmp_path / "base"
     base.mkdir()
     (base / "BACKUP-REPORT.json").write_text(json.dumps({"status": "verified and unmounted"}))
@@ -341,6 +416,26 @@ def test_plan_mode_never_reads_keychain_or_claims_boot_passed(monkeypatch, tmp_p
     assert result["mode"] == "plan" and result["verify_boot_requested"] is True
     assert result["application_restore_verified"] is False
     assert not (tmp_path / "backups").exists()
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_linux_rejected_before_keychain_image_or_ssh_work(monkeypatch, tmp_path, capsys, execute):
+    monkeypatch.setattr(backup.os, "uname", lambda: SimpleNamespace(sysname="Linux"))
+    arguments = ["secure_backup.py", "--base-backup", str(tmp_path / "not-read"), "--verify-boot"]
+    if execute:
+        arguments.append("--execute")
+    monkeypatch.setattr("sys.argv", arguments)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unsupported platforms must stop before authentication or subprocess work")
+
+    monkeypatch.setattr(backup.subprocess, "run", forbidden)
+    monkeypatch.setattr(backup.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(backup, "_hdi", forbidden)
+    monkeypatch.setattr(backup, "verified_base", forbidden)
+    with pytest.raises(ValueError, match="Run on the authenticated operator Mac"):
+        backup.main()
+    assert capsys.readouterr().out == ""
 
 
 def test_base_history_receipt_is_bound_to_report_and_actual_ciphertext(tmp_path):

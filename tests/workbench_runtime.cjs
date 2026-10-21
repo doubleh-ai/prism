@@ -103,12 +103,21 @@ async function logoutUsesServer() {
   context.location.href='';app.api=async()=>({ok:false});await app.logout();assert.equal(context.location.href,'','failed logout must not falsely report success');
 }
 async function vibeRetriesAfterNetworkFailure() {
-  const {context,app}=environment();const scheduled=[];let calls=0;
+  const {context,app}=environment();const scheduled=[];let calls=0;const notices=[];
   context.setTimeout=(fn,delay)=>{scheduled.push({fn,delay});return scheduled.length;};context.clearTimeout=()=>{};
-  app.api=async()=>{calls++;if(calls===1)throw Error('offline');return {ok:true,json:async()=>({plan:{id:'v',status:'complete'}})};};
-  app._upsertVibePlan=()=>{};app._renderVibeHistory=()=>{};
-  app._pollVibePlan('v');await settled();assert.equal(scheduled.length,1);assert.equal(app._vibePollTimers.v.busy,false);
-  await scheduled[0].fn();assert.equal(calls,2);assert.equal(app._vibePollTimers.v,undefined);
+  app.api=async()=>{calls++;throw Error('must not contact paused engine');};app._toast=value=>notices.push(value);
+  app._pollVibePlan('v');await app._runVibePlan();await app._submitVibeFollowup();await settled();
+  assert.equal(calls,0);assert.equal(scheduled.length,0);assert.equal(app._vibePollTimers.v,undefined);
+  assert.equal(notices.length,2);assert.match(notices[0],/隔离执行环境尚待验收/);
+  const legacy={id:'v',status:'cancelling',title:'Saved research'};
+  app._activeVibePlanId='v';app._renderVibePlan(legacy);
+  const html=context.document.getElementById('vibePanelInner').innerHTML;
+  assert.match(html,/<button class="danger" onclick="App\._cancelVibePlan\(\)">再次请求停止<\/button>/);
+  assert.equal(calls,0,'displaying unconfirmed history never sends cancellation automatically');
+  app.api=async(url,options)=>{calls++;assert.equal(url,'/api/vibe/plans/v/cancel');assert.equal(options.method,'POST');return {ok:true,json:async()=>({plan:legacy})};};
+  await app._cancelVibePlan();await settled();
+  assert.equal(calls,1,'only an explicit retry sends one fixed cancellation request');
+  assert.equal(scheduled.length,0);assert.equal(app._activeVibePlan.status,'cancelling');
 }
 async function navigationOpensExistingRecord() {
   const {context,app}=environment();const opened=[];let starts=0;

@@ -244,6 +244,8 @@ async def run_claude_stream(
             "HOME": str(Path.home()),
             "NO_COLOR": "1",
             "ANTHROPIC_BASE_URL": model_cfg.get("base_url", ""),
+            "DISABLE_UPDATES": "1",
+            "DISABLE_AUTOUPDATER": "1",
             "ANTHROPIC_AUTH_TOKEN": model_cfg.get("api_key", ""),
         }
     )

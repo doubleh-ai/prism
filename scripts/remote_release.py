@@ -11,6 +11,7 @@ import base64
 import fcntl
 import grp
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -19,6 +20,7 @@ import re
 import secrets
 import select
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -27,6 +29,8 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import closing
+from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
 
 ACTIONS = {"inspect", "prepare", "stage", "quiesce", "switch", "verify", "rollback", "resume"}
@@ -40,6 +44,116 @@ MAX_DEPENDENCIES = 192 * 1024 * 1024
 RESERVE = 2 * 1024 * 1024 * 1024
 NGINX_SITES = ("stock-analyzer", "stock-app")
 HOLD_MESSAGE = "系统升级中，请稍后重试"
+CLI_ENTRY = "home/ubuntu/.npm-global/bin/claude"
+CLI_SOURCE = "home/ubuntu/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+MAX_CLI_BINARY = 512 * 1024 * 1024
+
+# Passed verbatim to the isolated interpreter, never supplied by a candidate.
+# -S keeps even site initialization behind the probes; site.main() subsequently
+# enables the already verified venv. Probe output contains no file contents.
+STAGE_BOOTSTRAP = r"""
+import errno
+import json
+import os
+import re
+import socket
+import sys
+import time
+
+
+def denied_open(path, writable=False):
+    flags = os.O_CLOEXEC | os.O_NOFOLLOW
+    flags |= (os.O_WRONLY | os.O_CREAT | os.O_EXCL) if writable else os.O_RDONLY
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        categories = {errno.EACCES: "permission_denied", errno.EPERM: "operation_denied"}
+        if writable:
+            categories[errno.EROFS] = "read_only_filesystem"
+        else:
+            categories[errno.ENOENT] = "not_visible"
+        return {"blocked": exc.errno in categories, "errno": categories.get(exc.errno, "unexpected")}
+    os.close(fd)  # Never read bytes, including in the unsafe-success case.
+    if writable:
+        os.unlink(path)  # Only the new O_EXCL canary, never an existing file.
+    return {"blocked": False, "errno": "opened"}
+
+
+def denied_connect(port):
+    categories = {
+        errno.ECONNREFUSED: "connection_refused",
+        errno.ENETUNREACH: "network_unreachable",
+        errno.EHOSTUNREACH: "host_unreachable",
+        errno.EACCES: "permission_denied",
+        errno.EPERM: "operation_denied",
+    }
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(0.5)
+            code = connection.connect_ex(("127.0.0.1", port))
+    except OSError as exc:
+        code = exc.errno
+    return {"blocked": code in categories, "errno": categories.get(code, "unexpected")}
+
+
+def main(arguments):
+    if len(arguments) != 6:
+        raise RuntimeError("stage_probe_identity_rejected")
+    commit, release_id, production_pid, nonce, issued_at, application = arguments
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", commit)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", release_id)
+        or not re.fullmatch(r"[1-9][0-9]{0,9}", production_pid)
+        or int(production_pid) <= 1
+        or not re.fullmatch(r"[0-9a-f]{32}", nonce)
+        or not re.fullmatch(r"[0-9]{10}", issued_at)
+        or not 0 <= time.time() - int(issued_at) <= 120
+        or application not in {"server.main:app", "server.recovery:app"}
+    ):
+        raise RuntimeError("stage_probe_identity_rejected")
+    release = "/opt/prism/releases/" + commit
+    stage = "/var/lib/prism-operations/staging/" + release_id
+    checks = {
+        "production_environment": denied_open("/home/ubuntu/stock-analyzer/.env"),
+        "production_process_environment": denied_open("/proc/" + production_pid + "/environ"),
+        "production_http": denied_connect(8088),
+        "sidecar_http": denied_connect(8899),
+        "candidate_write": denied_open(release + "/.stage-write-probe-" + nonce, writable=True),
+    }
+    proof = {
+        "schema": 1,
+        "commit": commit,
+        "release_id": release_id,
+        "nonce": nonce,
+        "production_pid": int(production_pid),
+        "stage_pid": os.getpid(),
+        "issued_at": int(issued_at),
+        "checked_at": int(time.time()),
+        "application": application,
+        "checks": checks,
+    }
+    fd = os.open(stage + "/isolation-proof.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as output:
+        json.dump(proof, output, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        output.flush()
+        os.fsync(output.fileno())
+    if not all(result["blocked"] is True for result in checks.values()):
+        raise RuntimeError("stage_isolation_probe_failed")
+    # This is the first environment/candidate import point, in the probe PID.
+    import site
+    site.main()
+    sys.path.insert(0, release)
+    import uvicorn
+    uvicorn.run(application, uds=stage + "/stage.sock", workers=1)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except Exception:
+        # No raw path, provider exception or credential is sent to the journal.
+        raise SystemExit("stage_bootstrap_failed") from None
+"""
 
 
 def admission_config(raw):
@@ -474,7 +588,11 @@ class RemoteRelease:
             item.get("commit") != self.request["commit"] for item in (manifest, identity, prepared)
         ):
             raise ReleaseError("prepared_manifest_not_bound")
-        allowed = {item["path"] for item in manifest["files"]} | {".deploy-revision", ".engine-revision"}
+        allowed = {item["path"] for item in manifest["files"]} | {
+            ".deploy-revision",
+            ".engine-revision",
+            ".cli-revision",
+        }
         for path in self.release.rglob("*"):
             relative = path.relative_to(self.release)
             if (
@@ -504,6 +622,125 @@ class RemoteRelease:
         if tree_digest(self.release / ".venv")[0] != prepared.get("environment_sha256"):
             raise ReleaseError("prepared_environment_drift")
         self.verify_external(self.record)
+        self.verify_cli(self.record, self.release)
+
+    @staticmethod
+    def cli_identity(info):
+        return tuple(
+            getattr(info, name)
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_uid",
+                "st_gid",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        )
+
+    def cli_target(self, expected):
+        if not isinstance(expected, str) or not DIGEST.fullmatch(expected):
+            raise ReleaseError("cli_binary_receipt_required")
+        return self.checked(self.root / "opt/prism/tools/claude" / expected / "claude")
+
+    def check_cli_binary(self, expected):
+        target = self.cli_target(expected)
+        info = target.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o755:
+            raise ReleaseError("cli_binary_not_root_locked")
+        if self.root == Path("/"):
+            for path in (target, *target.parents):
+                info = path.lstat()
+                if info.st_uid != 0 or info.st_mode & 0o022:
+                    raise ReleaseError("cli_binary_not_root_locked")
+        with target.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
+                raise ReleaseError("cli_binary_drift")
+        return target
+
+    def verify_cli(self, record, release):
+        prepared = json.loads(self.checked(record / "prepared.json").read_bytes())
+        expected = prepared.get("cli_binary_sha256")
+        if self.checked(release / ".cli-revision").read_text().strip() != expected:
+            raise ReleaseError("prepared_cli_revision_mismatch")
+        return self.check_cli_binary(expected)
+
+    def prepare_cli(self):
+        expected = self.request["receipts"].get("dependencies", {}).get("cli_binary_sha256")
+        target = self.cli_target(expected)
+        entry, source = self.root / CLI_ENTRY, self.checked(self.root / CLI_SOURCE)
+        self.checked(entry.parent)
+        if not entry.is_symlink() or entry.resolve(strict=True) != source:
+            raise ReleaseError("fixed_cli_source_required")
+        entry_identity, link = self.cli_identity(entry.lstat()), os.readlink(entry)
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            original = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(original.st_mode)
+                or original.st_nlink != 1
+                or original.st_mode & 0o7000
+                or not original.st_mode & 0o111
+                or not 4 <= original.st_size <= MAX_CLI_BINARY
+            ):
+                raise ReleaseError("cli_source_not_regular_binary")
+            identity = self.cli_identity(original)
+
+            def source_unchanged():
+                return (
+                    self.cli_identity(os.fstat(stream.fileno())) == identity
+                    and self.cli_identity(source.lstat()) == identity
+                    and self.cli_identity(entry.lstat()) == entry_identity
+                    and os.readlink(entry) == link
+                    and entry.resolve(strict=True) == source
+                )
+
+            if stream.read(4) != b"\x7fELF":
+                raise ReleaseError("cli_source_not_regular_binary")
+            stream.seek(0)
+            if hashlib.file_digest(stream, "sha256").hexdigest() != expected or not source_unchanged():
+                raise ReleaseError("cli_source_drift")
+            self.space(target.parent, original.st_size)
+            self.boundary("prepare_fixed_cli_binary")
+            if not source_unchanged():
+                raise ReleaseError("cli_source_drift")
+            for path in reversed(target.parents):
+                if path.is_relative_to(self.root / "opt/prism/tools"):
+                    self.public_directory(path)
+            if not target.exists():
+                pending = self.checked(target.with_name("claude.pending"))
+                created_pending = False
+                try:
+                    stream.seek(0)
+                    copied = hashlib.sha256()
+                    with pending.open("xb") as output:
+                        created_pending = True
+                        while block := stream.read(1024 * 1024):
+                            self.stop()
+                            output.write(block)
+                            copied.update(block)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if copied.hexdigest() != expected or not source_unchanged():
+                        raise ReleaseError("cli_source_drift")
+                    stream.seek(0)
+                    if (
+                        hashlib.file_digest(stream, "sha256").hexdigest() != expected
+                        or not source_unchanged()
+                    ):
+                        raise ReleaseError("cli_source_drift")
+                    pending.chmod(0o755)
+                    pending.replace(target)
+                finally:
+                    if created_pending and pending.exists():
+                        pending.unlink()
+            if not source_unchanged():
+                raise ReleaseError("cli_source_drift")
+        self.check_cli_binary(expected)
+        return {"sha256": expected, "source_identity": identity, "entry_identity": entry_identity}
 
     def external_files(self, manifest):
         if manifest.get("source_root") != "/home/ubuntu/TradingAgents-astock" or not SHA.fullmatch(
@@ -655,6 +892,7 @@ class RemoteRelease:
         self.space(self.operations, dependency_size)
         self.boundary("prepare_candidate")
         external_digest = self.prepare_external()
+        cli = self.prepare_cli()
         self.public_directory(self.releases.parent)
         self.public_directory(self.releases)
         self.release.mkdir(parents=True, mode=0o755)
@@ -669,6 +907,7 @@ class RemoteRelease:
             self.write(path, content, mode)
         self.write(self.release / ".deploy-revision", (manifest["commit"] + "\n").encode(), 0o644)
         self.write(self.release / ".engine-revision", (external_digest + "\n").encode(), 0o644)
+        self.write(self.release / ".cli-revision", (cli["sha256"] + "\n").encode(), 0o644)
         self.write(self.record / "manifest.json", manifest_raw)
         inputs = self.record / "dependencies"
         inputs.mkdir(mode=0o700)
@@ -830,6 +1069,9 @@ class RemoteRelease:
                     "environment_sha256": tree_digest(target)[0],
                     "inherited_environment_sha256": inherited,
                     "external_sources_sha256": external_digest,
+                    "cli_binary_sha256": cli["sha256"],
+                    "cli_source_identity": cli["source_identity"],
+                    "cli_entry_identity": cli["entry_identity"],
                     "inherited_package_projection": {
                         "policy": "reviewed_legacy_ui_and_editable_v1",
                         "excluded_roots": excluded_roots,
@@ -841,6 +1083,7 @@ class RemoteRelease:
             ),
         )
         self.verify_external(self.record)
+        self.verify_cli(self.record, self.release)
 
     def build_command(self, target, phase, arguments):
         self.run(
@@ -909,6 +1152,254 @@ class RemoteRelease:
         ):
             raise ReleaseError("stage_account_not_isolated")
 
+    def seed_stage_probes(self, stage):
+        """Create disposable owners only in the not-yet-started private DB copy."""
+        expected = self.checked(self.operations / "staging" / self.request["release_id"])
+        database = self.checked(stage / "data/chat.db")
+        if stage != expected or database == self.production / "data/chat.db":
+            raise ReleaseError("stage_probe_database_rejected")
+        if not database.is_file() or (stage / "data/secret_key").exists():
+            raise ReleaseError("stage_probe_copy_required")
+        secret = secrets.token_hex(32)
+        accounts = [
+            {
+                "username": "stage_" + secrets.token_hex(12),
+                "password": secrets.token_urlsafe(32),
+                "conversation": secrets.token_hex(12),
+                "report": secrets.token_hex(12),
+            }
+            for _ in range(2)
+        ]
+        # This is the application's existing legacy hash contract. Real HTTP
+        # login upgrades each synthetic hash to bcrypt inside the isolated app.
+        # No candidate or inherited package is imported by this root process.
+        self.write(stage / "data/secret_key", secret.encode())
+        with closing(sqlite3.connect(database)) as db, db:
+            for account in accounts:
+                db.execute(
+                    "INSERT INTO users(username,password_hash) VALUES(?,?)",
+                    [account["username"], digest((account["password"] + secret).encode())],
+                )
+                db.execute(
+                    "INSERT INTO conversations(id,username,title,skill) VALUES(?,?,?,'prism-research')",
+                    [account["conversation"], account["username"], "Prism isolated acceptance"],
+                )
+                db.execute(
+                    "INSERT INTO messages(conv_id,role,content) VALUES(?,'assistant',?)",
+                    [account["conversation"], "Prism synthetic acceptance narrative"],
+                )
+                db.execute(
+                    "INSERT INTO saved_reports(id,username,conv_id,title,report_json,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,1,1)",
+                    [
+                        account["report"],
+                        account["username"],
+                        account["conversation"],
+                        "Prism isolated acceptance",
+                        '{"summary":"Prism synthetic acceptance narrative"}',
+                    ],
+                )
+        database.chmod(0o600)
+        self.write(self.record / "stage-probe-credentials.json", encoded({"accounts": accounts}))
+        return accounts
+
+    def stage_http(self, stage, method, path, body=None, cookie=""):
+        """Bounded stdlib HTTP over the fixed private socket; never TCP/proxies."""
+        if (
+            stage != self.operations / "staging" / self.request["release_id"]
+            or method not in {"GET", "POST", "PUT", "DELETE"}
+            or not re.fullmatch(r"/[a-zA-Z0-9/_\-.]+", path)
+        ):
+            raise ReleaseError("stage_http_target_rejected")
+        connection = http.client.HTTPConnection("localhost", timeout=5)
+        connection.auto_open = 0  # Never fall back to TCP if the fixed UDS closes.
+        channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            channel.settimeout(5)
+            channel.connect(str(self.stage_socket(stage)))
+            connection.sock = channel
+            headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+            if cookie:
+                headers["Cookie"] = cookie
+            payload = None if body is None else encoded(body)
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            connection.request(method, path, body=payload, headers=headers)
+            response = connection.getresponse()
+            raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ReleaseError("stage_http_response_limit")
+            cookies = SimpleCookie()
+            for key, value in response.getheaders():
+                if key.lower() == "set-cookie":
+                    cookies.load(value)
+            # Responses and cookie values never enter the public or private
+            # result record. Retain only the application's auth cookie in memory.
+            token = cookies.get("token")
+            result_cookie = "token=" + token.value if token is not None and token.value else ""
+            if result_cookie and not re.fullmatch(r"token=[0-9a-f]{64}", result_cookie):
+                raise ReleaseError("stage_http_cookie_rejected")
+            try:
+                data = json.loads(raw) if raw else {}
+            except (ValueError, UnicodeError):
+                # Keep the actual status for a failed/non-JSON response without
+                # retaining its body (which may contain provider diagnostics).
+                data = {}
+            return response.status, data, result_cookie
+        finally:
+            connection.close()
+            channel.close()
+
+    def stage_journeys(self, stage, accounts, application):
+        """Exercise only synthetic owners through real authenticated routes."""
+        checks = {}
+        result = {
+            "schema": 1,
+            "commit": self.request["commit"],
+            "served_commit": "unknown",
+            "checked_at": int(self.now()),
+            "synthetic_owners": len(accounts),
+            "checks": checks,
+            "passed": False,
+            "external_integrations_verified": False,
+            "http_status_by_check": {},
+        }
+        last_status = None
+
+        def request(method, path, body=None, cookie=""):
+            nonlocal last_status
+            self.stop()
+            response = self.stage_http(stage, method, path, body, cookie)
+            last_status = response[0]
+            return response
+
+        def require(name, condition):
+            checks[name] = condition is True
+            if last_status is not None:
+                result["http_status_by_check"][name] = last_status
+            if not checks[name]:
+                raise ReleaseError("stage_journey_failed")
+
+        try:
+            require("two_synthetic_owners", len(accounts) == 2)
+            status, ready, _ = request("GET", "/health/ready")
+            observed = ready.get("deployed_revision") if isinstance(ready, dict) else None
+            if isinstance(observed, str) and SHA.fullmatch(observed):
+                result["served_commit"] = observed
+            require(
+                "ready_exact_commit",
+                status == 200
+                and ready.get("status") == "ready"
+                and ready.get("deployed_revision") == self.request["commit"],
+            )
+            require("anonymous_denied", request("GET", "/api/me")[0] == 401)
+            for index, account in enumerate(accounts):
+                prefix = "owner_" + str(index + 1) + "_"
+                other = accounts[1 - index]
+                status, _, cookie = request(
+                    "POST",
+                    "/api/login",
+                    {
+                        "username": account["username"],
+                        "password": account["password"],
+                    },
+                )
+                require(prefix + "login", status == 200 and bool(cookie))
+                status, profile, _ = request("GET", "/api/me", cookie=cookie)
+                require(
+                    prefix + "identity",
+                    status == 200
+                    and profile.get("user") == account["username"]
+                    and profile.get("is_admin") is False,
+                )
+                status, conversations, _ = request("GET", "/api/convs", cookie=cookie)
+                require(
+                    prefix + "conversation_list",
+                    status == 200
+                    and isinstance(conversations, list)
+                    and [row.get("id") for row in conversations] == [account["conversation"]],
+                )
+                status, history, _ = request("GET", "/api/convs/" + account["conversation"], cookie=cookie)
+                require(
+                    prefix + "history",
+                    status == 200
+                    and history.get("id") == account["conversation"]
+                    and any(
+                        row.get("content") == "Prism synthetic acceptance narrative"
+                        for row in history.get("messages", [])
+                    ),
+                )
+                status, reports, _ = request("GET", "/api/reports/library", cookie=cookie)
+                require(
+                    prefix + "report_list",
+                    status == 200
+                    and [row.get("id") for row in reports.get("reports", [])] == [account["report"]],
+                )
+                status, report, _ = request("GET", "/api/reports/library/" + account["report"], cookie=cookie)
+                require(
+                    prefix + "report",
+                    status == 200
+                    and report.get("id") == account["report"]
+                    and report.get("report", {}).get("summary") == "Prism synthetic acceptance narrative",
+                )
+                require(
+                    prefix + "foreign_conversation",
+                    request("GET", "/api/convs/" + other["conversation"], cookie=cookie)[0] == 404,
+                )
+                require(
+                    prefix + "foreign_report",
+                    request("GET", "/api/reports/library/" + other["report"], cookie=cookie)[0] == 404,
+                )
+                if application == "server.recovery:app":
+                    for method, path in (
+                        ("POST", "/api/convs"),
+                        ("PUT", "/api/watchlist"),
+                        ("DELETE", "/api/reports/library/" + account["report"]),
+                    ):
+                        require(prefix + "recovery_" + method, request(method, path, {}, cookie)[0] == 503)
+                    require(
+                        prefix + "shared_file_denied",
+                        request(
+                            "GET",
+                            "/api/reports/" + account["conversation"] + "/stage-shared.html",
+                            cookie=cookie,
+                        )[0]
+                        == 404,
+                    )
+                elif application == "server.main:app":
+                    status, created, _ = request("POST", "/api/convs", {}, cookie)
+                    created_id = created.get("id", "")
+                    require(
+                        prefix + "create", status == 200 and bool(re.fullmatch(r"[0-9a-f]{24}", created_id))
+                    )
+                    path = "/api/convs/" + created_id
+                    require(prefix + "created_read", request("GET", path, cookie=cookie)[0] == 200)
+                    require(
+                        prefix + "update",
+                        request("PUT", path + "/skill", {"skill": "prism-research"}, cookie)[0] == 200,
+                    )
+                    require(prefix + "delete", request("DELETE", path, cookie=cookie)[0] == 200)
+                    require(prefix + "deleted_hidden", request("GET", path, cookie=cookie)[0] == 404)
+                else:
+                    raise ReleaseError("stage_application_rejected")
+                require(prefix + "logout", request("POST", "/api/logout", {}, cookie)[0] == 200)
+                require(prefix + "session_revoked", request("GET", "/api/me", cookie=cookie)[0] == 401)
+            result["passed"] = True
+        except Exception as error:
+            # No HTTP body, exception message, synthetic password or cookie.
+            result["check_count"] = len(checks)
+            self.write(self.record / "stage-journeys.json", encoded(result))
+            if isinstance(error, ReleaseError) and str(error) in {
+                "operator_stop",
+                "fresh_operator_permit_required",
+                "permit_timeout",
+            }:
+                raise
+            raise ReleaseError("stage_journey_failed_check_private_record") from None
+        result["check_count"] = len(checks)
+        self.write(self.record / "stage-journeys.json", encoded(result))
+        return digest(encoded(result))
+
     def stage(self):
         self.verify_tree()
         stage = self.checked(self.operations / "staging" / self.request["release_id"])
@@ -924,8 +1415,9 @@ class RemoteRelease:
         data = stage / "data"
         data.mkdir(mode=0o700)
         with (
-            sqlite3.connect(source_db.as_uri() + "?mode=ro", uri=True) as source,
-            sqlite3.connect(data / "chat.db") as destination,
+            closing(sqlite3.connect(source_db.as_uri() + "?mode=ro", uri=True)) as source,
+            closing(sqlite3.connect(data / "chat.db")) as destination,
+            destination,
         ):
             source.backup(destination)
             tables = {
@@ -935,6 +1427,7 @@ class RemoteRelease:
                 destination.execute("DELETE FROM sessions")
             if "capability_runs" in tables:
                 destination.execute("UPDATE capability_runs SET revoked=1")
+        accounts = self.seed_stage_probes(stage)
         # A copied DB is for migration/auth/history checks only. Runtime state is not copied.
         home = stage / "home"
         home.mkdir(mode=0o700)
@@ -942,6 +1435,10 @@ class RemoteRelease:
         self.run(["/usr/bin/chown", "prism-stage:ubuntu", str(stage)])
         stage.chmod(0o750)
         self.boundary("stage_isolated_service")
+        production_pid = self.process_id(SERVICE)
+        nonce = secrets.token_hex(16)
+        issued_at = int(self.now())
+        application = self.application(self.release, self.record)
         self.run(
             [
                 "/usr/bin/systemd-run",
@@ -978,16 +1475,19 @@ class RemoteRelease:
                 "PYTHONDONTWRITEBYTECODE=1",
                 "PRISM_SINGLE_WORKER=1",
                 "PRISM_ENVIRONMENT=staging",
+                "PRISM_COOKIE_SECURE=0",
                 str(self.release / ".venv/bin/python"),
                 "-I",
                 "-B",
-                "-m",
-                "uvicorn",
-                self.application(self.release, self.record),
-                "--app-dir",
-                str(self.release),
-                "--uds",
-                str(socket),
+                "-S",
+                "-c",
+                STAGE_BOOTSTRAP,
+                self.request["commit"],
+                self.request["release_id"],
+                str(production_pid),
+                nonce,
+                str(issued_at),
+                application,
             ]
         )
         deadline = time.monotonic() + 30
@@ -996,12 +1496,112 @@ class RemoteRelease:
             time.sleep(0.1)
         if not self.is_socket(socket):
             raise ReleaseError("stage_socket_unavailable")
-        self.run(["/usr/bin/chown", "prism-stage:ubuntu", str(socket)])
-        socket.chmod(0o660)
+        identity = self.stage_process_identity(production_pid)
+        proof = self.stage_proof(stage, nonce, issued_at, production_pid, identity["stage_pid"], application)
+        self.write(self.record / "stage-isolation.json", encoded({"proof": proof, "identity": identity}))
+        self.publish_stage_socket(socket)
+        journeys_digest = self.stage_journeys(stage, accounts, application)
         self.write(
             self.record / "staged.json",
-            encoded({"socket": str(socket), "external_integrations_verified": False}),
+            encoded(
+                {
+                    "socket": str(socket),
+                    "external_integrations_verified": False,
+                    "isolation_proof_sha256": digest(encoded(proof)),
+                    "journeys_sha256": journeys_digest,
+                }
+            ),
         )
+
+    def process_id(self, unit):
+        value = self.run(["/usr/bin/systemctl", "show", "--value", "--property=MainPID", unit]).strip()
+        if not re.fullmatch(rb"[1-9][0-9]{0,9}", value) or int(value) <= 1:
+            raise ReleaseError("stage_process_identity_unavailable")
+        return int(value)
+
+    def stage_process_identity(self, production_pid):
+        unit = "prism-stage-" + self.request["commit"][:12]
+        stage_pid = self.process_id(unit)
+        user = self.run(["/usr/bin/systemctl", "show", "--value", "--property=User", unit]).strip()
+        process = self.root / "proc" / str(stage_pid)
+        production = self.root / "proc" / str(production_pid)
+        if (
+            self.process_id(SERVICE) != production_pid
+            or stage_pid == production_pid
+            or user != b"prism-stage"
+            or process.stat().st_uid != pwd.getpwnam("prism-stage").pw_uid
+            or (process / "ns/net").readlink() == (production / "ns/net").readlink()
+        ):
+            raise ReleaseError("stage_process_identity_mismatch")
+        return {
+            "stage_pid": stage_pid,
+            "production_pid": production_pid,
+            "dedicated_user": True,
+            "separate_network_namespace": True,
+            "checked_at": int(self.now()),
+        }
+
+    def stage_proof(self, stage, nonce, issued_at, production_pid, stage_pid, application):
+        path = self.checked(stage / "isolation-proof.json")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096 or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ReleaseError("stage_isolation_proof_rejected")
+            proof = json.loads(source.read(4097))
+        if not isinstance(proof, dict):
+            raise ReleaseError("stage_isolation_proof_rejected")
+        expected = {
+            "schema": 1,
+            "commit": self.request["commit"],
+            "release_id": self.request["release_id"],
+            "nonce": nonce,
+            "issued_at": issued_at,
+            "production_pid": production_pid,
+            "stage_pid": stage_pid,
+            "application": application,
+        }
+        allowed = {
+            "production_environment": {"permission_denied", "operation_denied", "not_visible"},
+            "production_process_environment": {"permission_denied", "operation_denied", "not_visible"},
+            "production_http": {
+                "connection_refused",
+                "network_unreachable",
+                "host_unreachable",
+                "permission_denied",
+                "operation_denied",
+            },
+            "sidecar_http": {
+                "connection_refused",
+                "network_unreachable",
+                "host_unreachable",
+                "permission_denied",
+                "operation_denied",
+            },
+            "candidate_write": {"permission_denied", "operation_denied", "read_only_filesystem"},
+        }
+        checks = proof.get("checks", {})
+        if (
+            set(proof) != {*expected, "checked_at", "checks"}
+            or any(
+                type(proof.get(key)) is not type(value) or proof[key] != value
+                for key, value in expected.items()
+            )
+            or type(proof.get("checked_at")) is not int
+            or not issued_at <= proof["checked_at"] <= int(self.now()) <= issued_at + 120
+            or not isinstance(checks, dict)
+            or set(checks) != set(allowed)
+            or any(
+                not isinstance(checks[name], dict)
+                or set(checks[name]) != {"blocked", "errno"}
+                or checks[name]["blocked"] is not True
+                or not isinstance(checks[name]["errno"], str)
+                or checks[name]["errno"] not in categories
+                for name, categories in allowed.items()
+            )
+        ):
+            raise ReleaseError("stage_isolation_proof_rejected")
+        return proof
 
     @staticmethod
     def stage_socket(stage):
@@ -1012,7 +1612,39 @@ class RemoteRelease:
 
     @staticmethod
     def is_socket(path):
-        return stat.S_ISSOCK(path.stat().st_mode)
+        return stat.S_ISSOCK(path.lstat().st_mode)
+
+    def publish_stage_socket(self, path):
+        # The stage UID can replace this filename. Pin an inode with Linux O_PATH
+        # and mutate only our own proc-fd reference, never the replaceable name.
+        if not hasattr(os, "O_PATH"):
+            raise ReleaseError("stage_socket_pinning_unavailable")
+        descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            original = os.fstat(descriptor)
+            uid = pwd.getpwnam("prism-stage").pw_uid
+
+            def same_socket():
+                current = path.lstat()
+                return stat.S_ISSOCK(current.st_mode) and (current.st_dev, current.st_ino) == (
+                    original.st_dev,
+                    original.st_ino,
+                )
+
+            if (
+                not stat.S_ISSOCK(original.st_mode)
+                or original.st_uid != uid
+                or original.st_nlink != 1
+                or not same_socket()
+            ):
+                raise ReleaseError("stage_socket_identity_rejected")
+            pinned = "/proc/self/fd/" + str(descriptor)
+            os.chown(pinned, uid, grp.getgrnam("ubuntu").gr_gid)
+            os.chmod(pinned, 0o660)
+            if not same_socket() or os.fstat(descriptor).st_nlink != 1:
+                raise ReleaseError("stage_socket_identity_rejected")
+        finally:
+            os.close(descriptor)
 
     def switch(self):
         self.verify_tree()
@@ -1087,16 +1719,19 @@ class RemoteRelease:
         else:
             raise ReleaseError("application_identity_mismatch")
         application = self.application(release, record)
+        cli = self.verify_cli(record, release)
         return (
-            "[Service]\nWorkingDirectory="
+            "[Service]\nNoNewPrivileges=yes\nUMask=0077\nWorkingDirectory="
             + str(release)
-            + "\nExecStart=\nExecStart="
+            + "\nExecStart=\nExecStart=/usr/bin/env CLAUDE_BIN="
+            + str(cli)
+            + " "
             + str(release / ".venv/bin/python")
             + " -I -B -m uvicorn "
             + application
             + " --app-dir "
             + str(release)
-            + " --host 127.0.0.1 --port 8088\nEnvironmentFile="
+            + " --host 127.0.0.1 --port 8088 --workers 1\nEnvironmentFile="
             + str(self.production / ".env")
             + "\nEnvironment=STOCK_DATA_DIR="
             + str(self.production / "data")

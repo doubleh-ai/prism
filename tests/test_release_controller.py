@@ -5,10 +5,12 @@ import io
 import json
 import os
 import sqlite3
+import stat
 import tarfile
 import tempfile
 import types
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -119,7 +121,18 @@ class Fixture(unittest.TestCase):
         )
         self.engine.stage_account = lambda: None
         self.engine.is_socket = lambda path: path.is_file()  # fake transport, no socket/network syscall
+        self.engine.publish_stage_socket = lambda path: path.chmod(0o660)  # fake file, not Linux O_PATH
+        # Real synthetic seeding/HTTP contracts have dedicated stage tests.
+        # This fixture has no application server; keep transport explicitly fake.
+        self.engine.stage_journeys = lambda *args: "d" * 64
         self.engine.stage_socket = lambda stage: stage / "stage.sock"  # no real UDS address in this fake
+        self.engine.stage_process_identity = lambda pid: {
+            "stage_pid": 222,
+            "production_pid": pid,
+            "dedicated_user": True,
+            "separate_network_namespace": True,
+            "checked_at": NOW,
+        }
         self.engine.old_venv.joinpath("lib/python3.12/site-packages").mkdir(parents=True)
         self.engine.old_venv.joinpath("lib/python3.12/site-packages/inherited.pth").write_text(
             "/reviewed/external/source\n"
@@ -128,6 +141,15 @@ class Fixture(unittest.TestCase):
         self.engine.old_venv.joinpath("bin/python").write_text("never executed")
         self.engine.production.joinpath("data").mkdir(parents=True)
         self.data = request()
+        self.cli_source = self.root / remote.CLI_SOURCE
+        self.cli_source.parent.mkdir(parents=True)
+        self.cli_source.write_bytes(b"\x7fELFPrism inert test executable: never run\n")
+        self.cli_source.chmod(0o755)
+        self.cli_entry = self.root / remote.CLI_ENTRY
+        self.cli_entry.parent.mkdir(parents=True)
+        self.cli_entry.symlink_to(self.cli_source)
+        self.cli_digest = remote.digest(self.cli_source.read_bytes())
+        self.data["receipts"]["dependencies"]["cli_binary_sha256"] = self.cli_digest
         self.data["receipts"]["dependencies"]["base_environment_sha256"] = remote.tree_digest(
             self.engine.old_venv
         )[0]
@@ -163,6 +185,8 @@ class Fixture(unittest.TestCase):
 
     def run_fake(self, args, **kwargs):
         self.commands.append((args, kwargs))
+        if args[:2] == ["/usr/bin/systemctl", "show"] and "--property=MainPID" in args:
+            return b"111\n"
         if args[:2] == ["/usr/bin/systemctl", "show"] and args[-1].startswith("prism-stage-"):
             return b"LoadState=loaded\nActiveState=active\n"
         if "-m" in args and "venv" in args:
@@ -170,8 +194,33 @@ class Fixture(unittest.TestCase):
             target.joinpath("lib/python3.12/site-packages").mkdir(parents=True)
             target.joinpath("bin").mkdir()
             target.joinpath("bin/python").write_text("never executed")
-        if args[0] == "/usr/bin/systemd-run" and "--uds" in args:
-            Path(args[-1]).touch()
+        if args[0] == "/usr/bin/systemd-run" and remote.STAGE_BOOTSTRAP in args:
+            commit, release_id, pid, nonce, issued_at, app = args[-6:]
+            stage = self.engine.operations / "staging" / release_id
+            (stage / "stage.sock").touch()
+            proof = {
+                "schema": 1,
+                "commit": commit,
+                "release_id": release_id,
+                "production_pid": int(pid),
+                "stage_pid": 222,
+                "nonce": nonce,
+                "issued_at": int(issued_at),
+                "checked_at": NOW,
+                "application": app,
+                "checks": {
+                    name: {"blocked": True, "errno": "permission_denied"}
+                    for name in (
+                        "production_environment",
+                        "production_process_environment",
+                        "production_http",
+                        "sidecar_http",
+                        "candidate_write",
+                    )
+                },
+            }
+            (stage / "isolation-proof.json").write_bytes(remote.encoded(proof))
+            (stage / "isolation-proof.json").chmod(0o600)
         return b""
 
     def prepared(self):
@@ -186,6 +235,14 @@ class Fixture(unittest.TestCase):
             db.execute("INSERT INTO sessions VALUES ('private-live-session')")
             db.execute("CREATE TABLE capability_runs (revoked INTEGER, expires_at INTEGER)")
             db.execute("INSERT INTO capability_runs VALUES (0, ?)", [NOW - 100])
+            db.execute("CREATE TABLE users (username TEXT PRIMARY KEY, password_hash TEXT)")
+            db.execute(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, username TEXT, title TEXT, skill TEXT)"
+            )
+            db.execute("CREATE TABLE messages (conv_id TEXT, role TEXT, content TEXT)")
+            db.execute(
+                "CREATE TABLE saved_reports (id TEXT PRIMARY KEY, username TEXT, conv_id TEXT, title TEXT, report_json TEXT, created_at INTEGER, updated_at INTEGER)"
+            )
         return path
 
     def staged(self):
@@ -203,6 +260,7 @@ class Fixture(unittest.TestCase):
         (target / ".deploy-revision").write_text(RECOVERY + "\n")
         engine_digest = self.data["receipts"]["dependencies"]["external_sources_sha256"]
         (target / ".engine-revision").write_text(engine_digest + "\n")
+        (target / ".cli-revision").write_text(self.cli_digest + "\n")
         (record / "external-source-manifest.json").write_bytes(
             remote.encoded(self.data["external_source_manifest"])
         )
@@ -241,6 +299,7 @@ class Fixture(unittest.TestCase):
                     "commit": RECOVERY,
                     "environment_sha256": remote.tree_digest(target / ".venv")[0],
                     "external_sources_sha256": engine_digest,
+                    "cli_binary_sha256": self.cli_digest,
                 }
             )
         )
@@ -320,6 +379,126 @@ class Fixture(unittest.TestCase):
             any(args[0] == str(self.engine.old_venv / "bin/python") for args, _ in self.commands)
         )
         self.assertFalse((self.engine.release / ".venv/lib/python3.12/site-packages/inherited.pth").exists())
+
+    def test_cli_copy_is_bound_as_data_and_dropin_cannot_be_overridden_by_environment_file(self):
+        before = self.cli_source.read_bytes()
+        release = self.prepared()
+        prepared = json.loads((self.engine.record / "prepared.json").read_bytes())
+        target = self.engine.cli_target(self.cli_digest)
+        self.assertEqual(prepared["cli_binary_sha256"], self.cli_digest)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((release / ".cli-revision").read_text().strip(), self.cli_digest)
+        self.assertEqual(self.cli_source.read_bytes(), before)
+        self.assertFalse(
+            any(str(self.cli_source) in args or str(target) in args for args, _ in self.commands)
+        )
+        dropin = self.engine.dropin(release).decode()
+        self.assertIn("ExecStart=/usr/bin/env CLAUDE_BIN=" + str(target) + " ", dropin)
+        self.assertNotIn("Environment=CLAUDE_BIN=", dropin)
+        self.assertNotIn(str(self.cli_entry), dropin)
+        self.assertIn("prepare_fixed_cli_binary", self.boundaries)
+        self.engine.verify_tree()
+        target.write_bytes(b"\x7fELFtampered binary")
+        with self.assertRaisesRegex(remote.ReleaseError, "cli_binary_drift"):
+            self.engine.verify_tree()
+
+    def test_cli_missing_digest_rejected_before_any_candidate_or_cli_copy(self):
+        self.data["receipts"]["dependencies"].pop("cli_binary_sha256")
+        bind(self.data)
+        with self.assertRaisesRegex(remote.ReleaseError, "cli_binary_receipt_required"):
+            self.engine.execute(self.data)
+        self.assertFalse(self.engine.release.exists())
+        self.assertFalse((self.root / "opt/prism/tools/claude").exists())
+
+    def test_cli_entry_must_resolve_to_the_fixed_source(self):
+        for kind in ("regular", "other_target"):
+            with self.subTest(kind=kind):
+                self.cli_entry.unlink()
+                if kind == "regular":
+                    self.cli_entry.write_bytes(self.cli_source.read_bytes())
+                else:
+                    other = self.cli_entry.parent / "other-claude"
+                    other.write_bytes(self.cli_source.read_bytes())
+                    self.cli_entry.symlink_to(other)
+                self.engine.request = self.data
+                with self.assertRaisesRegex(remote.ReleaseError, "fixed_cli_source_required"):
+                    self.engine.prepare_cli()
+
+    def test_cli_source_shell_setuid_hardlink_and_nonexecutable_rejected_without_execution(self):
+        self.engine.request = self.data
+        original = self.cli_source.read_bytes()
+        for kind in ("shell", "setuid", "hardlink", "nonexecutable"):
+            with self.subTest(kind=kind):
+                self.cli_source.write_bytes(b"#!/bin/sh\nexit 9\n" if kind == "shell" else original)
+                self.cli_source.chmod(
+                    0o4755 if kind == "setuid" else 0o644 if kind == "nonexecutable" else 0o755
+                )
+                link = self.cli_source.with_name("linked-copy")
+                if kind == "hardlink":
+                    os.link(self.cli_source, link)
+                try:
+                    # Some macOS test filesystems strip setuid on chmod. Model
+                    # that one fstat result explicitly; every other case uses
+                    # real files, permissions, hard links and open descriptors.
+                    context = nullcontext()
+                    if kind == "setuid":
+                        observed = self.cli_source.stat()
+                        context = mock.patch.object(
+                            remote.os,
+                            "fstat",
+                            return_value=types.SimpleNamespace(
+                                st_mode=observed.st_mode | stat.S_ISUID,
+                                st_nlink=observed.st_nlink,
+                                st_size=observed.st_size,
+                            ),
+                        )
+                    with context:
+                        with self.assertRaisesRegex(remote.ReleaseError, "cli_source_not_regular_binary"):
+                            self.engine.prepare_cli()
+                finally:
+                    if link.exists():
+                        link.unlink()
+        self.assertFalse(self.commands)
+
+    def test_cli_source_or_entry_changed_at_copy_boundary_never_publishes_binary(self):
+        self.engine.request = self.data
+        original = self.cli_source.read_bytes()
+        for kind in ("bytes", "entry"):
+            with self.subTest(kind=kind):
+                self.cli_source.write_bytes(original)
+                self.cli_entry.unlink()
+                self.cli_entry.symlink_to(self.cli_source)
+
+                def change(nonce, label):
+                    if label == "prepare_fixed_cli_binary":
+                        if kind == "bytes":
+                            self.cli_source.write_bytes(original + b"changed")
+                        else:
+                            self.cli_entry.unlink()
+                            self.cli_entry.symlink_to(self.cli_source.with_name("not-the-original"))
+                    return nonce
+
+                self.engine.permit = change
+                with self.assertRaises((remote.ReleaseError, FileNotFoundError)):
+                    self.engine.prepare_cli()
+                self.assertFalse(self.engine.cli_target(self.cli_digest).exists())
+
+    def test_cli_existing_pending_is_preserved_and_existing_target_is_reverified(self):
+        self.engine.request = self.data
+        target = self.engine.cli_target(self.cli_digest)
+        target.parent.mkdir(parents=True)
+        pending = target.with_name("claude.pending")
+        pending.write_bytes(b"previous failed copy, preserve for inspection")
+        with self.assertRaises(FileExistsError):
+            self.engine.prepare_cli()
+        self.assertEqual(pending.read_bytes(), b"previous failed copy, preserve for inspection")
+        self.assertFalse(target.exists())
+        pending.unlink()
+        target.write_bytes(self.cli_source.read_bytes())
+        target.chmod(0o777)
+        with self.assertRaisesRegex(remote.ReleaseError, "cli_binary_not_root_locked"):
+            self.engine.prepare_cli()
 
     def test_prepare_drift_and_space_fail_before_candidate_write(self):
         self.engine.old_venv.joinpath("new.pth").write_text("changed")
@@ -468,7 +647,9 @@ class Fixture(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sessions").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT revoked FROM capability_runs").fetchone()[0], 0)
         command = next(
-            args for args, _ in self.commands if args[0] == "/usr/bin/systemd-run" and "--uds" in args
+            args
+            for args, _ in self.commands
+            if args[0] == "/usr/bin/systemd-run" and remote.STAGE_BOOTSTRAP in args
         )
         for item in [
             "--property=PrivateNetwork=yes",
@@ -479,7 +660,8 @@ class Fixture(unittest.TestCase):
             "--property=CPUQuota=100%",
             "--property=RuntimeMaxSec=1800",
             "--property=KillMode=control-group",
-            "--uds",
+            "-S",
+            "-c",
             "-i",
         ]:
             self.assertIn(item, command)
@@ -489,6 +671,10 @@ class Fixture(unittest.TestCase):
         self.assertIn("--gid=prism-stage", command)
         self.assertEqual((stage / "data").stat().st_mode & 0o777, 0o700)
         self.assertEqual((stage / "stage.sock").stat().st_mode & 0o777, 0o660)
+        proof_record = json.loads((self.engine.record / "stage-isolation.json").read_bytes())
+        self.assertEqual(proof_record["proof"]["stage_pid"], 222)
+        self.assertEqual(proof_record["proof"]["production_pid"], 111)
+        self.assertEqual(proof_record["proof"]["application"], "server.main:app")
 
     def test_collected_stage_unit_is_allowed_but_unknown_command_failure_is_not(self):
         command = [
@@ -512,6 +698,25 @@ class Fixture(unittest.TestCase):
         ):
             with self.assertRaisesRegex(remote.ReleaseError, "command_failed"):
                 remote.run_command(command)
+
+    def test_stage_never_records_acceptance_for_a_failed_probe(self):
+        self.prepared()
+        self.database()
+
+        def failed_probe(args, **kwargs):
+            result = self.run_fake(args, **kwargs)
+            if remote.STAGE_BOOTSTRAP in args:
+                path = self.engine.operations / "staging" / RELEASE / "isolation-proof.json"
+                proof = json.loads(path.read_bytes())
+                proof["checks"]["production_environment"] = {"blocked": False, "errno": "opened"}
+                path.write_bytes(remote.encoded(proof))
+            return result
+
+        self.engine.run = failed_probe
+        with self.assertRaisesRegex(remote.ReleaseError, "stage_isolation_proof_rejected"):
+            self.engine.execute(dict(self.data, action="stage"))
+        self.assertFalse((self.engine.record / "staged.json").exists())
+        self.assertFalse((self.engine.record / "stage-isolation.json").exists())
 
     def test_prepared_extra_source_and_environment_tampering_rejected(self):
         release = self.prepared()
@@ -612,6 +817,9 @@ class Fixture(unittest.TestCase):
         with self.assertRaisesRegex(remote.ReleaseError, "fresh_operator_permit_required"):
             self.engine.execute(dict(self.data, action="switch"))
         self.assertTrue(self.engine.override.exists())
+        self.assertIn("\nNoNewPrivileges=yes\nUMask=0077\n", self.engine.override.read_text())
+        self.assertIn("uvicorn server.main:app", self.engine.override.read_text())
+        self.assertIn(" --workers 1\n", self.engine.override.read_text())
         self.assertFalse(any("restart" in args for args, _ in self.commands))
         status = json.loads((self.engine.operations / "status.json").read_bytes())
         self.assertEqual(status["status"], "cancelled")
@@ -633,6 +841,8 @@ class Fixture(unittest.TestCase):
         result = self.engine.execute(dict(self.data, action="rollback"))
         self.assertIn(str(self.engine.releases / RECOVERY), self.engine.override.read_text())
         self.assertIn("uvicorn server.recovery:app", self.engine.override.read_text())
+        self.assertIn("\nNoNewPrivileges=yes\nUMask=0077\n", self.engine.override.read_text())
+        self.assertIn(" --workers 1\n", self.engine.override.read_text())
         self.assertFalse(result["production_verified"])
         self.assertEqual((self.engine.production / "data/chat.db").read_bytes(), before)
         with self.assertRaisesRegex(remote.ReleaseError, "rollback_already_completed"):

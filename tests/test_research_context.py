@@ -403,6 +403,8 @@ async def test_vibe_followup_gets_new_clock_without_rewriting_original_report(
         "quality": {"tool_calls": 9},
     }
     vibe._insert_vibe_plan("testuser", plan)
+    # Pure mocked legacy clock contract; the shipped execution gate stays closed.
+    monkeypatch.setattr(vibe, "require_vibe_execution", lambda: None)
     monkeypatch.setattr(vibe, "build_research_context", lambda **kwargs: new)
     monkeypatch.setattr(vibe, "_start_task", lambda *args, **kwargs: None)
     response = await client.post(

@@ -80,6 +80,7 @@ async def test_runner_restricts_tools_token_not_argv_and_emits_owned_calls(run_c
     ]
     argv = captured["argv"]
     token = captured["env"]["PRISM_CAPABILITY_TOKEN"]
+    assert captured["env"]["DISABLE_UPDATES"] == captured["env"]["DISABLE_AUTOUPDATER"] == "1"
     assert token not in json.dumps(argv)
     assert "unit-model-secret" not in json.dumps(argv)
     assert "UNRELATED_SECRET" not in captured["env"]

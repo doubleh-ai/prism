@@ -61,10 +61,13 @@ def assert_boundary(cmd, options):
         "TMP",
         "TEMP",
         "NO_COLOR",
+        "DISABLE_UPDATES",
+        "DISABLE_AUTOUPDATER",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
     }
     assert env["ANTHROPIC_AUTH_TOKEN"] == "synthetic-provider-key"
+    assert env["DISABLE_UPDATES"] == env["DISABLE_AUTOUPDATER"] == "1"
     assert env["ANTHROPIC_BASE_URL"] == "https://model.example/anthropic"
     assert "synthetic-provider-key" not in repr(cmd)
     directory = Path(options["cwd"])

@@ -144,41 +144,18 @@ def test_vibe_tool_failures_expose_classification_without_raw_provider_detail():
     assert activity["detail"] == activity["result"]
 
 
-async def test_vibe_draft_crud(client, auth_cookies):
-    created = await client.post(
-        "/api/vibe/plan",
-        cookies=auth_cookies,
-        json={
-            "prompt": "人形机器人执行器和减速器上游卡点",
-            "market": "A股",
-            "horizon": "position",
-            "risk_level": "defensive",
-            "research_depth": "focused",
-            "agent": False,
-        },
+async def test_vibe_new_draft_is_paused_without_creating_record(client, auth_cookies):
+    response = await client.post(
+        "/api/vibe/plan", cookies=auth_cookies, json={"prompt": "历史之外的新题目", "agent": False}
     )
-    assert created.status_code == 200
-    plan = created.json()["plan"]
-    assert plan["id"]
-    assert plan["status"] == "draft"
-    assert plan["agent_status"] == "not_started"
-    assert plan["risk_label"] == "防守"
-
-    listed = await client.get("/api/vibe/plans", cookies=auth_cookies)
-    assert listed.status_code == 200
-    assert any(item["id"] == plan["id"] for item in listed.json()["plans"])
-
-    fetched = await client.get(f"/api/vibe/plans/{plan['id']}", cookies=auth_cookies)
-    assert fetched.status_code == 200
-    assert fetched.json()["plan"]["id"] == plan["id"]
-
-    deleted = await client.delete(f"/api/vibe/plans/{plan['id']}", cookies=auth_cookies)
-    assert deleted.status_code == 200
-    missing = await client.get(f"/api/vibe/plans/{plan['id']}", cookies=auth_cookies)
-    assert missing.status_code == 404
+    assert response.status_code == 503
+    assert (await client.get("/api/vibe/plans", cookies=auth_cookies)).json()["plans"] == []
 
 
 async def test_official_vibe_run_persists_tools_report_and_followup(client, auth_cookies, monkeypatch):
+    # Exercise the legacy protocol only with explicit in-process fake engines.
+    # Default release-policy rejection is covered separately without this stub.
+    monkeypatch.setattr("server.vibe.require_vibe_execution", lambda: None)
     state = {"attempt": 0, "terminal": set()}
 
     async def fake_create(title, config=None):
@@ -222,14 +199,10 @@ async def test_official_vibe_run_persists_tools_report_and_followup(client, auth
         state["terminal"].add(attempt)
         yield "attempt.completed", {"summary": "done"}, "e7"
 
-    async def fake_delete(session_id):
-        return None
-
     monkeypatch.setattr("server.vibe.engine_create_session", fake_create)
     monkeypatch.setattr("server.vibe.engine_send_message", fake_send)
     monkeypatch.setattr("server.vibe.engine_get_messages", fake_messages)
     monkeypatch.setattr("server.vibe.engine_events", fake_events)
-    monkeypatch.setattr("server.vibe.engine_delete_session", fake_delete)
 
     created = await client.post(
         "/api/vibe/plan",
@@ -280,6 +253,8 @@ async def test_official_vibe_run_persists_tools_report_and_followup(client, auth
 
 
 async def test_official_engine_failure_never_returns_rule_candidates(client, auth_cookies, monkeypatch):
+    monkeypatch.setattr("server.vibe.require_vibe_execution", lambda: None)
+
     async def fail_create(title, config=None):
         raise RuntimeError("sidecar offline")
 

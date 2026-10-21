@@ -74,7 +74,7 @@
         {view:'industry',mark:'◇',title:'产业与证据',text:'梳理关系，区分已知事实与研究假设。'},
         {view:'reports',mark:'▤',title:'研究与研报',text:'继续已有研究，追溯来源与调用记录。'}
       ];
-      var availability = this._capabilityError ? '<button class="workbench-inline-retry" data-workbench-retry="capabilities">'+esc(this._capabilityError)+'</button>' : '<span>'+(this._capabilitiesLoaded ? this._capabilities.length+' 项平台能力可供 Agent 按需调用' : '正在读取实际可用的平台能力…')+'</span>';
+      var availability = this._capabilityError ? '<button class="workbench-inline-retry" data-workbench-retry="capabilities">'+esc(this._capabilityError)+'</button>' : '<span>'+(this._capabilitiesLoaded ? this._capabilities.length+' 项平台能力与历史入口' : '正在读取平台能力与历史入口…')+'</span>';
       list.innerHTML = '<div class="workbench-welcome"><div class="workbench-kicker">YOUR RESEARCH WORKSPACE</div><h2>从一个问题开始，<br>把研究过程连起来。</h2><p>在对话里明确目标。查看真实能力调用、结果与来源，<br class="desktop-only">也可以进入对应工作区继续探索。</p><div class="workbench-welcome-status"><i></i>'+availability+'</div><div class="workbench-entry-grid">'+cards.map(function(card){return '<button data-capability-view="'+card.view+'"><span class="workbench-entry-mark">'+card.mark+'</span><h3>'+card.title+'</h3><p>'+card.text+'</p><small>打开工作区 <span>↗</span></small></button>';}).join('')+'</div><div class="workbench-prompts"><span>试着从这里开始</span><button data-research-run="">查看我的研究与证据 ↗</button><button data-draft-question="请先查询可用的平台能力，再帮我建立一份区分事实、推断与假设的研究计划。">建立研究计划 ↗</button><button data-draft-question="请列出我已有的研究报告，说明研究时点、来源与仍待核验的问题。">梳理已有研报 ↗</button></div><div class="workbench-evidence-principle">采集成功不等于事实已核验 · 数据时点未知时明确标注</div></div>';
     },
     _draftResearchQuestion: function(text) {
@@ -147,12 +147,12 @@
         else if (!this._workbenchCalls.length) html += '<div class="workbench-empty">这里还没有对话产生的能力调用。<br>已有的手动任务与报告仍保留在各自工作区。</div>';
         else html += '<div class="workbench-call-list">'+this._workbenchCalls.slice().reverse().map(this._renderPlatformCallHTML.bind(this)).join('')+'</div>';
       } else {
-        html = '<p class="workbench-panel-intro">这里列出后端实际提供给 Agent 的平台能力。请在对话中说明目标；打开工作区仅导航，不会自动启动研究。</p>';
+        html = '<p class="workbench-panel-intro">这里列出平台能力与历史入口；暂停执行的能力会明确标注。请在对话中说明目标；打开工作区仅导航，不会自动启动研究。</p>';
         if (this._capabilityError) html += '<div class="workbench-empty">'+esc(this._capabilityError)+'<button data-workbench-retry="capabilities">重新加载</button></div>';
         else if (!this._capabilities.length) html += '<div class="workbench-empty">尚未读取到可用能力，请稍后重试。<button data-workbench-retry="capabilities">重新加载</button></div>';
         else html += '<div class="workbench-capability-grid">'+this._capabilities.map(function(capability) {
           var view = this._capabilityView(capability);
-          return '<article><span class="capability-kind">'+(capability.read_only===false?'会创建任务':'查询与读取')+'</span><h3>'+esc(capability.label || capability.id)+'</h3><p>'+esc(capability.description || '')+'</p>'+(view?'<button data-capability-view="'+escAttr(view)+'">打开'+esc(viewLabels[view])+' ↗</button>':'')+'</article>';
+          return '<article><span class="capability-kind">'+(capability.available===false?'执行暂停':capability.read_only===false?'会创建任务':'查询与读取')+'</span><h3>'+esc(capability.label || capability.id)+'</h3><p>'+esc(capability.description || '')+'</p>'+(view?'<button data-capability-view="'+escAttr(view)+'">打开'+esc(viewLabels[view])+' ↗</button>':'')+'</article>';
         },this).join('')+'</div>';
       }
       document.getElementById('workbenchDialogBody').innerHTML = html;

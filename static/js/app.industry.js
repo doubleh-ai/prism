@@ -308,7 +308,7 @@ Object.assign(App, {
       ["watchlist", "自选", totals.watchlist || 0]
     ];
     return '<section class="industry-context-strip">' +
-      '<div class="industry-context-copy"><span>实时数据层</span><strong>' + esc(String(summary.linked_tickers || 0)) + ' 个标的已归链</strong><em>预置关系为待核验背景</em></div>' +
+      '<div class="industry-context-copy"><span>研究记录覆盖</span><strong>' + esc(String(summary.linked_tickers || 0)) + ' 个标的已归链</strong><em>预置关系为待核验背景</em></div>' +
       '<div class="industry-context-sources">' + sources.map(function(source) {
         return '<span data-source="' + source[0] + '"><i></i><b>' + esc(source[1]) + '</b><em>' + esc(String(source[2])) + '</em></span>';
       }).join("") + '</div>' +
