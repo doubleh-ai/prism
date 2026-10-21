@@ -2,6 +2,10 @@
 
 Follow the human's current authorization and these repository safety defaults. Carry routine development, isolated validation and draft-PR work through to a reviewable result without asking for approval at every step.
 
+## This limited recovery branch
+
+`server.recovery:app` is the only permitted recovery service entrypoint. Its API mutation boundary is unconditional; only POST login/logout are allowed. Do not substitute `server.main:app`, which is retained solely for complete historical baseline regression tests. Do not re-enable shared report files, external CLI history, model starts or background task recovery. Preserve owner-scoped database history, additive schema and retired-user protection. The version is `v0.19.8-recovery`, not a full research rollback. Bind the exact candidate commit and entrypoint in the external reviewed release executor and validate against an isolated copy of the current database before production use. Offline tests alone are not Linux or production acceptance.
+
 ## Current delivery capability
 
 This repository currently provides CI, candidate packaging/verification and a read-only operations console. It does **not** have a production deployment or rollback executor. A successful CI run, candidate artifact, `/health/ready` response, environment label or local `.deploy-revision` alone is not evidence of a production release.

@@ -57,6 +57,7 @@ from .database import (
     delete_user_account,
     get_db,
     init_db,
+    is_username_retired,
     list_users,
     record_activity,
     set_user_disabled,
@@ -93,7 +94,16 @@ def ensure_configured_admin_user() -> None:
     admin_pass = os.environ.get("ADMIN_PASS", "")
     if not admin_user or not admin_pass or user_exists(admin_user):
         return
-    create_user(admin_user, hash_password(admin_pass))
+    if is_username_retired(admin_user):
+        log.warning("Configured admin account is retired; automatic recreation is disabled")
+        return
+    try:
+        create_user(admin_user, hash_password(admin_pass))
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        log.warning("Configured admin creation restricted; no existing account was replaced")
+        return
     log.info("Configured admin user created: %s", admin_user)
 
 

@@ -74,6 +74,19 @@ def built(source, tmp_path):
     return repo, commit, Path(result["archive"]), Path(result["manifest"])
 
 
+def test_recovery_entry_and_exact_lock_are_in_candidate(source, tmp_path):
+    repo, _ = source
+    write(repo, "server/recovery.py", b"# fixed recovery entry\n")
+    lock = b"fixture==1.0 --hash=sha256:" + b"a" * 64 + b"\n"
+    write(repo, "requirements.lock", lock)
+    commit = commit_all(repo)
+    result = candidate.build_candidate(repo, commit, tmp_path / "recovery-candidate")
+    manifest = json.loads(Path(result["manifest"]).read_text())
+    files = {item["path"]: item for item in manifest["files"]}
+    assert files["requirements.lock"]["sha256"] == hashlib.sha256(lock).hexdigest()
+    assert files["server/recovery.py"]["sha256"] == hashlib.sha256(b"# fixed recovery entry\n").hexdigest()
+
+
 def entries(path):
     with tarfile.open(path, "r:gz") as archive:
         return [(member, archive.extractfile(member).read()) for member in archive.getmembers()]
