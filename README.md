@@ -9,7 +9,17 @@
 > AI-powered investment research platform for the Chinese A-share market.
 > Multi-agent analysis, live market data, industry graph — all in one self-hosted app.
 
-Prism combines **7-agent LangGraph debate pipelines**, **real-time market data** (quotes, K-line, fundamentals), **industry chain knowledge graphs**, and **technical indicators** into a clean, fast, single-user web application.
+Prism combines **7-agent LangGraph debate pipelines**, **market data** (quotes, K-line, fundamentals), **industry chain knowledge graphs**, and **technical indicators** in an authenticated research workspace with per-user records.
+
+## Research Workbench（开发中）
+
+研究对话是统一入口，行情、个股分析、深度研究、产业关系、指标、全市场选股和网页研报仍有独立工作区。顶部“平台能力”展示后端实际提供的工具；Agent 的真实调用会在回复中形成结果卡，并保存到会话和对应工作区的“调用记录”。点击卡片打开已有记录，可以返回原会话继续讨论；打开后台任务不会重新启动一份研究。网页是主要研报阅读方式，已有导出功能仍可选用。
+
+新会话默认使用仓库内置的 `prism-research` 研究方法，不要求本机安装外部 `bottleneck-hunter` 技能。既有会话保留原技能；技能缺失时会明确提示回退到内置方法。内置方法并不替代真实模型、Claude CLI、行情提供方、Astock 或 Vibe 引擎；相应依赖不可用时，能力会返回失败记录，不以示例结果替代。
+
+每轮研究保存实际请求时间、`Asia/Shanghai` 时区和 `run_id`。界面将**研究截至**、来源**发布时间**、**采集时间**与行情本身的数据时间分开展示；未知时间不会用当前时间补造。来源“已采集”仅说明工具成功取得内容，不代表事实已经核验；外部网页、平台数据和历史研究分别标注。旧记录没有可靠时间或来源信息时保留“未提供 / 待核验”，产业关系也不能仅凭连接数或种子数据认定为真实供货或瓶颈。
+
+能力目录及历史接口见 [API Reference](docs/API.md#platform-capabilities-and-call-history)。
 
 ---
 
@@ -73,8 +83,18 @@ ADMIN_USER=admin ADMIN_PASS=your-password bash install.sh
 | `LLM_API_KEY` | Legacy fallback (used if per‑provider keys are unset) |
 | `STOCK_DATA_DIR` | Data directory (default: `./data`) |
 | `RATE_CHAT_PER_MIN` | Chat rate limit (default: 20) |
+| `PRISM_INTERNAL_API_URL` | Agent 工具桥访问同一 Prism 服务的内部地址，默认 `http://127.0.0.1:8088`；必须为带端口的数字回环 HTTP 地址 |
 
 Full list in `.env.example`.
+
+Agent 工具桥通过回环地址调用本实例，并按本轮用户、会话和能力范围执行校验。默认端口为 `8088`；若实际服务使用其他端口，必须同时配置 `PRISM_INTERNAL_API_URL`。例如本地服务使用 `9000`：
+
+```bash
+PRISM_INTERNAL_API_URL=http://127.0.0.1:9000 \
+  .venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 9000
+```
+
+systemd 部署时，将相同配置放入该服务的环境配置。此地址不是公网域名、反向代理入口或 Vibe sidecar 地址；不接受外部主机或重定向。短期调用认证由服务生成，无需在浏览器或仓库中放置认证值。
 
 ---
 

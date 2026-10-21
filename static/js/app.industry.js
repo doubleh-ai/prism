@@ -277,7 +277,7 @@ Object.assign(App, {
       '<section class="industry-kpis">' +
         this._industryKpi("产业数", t.industry_count, "覆盖链路") +
         this._industryKpi("节点", t.node_count, "公司/环节") +
-        this._industryKpi("关系", t.edge_count, "上下游连接") +
+        this._industryKpi("背景连接", t.edge_count, "待核验，不代表已披露供货") +
         this._industryKpi("地区", t.country_count, "国家/区域") +
       '</section>' +
       '<section class="industry-grid">' +
@@ -306,7 +306,7 @@ Object.assign(App, {
       ["watchlist", "自选", totals.watchlist || 0]
     ];
     return '<section class="industry-context-strip">' +
-      '<div class="industry-context-copy"><span>实时数据层</span><strong>' + esc(String(summary.linked_tickers || 0)) + ' 个标的已归链</strong><em>结构关系保持证据校验</em></div>' +
+      '<div class="industry-context-copy"><span>实时数据层</span><strong>' + esc(String(summary.linked_tickers || 0)) + ' 个标的已归链</strong><em>预置关系为待核验背景</em></div>' +
       '<div class="industry-context-sources">' + sources.map(function(source) {
         return '<span data-source="' + source[0] + '"><i></i><b>' + esc(source[1]) + '</b><em>' + esc(String(source[2])) + '</em></span>';
       }).join("") + '</div>' +
@@ -493,7 +493,7 @@ Object.assign(App, {
       '</section>' +
       '<section class="industry-kpis compact">' +
         this._industryKpi("节点", nodes.length, "链路环节") +
-        this._industryKpi("关系", edges.length, "供应/客户") +
+        this._industryKpi("关系", edges.length, "背景连接 · 待核验") +
         this._industryKpi("地区", Object.keys(countrySet).length, "区域分布") +
         this._industryKpi("标的", Object.keys(tickerSet).length, "可联动行情") +
       '</section>' +
@@ -504,7 +504,7 @@ Object.assign(App, {
           '<svg class="industry-stage-edges" id="industryStageEdges"></svg>' +
         '</div></div>' +
         '<aside class="industry-chain-aside">' +
-          '<div class="industry-section"><div class="industry-section-hd"><h3>瓶颈雷达</h3><span>连接度</span></div>' + this._renderIndustryBottlenecks(nodes, edges) + '</div>' +
+          '<div class="industry-section"><div class="industry-section-hd"><h3>连接度观察</h3><span>不代表供给瓶颈</span></div>' + this._renderIndustryBottlenecks(nodes, edges) + '</div>' +
           '<div class="industry-section"><div class="industry-section-hd"><h3>区域露出</h3><span>' + esc(String(Object.keys(countrySet).length)) + ' 地区</span></div><div id="industryMiniMap" class="industry-mini-map"></div></div>' +
         '</aside>' +
       '</section>';
@@ -680,11 +680,12 @@ Object.assign(App, {
       '</div>' +
       (n.description ? '<p class="industry-drawer-desc">' + esc(n.description) + '</p>' : '') +
       '<div class="industry-drawer-metrics">' +
-        '<span><b>' + esc(share || "-") + '</b><em>市占率</em></span>' +
-        '<span><b>' + esc(conf || "-") + '</b><em>置信度</em></span>' +
+        '<span><b>' + esc(share || "待核验") + '</b><em>市占率</em></span>' +
+        '<span><b>' + esc(conf || "未核验") + '</b><em>证据状态</em></span>' +
         '<span><b>' + esc(String(upstream.length)) + '</b><em>上游</em></span>' +
         '<span><b>' + esc(String(downstream.length)) + '</b><em>下游</em></span>' +
       '</div>' +
+      '<p class="industry-drawer-desc">背景结构与历史研究均需核对原始披露；连线不等于已确认供货关系。</p>' +
       this._renderIndustryDrawerContext(live) +
       this._drawerList("上游连接", upstream) +
       this._drawerList("下游连接", downstream) +
@@ -709,7 +710,7 @@ Object.assign(App, {
     if (!arr || !arr.length) return "";
     return '<div class="industry-drawer-list"><h4>' + esc(title) + '</h4>' + arr.map(function(x) {
       return '<button data-node="' + escAttr(String(x.id)) + '" onclick="App._showIndustryNode(this.dataset.node)">' +
-        '<span>' + esc(x.name) + '</span><em>' + esc((x.relation || "") + (x.source_ticker ? " · " + x.source_ticker : "")) + '</em></button>';
+        '<span>' + esc(x.name) + '</span><em>' + esc((x.relation === "background_link" ? "背景关系 · 待核验" : (x.relation || "待核验")) + (x.source_ticker ? " · " + x.source_ticker : "")) + '</em></button>';
     }).join("") + '</div>';
   },
 

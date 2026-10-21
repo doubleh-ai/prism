@@ -48,6 +48,43 @@ var ChatRender = (function() {
     stringify: _s,
     clean: _clean,
 
+    formatTime: function(value) {
+      if (value === null || value === undefined || value === '') return '未提供';
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value);
+      var numeric = typeof value === 'number' || /^-?\d+(?:\.\d+)?$/.test(String(value));
+      var date;
+      if (numeric) {
+        var timestamp = Number(value);
+        if (!Number.isFinite(timestamp)) return '未提供';
+        date = new Date(Math.abs(timestamp) < 1e11 ? timestamp * 1000 : timestamp);
+      }
+      // Do not silently interpret an unzoned historical timestamp as local time.
+      else if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(value))) return _clean(value) + '（时区未标注）';
+      else date = new Date(value);
+      if (!Number.isFinite(date.getTime())) return '未提供';
+      return new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(date) + ' 北京时间';
+    },
+
+    collectRefs: function(refs, chunks) {
+      var result = [], positions = Object.create(null);
+      (refs || []).concat((chunks || []).filter(function(c) { return c && c.t === 'ref'; })).forEach(function(ref) {
+        if (!ref || typeof ref !== 'object') return;
+        var key = [ref.run_id || '', ref.source_kind || '', ref.url || ref.title || ''].join('|');
+        if (!ref.url && !ref.title) return;
+        if (positions[key] !== undefined) {
+          var existing = result[positions[key]];
+          Object.keys(ref).forEach(function(k) { if (ref[k] !== null && ref[k] !== undefined && ref[k] !== '') existing[k] = ref[k]; });
+        } else { positions[key] = result.length; result.push(Object.assign({}, ref, {t:'ref'})); }
+      });
+      return result;
+    },
+
+    renderResearch: function(context) {
+      if (!context || typeof context !== 'object') return '';
+      return '<div class="research-context"><span>本轮研究截至 <strong>' + esc(this.formatTime(context.as_of)) + '</strong></span>' +
+        '<span>来源数据截至 <strong>以各来源标注为准；未提供则未知</strong></span></div>';
+    },
+
     renderContent: function(input) {
       input = _s(input); if (!input) return '';
       return _md(_clean(input));
@@ -63,9 +100,19 @@ var ChatRender = (function() {
       if (t === 'tool')  return '<div class="cr-tool"><details class="cr-tool-det"><summary><b>'+esc(v)+'</b></summary><pre class="cr-tool-body">'+esc(_clean(_s(c.d)))+'</pre></details></div>';
       if (t === 'ask') {
         var opts = Array.isArray(c.opts) ? c.opts : _s(c.opts).split('\n').filter(Boolean);
-        return '<div class="ask-card"><div class="ask-q">'+esc(_s(c.q))+'</div><div class="ask-opts">'+opts.map(function(o){return '<button class="ask-opt" onclick="App.answerAsk(\''+escAttr(_s(o))+'\')">'+esc(_s(o))+'</button>';}).join('')+'</div></div>';
+        return '<div class="ask-card"><div class="ask-q">'+esc(_s(c.q))+'</div><div class="ask-opts">'+opts.map(function(o){var value=esc(_s(o)).replace(/"/g,'&quot;').replace(/'/g,'&#39;');return '<button class="ask-opt" data-ask-answer="'+value+'">'+esc(_s(o))+'</button>';}).join('')+'</div></div>';
       }
-      if (t === 'ref')   return '<div class="ref-item"><span class="ref-idx"></span><div><a class="ref-link" href="'+escAttr(safeUrl(c.url)||'#')+'" target="_blank" rel="noopener">'+esc(_s(c.title||c.url))+'</a>'+(c.snippet?'<div class="ref-snippet">'+esc(_s(c.snippet))+'</div>':'')+'</div></div>';
+      if (t === 'research') return '';
+      if (t === 'ref') {
+        var kind = c.source_kind === 'external_web' ? '外部网页' : c.source_kind === 'historical_research' ? '历史研究' : (c.source_kind && c.source_kind.indexOf('platform') === 0) ? '平台数据' : '来源归属未标注';
+        var status = c.evidence_status === 'retrieved' ? '已采集 · 未核验' : '待核验';
+        var url = safeUrl(_s(c.url));
+        var title = esc(_s(c.title || c.url || '未命名来源'));
+        return '<div class="ref-item"><span class="ref-idx"></span><div class="ref-body"><div class="ref-meta"><span>'+esc(kind)+'</span><span>'+status+'</span></div>' +
+          (url ? '<a class="ref-link" href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">'+title+' ↗</a>' : '<span class="ref-link">'+title+'</span>') +
+          (c.snippet?'<div class="ref-snippet">'+esc(_s(c.snippet))+'</div>':'') +
+          '<div class="ref-time">发布：'+esc(this.formatTime(c.published_at))+'<br>采集：'+esc(this.formatTime(c.retrieved_at))+'</div></div></div>';
+      }
       return _md(v);
     },
 

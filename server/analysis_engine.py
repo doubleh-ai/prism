@@ -1,8 +1,8 @@
 """Astock analysis engine — wraps TradingAgentsGraph with async SSE streaming.
 
 Each analysis runs in a thread-pool executor.  LangGraph stream events are
-pushed into an asyncio.Queue so the SSE endpoint can consume them without
-polling or blocking the event loop.
+retained in a run event log so independent SSE readers can replay progress
+without consuming each other's events or blocking the event loop.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import uuid
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 
 from .config import (
     ASTOCK_CACHE_TTL_SECONDS,
@@ -34,6 +34,7 @@ from .config import (
     ASTOCK_RESULTS_DIR,
 )
 from .database import get_db
+from .research_context import build_research_context
 
 log = logging.getLogger("prism.analysis")
 
@@ -68,6 +69,83 @@ def _selected_analysts(mode: str) -> list[str]:
 
 def _cache_key_user(username: str) -> str:
     return username or "__anonymous__"
+
+
+def _persist_analysis(entry: dict) -> None:
+    """Keep owned task results available after the browser or process exits."""
+    if not entry.get("username"):
+        return
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO analysis_runs
+               (id,username,ticker,name,mode,trade_date,status,report_json,signal,error,started_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET status=excluded.status,
+                 report_json=excluded.report_json,signal=excluded.signal,error=excluded.error,
+                 updated_at=excluded.updated_at""",
+            [
+                entry["id"],
+                entry["username"],
+                entry["ticker"],
+                entry.get("name", ""),
+                entry["mode"],
+                entry["trade_date"],
+                entry["status"],
+                json.dumps(entry.get("report"), ensure_ascii=False),
+                str(entry.get("signal") or ""),
+                str(entry.get("error") or ""),
+                entry["started_at"],
+                int(time.time()),
+            ],
+        )
+
+
+def get_analysis_record(analysis_id: str, username: str) -> dict | None:
+    entry = _store.get(analysis_id)
+    if entry:
+        if entry.get("username") != username:
+            return None
+        return {
+            key: entry.get(key)
+            for key in (
+                "id",
+                "ticker",
+                "name",
+                "mode",
+                "trade_date",
+                "status",
+                "report",
+                "signal",
+                "error",
+                "research",
+                "started_at",
+                "timings",
+                "cached",
+                "elapsed",
+            )
+        }
+    with get_db() as db:
+        row = db.execute(
+            "SELECT * FROM analysis_runs WHERE id=? AND username=?", [analysis_id, username]
+        ).fetchone()
+    if not row:
+        return None
+    record = dict(row)
+    record.pop("username", None)
+    try:
+        record["report"] = json.loads(record.pop("report_json") or "null")
+    except (ValueError, TypeError):
+        record["report"] = None
+        record["status"] = "error"
+        record["error"] = "研究记录暂时无法读取"
+    meta = (record.get("report") or {}).get("_analysis_meta") or {}
+    record["research"] = meta.get("research")
+    record["timings"] = meta.get("timings") or {}
+    record["elapsed"] = record["timings"].get("total_seconds")
+    if record["status"] in {"starting", "running"}:
+        record["status"] = "interrupted"
+        record["error"] = "原研究进程已结束，保留已有内容；未自动重新启动。"
+    return record
 
 
 def _load_cached_analysis(username: str, ticker: str, trade_date: str, mode: str) -> dict | None:
@@ -268,10 +346,12 @@ async def start_analysis(
     """
     ticker = (ticker or "").strip().upper()
     mode = _normalize_mode(mode)
-    trade_date = date or time.strftime("%Y-%m-%d")
+    research = build_research_context(engine="astock")
+    # The requested research date is not necessarily an exchange trading day.
+    trade_date = date or research["date"]
     selected_analysts = _selected_analysts(mode)
     aid = uuid.uuid4().hex[:12]
-    queue: asyncio.Queue = asyncio.Queue()
+    events: list[dict] = []
     _store[aid] = {
         "id": aid,
         "ticker": ticker,
@@ -283,12 +363,14 @@ async def start_analysis(
         "cached": False,
         "timings": {},
         "status": "starting",
-        "queue": queue,
+        "events": events,
         "report": None,
         "signal": None,
         "error": None,
         "started_at": time.time(),
+        "research": research,
     }
+    _persist_analysis(_store[aid])
 
     cached = None if force_refresh else _load_cached_analysis(username, ticker, trade_date, mode)
     if cached:
@@ -302,6 +384,7 @@ async def start_analysis(
                 "selected_analysts": selected_analysts,
                 "cache_updated_at": cached.get("updated_at"),
                 "timings": cached.get("timings") or {},
+                "request_context": research,
             }
         )
         _store[aid].update(
@@ -314,11 +397,12 @@ async def start_analysis(
                 "elapsed": cached.get("elapsed") or 0,
             }
         )
-        queue.put_nowait(
+        _persist_analysis(_store[aid])
+        events.append(
             {"type": "status", "elapsed": 0, "message": "使用今日缓存报告，已跳过重复 Astock 分析。"}
         )
-        queue.put_nowait({"type": "stage", "elapsed": 0, "stage": "decision", "progress_pct": 100})
-        queue.put_nowait(
+        events.append({"type": "stage", "elapsed": 0, "stage": "decision", "progress_pct": 100})
+        events.append(
             {
                 "type": "done",
                 "elapsed": round(cached.get("elapsed") or 0, 1),
@@ -331,8 +415,14 @@ async def start_analysis(
         )
         return aid
 
-    _ensure_astock()
-    from tradingagents.graph.trading_graph import TradingAgentsGraph
+    try:
+        _ensure_astock()
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+    except Exception:
+        _store[aid].update(status="error", error="分析引擎不可用，请检查引擎配置")
+        _persist_analysis(_store[aid])
+        events.append({"type": "error", "message": _store[aid]["error"]})
+        return aid
 
     def _run():
         # Define _emit + stage maps FIRST so the except handler below can
@@ -345,8 +435,7 @@ async def start_analysis(
         start = time.time()
 
         def _emit(event_type: str, **kwargs):
-            with suppress(asyncio.QueueFull):
-                queue.put_nowait({"type": event_type, "elapsed": round(time.time() - start, 1), **kwargs})
+            events.append({"type": event_type, "elapsed": round(time.time() - start, 1), **kwargs})
 
         _STAGE_ORDER = ["analysts", "debate", "research", "trader", "risk", "decision"]
         _STAGE_PCT = {"analysts": 40, "debate": 55, "research": 65, "trader": 75, "risk": 90, "decision": 100}
@@ -383,6 +472,7 @@ async def start_analysis(
                 graph_kwargs["selected_analysts"] = selected_analysts
             ta = TradingAgentsGraph(**graph_kwargs)
             _store[aid]["status"] = "running"
+            _persist_analysis(_store[aid])
             if mode == "fast":
                 _emit("status", message="正在快速分析（行情 + 基本面，跳过舆情/新闻/政策等慢节点）…")
             else:
@@ -435,20 +525,24 @@ async def start_analysis(
                 "trade_date": trade_date,
                 "selected_analysts": selected_analysts,
                 "timings": timings,
+                "research": research,
+                "data_as_of": None,
+                "evidence_status": "unverified_engine_report",
             }
             _store[aid]["report"] = report
             _store[aid]["signal"] = signal
             _store[aid]["timings"] = timings
             _store[aid]["elapsed"] = timings["total_seconds"]
-            _store[aid]["status"] = "done"
+            _store[aid]["status"] = "running"
+            _persist_analysis(_store[aid])
             _save_cached_analysis(
                 username, ticker, trade_date, mode, name, signal, report, timings, timings["total_seconds"]
             )
-            _emit("done", report=report, signal=signal, mode=mode, cached=False, timings=timings)
+            _emit("report", report=report, signal=signal, mode=mode, cached=False, timings=timings)
 
             # Post-analysis structured extraction (dashboard upgrade). Emits a
-            # separate "structured" event so the UI can render the plain report
-            # fast, then fill in the dashboard. Failure is non-fatal.
+            # separate non-terminal event. Only emit done after the optional
+            # extraction, otherwise the SSE consumer drops the dashboard.
             try:
                 structured = _extract_structured(report, ticker, name)
                 if structured:
@@ -467,10 +561,14 @@ async def start_analysis(
                     _emit("structured", structured=structured)
             except Exception as exc:
                 log.warning("structured extraction failed: %s", exc)
+            _store[aid]["status"] = "done"
+            _persist_analysis(_store[aid])
+            _emit("done", report=report, signal=signal, mode=mode, cached=False, timings=timings)
         except Exception as exc:
             log.exception("Analysis %s failed: %s", aid, exc)
             _store[aid]["status"] = "error"
             _store[aid]["error"] = str(exc)
+            _persist_analysis(_store[aid])
             _emit("error", message=str(exc))
         finally:
             if ta is not None:
@@ -507,19 +605,44 @@ async def stream_events(analysis_id: str):
         yield _sse({"type": "error", "message": "分析不存在"})
         return
 
-    queue: asyncio.Queue = entry["queue"]
+    # Each subscriber owns a cursor. Reconnecting or opening a second tab
+    # must not consume events needed by another reader.
+    events = entry.get("events", [])
+    cursor = 0
     started = entry.get("started_at") or time.time()
     last_activity = time.time()
     warned_slow = False
     SLOW_IDLE = 60  # no real event for 60s → tell user it's slow
-    HARD_TIMEOUT = 15 * 60  # 15 min total with no done/error → abort
-
     HARD_TIMEOUT = max(60, ASTOCK_HARD_TIMEOUT_SECONDS)
 
     while True:
-        try:
-            event = await asyncio.wait_for(queue.get(), timeout=0.5)
-        except TimeoutError:
+        if cursor < len(events):
+            event = events[cursor]
+            cursor += 1
+            last_activity = time.time()
+            warned_slow = False
+            yield _sse(event)
+            if event["type"] in ("done", "error"):
+                return
+            continue
+        if entry["status"] == "done":
+            yield _sse(
+                {
+                    "type": "done",
+                    "report": entry.get("report"),
+                    "signal": entry.get("signal"),
+                    "mode": entry.get("mode"),
+                    "timings": entry.get("timings") or {},
+                    "elapsed": entry.get("elapsed"),
+                    "cached": entry.get("cached", False),
+                }
+            )
+            return
+        if entry["status"] == "error":
+            yield _sse({"type": "error", "message": entry.get("error") or "研究未完成"})
+            return
+        await asyncio.sleep(0.5)
+        if cursor == len(events) and entry["status"] not in {"done", "error"}:
             now = time.time()
             # Warn once when data fetching stalls (typical when mootdx/eastmoney
             # are blocked — each call burns its full timeout before failing).
@@ -528,28 +651,18 @@ async def stream_events(analysis_id: str):
                 yield _sse({"type": "slow", "message": "数据源响应较慢，仍在拉取中…（行情接口偶有阻塞）"})
             # Hard ceiling so a hung run can't spin forever silently.
             if now - started > HARD_TIMEOUT:
-                entry["status"] = "error"
-                entry["error"] = f"analysis timeout after {HARD_TIMEOUT}s"
                 timeout_min = max(1, round(HARD_TIMEOUT / 60))
                 yield _sse(
                     {
                         "type": "error",
-                        "message": f"分析超时（{timeout_min} 分钟无进展）已中止。"
-                        "通常因行情数据源（mootdx/eastmoney）网络不通，"
-                        "请检查服务器出口或更换数据源。",
+                        "message": f"分析已超过 {timeout_min} 分钟，停止等待结果。"
+                        "后台任务可能仍在运行，请先查看记录，避免重复启动。",
                     }
                 )
                 break
             # Heartbeat keeps the SSE connection alive and lets the
             # frontend tick its elapsed timer every 0.5s.
             yield _sse({"type": "heartbeat"})
-            continue
-
-        last_activity = time.time()
-        warned_slow = False
-        yield _sse(event)
-        if event["type"] in ("done", "error"):
-            break
 
 
 def get_report(analysis_id: str) -> dict | None:
@@ -564,6 +677,7 @@ def get_report(analysis_id: str) -> dict | None:
         "mode": entry.get("mode", "deep"),
         "cached": bool(entry.get("cached")),
         "trade_date": entry.get("trade_date"),
+        "research": entry.get("research"),
         "selected_analysts": entry.get("selected_analysts") or [],
         "status": entry["status"],
         "signal": entry["signal"],
@@ -938,17 +1052,18 @@ def _extract_structured(report: dict, ticker: str, name: str) -> dict | None:
     schema = (
         "严格只输出JSON，schema："
         '{"signal":"买入|持有|卖出|观望",'
-        '"confidence":0到100的整数,'
+        '"confidence":null,'
         '"thesis":"1-2句核心论点",'
         '"metrics":{"valuation":"高|中|低|合理","growth":"高|中|低",'
-        '"risk_score":0到10的整数,"momentum":"强|中|弱"},'
+        '"risk_score":null,"momentum":"强|中|弱"},'
         '"trade":{"target_price":"文字","stop_loss":"文字","position":"文字",'
         '"horizon":"文字","rationale":"文字"},'
         '"analyst_digests":[{"agent":"market|social|news|fundamentals|policy|hot_money|lockup",'
         '"verdict":"多|空|中","bullets":["要点1","要点2"]}],'
         '"bull_bear":{"bull":"多方摘要","bear":"空方摘要","judge":"偏多|偏空|中性"},'
         '"verdict_summary":"最终结论摘要"}'
-        "只输出JSON，不要任何额外文字。"
+        "只提取原文明确给出的内容；未知字段为null，不能自行估算目标价、仓位或数字。"
+        "confidence与risk_score没有校准依据，必须为null。只输出JSON，不要任何额外文字。"
     )
     prompt = (
         "你是投研分析师。根据以下 astock 多智能体分析报告，提炼成结构化JSON仪表盘数据。\n"
@@ -983,6 +1098,15 @@ def _extract_structured(report: dict, ticker: str, name: str) -> dict | None:
     # Require at least a signal or thesis — otherwise treat as garbage.
     if not data.get("signal") and not data.get("thesis"):
         return None
+    # A model-produced percentage is not a calibrated confidence estimate.
+    data["confidence"] = None
+    if isinstance(data.get("metrics"), dict):
+        data["metrics"]["risk_score"] = None
+    if isinstance(data.get("trade"), dict):
+        for field in ("target_price", "stop_loss", "position", "horizon"):
+            value = data["trade"].get(field)
+            if value and (not isinstance(value, str) or value not in bundle):
+                data["trade"][field] = None
     return data
 
 

@@ -3,7 +3,7 @@ const fs = require('fs');
 const vm = require('vm');
 
 const markedModule = require('../static/lib/marked.min.js');
-const context = { App: {}, marked: markedModule.marked, console };
+const context = { App: {}, marked: markedModule.marked, console, URL };
 context.window = context;
 vm.createContext(context);
 vm.runInContext(fs.readFileSync('static/js/app.util.js', 'utf8'), context);

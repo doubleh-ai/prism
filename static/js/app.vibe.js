@@ -155,11 +155,11 @@ Object.assign(App, {
   _pollVibePlan: function(id) {
     var self = this;
     if (!id || this._vibePollTimers[id]) return;
-    var state = {tries:0, timer:null, busy:false};
+    var state = {tries:0, timer:null, busy:false, failures:0};
     this._vibePollTimers[id] = state;
     var schedule = function() {
       if (self._vibePollTimers[id] !== state) return;
-      var delay = document.hidden ? 10000 : (state.tries < 15 ? 2000 : 5000);
+      var delay = state.failures ? Math.min(30000, 2000 * Math.pow(2, Math.min(state.failures - 1, 4))) : document.hidden ? 10000 : (state.tries < 15 ? 2000 : 5000);
       state.timer = setTimeout(tick, delay);
     };
     var tick = async function() {
@@ -174,11 +174,16 @@ Object.assign(App, {
           return;
         }
         var plan = (await response.json()).plan;
+        state.failures = 0;
         self._upsertVibePlan(plan);
         if (self._activeVibePlanId === id) self._renderVibePlan(plan);
         self._renderVibeHistory();
         if (!self._vibeIsActive(plan) || state.tries > 500) self._stopVibePolling(id);
         else schedule();
+      } catch (error) {
+        state.failures += 1;
+        if (state.failures === 1 && self._toast) self._toast('研究进度连接中断，正在自动重试；后台任务不会重复启动');
+        schedule();
       } finally {
         state.busy = false;
       }
@@ -274,7 +279,7 @@ Object.assign(App, {
         '<div class="vibe-run-health-bar" aria-label="成功 ' + success + '，未命中 ' + degraded + '，接口异常 ' + errors + '"><i class="ok" style="width:' + successPct + '%"></i><i class="warn" style="width:' + degradedPct + '%"></i><i class="bad" style="width:' + errorPct + '%"></i></div>' +
         '<div class="vibe-run-health-legend"><span class="ok">有效 ' + success + '</span><span class="warn">未命中 ' + degraded + '</span><span class="bad">接口异常 ' + errors + '</span></div>' +
       '</div>' +
-      '<div class="vibe-run-evidence"><span>报告缺口 <b class="' + (quality.reported_gaps ? 'bad' : '') + '">' + Number(quality.reported_gaps || 0) + '</b></span><span>来源链接 <b>' + Number(quality.source_links || 0) + '</b></span></div>' +
+      '<div class="vibe-run-evidence"><span>报告缺口 <b class="' + (quality.reported_gaps ? 'bad' : '') + '">' + Number(quality.reported_gaps || 0) + '</b></span><span>报告链接（待核验） <b>' + Number(quality.source_links || 0) + '</b></span></div>' +
     '</section>';
   },
 
@@ -356,10 +361,12 @@ Object.assign(App, {
   },
 
   _vibeReportHtml: function(plan) {
-    var quality = plan.quality || {};
+    var quality = plan.report_quality || plan.quality || {};
     var warnings = quality.warnings || [];
     var followups = plan.followups || [];
-    return '<section class="vibe-report-quality"><div><span>证据检查</span><b>' + esc(quality.grade || '待检查') + '</b></div>' +
+    var research = plan.report_research || (!(plan.followups || []).length ? plan.research : null);
+    return (research ? ChatRender.renderResearch(research) : '<div class="research-context">原始研报的研究时点未保留；来源数据截至未知。</div>') +
+      '<section class="vibe-report-quality"><div><span>来源边界</span><b>' + esc(quality.grade || '来源待核验') + '</b></div>' +
       '<p>' + (warnings.length ? warnings.map(function(item) { return esc(item); }).join(' · ') : '工具调用、正文来源与失败项已记录。') + '</p></section>' +
       '<article class="vibe-report-markdown">' + this._renderVibeMarkdown(plan.report_markdown || '') + '</article>' +
       this._vibeFollowupsHtml(followups) +
@@ -370,7 +377,7 @@ Object.assign(App, {
     if (!followups.length) return '';
     return '<section class="vibe-followups"><h3>上下文追问</h3>' + followups.map(function(item, index) {
       var answer = item.answer_markdown ? App._renderVibeMarkdown(item.answer_markdown) : '<div class="vibe-followup-wait">' + (item.status === 'failed' ? esc(item.error || '追问失败') : '正在研究这个追问...') + '</div>';
-      return '<div class="vibe-followup-turn"><div class="vibe-followup-q"><span>' + (index + 1) + '</span><b>' + esc(item.question || '') + '</b></div><div class="vibe-followup-a">' + answer + '</div></div>';
+      return '<div class="vibe-followup-turn"><div class="vibe-followup-q"><span>' + (index + 1) + '</span><b>' + esc(item.question || '') + '</b></div><div class="vibe-followup-a">' + ChatRender.renderResearch(item.research) + answer + '</div></div>';
     }).join('') + '</section>';
   },
 

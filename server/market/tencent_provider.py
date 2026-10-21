@@ -13,6 +13,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from .clock import market_timestamp
 from .models import Fundamentals, KLine, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
@@ -102,6 +103,8 @@ class TencentProvider:
             prev_close = float(f[4]) if f[4] else 0.0
             change = price - prev_close
             change_pct = (change / prev_close * 100.0) if prev_close else 0.0
+            retrieved_at = int(time.time())
+            data_timestamp = market_timestamp(f[30], "%Y%m%d%H%M%S") if len(f) > 30 else None
             return Quote(
                 ticker=ticker,
                 name=f[1] if len(f) > 1 else ticker,
@@ -114,7 +117,11 @@ class TencentProvider:
                 low=float(f[34]) if len(f) > 34 and f[34] else None,
                 open=float(f[5]) if len(f) > 5 and f[5] else None,
                 prev_close=prev_close,
-                timestamp=int(time.time()),
+                timestamp=data_timestamp or retrieved_at,
+                data_timestamp=data_timestamp,
+                retrieved_at=retrieved_at,
+                timestamp_kind="trade" if data_timestamp else "retrieved",
+                data_kind="quote",
                 source=self.name,
             )
         except (ValueError, IndexError) as e:
@@ -143,7 +150,9 @@ class TencentProvider:
         out: list[KLine] = []
         for b in bars:
             try:
-                ts = int(time.mktime(time.strptime(b["day"], "%Y-%m-%d")))
+                ts = market_timestamp(b["day"])
+                if ts is None:
+                    continue
                 out.append(
                     KLine(
                         timestamp=ts,

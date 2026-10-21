@@ -1,23 +1,26 @@
 <!DOCTYPE html>
 <html lang="zh-CN" class="light"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Prism · 登录</title>
-<link rel="stylesheet" href="/static/css/app.css?v=77">
+<link rel="stylesheet" href="/static/css/app.css?v=78">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%233b5d8a'/><stop offset='100%' stop-color='%236b95c8'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='%231c1a16'/><circle cx='16' cy='16' r='9' fill='none' stroke='url(%23g)' stroke-width='1.8'/><circle cx='16' cy='16' r='3.5' fill='url(%23g)' opacity='.9'/></svg>">
-</head><body>
+</head><body class="workbench-login">
 
 <div class="login-card">
-  <h1>Prism</h1>
-  <p>AI 投资分析 · 私人研究助手</p>
+  <div class="login-mark" aria-hidden="true">◈</div><span class="workbench-kicker">RESEARCH WORKSPACE</span><h1>Prism 研究工作台</h1>
+  <p>从问题出发，让每一步研究有据可查。</p>
   <form onsubmit="event.preventDefault(); doLogin()">
-    <input id="username" placeholder="用户名" autocomplete="username" required>
-    <input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <label for="username">账号</label><input id="username" placeholder="用户名" autocomplete="username" required>
+    <label for="password">密码</label><input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
     <div class="login-error" id="loginError"></div>
-    <button type="submit">登 录</button>
+    <button type="submit" id="loginSubmit">进入工作台 →</button>
   </form>
 </div>
 
 <script>
 async function doLogin() {
+  var submit = document.getElementById('loginSubmit');
+  if (submit.disabled) return false;
+  submit.disabled = true; submit.textContent = '正在登录…';
   var u = document.getElementById('username').value.trim();
   var p = document.getElementById('password').value;
   var err = document.getElementById('loginError');
@@ -33,9 +36,10 @@ async function doLogin() {
     else if (r.status === 429) { err.textContent = '请求过于频繁，请稍后再试'; }
     else { err.textContent = '登录失败 (' + r.status + ')'; }
   } catch(e) { err.textContent = '网络连接失败'; }
+  submit.disabled = false; submit.textContent = '进入工作台 →';
   err.style.display = 'block';
   return false;
 }
-document.getElementById('password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+
 </script>
 </body></html>

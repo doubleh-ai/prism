@@ -13,6 +13,12 @@ from .analysis_graph import persist_graph
 from .auth import require_auth
 from .config import DEFAULT_MODEL, MODELS, RATE_CHAT_PER_MIN
 from .database import check_rate_limit, get_db
+from .research_context import (
+    EvidenceTracker,
+    build_research_context,
+    extract_web_refs,
+    parse_claude_jsonl_events,
+)
 from .services.claude_runner import (
     _resolve_skill_dir,
     cancel_process,
@@ -121,34 +127,8 @@ def _cwd_to_project_dir(cwd: str) -> str:
 
 
 def _extract_refs_from_tool_result(content_text: str) -> list[dict]:
-    """Extract web references from tool_result content (WebSearch/WebFetch).
-
-    WebSearch results typically contain markdown links like:
-      1. [Title](https://url) - snippet
-    WebFetch returns a markdown page with the URL as context.
-    """
-    refs = []
-    # Match markdown links: [title](url)
-    url_pattern = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
-    seen_urls = set()
-    for match in url_pattern.finditer(content_text):
-        title = match.group(1).strip()
-        url = match.group(2).strip()
-        # Skip internal anchor links and non-web URLs
-        if not url.startswith(("http://", "https://")):
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        # Extract a snippet after the link (up to 120 chars)
-        after_pos = match.end()
-        snippet = content_text[after_pos : after_pos + 160].strip()
-        # Clean up snippet: remove leading dash/bullet
-        snippet = re.sub(r"^[\s\-•·–—]+", "", snippet)
-        if len(snippet) > 120:
-            snippet = snippet[:120] + "…"
-        refs.append({"url": url, "title": title, "snippet": snippet})
-    return refs
+    """Parse links; provenance is established separately by EvidenceTracker."""
+    return extract_web_refs(content_text)
 
 
 def _content_to_text(value) -> str:
@@ -180,124 +160,20 @@ def _content_to_text(value) -> str:
 
 
 async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
-    """Read Claude Code JSONL, merging consecutive assistant events into single turns.
-
-    Async (uses aiofiles) so it doesn't block the event loop when called
-    from inside the SSE generator in chat_stream.
-
-    Returns list of {role, content} dicts where content is JSON string with
-    {text, chunks, refs}. Also captures WebSearch/WebFetch tool results
-    as 'ref' chunks.
-    """
+    """Read historical turns asynchronously using the shared provenance parser."""
     import aiofiles
 
     jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
-
-    messages = []
-    collected_refs = []  # Accumulate refs across the conversation
-
+    events = []
     async with aiofiles.open(jsonl_path, encoding="utf-8") as f:
         async for line in f:
             try:
-                ev = json.loads(line)
+                events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            t = ev.get("type", "")
-
-            if t == "user":
-                msg = ev.get("message", "")
-                if isinstance(msg, dict):
-                    content_blocks = msg.get("content", "")
-                else:
-                    try:
-                        msg_dict = json.loads(str(msg).replace("'", '"'))
-                        content_blocks = msg_dict.get("content", str(msg))
-                    except Exception:
-                        content_blocks = str(msg)
-
-                # Check if this is a tool_result message
-                if isinstance(content_blocks, list):
-                    for block in content_blocks:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            result_content = block.get("content", "")
-                            if isinstance(result_content, list):
-                                result_text = ""
-                                for rc in result_content:
-                                    if isinstance(rc, dict) and rc.get("type") == "text":
-                                        result_text += rc.get("text", "")
-                                    elif isinstance(rc, str):
-                                        result_text += rc
-                            elif isinstance(result_content, str):
-                                result_text = result_content
-                            else:
-                                result_text = _content_to_text(result_content)
-                            # Extract URLs from WebSearch/WebFetch results
-                            refs = _extract_refs_from_tool_result(result_text)
-                            collected_refs.extend(refs)
-                            continue  # Skip tool_result — don't add as user message
-
-                content_str = _content_to_text(content_blocks)
-                if (
-                    content_str
-                    and not content_str.startswith("[{'type':")
-                    and not content_str.startswith("[{'tool_use_id':")
-                ):
-                    messages.append({"role": "user", "content": content_str})
-
-            elif t == "assistant":
-                blocks = ev.get("message", {}).get("content", [])
-                chunks = []
-                for b in blocks:
-                    bt = b.get("type", "")
-                    if bt == "text":
-                        text = _content_to_text(b.get("text", ""))
-                        if text:
-                            chunks.append({"t": "text", "c": text})
-                    elif bt == "tool_use":
-                        name = b.get("name", "?")
-                        inp = b.get("input", {})
-                        detail = _content_to_text(list(inp.values())[:1]) if inp else ""
-                        chunks.append({"t": "tool", "c": name, "d": detail})
-                    elif bt == "thinking":
-                        thought = _content_to_text(b.get("thinking", ""))
-                        if thought:
-                            chunks.append({"t": "think", "c": thought})
-
-                if not chunks:
-                    continue
-
-                # Merge consecutive assistant messages
-                if messages and messages[-1]["role"] == "assistant":
-                    prev = json.loads(messages[-1]["content"])
-                    prev["chunks"].extend(chunks)
-                    txts = [c["c"] for c in prev["chunks"] if c["t"] == "text"]
-                    prev["text"] = "".join(txts)
-                    messages[-1]["content"] = json.dumps(prev, ensure_ascii=False)
-                else:
-                    txts = [c["c"] for c in chunks if c["t"] == "text"]
-                    content = json.dumps({"text": "".join(txts), "chunks": chunks}, ensure_ascii=False)
-                    messages.append({"role": "assistant", "content": content})
-
-    # Attach collected references to the last assistant message
-    if collected_refs and messages:
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i]["role"] == "assistant":
-                prev = json.loads(messages[i]["content"])
-                for ref in collected_refs:
-                    prev.setdefault("chunks", []).append(
-                        {
-                            "t": "ref",
-                            "url": ref["url"],
-                            "title": ref["title"],
-                            "snippet": ref.get("snippet", ""),
-                        }
-                    )
-                messages[i]["content"] = json.dumps(prev, ensure_ascii=False)
-                break
-
-    return messages
+    return parse_claude_jsonl_events(events, session_id=session_id)
 
 
 async def chat_stream(request: Request):
@@ -327,36 +203,53 @@ async def chat_stream(request: Request):
     t0 = time.time()
     log.info(f"[{user}] Q({skill_name}): {question[:80]}...")
 
-    # Determine if we should resume a previous session
+    # Validate ownership before reading session history, writing, or starting an engine.
     resume_session_id = None
+    resume_project_dir = None
+    history_anchor = {"db_message_id": 0, "jsonl_user_turns": 0}
     if conv_id:
         with get_db() as db:
             row = db.execute(
-                "SELECT session_id, project_dir FROM conversations WHERE id=? AND username=?", [conv_id, user]
+                "SELECT session_id, project_dir FROM conversations "
+                "WHERE id=? AND username=? AND deleted_at IS NULL",
+                [conv_id, user],
             ).fetchone()
-            if row and row["session_id"]:
-                resume_session_id = row["session_id"]
-
-    # Save user message
-    if conv_id:
+            if not row:
+                return JSONResponse({"error": "对话不存在"}, status_code=404)
+            resume_session_id = row["session_id"] or None
+            resume_project_dir = row["project_dir"] or None
+            history_anchor["db_message_id"] = db.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conv_id=?", [conv_id]
+            ).fetchone()[0]
+        if resume_session_id and resume_project_dir:
+            history = await _read_jsonl_messages(resume_session_id, resume_project_dir)
+            history_anchor["jsonl_user_turns"] = sum(m["role"] == "user" for m in history)
         with get_db() as db:
+            # Re-check within the write transaction after the asynchronous history read.
+            if not db.execute(
+                "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+                [conv_id, user],
+            ).fetchone():
+                return JSONResponse({"error": "对话不存在"}, status_code=404)
             db.execute(
                 "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [conv_id, "user", question]
             )
             db.execute(
-                "UPDATE conversations SET title=? WHERE id=? AND title='新对话'", [question[:40], conv_id]
+                "UPDATE conversations SET title=? WHERE id=? AND username=? AND title='新对话'",
+                [question[:40], conv_id, user],
             )
+    research = build_research_context(engine="chat")
 
     async def generate():
         session_id = resume_session_id  # May be None for first message
-        project_dir = None
+        project_dir = resume_project_dir
 
         def _emit(event):
             """Emit JSON-safe SSE data without lossy object stringification."""
 
             def _json_safe(v):
                 if v is None:
-                    return ""
+                    return None
                 if isinstance(v, str):
                     return _content_to_text(v)
                 if isinstance(v, (int, float, bool)):
@@ -373,11 +266,14 @@ async def chat_stream(request: Request):
         full_text = ""
         step_num = 0
         collected_refs = []
-        seen_ref_urls = set()
+        evidence = EvidenceTracker(research["run_id"])
+        live_chunks = [{"t": "research", "research": research}]
+        platform_calls = {}
         stream_error = ""
         delivery_note = ""
         report_files_before = _skill_report_snapshot(skill_name)
 
+        yield _emit({"research": research})
         yield _emit({"pulse": "start"})
 
         async for ev in run_claude_stream(
@@ -388,6 +284,7 @@ async def chat_stream(request: Request):
             session_id=resume_session_id,
             conv_id=conv_id,
             extra_skills=extra_skills,
+            research_context=research,
         ):
             t = ev.get("type", "")
 
@@ -400,42 +297,35 @@ async def chat_stream(request: Request):
                     project_dir = _cwd_to_project_dir(cwd)
                     log.info(f"[{user}] session={session_id} project={project_dir}")
 
-            # tool_result events — capture WebSearch/WebFetch results as references
+            # Only a successful result associated with this turn's known call is a source.
             if t == "user":
                 msg = ev.get("message", {})
-                if isinstance(msg, dict):
-                    content = msg.get("content", [])
-                else:
-                    content = []
+                content = msg.get("content", []) if isinstance(msg, dict) else []
                 if isinstance(content, list):
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "tool_result":
-                            result_content = block.get("content", "")
-                            if isinstance(result_content, list):
-                                result_text = ""
-                                for rc in result_content:
-                                    if isinstance(rc, dict) and rc.get("type") == "text":
-                                        result_text += rc.get("text", "")
-                                    elif isinstance(rc, str):
-                                        result_text += rc
-                            elif isinstance(result_content, str):
-                                result_text = result_content
-                            else:
-                                result_text = _content_to_text(result_content)
-                            # Extract URLs and send as reference citations
-                            refs = _extract_refs_from_tool_result(result_text)
+                            refs = evidence.record_result(
+                                block, retrieved_at=build_research_context()["as_of"]
+                            )
                             for ref in refs:
-                                if ref["url"] not in seen_ref_urls:
-                                    seen_ref_urls.add(ref["url"])
-                                    collected_refs.append(ref)
-                                    yield _emit({"ref": ref})
+                                collected_refs.append(ref)
+                                live_chunks.append({"t": "ref", **ref})
+                                yield _emit({"ref": ref})
+
+            if t == "platform_call":
+                call = ev.get("call") or {}
+                if call.get("call_id") and call.get("run_id") == research["run_id"]:
+                    platform_calls[call["call_id"]] = call
+                    yield _emit({"platform_call": call})
 
             # tool_use event (top-level)
             if t == "tool_use":
                 tool = ev.get("tool", {})
+                evidence.record_call(tool)
                 name = tool.get("name", "?")
                 inp = tool.get("input", {})
                 step_num += 1
+                live_chunks.append({"t": "tool", "c": name, "d": _content_to_text(inp)})
                 if name == "AskUserQuestion":
                     yield _emit(
                         {
@@ -458,11 +348,14 @@ async def chat_stream(request: Request):
                         if not txt:
                             continue
                         full_text += txt
+                        live_chunks.append({"t": "text", "c": txt})
                         yield _emit({"text": txt})
                     elif bt == "tool_use":
+                        evidence.record_call(b)
                         step_num += 1
                         name = b.get("name", "?")
                         inp = b.get("input", {})
+                        live_chunks.append({"t": "tool", "c": name, "d": _content_to_text(inp)})
                         if name == "AskUserQuestion":
                             yield _emit(
                                 {
@@ -478,7 +371,14 @@ async def chat_stream(request: Request):
                     elif bt == "thinking":
                         thought = _content_to_text(b.get("thinking", ""))
                         if thought:
+                            live_chunks.append({"t": "think", "c": thought})
                             yield _emit({"think": thought})
+
+            elif t == "status":
+                message = _content_to_text(ev.get("message"))
+                if message:
+                    live_chunks.append({"t": "status", "c": message})
+                    yield _emit({"status": message})
 
             # Error from Claude
             elif t == "error":
@@ -499,6 +399,7 @@ async def chat_stream(request: Request):
                     if terminal_text:
                         addition = terminal_text if not full_text else "\n\n" + terminal_text
                         full_text += addition
+                        live_chunks.append({"t": "text", "c": addition})
                         yield _emit({"text": addition, "recovered": True})
 
             elif t == "heartbeat":
@@ -517,6 +418,7 @@ async def chat_stream(request: Request):
                     f"\n\n> **研究未完成**：{reason}。已保留研究过程，可在本对话中发送“继续完成报告”恢复。"
                 )
             full_text += delivery_note
+            live_chunks.append({"t": "text", "c": delivery_note})
             yield _emit({"text": delivery_note, "delivery": True})
 
         elapsed = time.time() - t0
@@ -549,65 +451,42 @@ async def chat_stream(request: Request):
                             "model": model_id,
                             "skill": skill_name,
                             "references": collected_refs,
+                            "research": research,
                         },
                     },
                 )
             except Exception as e:
                 log.warning(f"[{user}] Failed to save chat report snapshot: {e}")
 
-        # Save structured messages from JSONL
-        if conv_id and session_id and project_dir:
+        # Persist only this turn. Re-importing every JSONL assistant duplicates old research.
+        if conv_id:
+            live_chunks.extend({"t": "platform_call", "call": call} for call in platform_calls.values())
+            payload = json.dumps(
+                {
+                    "text": full_text,
+                    "chunks": live_chunks,
+                    "refs": collected_refs,
+                    "research": research,
+                    "history_anchor": history_anchor,
+                    "report_status": report_status,
+                    "report_files": delivery_reports[:5],
+                },
+                ensure_ascii=False,
+            )
             with get_db() as db:
-                db.execute(
-                    "UPDATE conversations SET session_id=?, project_dir=? WHERE id=?",
-                    [session_id, project_dir, conv_id],
-                )
-            jsonl_msgs = await _read_jsonl_messages(session_id, project_dir)
-            assistant_indices = [i for i, item in enumerate(jsonl_msgs) if item.get("role") == "assistant"]
-            if delivery_note and assistant_indices:
-                last_index = assistant_indices[-1]
-                parsed = json.loads(jsonl_msgs[last_index]["content"])
-                parsed.setdefault("chunks", []).append({"t": "text", "c": delivery_note})
-                parsed["text"] = (parsed.get("text") or "") + delivery_note
-                jsonl_msgs[last_index]["content"] = json.dumps(parsed, ensure_ascii=False)
-            with get_db() as db:
-                for message_index, m in enumerate(jsonl_msgs):
-                    if m["role"] == "assistant":
-                        parsed = json.loads(m["content"])
-                        txt_parts = [c["c"] for c in parsed.get("chunks", []) if c["t"] == "text"]
-                        full = "".join(txt_parts)
-                        payload = json.dumps(
-                            {
-                                "text": full,
-                                "chunks": parsed.get("chunks", []),
-                                "report_status": report_status
-                                if message_index == assistant_indices[-1]
-                                else "",
-                                "report_files": delivery_reports[:5]
-                                if message_index == assistant_indices[-1]
-                                else [],
-                            },
-                            ensure_ascii=False,
-                        )
+                if db.execute(
+                    "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+                    [conv_id, user],
+                ).fetchone():
+                    if session_id and project_dir:
                         db.execute(
-                            "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                            [conv_id, "assistant", payload],
+                            "UPDATE conversations SET session_id=?, project_dir=? WHERE id=? AND username=?",
+                            [session_id, project_dir, conv_id, user],
                         )
-                if not assistant_indices and full_text.strip():
-                    payload = json.dumps(
-                        {
-                            "text": full_text,
-                            "chunks": [{"t": "text", "c": full_text}],
-                            "report_status": report_status,
-                            "report_files": delivery_reports[:5],
-                        },
-                        ensure_ascii=False,
-                    )
                     db.execute(
                         "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
                         [conv_id, "assistant", payload],
                     )
-            log.info(f"[{user}] Saved {len(jsonl_msgs)} messages + {len(collected_refs)} refs from JSONL")
 
         # Auto-extract analysis graph from saved messages
         if conv_id:
@@ -649,7 +528,7 @@ async def chat_respond(request: Request):
     """POST /api/chat/respond — Send user's answer to a running AskUserQuestion."""
     from .models import ChatRespondRequest, validation_error_message
 
-    require_auth(request)
+    user = require_auth(request)
     body = await request.json()
     try:
         req = ChatRespondRequest(**(body or {}))
@@ -660,6 +539,12 @@ async def chat_respond(request: Request):
     if not conv_id or not answer:
         return JSONResponse({"error": "缺少 conv_id 或 answer"}, status_code=400)
 
+    with get_db() as db:
+        if not db.execute(
+            "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+            [conv_id, user],
+        ).fetchone():
+            return JSONResponse({"error": "对话不存在"}, status_code=404)
     ok = await respond_to_question(conv_id, answer)
     if ok:
         return {"ok": True, "message": "回答已发送"}
@@ -671,7 +556,7 @@ async def chat_cancel(request: Request):
     """POST /api/chat/cancel — Cancel a running Claude process."""
     from .models import ChatCancelRequest, validation_error_message
 
-    require_auth(request)
+    user = require_auth(request)
     body = await request.json()
     try:
         req = ChatCancelRequest(**(body or {}))
@@ -681,5 +566,11 @@ async def chat_cancel(request: Request):
     if not conv_id:
         return JSONResponse({"error": "缺少 conv_id"}, status_code=400)
 
+    with get_db() as db:
+        if not db.execute(
+            "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+            [conv_id, user],
+        ).fetchone():
+            return JSONResponse({"error": "对话不存在"}, status_code=404)
     ok = await cancel_process(conv_id)
     return {"ok": ok}

@@ -74,6 +74,30 @@ def _category_stats(db) -> list[dict]:
     return rows
 
 
+def _research_view(value):
+    """Legacy seed confidence and links are background, not verified evidence."""
+    if isinstance(value, list):
+        return [_research_view(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = {key: _research_view(item) for key, item in value.items()}
+    if "avg_confidence" in out:
+        out["avg_confidence"] = None
+    if "max_market_share" in out:
+        out["max_market_share"] = None
+    if "confidence" in out:
+        out["confidence"] = None
+        out["evidence_status"] = "unverified_background" if out.get("source_date") == "seed" else "unverified"
+    if "market_share" in out:
+        # This legacy field lacks period, denominator and source references.
+        out["market_share"] = None
+    if out.get("evidence") == "seed" or out.get("source_date") == "seed":
+        out["evidence_status"] = "unverified_background"
+        if "relation" in out:
+            out["relation"] = "background_link"
+    return out
+
+
 @router.get("/graph")
 async def graph(
     ticker: str = "",
@@ -83,93 +107,87 @@ async def graph(
     depth: int = 2,
     min_confidence: float = 0.2,
 ):
-    """Return nodes + edges filtered by optional criteria."""
+    """Filter a graph and expand explicit roots without dangling edges."""
+    if not 0 <= depth <= 4 or not 0 <= min_confidence <= 1:
+        raise HTTPException(400, "invalid graph bounds")
+    wheres = ["confidence >= ?"]
+    params = [min_confidence]
+    if category:
+        wheres.append("category = ?")
+        params.append(category)
+    if country:
+        wheres.append("country = ?")
+        params.append(country.upper())
     with get_db() as db:
-        wheres = []
-        params = []
-        if ticker:
-            wheres.append(
-                "(source_ticker = ? OR target_node_id IN (SELECT id FROM industry_nodes WHERE source_ticker = ?))"
-            )
-            params.extend([ticker, ticker])
-        if category:
-            wheres.append("category = ?")
-            params.append(category)
-        if country:
-            wheres.append("country = ?")
-            params.append(country.upper())
-
-        where = " AND ".join(wheres) if wheres else "1=1"
-        nodes = [
-            dict(r)
-            for r in db.execute(
-                f"SELECT * FROM industry_nodes WHERE confidence >= ? AND ({where}) ORDER BY tier, confidence DESC",
-                [min_confidence] + params,
+        pool = [
+            dict(row)
+            for row in db.execute(
+                "SELECT * FROM industry_nodes WHERE " + " AND ".join(wheres) + " ORDER BY tier, name", params
             ).fetchall()
         ]
-
-        node_ids = {n["id"] for n in nodes}
-        edges = []
-        if node_ids:
-            placeholders = ",".join("?" for _ in node_ids)
-            edges = [
-                dict(r)
-                for r in db.execute(
-                    f"SELECT e.*, s.name AS source_name, t.name AS target_name "
-                    f"FROM industry_edges e "
-                    f"JOIN industry_nodes s ON e.source_node_id = s.id "
-                    f"JOIN industry_nodes t ON e.target_node_id = t.id "
-                    f"WHERE e.source_node_id IN ({placeholders}) OR e.target_node_id IN ({placeholders})",
-                    list(node_ids) + list(node_ids),
-                ).fetchall()
-            ]
-
-        # Expand by depth: include nodes reachable from current set
-        if depth > 1 and edges:
-            expanded_ids = set(node_ids)
-            for e in edges:
-                expanded_ids.add(e["source_node_id"])
-                expanded_ids.add(e["target_node_id"])
-            new_ids = expanded_ids - node_ids
-            if new_ids:
-                placeholders2 = ",".join("?" for _ in new_ids)
-                extra = [
-                    dict(r)
-                    for r in db.execute(
-                        f"SELECT * FROM industry_nodes WHERE id IN ({placeholders2})",
-                        list(new_ids),
-                    ).fetchall()
-                ]
-                nodes.extend(extra)
-
-    # Search
-    results = nodes
-    if q:
-        ql = q.lower()
-        results = [
-            n
-            for n in nodes
-            if ql in n["name"].lower()
-            or ql in n.get("description", "").lower()
-            or ql in n.get("category", "").lower()
-            or ql in n.get("source_ticker", "").lower()
+        all_edges = [
+            dict(row)
+            for row in db.execute(
+                "SELECT e.*, s.name AS source_name, t.name AS target_name FROM industry_edges e "
+                "JOIN industry_nodes s ON e.source_node_id=s.id "
+                "JOIN industry_nodes t ON e.target_node_id=t.id ORDER BY e.id"
+            ).fetchall()
         ]
-
-    return {
-        "nodes": results,
-        "edges": edges,
-        "total_nodes": len(results),
-        "total_edges": len(edges),
-        "summary": {
-            "category": category,
-            "country": country,
-            "ticker": ticker,
-            "node_count": len(results),
-            "edge_count": len(edges),
-            "country_count": len({n.get("country") for n in results if n.get("country")}),
-            "ticker_count": len({n.get("source_ticker") for n in results if n.get("source_ticker")}),
-        },
-    }
+    candidates = {node["id"]: node for node in pool}
+    roots = pool
+    if ticker:
+        roots = [node for node in roots if node.get("source_ticker") == ticker]
+    if q:
+        query = q.casefold()
+        roots = [
+            node
+            for node in roots
+            if any(
+                query in str(node.get(key) or "").casefold()
+                for key in ("name", "description", "category", "source_ticker")
+            )
+        ]
+    selected = {node["id"] for node in roots}
+    if ticker or q:
+        frontier = set(selected)
+        for _ in range(depth):
+            adjacent = set()
+            for edge in all_edges:
+                source, target = edge["source_node_id"], edge["target_node_id"]
+                if source in frontier and target in candidates:
+                    adjacent.add(target)
+                if target in frontier and source in candidates:
+                    adjacent.add(source)
+            frontier = adjacent - selected
+            selected.update(frontier)
+            if not frontier:
+                break
+    nodes = [node for node in pool if node["id"] in selected]
+    edges = [
+        edge
+        for edge in all_edges
+        if edge["source_node_id"] in selected and edge["target_node_id"] in selected
+    ]
+    return _research_view(
+        {
+            "nodes": nodes,
+            "edges": edges,
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "summary": {
+                "category": category,
+                "country": country,
+                "ticker": ticker,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "country_count": len({node.get("country") for node in nodes if node.get("country")}),
+                "ticker_count": len(
+                    {node.get("source_ticker") for node in nodes if node.get("source_ticker")}
+                ),
+            },
+            "evidence_status": "background_requires_verification",
+        }
+    )
 
 
 @router.get("/overview")
@@ -233,12 +251,14 @@ async def overview():
             """
             ).fetchall()
         ]
-    return {
-        "totals": totals,
-        "categories": categories,
-        "countries": countries,
-        "key_nodes": nodes,
-    }
+    return _research_view(
+        {
+            "totals": totals,
+            "categories": categories,
+            "countries": countries,
+            "key_nodes": nodes,
+        }
+    )
 
 
 @router.get("/context")
@@ -304,7 +324,7 @@ async def search(q: str = "", limit: int = 20):
                 [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", q, f"{q}%", f"{q}%", limit],
             ).fetchall()
         ]
-    return {"results": rows}
+    return _research_view({"results": rows})
 
 
 @router.get("/ticker/{ticker}/chain")
@@ -348,7 +368,7 @@ async def ticker_chain(ticker: str):
                         ).fetchall()
                     ]
                 )
-    return {"ticker": ticker, "nodes": nodes, "edges": edges}
+    return _research_view({"ticker": ticker, "nodes": nodes, "edges": edges})
 
 
 @router.get("/categories")
@@ -356,7 +376,7 @@ async def categories():
     """Distinct industry chains with node counts — populates the sidebar list."""
     with get_db() as db:
         rows = _category_stats(db)
-    return {"categories": rows}
+    return _research_view({"categories": rows})
 
 
 @router.get("/node/{node_id}")
@@ -385,7 +405,7 @@ async def node_detail(node_id: str):
                 [node_id],
             ).fetchall()
         ]
-    return {"node": node, "upstream": upstream, "downstream": downstream}
+    return _research_view({"node": node, "upstream": upstream, "downstream": downstream})
 
 
 @router.post("/seed")

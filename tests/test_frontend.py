@@ -556,7 +556,9 @@ class TestChatObjectArtifactGuard:
             core = f.read()
         with open("static/js/app.chat.js", encoding="utf-8") as f:
             chat = f.read()
-        assert "var DB_VERSION = 2" in core
+        assert "var DB_VERSION = 3" in core
+        assert "cacheKey(id)" in core
+        assert "String(App.user || '')" in core
         assert "db.deleteObjectStore('convs')" in core
         assert "_sanitizeConvPayload(req.result.data)" in core
         assert "_sanitizeConvPayload(data)" in core
@@ -591,7 +593,7 @@ class TestServiceWorkerCachePolicy:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
-        assert "prism-v0197" in sw
+        assert "prism-workbench-v78" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
         assert "client.navigate(client.url)" in sw
@@ -620,7 +622,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     with open("static/sw.js", encoding="utf-8") as f:
         sw = f.read()
 
-    assert "app.indicator-chart.js?v=77" in template
+    assert "app.indicator-chart.js?v=78" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -651,7 +653,7 @@ def test_industry_workbench_static_contract():
         core = f.read()
 
     assert 'data-mode="industry"' in template
-    assert "app.industry.js?v=77" in template
+    assert "app.industry.js?v=78" in template
     assert "/api/industry/overview" in js
     assert "/api/industry/context" in js
     assert "_renderIndustryOverview" in js
@@ -689,7 +691,7 @@ def test_client_diagnostics_and_admin_bundle_static_contract():
     admin = Path("static/js/app.admin.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=77" in template
+    assert "app.diagnostics.js?v=78" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
@@ -753,8 +755,8 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert "app.css?v=77" in login
-    assert "app.css?v=77" in app
+    assert "app.css?v=78" in login
+    assert "app.css?v=78" in app
 
 
 def test_astock_fast_mode_controls_and_metadata_are_wired():
@@ -845,7 +847,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=77" in html
+    assert "app.screener.js?v=78" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener

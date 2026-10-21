@@ -109,7 +109,8 @@ class TestConversations:
 
         with get_db() as db:
             db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [cid, "user", "hello"])
-        # Now permanent delete
+        # Only conversations already in the owner's trash can be permanently deleted.
+        await client.delete(f"/api/convs/{cid}", cookies=auth_cookies)
         r = await client.delete(f"/api/convs/{cid}/permanent", cookies=auth_cookies)
         assert r.status_code == 200
         # Verify messages are gone

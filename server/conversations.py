@@ -9,6 +9,7 @@ from fastapi import HTTPException, Request
 
 from .auth import require_auth
 from .database import get_db
+from .research_context import parse_claude_jsonl_events
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
@@ -52,7 +53,7 @@ def _content_to_text(value) -> str:
 def _sanitize_json_value(value):
     """Clean stored JSON message payloads without changing their structure."""
     if value is None:
-        return ""
+        return None
     if isinstance(value, str):
         return _clean_object_artifacts(value)
     if isinstance(value, (int, float, bool)):
@@ -126,68 +127,47 @@ def _read_jsonl_user_content(jsonl_path: Path) -> str | None:
 
 
 def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
-    """Read full messages from Claude Code JSONL, merging consecutive assistant events."""
+    """Read historical turns with the same provenance rules as live chat."""
     jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
-
-    messages = []
+    events = []
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
             try:
-                ev = json.loads(line)
+                events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            t = ev.get("type", "")
+    return parse_claude_jsonl_events(events, session_id=session_id)
 
-            if t == "user":
-                msg = ev.get("message", "")
-                if isinstance(msg, dict):
-                    content = msg.get("content", "")
-                else:
-                    try:
-                        msg_dict = json.loads(str(msg).replace("'", '"'))
-                        content = msg_dict.get("content", str(msg))
-                    except Exception:
-                        content = str(msg)
-                if (
-                    content
-                    and not str(content).startswith("[{'type':")
-                    and not str(content).startswith("[{'tool_use_id':")
-                ):
-                    messages.append({"role": "user", "content": _content_to_text(content)})
 
-            elif t == "assistant":
-                blocks = ev.get("message", {}).get("content", [])
-                chunks = []
-                for b in blocks:
-                    bt = b.get("type", "")
-                    if bt == "text":
-                        text = _content_to_text(b.get("text", ""))
-                        if text:
-                            chunks.append({"t": "text", "c": text})
-                    elif bt == "tool_use":
-                        name = b.get("name", "?")
-                        inp = b.get("input", {})
-                        detail = _content_to_text(list(inp.values())[:1]) if inp else ""
-                        chunks.append({"t": "tool", "c": name, "d": detail})
-                    elif bt == "thinking":
-                        thought = _content_to_text(b.get("thinking", ""))
-                        if thought:
-                            chunks.append({"t": "think", "c": thought})
-                if not chunks:
-                    continue
-                if messages and messages[-1]["role"] == "assistant":
-                    prev = json.loads(messages[-1]["content"])
-                    prev["chunks"].extend(chunks)
-                    txts = [c["c"] for c in prev["chunks"] if c["t"] == "text"]
-                    prev["text"] = "".join(txts)
-                    messages[-1]["content"] = json.dumps(prev, ensure_ascii=False)
-                else:
-                    txts = [c["c"] for c in chunks if c["t"] == "text"]
-                    content = json.dumps({"text": "".join(txts), "chunks": chunks}, ensure_ascii=False)
-                    messages.append({"role": "assistant", "content": content})
-    return messages
+def _merge_saved_turns(history: list[dict], stored: list[dict]) -> list[dict]:
+    """Retain the legacy JSONL prefix; modern DB turns own their research metadata."""
+    anchor = None
+    for item in stored:
+        if item["role"] != "assistant":
+            continue
+        try:
+            payload = json.loads(item["content"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("research") and payload.get("history_anchor"):
+            anchor = payload["history_anchor"]
+            break
+    if anchor is None:
+        return history or [{"role": m["role"], "content": m["content"]} for m in stored]
+    boundary = int(anchor.get("db_message_id") or 0)
+    prefix = []
+    if history:
+        users = 0
+        for item in history:
+            users += item["role"] == "user"
+            if users > int(anchor.get("jsonl_user_turns") or 0):
+                break
+            prefix.append(item)
+    else:
+        prefix = [{"role": m["role"], "content": m["content"]} for m in stored if m["id"] <= boundary]
+    return prefix + [{"role": m["role"], "content": m["content"]} for m in stored if m["id"] > boundary]
 
 
 # ═══════════════════════════════════════
@@ -231,11 +211,14 @@ def get_conv(cid: str, request: Request) -> dict:
         if conv["session_id"] and conv["project_dir"]:
             messages = _read_jsonl_messages(conv["session_id"], conv["project_dir"])
 
-        if not messages:
-            msgs = db.execute(
-                "SELECT role, content FROM messages WHERE conv_id=? ORDER BY id", [cid]
-            ).fetchall()
-            messages = [{"role": m["role"], "content": _sanitize_stored_content(m["content"])} for m in msgs]
+        msgs = db.execute(
+            "SELECT id, role, content FROM messages WHERE conv_id=? ORDER BY id", [cid]
+        ).fetchall()
+        stored = [
+            {"id": m["id"], "role": m["role"], "content": _sanitize_stored_content(m["content"])}
+            for m in msgs
+        ]
+        messages = _merge_saved_turns(messages, stored)
 
     return {
         "id": cid,
@@ -291,6 +274,13 @@ def permanent_delete_conv(cid: str, request: Request) -> dict:
     """DELETE /api/convs/{cid}/permanent — permanently delete conversation and messages."""
     u = require_auth(request)
     with get_db() as db:
+        row = db.execute(
+            "SELECT deleted_at FROM conversations WHERE id=? AND username=?", [cid, u]
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "对话不存在")
+        if row["deleted_at"] is None:
+            raise HTTPException(409, "请先将对话移入回收站")
         db.execute("DELETE FROM conversations WHERE id=? AND username=?", [cid, u])
         db.execute("DELETE FROM messages WHERE conv_id=?", [cid])
     return {"ok": True}
@@ -359,7 +349,7 @@ async def create_conv(request: Request) -> dict:
     except Exception as e:
         raise HTTPException(422, validation_error_message(e))
     cid = secrets.token_hex(12)
-    skill = req.skill or "bottleneck-hunter"
+    skill = req.skill or "prism-research"
     with get_db() as db:
         db.execute(
             "INSERT INTO conversations (id, username, title, skill) VALUES (?,?,?,?)",

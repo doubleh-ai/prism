@@ -16,6 +16,7 @@ import re
 import time
 
 from ..config import AKSHARE_TIMEOUT
+from .clock import market_timestamp
 from .models import Fundamentals, KLine, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
@@ -232,6 +233,8 @@ class AkshareProvider:
         prev_close = _f(prev.get("close"), 0.0) or 0.0
         change = price - prev_close
         change_pct = (change / prev_close * 100.0) if prev_close else 0.0
+        data_timestamp = market_timestamp(str(latest.get("date", "")))
+        retrieved_at = int(time.time())
 
         return Quote(
             ticker=ticker,
@@ -245,7 +248,11 @@ class AkshareProvider:
             low=_f(latest.get("low")),
             open=_f(latest.get("open")),
             prev_close=prev_close,
-            timestamp=int(time.time()),
+            timestamp=data_timestamp or retrieved_at,
+            data_timestamp=data_timestamp,
+            retrieved_at=retrieved_at,
+            timestamp_kind="trade" if data_timestamp else "retrieved",
+            data_kind="daily_close",
             source=self.name,
         )
 
@@ -328,8 +335,11 @@ class AkshareProvider:
 
 def _pd_timestamp(s):
     """Convert '2024-01-15' style string to unix seconds."""
-    import datetime
+    from .clock import market_timestamp
 
     if isinstance(s, (int, float)):
         return int(s)
-    return int(datetime.datetime.strptime(str(s), "%Y-%m-%d").timestamp())
+    value = market_timestamp(str(s))
+    if value is None:
+        raise ValueError("invalid market date")
+    return value
