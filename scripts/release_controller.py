@@ -257,7 +257,12 @@ def execute(request, source, stop_file, *, popen=subprocess.Popen, gate=check_ga
                     raise ControlError("stop_requested_state_requires_reconciliation")
                 return event["result"]
             else:
-                raise ControlError("executor_stage_failed_check_private_journal")
+                code = event.get("error") if isinstance(event, dict) else None
+                raise ControlError(
+                    code
+                    if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,96}", code)
+                    else "executor_stage_failed_check_private_journal"
+                ) from None
         raise ControlError("executor_timeout_state_requires_reconciliation")
     finally:
         if process.poll() is None:

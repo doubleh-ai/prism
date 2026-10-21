@@ -216,6 +216,11 @@ class ReleaseError(RuntimeError):
     """A safe category, never an upstream error body, command or credential."""
 
 
+def failure_code(error):
+    code = str(error) if isinstance(error, ReleaseError) else ""
+    return code if re.fullmatch(r"[a-z0-9_]{1,96}", code) else "executor_failed"
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -385,7 +390,7 @@ class RemoteRelease:
         temporary.chmod(mode)
         temporary.replace(path)
 
-    def journal(self, stage, outcome):
+    def journal(self, stage, outcome, *, failure=None):
         previous = (
             json.loads((self.record / "status.json").read_bytes())
             if (self.record / "status.json").exists()
@@ -422,13 +427,16 @@ class RemoteRelease:
             and (self.record / "verified.json").exists()
             and not (self.record / "rollback.json").exists(),
         }
+        private_event = dict(event)
+        if failure is not None:
+            private_event["failure_code"] = failure_code(failure)
         path = self.checked(self.record / "journal.jsonl")
         with path.open("ab") as output:
-            output.write(encoded(event) + b"\n")
+            output.write(encoded(private_event) + b"\n")
             output.flush()
             os.fsync(output.fileno())
         path.chmod(0o600)
-        self.write(self.record / "status.json", encoded(event))
+        self.write(self.record / "status.json", encoded(private_event))
         self.write(self.operations / "status.json", encoded(event), 0o644)
         return event
 
@@ -681,7 +689,10 @@ class RemoteRelease:
             original = os.fstat(stream.fileno())
             if (
                 not stat.S_ISREG(original.st_mode)
-                or original.st_nlink != 1
+                # The official installation can have multiple source hard
+                # links. Read this fixed inode only as data; every identity
+                # field (including link count) and its hash must remain stable.
+                or original.st_nlink < 1
                 or original.st_mode & 0o7000
                 or not original.st_mode & 0o111
                 or not 4 <= original.st_size <= MAX_CLI_BINARY
@@ -2057,6 +2068,7 @@ class RemoteRelease:
                     if isinstance(error, ReleaseError)
                     and str(error) in {"operator_stop", "fresh_operator_permit_required", "permit_timeout"}
                     else "failed",
+                    failure=error,
                 )
                 raise
         finally:
@@ -2105,7 +2117,7 @@ if __name__ == "__main__":
         main()
     except Exception as error:
         print(
-            json.dumps({"error": str(error) if isinstance(error, ReleaseError) else "executor_failed"}),
+            json.dumps({"error": failure_code(error)}),
             flush=True,
         )
         raise SystemExit(1) from None

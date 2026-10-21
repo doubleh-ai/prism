@@ -425,41 +425,121 @@ class Fixture(unittest.TestCase):
                 with self.assertRaisesRegex(remote.ReleaseError, "fixed_cli_source_required"):
                     self.engine.prepare_cli()
 
-    def test_cli_source_shell_setuid_hardlink_and_nonexecutable_rejected_without_execution(self):
+    def test_cli_source_shell_setuid_and_nonexecutable_rejected_without_execution(self):
         self.engine.request = self.data
         original = self.cli_source.read_bytes()
-        for kind in ("shell", "setuid", "hardlink", "nonexecutable"):
+        for kind in ("shell", "setuid", "nonexecutable"):
             with self.subTest(kind=kind):
                 self.cli_source.write_bytes(b"#!/bin/sh\nexit 9\n" if kind == "shell" else original)
                 self.cli_source.chmod(
                     0o4755 if kind == "setuid" else 0o644 if kind == "nonexecutable" else 0o755
                 )
-                link = self.cli_source.with_name("linked-copy")
-                if kind == "hardlink":
-                    os.link(self.cli_source, link)
-                try:
-                    # Some macOS test filesystems strip setuid on chmod. Model
-                    # that one fstat result explicitly; every other case uses
-                    # real files, permissions, hard links and open descriptors.
-                    context = nullcontext()
-                    if kind == "setuid":
-                        observed = self.cli_source.stat()
-                        context = mock.patch.object(
-                            remote.os,
-                            "fstat",
-                            return_value=types.SimpleNamespace(
-                                st_mode=observed.st_mode | stat.S_ISUID,
-                                st_nlink=observed.st_nlink,
-                                st_size=observed.st_size,
-                            ),
-                        )
-                    with context:
-                        with self.assertRaisesRegex(remote.ReleaseError, "cli_source_not_regular_binary"):
-                            self.engine.prepare_cli()
-                finally:
-                    if link.exists():
-                        link.unlink()
+                # Some macOS test filesystems strip setuid on chmod. Model
+                # that one fstat result explicitly; other cases use real files.
+                context = nullcontext()
+                if kind == "setuid":
+                    observed = self.cli_source.stat()
+                    context = mock.patch.object(
+                        remote.os,
+                        "fstat",
+                        return_value=types.SimpleNamespace(
+                            st_mode=observed.st_mode | stat.S_ISUID,
+                            st_nlink=observed.st_nlink,
+                            st_size=observed.st_size,
+                        ),
+                    )
+                with context:
+                    with self.assertRaisesRegex(remote.ReleaseError, "cli_source_not_regular_binary"):
+                        self.engine.prepare_cli()
         self.assertFalse(self.commands)
+
+    def test_cli_stable_hardlinked_source_is_copied_to_an_independent_single_link_inode(self):
+        alias = self.cli_source.with_name("official-install-alias")
+        os.link(self.cli_source, alias)
+        before = remote.RemoteRelease.cli_identity(self.cli_source.stat())
+        self.prepared()
+        target = self.engine.cli_target(self.cli_digest)
+        source_info, target_info = self.cli_source.stat(), target.stat()
+        self.assertEqual(source_info.st_nlink, 2)
+        self.assertEqual(remote.RemoteRelease.cli_identity(source_info), before)
+        self.assertEqual(target_info.st_nlink, 1)
+        self.assertNotEqual(
+            (source_info.st_dev, source_info.st_ino), (target_info.st_dev, target_info.st_ino)
+        )
+        self.assertEqual(target.read_bytes(), alias.read_bytes())
+        self.assertFalse(any(str(self.cli_source) in args or str(alias) in args for args, _ in self.commands))
+        os.link(target, target.with_name("forbidden-target-alias"))
+        with self.assertRaisesRegex(remote.ReleaseError, "cli_binary_not_root_locked"):
+            self.engine.verify_tree()
+
+    def test_cli_source_alias_mutation_or_identity_change_during_copy_is_rejected(self):
+        self.engine.request = self.data
+        original = self.cli_source.read_bytes()
+        for kind in ("alias_bytes", "link_count", "source_inode"):
+            for phase in ("boundary", "copy"):
+                with self.subTest(kind=kind, phase=phase):
+                    self.cli_source.write_bytes(original)
+                    self.cli_source.chmod(0o755)
+                    alias = self.cli_source.with_name("official-install-alias")
+                    os.link(self.cli_source, alias)
+                    target = self.engine.cli_target(self.cli_digest)
+                    pending = target.with_name("claude.pending")
+                    changed = False
+
+                    def change():
+                        nonlocal changed
+                        if changed:
+                            return
+                        changed = True
+                        if kind == "alias_bytes":
+                            alias.write_bytes(original[:-1] + b"!")
+                        elif kind == "link_count":
+                            alias.unlink()
+                        else:
+                            replacement = self.cli_source.with_name("replacement")
+                            replacement.write_bytes(original)
+                            replacement.chmod(0o755)
+                            replacement.replace(self.cli_source)
+
+                    def permit(nonce, label):
+                        if phase == "boundary" and label == "prepare_fixed_cli_binary":
+                            change()
+                        return nonce
+
+                    def stop():
+                        if phase == "copy" and pending.exists():
+                            change()
+
+                    self.engine.permit, self.engine.stop = permit, stop
+                    try:
+                        with self.assertRaisesRegex(remote.ReleaseError, "cli_source_drift"):
+                            self.engine.prepare_cli()
+                        self.assertTrue(changed)
+                        self.assertFalse(target.exists())
+                        self.assertFalse(pending.exists())
+                    finally:
+                        if alias.exists():
+                            alias.unlink()
+
+    def test_failed_cli_check_before_candidate_creation_can_retry_same_identity(self):
+        original = self.cli_source.read_bytes()
+        self.cli_source.write_bytes(original + b"changed")
+        with self.assertRaisesRegex(remote.ReleaseError, "cli_source_drift"):
+            self.engine.execute(self.data)
+        self.assertFalse(self.engine.release.exists())
+        self.assertFalse(self.engine.cli_target(self.cli_digest).exists())
+        external = self.engine.external_target(self.data["external_source_manifest"])
+        before = remote.tree_digest(external)
+        self.cli_source.write_bytes(original)
+        self.prepared()
+        self.assertEqual(remote.tree_digest(external), before)
+        journal = [
+            json.loads(line) for line in (self.engine.record / "journal.jsonl").read_bytes().splitlines()
+        ]
+        failed = [row for row in journal if row["outcome"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["failure_code"], "cli_source_drift")
+        self.assertEqual(journal[-1]["outcome"], "completed")
 
     def test_cli_source_or_entry_changed_at_copy_boundary_never_publishes_binary(self):
         self.engine.request = self.data
@@ -616,6 +696,30 @@ class Fixture(unittest.TestCase):
         self.assertFalse((self.engine.record / "prepared.json").exists())
         with self.assertRaisesRegex(remote.ReleaseError, "prepare_not_completed"):
             self.engine.execute(dict(self.data, action="stage"))
+
+    def test_failed_stage_journal_keeps_only_safe_codes_and_public_status_omits_them(self):
+        for index, (error, expected) in enumerate(
+            (
+                (remote.ReleaseError("cli_source_drift"), "cli_source_drift"),
+                (remote.ReleaseError("PRIVATE fixture /not/a/code"), "executor_failed"),
+                (remote.ReleaseError("a" * 97), "executor_failed"),
+                (ValueError("PRIVATE fixture /upstream/error"), "executor_failed"),
+            )
+        ):
+            with self.subTest(index=index):
+                data = dict(self.data, release_id="failed-journal-" + str(index))
+                self.engine.prepare = lambda: (_ for _ in ()).throw(error)
+                with self.assertRaises(type(error)):
+                    self.engine.execute(data)
+                private_raw = (self.engine.record / "journal.jsonl").read_bytes()
+                last = json.loads(private_raw.splitlines()[-1])
+                self.assertEqual(last["failure_code"], expected)
+                self.assertEqual(last["outcome"], "failed")
+                self.assertEqual(
+                    json.loads((self.engine.record / "status.json").read_bytes())["failure_code"], expected
+                )
+                self.assertNotIn(b"PRIVATE", private_raw)
+                self.assertNotIn(b"failure_code", (self.engine.operations / "status.json").read_bytes())
 
     def test_inherited_package_changes_after_receipt_check_never_reach_pip(self):
         source = self.engine.old_venv / "lib/python3.12/site-packages/example.py"
@@ -1102,6 +1206,53 @@ class PureTests(unittest.TestCase):
         finally:
             process.stdout.close()
             process.stdin.close()
+
+    def test_controller_forwards_only_bounded_safe_remote_error_codes(self):
+        fallback = "executor_stage_failed_check_private_journal"
+        for code, expected in (
+            ("cli_source_not_regular_binary", "cli_source_not_regular_binary"),
+            ("a" * 96, "a" * 96),
+            ("a" * 97, fallback),
+            ("PRIVATE fixture /upstream/error", fallback),
+            ("safe_code\n", fallback),
+            ("错误", fallback),
+            ("", fallback),
+            (None, fallback),
+            ({"private": "fixture"}, fallback),
+        ):
+            with self.subTest(code=code):
+
+                class Process:
+                    def __init__(self):
+                        read, write = os.pipe()
+                        self.stdout = os.fdopen(read, "rb")
+                        os.write(write, json.dumps({"error": code}).encode() + b"\n")
+                        os.close(write)
+                        self.stdin, self.code = io.BytesIO(), None
+
+                    def poll(self):
+                        return self.code
+
+                    def wait(self, timeout=None):
+                        return self.code
+
+                    def terminate(self):
+                        self.code = 1
+
+                process = Process()
+                try:
+                    with self.assertRaises(controller.ControlError) as raised:
+                        controller.execute(
+                            {"action": "prepare"},
+                            b"inert",
+                            "/nonexistent/prism-test-stop",
+                            popen=lambda *a, **k: process,
+                            gate=lambda flag: None,
+                        )
+                    self.assertEqual(str(raised.exception), expected)
+                finally:
+                    process.stdout.close()
+                    process.stdin.close()
 
 
 if __name__ == "__main__":
