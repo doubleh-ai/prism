@@ -151,3 +151,26 @@ async def test_concurrent_requests_coalesce_to_single_upstream_call():
     results = await asyncio.gather(*[chain.get_quote("600519") for _ in range(10)])
     assert all(r[0].price == 10.0 for r in results)
     assert p.calls == 1, f"expected 1 upstream call, got {p.calls}"
+
+
+@pytest.mark.asyncio
+async def test_kline_chain_normalizes_daily_only_provider_and_uses_v2_cache_key():
+    class DailyOnlyProvider(FakeProvider):
+        name = "daily-only"
+
+        async def get_kline(self, ticker, period="1d", limit=120):
+            return [
+                KLine(timestamp=1706486400, open=10, high=12, low=9, close=11, volume=100),
+                KLine(timestamp=1706832000, open=11, high=14, low=10, close=13, volume=200),
+                KLine(timestamp=1707091200, open=13, high=15, low=12, close=14, volume=300),
+            ]
+
+    cache = MarketCache()
+    chain = ProviderChain([DailyOnlyProvider("daily-only")], cache=cache)
+    bars, stale = await chain.get_kline("600519", period="1w", limit=2)
+
+    assert stale is False
+    assert len(bars) == 2
+    assert (bars[0].open, bars[0].close, bars[0].volume) == (10, 13, 300)
+    cached, _ = cache.get("kline-v2:daily-only:600519:1w:2")
+    assert cached is not None

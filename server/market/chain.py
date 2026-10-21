@@ -15,6 +15,7 @@ from .provider import (
 )
 from .cache import MarketCache
 from .models import Quote, KLine, Fundamentals, SearchHit
+from .resample import resample_kline
 
 log = logging.getLogger("stock-app")
 
@@ -142,19 +143,20 @@ class ProviderChain:
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
         async def _invoke(p):
             kls = await p.get_kline(ticker, period=period, limit=limit)
-            return [KLine(**k.model_dump()) for k in kls]
+            normalized = [KLine(**k.model_dump()) for k in kls]
+            return resample_kline(normalized, period, limit)
         # Custom path — bypass _with_failover's list handling
         last_err = None
 
         # Check cache first
         for p in self.providers:
-            key = self._cache_key("kline", p.name, ticker, period, str(limit))
+            key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
             val, _ = self.cache.get(key)
             if val is not None:
                 return [KLine(**k) for k in val], False
 
         # Coalesce concurrent identical requests
-        co_key = f"kline:{ticker}:{period}:{limit}"
+        co_key = f"kline-v2:{ticker}:{period}:{limit}"
 
         async def _runner():
             nonlocal last_err
@@ -171,12 +173,12 @@ class ProviderChain:
                     # provider instead of caching/returning an empty chart.
                     last_err = ProviderNotFound(f"{p.name}: no kline for {ticker}")
                     continue
-                key = self._cache_key("kline", p.name, ticker, period, str(limit))
+                key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
                 self.cache.set(key, [k.model_dump() for k in kls], ttl=self.ttls.get("kline", 300))
                 return kls, False
             # All providers failed — fall back to stale
             for p in self.providers:
-                key = self._cache_key("kline", p.name, ticker, period, str(limit))
+                key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
                 val, _ = self.cache.get_stale(key)
                 if val is not None:
                     return [KLine(**k) for k in val], True

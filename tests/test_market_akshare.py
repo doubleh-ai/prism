@@ -63,6 +63,24 @@ async def test_get_quote_unknown_ticker_raises():
 
 
 @pytest.mark.asyncio
+async def test_get_kline_builds_real_weekly_bars_from_daily_source():
+    frame = pd.DataFrame([
+        {"date": "2024-01-29", "open": 10, "high": 12, "low": 9, "close": 11, "volume": 100, "amount": 1000},
+        {"date": "2024-01-30", "open": 11, "high": 13, "low": 10, "close": 12, "volume": 200, "amount": 2000},
+        {"date": "2024-02-02", "open": 12, "high": 14, "low": 11, "close": 13, "volume": 300, "amount": 3000},
+        {"date": "2024-02-05", "open": 13, "high": 15, "low": 12, "close": 14, "volume": 400, "amount": 4000},
+    ])
+    with patch("akshare.stock_zh_a_daily", return_value=frame):
+        from server.market.akshare_provider import AkshareProvider
+        bars = await AkshareProvider().get_kline("600519", period="1w", limit=10)
+
+    assert len(bars) == 2
+    assert (bars[0].open, bars[0].high, bars[0].low, bars[0].close) == (10, 14, 9, 13)
+    assert bars[0].volume == 600
+    assert bars[1].close == 14
+
+
+@pytest.mark.asyncio
 async def test_provider_unavailable_when_akshare_missing(monkeypatch):
     """If akshare is not installed, the provider raises ProviderUnavailable."""
     import builtins

@@ -38,6 +38,16 @@ class TestPasswordHashing:
 
 
 class TestSessions:
+    @pytest.fixture(autouse=True)
+    def _seed_test_user(self):
+        from server.auth import hash_password
+        from server.database import get_db
+        with get_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
+                ["testuser", hash_password("testpass123")],
+            )
+
     def test_create_and_get_session(self):
         from server.auth import create_session, get_session
         token = create_session("testuser")

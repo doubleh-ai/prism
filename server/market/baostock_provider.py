@@ -186,10 +186,14 @@ class BaostockProvider:
         self, ticker: str, period: str = "1d", limit: int = 120
     ) -> List[KLine]:
         _bs_or_raise()
-        bs_period = _PERIOD_MAP.get(period, "d")
+        if period not in _PERIOD_MAP:
+            raise ProviderUnavailable(f"baostock: unsupported K-line period {period}")
+        bs_period = _PERIOD_MAP[period]
         code = self._prefix(ticker)
-        # Fetch enough history to satisfy `limit` bars (≈ limit trading days).
-        start = (datetime.date.today() - datetime.timedelta(days=limit * 2 + 30)).strftime("%Y-%m-%d")
+        calendar_days_per_bar = {"1d": 2, "1w": 8, "1m": 35}[period]
+        start = (datetime.date.today() - datetime.timedelta(
+            days=limit * calendar_days_per_bar + 45,
+        )).strftime("%Y-%m-%d")
         rows = await self._query(
             code,
             "date,open,high,low,close,volume,amount",

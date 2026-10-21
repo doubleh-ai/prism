@@ -39,9 +39,11 @@ For local development, the app runs without any LLM keys but you won't
 get useful responses. Set at least one provider key:
 
 ```bash
-export DEEPSEEK_API_KEY=sk-...
+read -rs DEEPSEEK_API_KEY
+export DEEPSEEK_API_KEY
 # or
-export MINIMAX_API_KEY=sk-...
+read -rs MINIMAX_API_KEY
+export MINIMAX_API_KEY
 ```
 
 The Claude Code CLI must be installed and on `$PATH`. See

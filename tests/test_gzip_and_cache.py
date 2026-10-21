@@ -39,6 +39,15 @@ async def test_static_files_have_immutable_cache_control(client):
 
 
 @pytest.mark.asyncio
+async def test_service_worker_script_is_never_immutable_cached(client):
+    """The update manifest itself must always be revalidated after deploys."""
+    r = await client.get("/static/sw.js")
+    cc = r.headers.get("cache-control", "")
+    assert "no-store" in cc
+    assert "immutable" not in cc
+
+
+@pytest.mark.asyncio
 async def test_dynamic_routes_not_immortal_cached(client):
     """/api/* responses do NOT get the immutable cache header."""
     # /api/me returns 401 for unauthenticated; we don't care, only the header

@@ -12,9 +12,17 @@ from starlette.middleware.gzip import GZipMiddleware
 from .config import (TEMPLATE_DIR, STATIC_DIR, LOG_FILE, MODELS, SKILL_MAP,
                      SKILLS_HOME, CLAUDE_BIN, CORS_ORIGINS, CORS_ALLOW_CREDENTIALS,
                      RATE_EXPLAIN_PER_MIN)
-from .database import init_db, get_db, check_rate_limit
+from .database import (init_db, get_db, check_rate_limit, list_users, user_exists,
+                       create_user, set_user_password, set_user_disabled,
+                       delete_user_account, admin_usage_stats,
+                       admin_activity_overview, admin_activity_events,
+                       admin_activity_users, admin_activity_insights,
+                       record_activity)
 from .auth import (login as auth_login, logout as auth_logout, require_auth,
-                   verify_csrf)
+                   require_admin, is_admin_user, hash_password, verify_csrf)
+from .release import release_payload
+from .health import admin_health_payload
+from .activity import ActivityMiddleware
 
 # ── Logging ──
 LOG_PATH = Path(LOG_FILE)
@@ -27,6 +35,19 @@ log = configure_logging(str(LOG_PATH), level=log_level)
 
 # ── Init ──
 init_db()
+
+
+def ensure_configured_admin_user() -> None:
+    """Create the configured admin user on first boot when credentials exist."""
+    admin_user = os.environ.get("ADMIN_USER", "admin").strip()
+    admin_pass = os.environ.get("ADMIN_PASS", "")
+    if not admin_user or not admin_pass or user_exists(admin_user):
+        return
+    create_user(admin_user, hash_password(admin_pass))
+    log.info("Configured admin user created: %s", admin_user)
+
+
+ensure_configured_admin_user()
 
 # ── FastAPI app ──
 app = FastAPI(title="Prism")
@@ -97,7 +118,9 @@ class StaticCacheControlMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith("/static/"):
+        if request.url.path == "/static/sw.js":
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        elif request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
@@ -132,6 +155,7 @@ app.add_middleware(GZipMiddleware, minimum_size=512)
 app.add_middleware(StaticCacheControlMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CSRFMiddleware)
+app.add_middleware(ActivityMiddleware)
 
 # Static files (proper caching via StaticFiles)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -149,7 +173,7 @@ def render_template(name: str) -> str:
 # ── Pages ──
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
-    return render_template("login.html")
+    return HTMLResponse(render_template("login.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -157,7 +181,7 @@ async def index(request: Request):
     u = require_auth(request, optional=True)
     if not u:
         return RedirectResponse("/login")
-    return render_template("app.html")
+    return HTMLResponse(render_template("app.html"), headers={"Cache-Control": "no-store"})
 
 
 # ── Auth ──
@@ -176,7 +200,183 @@ async def api_me(request: Request):
     u = require_auth(request, optional=True)
     if not u:
         raise HTTPException(401)
-    return {"user": u}
+    return {"user": u, "is_admin": is_admin_user(u)}
+
+
+@app.get("/api/releases")
+async def api_releases(request: Request):
+    require_auth(request)
+    return release_payload()
+
+
+_UI_ACTIVITY_RULES = {
+    "chat": {"open"},
+    "market": {"open", "watchlist_add", "watchlist_remove", "screener_start"},
+    "analysis": {"open"},
+    "vibe": {"open"},
+    "report": {"open"},
+    "industry": {"open"},
+    "admin": {"open"},
+}
+
+
+@app.post("/api/activity")
+async def api_track_activity(request: Request):
+    """Record allowlisted UI-only events without storing prompts or page contents."""
+    username = require_auth(request)
+    from .models import ActivityTrackRequest, validation_error_message
+    try:
+        payload = ActivityTrackRequest(**((await request.json()) or {}))
+    except Exception as exc:
+        raise HTTPException(422, validation_error_message(exc))
+    allowed = _UI_ACTIVITY_RULES.get(payload.feature, set())
+    if payload.action not in allowed:
+        raise HTTPException(422, detail="activity event is not allowed")
+    target_type = payload.target_type or ""
+    target_id = payload.target_id or ""
+    target_label = payload.target_label or ""
+    if payload.action == "open":
+        target_type = target_id = target_label = ""
+    record_activity(
+        username=username,
+        feature=payload.feature,
+        action=payload.action,
+        target_type=target_type,
+        target_id=target_id,
+        target_label=target_label,
+        meta={"source": "ui"},
+        request=request,
+    )
+    return {"ok": True}
+
+
+# ── Admin: account management ──
+@app.get("/api/admin/stats")
+async def api_admin_stats(request: Request):
+    require_admin(request)
+    return admin_usage_stats()
+
+
+@app.get("/api/admin/health")
+async def api_admin_health(request: Request):
+    require_admin(request)
+    return admin_health_payload()
+
+
+@app.get("/api/admin/analytics/overview")
+async def api_admin_analytics_overview(request: Request, range: str = "7d"):
+    require_admin(request)
+    return admin_activity_overview(range)
+
+
+@app.get("/api/admin/analytics/insights")
+async def api_admin_analytics_insights(request: Request, range: str = "7d"):
+    require_admin(request)
+    return admin_activity_insights(range)
+
+
+@app.get("/api/admin/analytics/events")
+async def api_admin_analytics_events(
+    request: Request,
+    range: str = "7d",
+    username: str = "",
+    feature: str = "",
+    action: str = "",
+    status: str = "",
+    query: str = "",
+    limit: int = 80,
+    offset: int = 0,
+):
+    require_admin(request)
+    return admin_activity_events(
+        range_key=range,
+        username=username.strip(),
+        feature=feature.strip(),
+        action=action.strip(),
+        status=status.strip(),
+        query=query.strip(),
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/admin/analytics/users")
+async def api_admin_analytics_users(request: Request, range: str = "7d"):
+    require_admin(request)
+    return admin_activity_users(range)
+
+
+@app.get("/api/admin/users")
+async def api_admin_list_users(request: Request):
+    current = require_admin(request)
+    users = []
+    for row in list_users():
+        users.append({
+            "username": row["username"],
+            "created_at": row["created_at"],
+            "disabled_at": row["disabled_at"],
+            "active_sessions": row["active_sessions"],
+            "conversation_count": row["conversation_count"],
+            "is_admin": is_admin_user(row["username"]),
+            "is_current": row["username"] == current,
+        })
+    return {"users": users, "current_user": current}
+
+
+@app.post("/api/admin/users")
+async def api_admin_create_user(request: Request):
+    require_admin(request)
+    from .models import AdminUserCreateRequest, validation_error_message
+    body = await request.json()
+    try:
+        req = AdminUserCreateRequest(**(body or {}))
+    except Exception as e:
+        raise HTTPException(422, validation_error_message(e))
+    username = req.username.strip()
+    if user_exists(username):
+        raise HTTPException(status_code=409, detail="user already exists")
+    create_user(username, hash_password(req.password))
+    return {"ok": True, "user": username}
+
+
+@app.put("/api/admin/users/{username}/password")
+async def api_admin_reset_password(username: str, request: Request):
+    require_admin(request)
+    from .models import AdminPasswordResetRequest, validation_error_message
+    body = await request.json()
+    try:
+        req = AdminPasswordResetRequest(**(body or {}))
+    except Exception as e:
+        raise HTTPException(422, validation_error_message(e))
+    if not set_user_password(username, hash_password(req.password)):
+        raise HTTPException(status_code=404, detail="user not found")
+    return {"ok": True}
+
+
+@app.put("/api/admin/users/{username}/status")
+async def api_admin_set_user_status(username: str, request: Request):
+    current = require_admin(request)
+    from .models import AdminUserStatusRequest, validation_error_message
+    body = await request.json()
+    try:
+        req = AdminUserStatusRequest(**(body or {}))
+    except Exception as e:
+        raise HTTPException(422, validation_error_message(e))
+    if username == current and req.disabled:
+        raise HTTPException(status_code=400, detail="cannot disable current user")
+    if not set_user_disabled(username, req.disabled):
+        raise HTTPException(status_code=404, detail="user not found")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{username}")
+async def api_admin_delete_user(username: str, request: Request):
+    current = require_admin(request)
+    if username == current:
+        raise HTTPException(status_code=400, detail="cannot delete current user")
+    if not delete_user_account(username):
+        raise HTTPException(status_code=404, detail="user not found")
+    return {"ok": True}
 
 
 # ── Conversations ──
@@ -265,11 +465,17 @@ from .market.router import router as market_router
 from .analysis_graph import router as graph_router
 from .industry_router import router as industry_router
 from .indicators.router import router as indicators_router
+from .reports import router as reports_router, list_saved_reports_for_conv
+from .vibe import router as vibe_router
+from .diagnostics import router as diagnostics_router
 
 app.include_router(market_router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)
+app.include_router(reports_router)
+app.include_router(vibe_router)
+app.include_router(diagnostics_router)
 
 
 # ── Report viewer ──
@@ -298,34 +504,42 @@ async def api_list_reports(conv_id: str, request: Request):
     if not row:
         return {"reports": []}
 
-    skill_info = SKILL_MAP.get(row["skill"])
-    if not skill_info:
-        return {"reports": []}
-
-    reports_dir = SKILLS_HOME / skill_info["dir"] / "reports"
-    if not reports_dir.exists():
-        return {"reports": []}
-
     out = []
-    try:
-        for p in sorted(reports_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-            if not p.is_file():
-                continue
-            ext = os.path.splitext(p.name)[1].lower()
-            if ext not in _REPORT_ALLOWED_EXT:
-                continue
+    skill_info = SKILL_MAP.get(row["skill"])
+    if skill_info:
+        reports_dir = SKILLS_HOME / skill_info["dir"] / "reports"
+        if reports_dir.exists():
             try:
-                st = p.stat()
+                for p in sorted(reports_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                    if not p.is_file():
+                        continue
+                    ext = os.path.splitext(p.name)[1].lower()
+                    if ext not in _REPORT_ALLOWED_EXT:
+                        continue
+                    try:
+                        st = p.stat()
+                    except OSError:
+                        continue
+                    out.append({
+                        "filename": p.name,
+                        "title": p.name,
+                        "size": st.st_size,
+                        "mtime": int(st.st_mtime),
+                        "kind": _REPORT_KIND.get(ext, "file"),
+                    })
             except OSError:
-                continue
-            out.append({
-                "filename": p.name,
-                "size": st.st_size,
-                "mtime": int(st.st_mtime),
-                "kind": _REPORT_KIND.get(ext, "file"),
-            })
-    except OSError:
-        pass
+                pass
+
+    for rep in list_saved_reports_for_conv(u, conv_id, limit=50):
+        out.append({
+            "filename": rep.get("title") or "Saved report",
+            "title": rep.get("title") or "Saved report",
+            "size": 0,
+            "mtime": rep.get("updated_at") or rep.get("created_at") or 0,
+            "kind": "saved",
+            "report_id": rep["id"],
+            "summary": rep.get("summary") or "",
+        })
     return {"reports": out}
 
 # ── Term explanation cache ──
@@ -396,7 +610,7 @@ from starlette.responses import StreamingResponse
 
 @app.post("/api/analysis/start")
 async def api_analysis_start(request: Request):
-    """Launch a 7-agent astock analysis for the selected ticker."""
+    """Launch an astock analysis for the selected ticker."""
     u = require_auth(request)
     try:
         body = await request.json()
@@ -404,11 +618,20 @@ async def api_analysis_start(request: Request):
         body = {}
     ticker = (body.get("ticker") or "").strip()
     name = (body.get("name") or "").strip()
+    mode = (body.get("mode") or "fast").strip().lower()
+    force_refresh = bool(body.get("force_refresh"))
     if not ticker:
         return JSONResponse({"error": "请提供股票代码"}, status_code=400)
     try:
-        aid = await start_analysis(ticker, name, username=u)
-        return {"analysis_id": aid, "status": "started"}
+        aid = await start_analysis(ticker, name, username=u, mode=mode, force_refresh=force_refresh)
+        entry = _store.get(aid, {})
+        return {
+            "analysis_id": aid,
+            "status": "cached" if entry.get("cached") else "started",
+            "mode": entry.get("mode", mode),
+            "cached": bool(entry.get("cached")),
+            "selected_analysts": entry.get("selected_analysts") or [],
+        }
     except Exception as e:
         logging.getLogger("prism").exception("Failed to start analysis for %s: %s", ticker, e)
         return JSONResponse({"error": f"启动分析失败: {e}"}, status_code=500)

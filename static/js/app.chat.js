@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════
-   Prism — Application Logic (v0.8 split)
+   Prism — Chat and Report Reader (v0.19.7)
    ═══════════════════════════════════════ */
 
 Object.assign(App, {
@@ -278,19 +278,53 @@ Object.assign(App, {
 
   /* ═══ Rendering ═══ */
   _renderMsg: function(chunks, fullText, streaming, msgObj) {
-    if (!chunks || !chunks.length) return ChatRender.renderContent(fullText);
+    chunks = chunks || [];
+    var directReportFiles = streaming ? [] : this._reportFilesForMessage(msgObj, chunks, fullText);
+    if (!chunks.length) {
+      var directText = directReportFiles.length ? this._compactDeliveredReportText(fullText) : fullText;
+      return ChatRender.renderContent(directText) + (directReportFiles.length ? this._inlineReportCard(directReportFiles) : '');
+    }
     try { var html = '', pending = [], refs = (msgObj && msgObj._refs) || [];
-    for (var _i=0;_i<chunks.length;_i++) { var _c=chunks[_i]; for (var _k in _c) { _c[_k]=ChatRender.stringify(_c[_k]); } }
-    for (var ci=0; ci<chunks.length; ci++) { var c = chunks[ci];
+    var reportFiles = directReportFiles;
+    var safeChunks = [];
+    for (var _i=0; _i<chunks.length; _i++) {
+      var _src = chunks[_i] || {}, _dst = {};
+      for (var _k in _src) {
+        if (_k === 'opts' && Array.isArray(_src[_k])) _dst[_k] = _src[_k].map(ChatRender.stringify);
+        else _dst[_k] = ChatRender.stringify(_src[_k]);
+      }
+      safeChunks.push(_dst);
+    }
+    for (var ci=0; ci<safeChunks.length; ci++) { var c = safeChunks[ci];
       if (c.t === 'tool') { pending.push(c); }
-      else if (c.t === 'think') { html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderChunk(c); }
+      else if (c.t === 'think') { html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderChunk(c, {open:streaming}); }
       else if (c.t === 'ask' || c.t === 'ref') { if (c.t==='ref') refs.push(c); else html += ChatRender.renderChunk(c); }
-      else { html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderContent(c.c) + (streaming && ci===chunks.length-1 ? '<span class="stream-cursor"></span>' : ''); }
+      else { var chunkText = reportFiles.length ? this._compactDeliveredReportText(c.c) : c.c; html += ChatRender.renderSteps(pending); pending=[]; html += ChatRender.renderContent(chunkText) + (streaming && ci===chunks.length-1 ? '<span class="stream-cursor"></span>' : ''); }
     }
     html += ChatRender.renderSteps(pending, streaming);
     if (streaming && html==='') html = '<div class="shimmer-bar" style="width:60%"></div>';
+    if (reportFiles.length) html += this._inlineReportCard(reportFiles);
     if (refs.length && !streaming) { html += '<div class="ref-section"><div class="ref-title">参考来源 ('+refs.length+')</div>'; for (var ri=0;ri<refs.length;ri++) html += ChatRender.renderChunk(refs[ri]); html += '</div>'; }
     return html; } catch(e) { console.error('_renderMsg:',e); return ChatRender.renderContent(fullText); }
+  },
+
+  _sanitizeRenderedArtifacts: function(container) {
+    if (!container || !container.querySelectorAll) return;
+    var root = container;
+    try {
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      var nodes = [], node;
+      while ((node = walker.nextNode())) {
+        if (node.nodeValue && node.nodeValue.indexOf('[object Object]') >= 0) nodes.push(node);
+      }
+      nodes.forEach(function(n) {
+        n.nodeValue = ChatRender.clean ? ChatRender.clean(n.nodeValue) : String(n.nodeValue).replace(/\[object Object\]/g, '');
+      });
+    } catch(e) {}
+    root.querySelectorAll('.think-box').forEach(function(box) {
+      var body = box.querySelector('.think-content');
+      if (body && !body.textContent.trim()) box.remove();
+    });
   },
 
   renderAll: function() {
@@ -313,7 +347,7 @@ Object.assign(App, {
           chunks = m._chunks;
           text = m.content || '';
         } else if (typeof text === 'string' && text.startsWith('{"text":')) {
-          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; } catch(e) { chunks = []; }
+          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; m._chunks = chunks; m._reportFiles = p.report_files || m._reportFiles || []; m._reportStatus = p.report_status || m._reportStatus || ''; } catch(e) { chunks = []; }
         } else {
           chunks = [];
         }
@@ -338,6 +372,7 @@ Object.assign(App, {
         return '<div class="msg assistant"><div class="msg-inner"><div class="msg-card"><div class="msg-card__hd"><span class="msg-card__who">PRISM</span><span class="msg-card__acts"></span></div><div class="bubble">'+ChatRender.renderContent(m.content)+'</div></div></div></div>';
       }
     }).join('');
+    this._sanitizeRenderedArtifacts(el);
     this._addCopyButtons(el);
     el.scrollTop = el.scrollHeight;
     this._buildTOC();
@@ -367,7 +402,7 @@ Object.assign(App, {
       this._scrollToBottom(false); return;
     }
     if (chunks.length === 0 && m.content) {
-      bubbles[idx].innerHTML = this.renderQuoteTags(this._glossifyTerms(this._linkifyReports(ChatRender.renderContent(m.content))));
+      bubbles[idx].innerHTML = this.renderQuoteTags(this._glossifyTerms(this._linkifyReports(this._renderMsg([], m.content, false, m))));
       this._scrollToBottom(false); return;
     }
 
@@ -413,6 +448,7 @@ Object.assign(App, {
       bubbles[idx].querySelectorAll('.step-fold[open]').forEach(function(f, i) { openFolds.push(i); });
     }
     bubbles[idx].innerHTML = this.renderQuoteTags(this._glossifyTerms(this._linkifyReports(this._renderMsg(displayChunks, displayContent || m.content, streaming, m))));
+    this._sanitizeRenderedArtifacts(bubbles[idx]);
     // Restore open state
     if (openFolds.length) {
       var newFolds = bubbles[idx].querySelectorAll('.step-fold');
@@ -643,6 +679,69 @@ Object.assign(App, {
     });
   },
 
+  _reportFilesForMessage: function(msgObj, chunks, fullText) {
+    var files = [], seen = {};
+    var add = function(value) {
+      var name = value && typeof value === 'object' ? value.filename : value;
+      name = String(name || '').replace(/^reports\//i, '');
+      try { name = decodeURIComponent(name); } catch(e) {}
+      if (!name || name.indexOf('..') >= 0 || /[\\/]/.test(name) || !/\.(?:html?|pdf|md)$/i.test(name) || seen[name]) return;
+      seen[name] = true; files.push(name);
+    };
+    ((msgObj && msgObj._reportFiles) || []).forEach(add);
+    var sources = [String(fullText || '')];
+    (chunks || []).forEach(function(chunk) {
+      if (chunk && chunk.c) sources.push(ChatRender.stringify(chunk.c));
+      if (chunk && chunk.d) sources.push(ChatRender.stringify(chunk.d));
+    });
+    var re = /reports\/([^\s<>"')]+?\.(?:html?|pdf|md))/gi;
+    sources.forEach(function(source) {
+      var match;
+      while ((match = re.exec(source))) add(match[1]);
+      re.lastIndex = 0;
+    });
+    var rank = function(name) { return /\.html?$/i.test(name) ? 0 : (/\.pdf$/i.test(name) ? 1 : 2); };
+    return files.sort(function(a, b) { return rank(a) - rank(b); });
+  },
+
+  _compactDeliveredReportText: function(text) {
+    text = ChatRender.clean(text || '');
+    var marker = /^#{1,4}\s*报告已交付(?:\s|$).*$/im.exec(text);
+    if (!marker) return text;
+    var delivered = text.slice(marker.index).trim();
+    var headings = [], headingRe = /^#{1,4}\s+.+$/gm, match;
+    while ((match = headingRe.exec(delivered))) headings.push({index:match.index, text:match[0]});
+    var cutoff = headings.length >= 3 ? headings[2].index : -1;
+    if (cutoff < 0 && delivered.length > 1800) {
+      cutoff = delivered.lastIndexOf('\n\n', 1800);
+      if (cutoff < 400) cutoff = 1800;
+    }
+    if (cutoff > 0) delivered = delivered.slice(0, cutoff).trim() + '\n\n> 完整内容已在下方报告中展开。';
+    return delivered;
+  },
+
+  _inlineReportCard: function(files) {
+    if (!this.convId || !files || !files.length) return '';
+    var fname = files[0];
+    var url = '/api/reports/' + this.convId + '/' + encodeURIComponent(fname);
+    var title = fname.replace(/\.(?:html?|pdf|md)$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    var kind = /\.pdf$/i.test(fname) ? 'PDF 报告' : (/\.md$/i.test(fname) ? 'Markdown 报告' : '完整报告');
+    return '<section class="chat-inline-report" data-report-file="' + escAttr(fname) + '">' +
+      '<header><div class="chat-inline-report-copy"><span>' + kind + '</span><b title="' + escAttr(fname) + '">' + esc(title || '研究报告') + '</b></div>' +
+      '<div class="chat-inline-report-actions"><button type="button" class="chat-inline-report-toggle" aria-expanded="true" onclick="App._toggleInlineReport(this)">收起</button>' +
+      '<button type="button" onclick="App.openReport(\'' + escAttr(fname) + '\',{newTab:true})">独立阅读</button></div></header>' +
+      '<div class="chat-inline-report-body"><iframe src="' + escAttr(url) + '" loading="lazy" sandbox="allow-scripts" referrerpolicy="no-referrer" title="' + escAttr(title || '研究报告') + '"></iframe></div>' +
+    '</section>';
+  },
+
+  _toggleInlineReport: function(button) {
+    var card = button && button.closest('.chat-inline-report');
+    if (!card) return;
+    var collapsed = card.classList.toggle('collapsed');
+    button.textContent = collapsed ? '展开' : '收起';
+    button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  },
+
   /* ═══ Inline report viewer ═══ */
   _currentReportUrl: '',
 
@@ -682,16 +781,21 @@ Object.assign(App, {
       body.innerHTML = '<div class="reports-empty">该对话还没有生成报告</div>';
     } else {
       body.innerHTML = '<div class="reports-list">' + data.reports.map(function(rep) {
-        var sz = rep.size < 1024 ? (rep.size + 'B')
+        var sz = rep.kind === 'saved' ? 'saved'
+                : rep.size < 1024 ? (rep.size + 'B')
                 : rep.size < 1024 * 1024 ? (Math.round(rep.size/1024) + 'KB')
                 : (Math.round(rep.size/1024/1024 * 10) / 10) + 'MB';
         var d = new Date(rep.mtime * 1000);
         var ds = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+
                  String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-        return '<div class="reports-item" onclick="App.openReport(\'' + escAttr(rep.filename) + '\')">' +
+        var title = rep.title || rep.filename || 'Saved report';
+        var onclick = rep.report_id
+          ? "App.openSavedReportFromChat('" + escAttr(rep.report_id) + "')"
+          : "App.openReport('" + escAttr(rep.filename) + "')";
+        return '<div class="reports-item" onclick="' + onclick + '">' +
           '<div class="reports-kind">' + esc(rep.kind.toUpperCase().slice(0, 4)) + '</div>' +
           '<div class="reports-meta">' +
-            '<div class="reports-name">' + esc(rep.filename) + '</div>' +
+            '<div class="reports-name">' + esc(title) + '</div>' +
             '<div class="reports-sub">' + ds + ' · ' + sz + '</div>' +
           '</div>' +
           '<span class="reports-open">查看</span>' +
@@ -699,6 +803,13 @@ Object.assign(App, {
       }).join('') + '</div>';
     }
     document.getElementById('reportsModal').style.display = 'flex';
+  },
+
+  openSavedReportFromChat: function(id) {
+    this.closeReports();
+    this.switchMode('reports');
+    this._activeSavedReportId = id;
+    if (this._openSavedReport) this._openSavedReport(id);
   },
 
   closeReports: function() {
@@ -836,9 +947,19 @@ Object.assign(App, {
         self.msgs[msgIdx].content = errText; self.renderAll(); delete Streams[sid]; self._streamDone(sid, btn); return;
       }
       var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
+      var lastStreamEventAt = Date.now(), streamTimedOut = false, streamGuard = null;
       self._activeReader = reader;
+      try {
+      streamGuard = setInterval(function() {
+        if (!Streams[sid]) return;
+        if (Date.now() - lastStreamEventAt > 7 * 60 * 1000) {
+          streamTimedOut = true;
+          try { reader.cancel(); } catch(e) {}
+        }
+      }, 15000);
       while (true) {
         var ck = await reader.read(); if (ck.done) break;
+        lastStreamEventAt = Date.now();
         buf += dec.decode(ck.value,{stream:true});
         var lines = buf.split('\n'); buf = lines.pop()||'';
         for (var i = 0; i < lines.length; i++) {
@@ -846,27 +967,37 @@ Object.assign(App, {
           var d = l.slice(6); if (d==='[DONE]') continue;
           try { var p = JSON.parse(d);
             if (p.error) {
-              self.msgs[msgIdx].content = '⚠ ' + p.error;
-              self.renderAll(); delete Streams[sid]; self._streamDone(sid, btn); return;
+              var streamError = '⚠ ' + ChatRender.clean(p.error);
+              full += (full ? '\n\n' : '') + streamError;
+              chunks.push({t:'text', c:(full && chunks.length ? '\n\n' : '') + streamError});
+              stream.error = streamError;
             }
             if (p.pulse) { /* loading pulse */ }
             if (p.tool) {
-              var toolName = typeof p.tool==='object' ? JSON.stringify(p.tool) : String(p.tool||'');
+              var toolName = ChatRender.clean(p.tool || '');
               if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
-              else { var td = p.d; if (td && typeof td==='object') td = JSON.stringify(td); chunks.push({t:'tool',c:toolName,n:String(p.n||''),d:td||''}); }
+              else { var td = ChatRender.clean(p.d || ''); chunks.push({t:'tool',c:toolName,n:ChatRender.stringify(p.n||''),d:td}); }
             }
-            if (p.think) { var tc = p.think; if (tc && typeof tc==='object') tc = JSON.stringify(tc); chunks.push({t:'think',c:tc||''}); }
+            if (p.think) { var tc = ChatRender.clean(p.think || ''); if (tc) chunks.push({t:'think',c:tc}); }
             if (p.text) {
-              var pt = fixPunct(String(p.text||''));
-              full += pt;
-              var last = chunks[chunks.length-1];
-              if (last&&last.t==='text') last.c+=pt; else chunks.push({t:'text',c:pt});
+              var pt = fixPunct(ChatRender.stringify(p.text || ''));
+              if (pt) {
+                full += pt;
+                var last = chunks[chunks.length-1];
+                if (last&&last.t==='text') last.c+=pt; else chunks.push({t:'text',c:pt});
+              }
             }
             if (p.ref) {
               // Reference citation from WebSearch/WebFetch tool results
               chunks.push({t:'ref',url:p.ref.url,title:p.ref.title||p.ref.url,snippet:p.ref.snippet||''});
               if (!self.msgs[msgIdx]._refs) self.msgs[msgIdx]._refs = [];
               self.msgs[msgIdx]._refs.push(p.ref);
+            }
+            if (p.report_status) {
+              stream.reportStatus = p.report_status;
+              stream.reportFiles = p.report_files || [];
+              stream.msgs[msgIdx]._reportStatus = p.report_status;
+              stream.msgs[msgIdx]._reportFiles = p.report_files || [];
             }
           } catch(e) { /* skip malformed JSON */ }
         }
@@ -876,6 +1007,19 @@ Object.assign(App, {
           var curMsgIdx = App.msgs.length - 1;
           if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') App.renderOne(curMsgIdx);
         }
+      }
+      } finally {
+        if (streamGuard) clearInterval(streamGuard);
+      }
+      if (streamTimedOut) {
+        var stalledMsg = '生成中断：超过 7 分钟没有收到新内容，已自动停止。';
+        full = full ? full + '\n\n' + stalledMsg : stalledMsg;
+        var lastTextChunk = chunks[chunks.length - 1];
+        if (lastTextChunk && lastTextChunk.t === 'text') lastTextChunk.c += '\n\n' + stalledMsg;
+        else chunks.push({t:'text',c:stalledMsg});
+        stream.msgs[msgIdx].content = String(full||''); stream.msgs[msgIdx]._chunks = chunks;
+        stream.full = full; stream.chunks = chunks;
+        if (App.convId === sid) App.renderAll();
       }
     } catch(e) {
       var errorMsg = '网络异常';

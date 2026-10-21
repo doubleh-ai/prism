@@ -4,10 +4,24 @@ import bcrypt
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from .config import (RATE_LOGIN_PER_MIN, COOKIE_SECURE, COOKIE_SAMESITE,
-                     CSRF_REQUIRED_HEADER, CSRF_HEADER_VALUE, ALLOWED_ORIGINS)
+                     CSRF_REQUIRED_HEADER, CSRF_HEADER_VALUE, ALLOWED_ORIGINS, ADMIN_USERS)
 from .database import (get_db, check_rate_limit, create_session,
-                       get_session, delete_session)
+                       get_session, delete_session, record_activity)
 
+
+
+def is_admin_user(username: str | None) -> bool:
+    """Return whether the user can manage Prism accounts."""
+    if not username:
+        return False
+    return username in ADMIN_USERS
+
+
+def require_admin(request: Request) -> str:
+    username = require_auth(request)
+    if not is_admin_user(username):
+        raise HTTPException(status_code=403, detail="admin required")
+    return username
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -88,14 +102,44 @@ async def login(request: Request):
     password = req.password
     if not check_rate_limit(f"login:{request.client.host}", RATE_LOGIN_PER_MIN, 60):
         Event.auth(username, "rate_limited").warn()
+        record_activity(
+            username=username,
+            feature="auth",
+            action="login_rate_limited",
+            target_type="user",
+            target_id=username,
+            target_label=username,
+            status="failed",
+            request=request,
+        )
         raise HTTPException(status_code=429, detail="请求过于频繁")
     with get_db() as db:
-        row = db.execute("SELECT password_hash FROM users WHERE username=?", [username]).fetchone()
-    if not row or not verify_password(password, row["password_hash"]):
+        row = db.execute("SELECT password_hash, disabled_at FROM users WHERE username=?", [username]).fetchone()
+    if not row or row["disabled_at"] is not None or not verify_password(password, row["password_hash"]):
         Event.auth(username, "failed").warn()
+        record_activity(
+            username=username,
+            feature="auth",
+            action="login",
+            target_type="user",
+            target_id=username,
+            target_label=username,
+            status="failed",
+            request=request,
+        )
         raise HTTPException(status_code=403)
     Event.auth(username, "ok").info()
     token = create_session(username)
+    record_activity(
+        username=username,
+        feature="auth",
+        action="login",
+        target_type="user",
+        target_id=username,
+        target_label=username,
+        status="success",
+        request=request,
+    )
     # Generate a per-session CSRF token. The frontend mirrors this in the
     # ``X-CSRF-Token`` header. This is the double-submit cookie pattern.
     csrf_token = secrets.token_urlsafe(32)
@@ -115,8 +159,20 @@ async def login(request: Request):
 
 def logout(request: Request):
     token = request.cookies.get("token")
+    username = get_session(token) if token else ""
     if token:
         delete_session(token)
+    if username:
+        record_activity(
+            username=username,
+            feature="auth",
+            action="logout",
+            target_type="user",
+            target_id=username,
+            target_label=username,
+            status="success",
+            request=request,
+        )
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("token", path="/")
     resp.delete_cookie("csrf_token", path="/")

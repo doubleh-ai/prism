@@ -10,7 +10,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import RATE_CHAT_PER_MIN, MODELS, DEFAULT_MODEL
 from .database import get_db, check_rate_limit
 from .auth import require_auth
-from .services.claude_runner import run_claude_stream, respond_to_question, cancel_process
+from .services.claude_runner import (
+    _resolve_skill_dir,
+    run_claude_stream,
+    respond_to_question,
+    cancel_process,
+)
 from .analysis_graph import persist_graph
 
 log = logging.getLogger("stock-app")
@@ -20,6 +25,86 @@ CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 # Formatting & language rules are handled by the readable-ai skill (CLAUDE.md)
 # loaded by Claude Code — no server-side prompt injection needed.
+
+
+def _clean_object_artifacts(text: str) -> str:
+    """Remove JavaScript object-stringification artifacts from Claude CLI output."""
+    if not text:
+        return ""
+    cleaned = str(text).replace("[object Object]", "")
+    cleaned = re.sub(
+        r'([^\n])\s*["\']>\s*(?=[\u3400-\u9fffA-Za-z0-9])',
+        r"\1 ",
+        cleaned,
+    )
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+_REPORT_DELIVERY_RE = re.compile(
+    r"^#{1,4}\s*(?:报告已交付|最终报告|最终结论|投资结论|分析结论|核心发现)\b.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_REPORT_FAILURE_RE = re.compile(
+    r"API Error|operation timed out|timed out|请求超时|任务中止",
+    re.IGNORECASE,
+)
+_REPORT_FILE_EXTENSIONS = {".html", ".htm", ".pdf", ".md"}
+
+
+def _prepare_chat_report(text: str, skill_name: str = "") -> tuple[str, str]:
+    """Keep delivered research while marking interrupted skill runs honestly."""
+    cleaned = _clean_object_artifacts(text)
+    matches = list(_REPORT_DELIVERY_RE.finditer(cleaned))
+    if matches:
+        return cleaned[matches[-1].start():].strip(), "complete"
+    if skill_name or _REPORT_FAILURE_RE.search(cleaned):
+        return cleaned, "incomplete"
+    return cleaned, "complete"
+
+
+def _skill_report_snapshot(skill_name: str) -> dict[str, tuple[int, int]]:
+    """Return safe metadata for report files produced by the active skill."""
+    try:
+        from .config import SKILL_MAP
+
+        info = SKILL_MAP.get(skill_name)
+        if not info:
+            return {}
+        skill_dir, _ = _resolve_skill_dir(info["dir"])
+        reports_dir = skill_dir / "reports" if skill_dir else None
+        if not reports_dir or not reports_dir.exists():
+            return {}
+        snapshot = {}
+        for path in reports_dir.iterdir():
+            if not path.is_file() or path.suffix.lower() not in _REPORT_FILE_EXTENSIONS:
+                continue
+            stat = path.stat()
+            snapshot[path.name] = (stat.st_mtime_ns, stat.st_size)
+        return snapshot
+    except OSError:
+        return {}
+
+
+def _changed_report_files(before: dict, after: dict) -> list[str]:
+    changed = [name for name, meta in after.items() if before.get(name) != meta and meta[1] > 0]
+    return sorted(changed, key=lambda name: after[name][0], reverse=True)
+
+
+def _prioritize_report_files(files: list[str]) -> list[str]:
+    """Put directly readable reports before supporting CSV/JSON artifacts."""
+    priority = {".html": 0, ".htm": 0, ".pdf": 1, ".md": 2, ".csv": 3, ".json": 4}
+    indexed = list(enumerate(files))
+    indexed.sort(key=lambda item: (priority.get(Path(item[1]).suffix.lower(), 9), item[0]))
+    return [name for _, name in indexed]
+
+
+def _result_payload_text(event: dict) -> str:
+    """Recover final text carried only by Claude CLI's terminal result event."""
+    for key in ("result", "content", "message"):
+        text = _content_to_text(event.get(key))
+        if text:
+            return text
+    return ""
 
 
 def _cwd_to_project_dir(cwd: str) -> str:
@@ -63,6 +148,35 @@ def _extract_refs_from_tool_result(content_text: str) -> list[dict]:
         refs.append({"url": url, "title": title, "snippet": snippet})
     return refs
 
+
+
+
+def _content_to_text(value) -> str:
+    """Convert Claude content blocks into readable text, never object reprs."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _clean_object_artifacts(value)
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        return "\n".join(part for part in (_content_to_text(v) for v in value) if part)
+    if isinstance(value, dict):
+        typ = value.get("type", "")
+        if typ == "tool_use":
+            name = value.get("name", "tool")
+            detail = _content_to_text(value.get("input", ""))
+            return f"{name}: {detail}" if detail else str(name)
+        for key in ("text", "thinking", "content", "question", "summary"):
+            if key in value:
+                text = _content_to_text(value.get(key))
+                if text:
+                    return text
+        try:
+            return _clean_object_artifacts(json.dumps(value, ensure_ascii=False))
+        except TypeError:
+            return _clean_object_artifacts(str(value))
+    return _clean_object_artifacts(str(value))
 
 async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
     """Read Claude Code JSONL, merging consecutive assistant events into single turns.
@@ -116,13 +230,13 @@ async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                             elif isinstance(result_content, str):
                                 result_text = result_content
                             else:
-                                result_text = str(result_content)
+                                result_text = _content_to_text(result_content)
                             # Extract URLs from WebSearch/WebFetch results
                             refs = _extract_refs_from_tool_result(result_text)
                             collected_refs.extend(refs)
                             continue  # Skip tool_result — don't add as user message
 
-                content_str = str(content_blocks) if not isinstance(content_blocks, str) else content_blocks
+                content_str = _content_to_text(content_blocks)
                 if content_str and not content_str.startswith("[{'type':") and not content_str.startswith("[{'tool_use_id':"):
                     messages.append({"role": "user", "content": content_str})
 
@@ -132,14 +246,18 @@ async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                 for b in blocks:
                     bt = b.get("type", "")
                     if bt == "text":
-                        chunks.append({"t": "text", "c": b.get("text", "")})
+                        text = _content_to_text(b.get("text", ""))
+                        if text:
+                            chunks.append({"t": "text", "c": text})
                     elif bt == "tool_use":
                         name = b.get("name", "?")
                         inp = b.get("input", {})
-                        detail = str(list(inp.values())[:1]) if inp else ""
+                        detail = _content_to_text(list(inp.values())[:1]) if inp else ""
                         chunks.append({"t": "tool", "c": name, "d": detail})
                     elif bt == "thinking":
-                        chunks.append({"t": "think", "c": str(b.get("thinking", ""))})
+                        thought = _content_to_text(b.get("thinking", ""))
+                        if thought:
+                            chunks.append({"t": "think", "c": thought})
 
                 if not chunks:
                     continue
@@ -218,19 +336,29 @@ async def chat_stream(request: Request):
         session_id = resume_session_id  # May be None for first message
         project_dir = None
         def _emit(event):
-            """Force all SSE event values to strings — NEVER let an object reach the frontend."""
-            clean = {}
-            for k, v in event.items():
-                if isinstance(v, str): clean[k] = v
-                elif isinstance(v, (int, float, bool)): clean[k] = v
-                elif v is None: clean[k] = ""
-                else: clean[k] = str(v)
+            """Emit JSON-safe SSE data without lossy object stringification."""
+            def _json_safe(v):
+                if v is None:
+                    return ""
+                if isinstance(v, str):
+                    return _content_to_text(v)
+                if isinstance(v, (int, float, bool)):
+                    return v
+                if isinstance(v, list):
+                    return [_json_safe(x) for x in v]
+                if isinstance(v, dict):
+                    return {str(k): _json_safe(val) for k, val in v.items()}
+                return _content_to_text(v)
+            clean = {str(k): _json_safe(v) for k, v in event.items()}
             return f"data: {json.dumps(clean, ensure_ascii=False)}\n\n"
 
         full_text = ""
         step_num = 0
         collected_refs = []
         seen_ref_urls = set()
+        stream_error = ""
+        delivery_note = ""
+        report_files_before = _skill_report_snapshot(skill_name)
 
         yield _emit({'pulse': 'start'})
 
@@ -271,7 +399,7 @@ async def chat_stream(request: Request):
                             elif isinstance(result_content, str):
                                 result_text = result_content
                             else:
-                                result_text = str(result_content)
+                                result_text = _content_to_text(result_content)
                             # Extract URLs and send as reference citations
                             refs = _extract_refs_from_tool_result(result_text)
                             for ref in refs:
@@ -289,7 +417,7 @@ async def chat_stream(request: Request):
                 if name == "AskUserQuestion":
                     yield _emit({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])})
                 else:
-                    detail = str(list(inp.values())[:1]) if inp else ""
+                    detail = _content_to_text(list(inp.values())[:1]) if inp else ""
                     yield _emit({'tool': name, 'n': step_num, 'd': detail})
 
             # assistant message
@@ -297,7 +425,9 @@ async def chat_stream(request: Request):
                 for b in ev.get("message", {}).get("content", []):
                     bt = b.get("type", "")
                     if bt == "text":
-                        txt = b["text"]
+                        txt = _content_to_text(b.get("text", ""))
+                        if not txt:
+                            continue
                         full_text += txt
                         yield _emit({'text': txt})
                     elif bt == "tool_use":
@@ -307,22 +437,82 @@ async def chat_stream(request: Request):
                         if name == "AskUserQuestion":
                             yield _emit({'tool': name, 'n': step_num, 'ask': inp.get('question', ''), 'opts': inp.get('options', [])})
                         else:
-                            detail = str(list(inp.values())[:1]) if inp else ""
+                            detail = _content_to_text(list(inp.values())[:1]) if inp else ""
                             yield _emit({'tool': name, 'n': step_num, 'd': detail})
                     elif bt == "thinking":
-                        yield _emit({'think': str(b.get('thinking', ''))})
+                        thought = _content_to_text(b.get('thinking', ''))
+                        if thought:
+                            yield _emit({'think': thought})
 
             # Error from Claude
             elif t == "error":
-                log.error(f"[{user}] Claude error: {ev.get('message', '')}")
-                yield _emit({'error': ev.get('message', 'AI引擎异常')})
+                stream_error = _content_to_text(ev.get("message")) or "AI引擎异常"
+                log.error(f"[{user}] Claude error: {stream_error}")
+                yield _emit({'error': stream_error})
 
             elif t == "result":
                 log.info(f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}")
+                terminal_text = _result_payload_text(ev)
+                if terminal_text and terminal_text not in full_text:
+                    if full_text and terminal_text.startswith(full_text):
+                        terminal_text = terminal_text[len(full_text):]
+                    elif full_text.endswith(terminal_text):
+                        terminal_text = ""
+                    if terminal_text:
+                        addition = terminal_text if not full_text else "\n\n" + terminal_text
+                        full_text += addition
+                        yield _emit({'text': addition, 'recovered': True})
 
-        yield "data: [DONE]\n\n"
+            elif t == "heartbeat":
+                yield _emit({'pulse': 'wait', 'idle_ms': ev.get('idle_ms', 0)})
+
+        report_files_after = _skill_report_snapshot(skill_name)
+        changed_reports = _changed_report_files(report_files_before, report_files_after)
+        delivery_reports = _prioritize_report_files(changed_reports)
+        if skill_name and not _REPORT_DELIVERY_RE.search(full_text):
+            if delivery_reports:
+                filename = delivery_reports[0]
+                delivery_note = f"\n\n## 报告已交付\n\n完整报告：reports/{filename}"
+            else:
+                reason = _clean_object_artifacts(stream_error) or "Agent 在形成最终结论前结束"
+                delivery_note = (
+                    "\n\n> **研究未完成**："
+                    f"{reason}。已保留研究过程，可在本对话中发送“继续完成报告”恢复。"
+                )
+            full_text += delivery_note
+            yield _emit({'text': delivery_note, 'delivery': True})
+
         elapsed = time.time() - t0
         log.info(f"[{user}] DONE {elapsed:.1f}s len={len(full_text)} refs={len(collected_refs)}")
+
+        report_text, report_status = _prepare_chat_report(full_text, skill_name)
+
+        if conv_id and full_text.strip():
+            try:
+                from .reports import save_report_snapshot
+                clean_text = " ".join(report_text.split())
+                title = question[:80] + ("..." if len(question) > 80 else "")
+                save_report_snapshot(user, {
+                    "source": "chat",
+                    "source_id": conv_id,
+                    "conv_id": conv_id,
+                    "title": title or "Chat report",
+                    "summary": (
+                        clean_text[:240]
+                        if report_status == "complete"
+                        else "研究过程已保存，但任务在形成最终报告前中止。"
+                    ),
+                    "report": {
+                        "question": question,
+                        "final_decision": report_text,
+                        "status": report_status,
+                        "model": model_id,
+                        "skill": skill_name,
+                        "references": collected_refs,
+                    },
+                })
+            except Exception as e:
+                log.warning(f"[{user}] Failed to save chat report snapshot: {e}")
 
         # Save structured messages from JSONL
         if conv_id and session_id and project_dir:
@@ -330,8 +520,15 @@ async def chat_stream(request: Request):
                 db.execute("UPDATE conversations SET session_id=?, project_dir=? WHERE id=?",
                            [session_id, project_dir, conv_id])
             jsonl_msgs = await _read_jsonl_messages(session_id, project_dir)
+            assistant_indices = [i for i, item in enumerate(jsonl_msgs) if item.get("role") == "assistant"]
+            if delivery_note and assistant_indices:
+                last_index = assistant_indices[-1]
+                parsed = json.loads(jsonl_msgs[last_index]["content"])
+                parsed.setdefault("chunks", []).append({"t": "text", "c": delivery_note})
+                parsed["text"] = (parsed.get("text") or "") + delivery_note
+                jsonl_msgs[last_index]["content"] = json.dumps(parsed, ensure_ascii=False)
             with get_db() as db:
-                for m in jsonl_msgs:
+                for message_index, m in enumerate(jsonl_msgs):
                     if m["role"] == "assistant":
                         parsed = json.loads(m["content"])
                         txt_parts = [c["c"] for c in parsed.get("chunks", []) if c["t"] == "text"]
@@ -339,9 +536,20 @@ async def chat_stream(request: Request):
                         payload = json.dumps({
                             "text": full,
                             "chunks": parsed.get("chunks", []),
+                            "report_status": report_status if message_index == assistant_indices[-1] else "",
+                            "report_files": delivery_reports[:5] if message_index == assistant_indices[-1] else [],
                         }, ensure_ascii=False)
                         db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
                                    [conv_id, "assistant", payload])
+                if not assistant_indices and full_text.strip():
+                    payload = json.dumps({
+                        "text": full_text,
+                        "chunks": [{"t": "text", "c": full_text}],
+                        "report_status": report_status,
+                        "report_files": delivery_reports[:5],
+                    }, ensure_ascii=False)
+                    db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                               [conv_id, "assistant", payload])
             log.info(f"[{user}] Saved {len(jsonl_msgs)} messages + {len(collected_refs)} refs from JSONL")
 
         # Auto-extract analysis graph from saved messages
@@ -365,6 +573,13 @@ async def chat_stream(request: Request):
                 persist_graph(conv_id, messages_json, skill)
             except Exception as e:
                 log.warning(f"[{user}] Failed to extract analysis graph: {e}")
+
+        yield _emit({
+            'report_status': report_status,
+            'report_files': delivery_reports[:5],
+            'elapsed': round(elapsed, 1),
+        })
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

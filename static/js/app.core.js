@@ -4,18 +4,51 @@
 
 var Streams = {}; // Active SSE streams keyed by convId
 
+function _stripObjectArtifactsText(text, trim) {
+  var out = String(text || '').replace(/\[object Object\]/g, '').replace(/\n{3,}/g, '\n\n');
+  return trim ? out.trim() : out;
+}
+
+function _sanitizeArtifactValue(value) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return _stripObjectArtifactsText(value, false);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    var list = [];
+    for (var i = 0; i < value.length; i++) {
+      var item = _sanitizeArtifactValue(value[i]);
+      if (item !== null && item !== undefined) list.push(item);
+    }
+    return list;
+  }
+  if (typeof value === 'object') {
+    var out = {};
+    for (var k in value) out[k] = _sanitizeArtifactValue(value[k]);
+    if ((out.t === 'think' || out.t === 'text') && !_stripObjectArtifactsText(out.c || '', true)) return null;
+    return out;
+  }
+  return value;
+}
+
+function _sanitizeConvPayload(data) {
+  return _sanitizeArtifactValue(data);
+}
+
 /* IndexedDB helper for conversation cache (P5).
    Stores {id, conv} keyed by conversation ID so switching convs
    renders instantly from cache while the network fetch completes. */
 var _idb = (function() {
   if (!window.indexedDB) return null;
   var _db = null;
+  var DB_VERSION = 2; // v2 clears pre-v0.14.9 cached conversations with raw object placeholders.
   function open() {
     return new Promise(function(resolve, reject) {
       if (_db) return resolve(_db);
-      var req = indexedDB.open('prism_cache', 1);
+      var req = indexedDB.open('prism_cache', DB_VERSION);
       req.onupgradeneeded = function(e) {
-        e.target.result.createObjectStore('convs', {keyPath: 'id'});
+        var db = e.target.result;
+        if (db.objectStoreNames.contains('convs')) db.deleteObjectStore('convs');
+        db.createObjectStore('convs', {keyPath: 'id'});
       };
       req.onsuccess = function(e) { _db = e.target.result; resolve(_db); };
       req.onerror = function() { reject(); };
@@ -27,7 +60,7 @@ var _idb = (function() {
         return new Promise(function(resolve) {
           var tx = db.transaction('convs', 'readonly');
           var req = tx.objectStore('convs').get(id);
-          req.onsuccess = function() { resolve(req.result ? req.result.data : null); };
+          req.onsuccess = function() { resolve(req.result ? _sanitizeConvPayload(req.result.data) : null); };
           req.onerror = function() { resolve(null); };
         });
       }).catch(function() { return null; });
@@ -35,7 +68,7 @@ var _idb = (function() {
     putConv: function(id, data) {
       return open().then(function(db) {
         var tx = db.transaction('convs', 'readwrite');
-        tx.objectStore('convs').put({id: id, data: data, ts: Date.now()});
+        tx.objectStore('convs').put({id: id, data: _sanitizeConvPayload(data), ts: Date.now()});
       }).catch(function(){});
     },
     listConvs: function() {
@@ -59,12 +92,18 @@ var App = {
   _bulkMode: false,       // Bulk select mode — true when checkboxes are visible
   _bulkChecked: {},       // {convId: true} for checked items
   _activeSkills: new Set(['cn']), // Multi-select skills; 'cn' (force-chinese) always pre-selected
+  _telemetryRecent: {},
 
   /* ═══ Init ═══ */
   init: async function() {
     var r = await this.api('/api/me'); if (!r.ok) return;
-    this.user = (await r.json()).user;
+    var me = await r.json();
+    this.user = me.user;
+    this.isAdmin = !!me.is_admin;
+    if (this._initDiagnostics) this._initDiagnostics();
     document.getElementById('userBadge').textContent = this.user;
+    var adminEntry = document.getElementById('adminEntry');
+    if (adminEntry) adminEntry.style.display = this.isAdmin ? 'inline-flex' : 'none';
     // Theme & width
     var saved = localStorage.getItem('cl-theme');
     if (saved === 'dark') document.documentElement.className = 'dark';
@@ -73,15 +112,26 @@ var App = {
     if (localStorage.getItem('cl-wide') === 'true') document.documentElement.classList.add('wide');
     this.loadSkills(); this.loadModels(); this.loadConvs(); this.showWelcome();
     this.renderSkillsBar();
+    if (this._initReleaseNotes) this._initReleaseNotes();
     this._bindScroll();
     this._bindGlossClicks();
     this._bindMarketModal();
     this._loadWatchlist();
     this._bindMarketPanel();
     this._bindAnalysisSearch();
-    // Register Service Worker for offline cache (P5)
+    this._trackUiEvent('chat', 'open');
+    // Register Service Worker for offline cache (P5). Bypass HTTP cache for
+    // the SW script itself so deployments can replace stale app shells.
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/static/sw.js').catch(function(){});
+      var swReloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function() {
+        if (swReloading) return;
+        swReloading = true;
+        window.location.reload();
+      });
+      navigator.serviceWorker.register('/static/sw.js', {updateViaCache: 'none'}).then(function(reg) {
+        try { reg.update(); } catch(e) {}
+      }).catch(function(){});
     }
     // If a previous analysis was running, auto-restore it (P5 persistence)
     var saved;
@@ -112,8 +162,44 @@ var App = {
       var csrf = this._getCookie('csrf_token');
       if (csrf) opts.headers['X-CSRF-Token'] = csrf;
     }
-    var r = await fetch(url, opts);
+    var r;
+    try {
+      r = await fetch(url, opts);
+    } catch (error) {
+      if (this._captureDiagnostic && String(url).indexOf('/api/diagnostics/') < 0) {
+        this._captureDiagnostic('api_network_error', error.message || 'API network error', {
+          severity:'warning', component:'api', stack:error.stack || '',
+          context:{route:String(url).split('?')[0], method:method}
+        });
+      }
+      throw error;
+    }
+    if (r.status >= 500 && this._captureDiagnostic && String(url).indexOf('/api/diagnostics/') < 0) {
+      this._captureDiagnostic('api_http_5xx', 'HTTP ' + r.status + ' from API', {
+        severity:'error', component:'api',
+        context:{route:String(url).split('?')[0], method:method, status:r.status, request_id:r.headers.get('X-Request-ID') || ''}
+      });
+    }
     if (r.status === 401) window.location.href = '/login'; return r;
+  },
+
+  _trackUiEvent: function(feature, action, targetType, targetId, targetLabel) {
+    if (!feature || !action || !this.user) return;
+    var key = feature + ':' + action + ':' + (targetId || '');
+    var now = Date.now();
+    if (action === 'open' && now - Number(this._telemetryRecent[key] || 0) < 60000) return;
+    this._telemetryRecent[key] = now;
+    this.api('/api/activity', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        feature: feature,
+        action: action,
+        target_type: targetType || '',
+        target_id: targetId || '',
+        target_label: targetLabel || ''
+      })
+    }).catch(function() {});
   },
 
   _getCookie: function(name) {
@@ -131,10 +217,35 @@ var App = {
     if (this._mode === 'market' && this._currentTicker) {
       this._renderKline(this._currentTicker, this._currentPeriod || '1d');
     }
+    if (this._mode === 'industry' && this._refreshIndustryTheme) {
+      this._refreshIndustryTheme();
+    }
   },
   toggleWidth: function() {
     document.documentElement.classList.toggle('wide');
     localStorage.setItem('cl-wide', document.documentElement.classList.contains('wide'));
+  },
+
+  _isCompactViewport: function() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches);
+  },
+
+  toggleSidebar: function(force) {
+    var shell = document.getElementById('appShell');
+    if (!shell) return;
+    if (this._isCompactViewport()) {
+      var open = force;
+      if (open === undefined) open = !shell.classList.contains('mobile-sidebar-open');
+      shell.classList.toggle('mobile-sidebar-open', !!open);
+    } else {
+      shell.classList.remove('mobile-sidebar-open');
+      shell.classList.toggle('collapsed');
+    }
+  },
+
+  _closeMobileSidebar: function() {
+    var shell = document.getElementById('appShell');
+    if (shell) shell.classList.remove('mobile-sidebar-open');
   },
 
   /* ═══ Welcome ═══ */
@@ -226,8 +337,16 @@ var App = {
     var r = await this.api('/api/trash'); if (!r.ok) return;
     var trash = await r.json();
     var link = document.getElementById('trashLink');
-    if (trash.length) { link.textContent = '回收站 ' + trash.length; link.classList.remove('hidden'); }
-    else { link.classList.add('hidden'); }
+    if (trash.length) {
+      link.classList.remove('hidden');
+      link.style.display = '';
+      link.setAttribute('data-count', String(trash.length));
+      link.setAttribute('title', '回收站 ' + trash.length);
+    } else {
+      link.classList.add('hidden');
+      link.removeAttribute('data-count');
+      link.setAttribute('title', '回收站');
+    }
     // Show/hide analysis graph link based on whether a conv is active
     var gl = document.getElementById('graphLink');
     if (gl) gl.style.display = this.convId ? '' : 'none';
@@ -241,6 +360,7 @@ var App = {
     if (!skipWelcome) this.showWelcome();
     await this.loadConvs();
     this._refreshReportsButton();
+    this._closeMobileSidebar();
   },
 
   openConv: async function(id) {
@@ -252,6 +372,7 @@ var App = {
       this.renderAll(); this.loadConvs();
       this._reattachStream();
       this._refreshReportsButton();
+      this._closeMobileSidebar();
       return;
     }
     // Try IndexedDB cache first for instant render (P5)
@@ -276,6 +397,7 @@ var App = {
     else this.renderAll();
     this.loadConvs();
     this._refreshReportsButton();
+    this._closeMobileSidebar();
   },
 
   /* Show/hide the reports button in the input zone based on what reports

@@ -1,4 +1,5 @@
 """BaostockProvider — lazy login, K-line/quote/fundamentals from daily bars."""
+import datetime
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -100,6 +101,29 @@ async def test_get_kline_normalizes_rows():
     assert len(bars) == 2
     assert bars[0].close == 1680.5
     assert bars[1].close == 1695.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("period", "frequency", "days_per_bar"), [
+    ("1w", "w", 8),
+    ("1m", "m", 35),
+])
+async def test_get_kline_uses_native_period_and_sufficient_lookback(period, frequency, days_per_bar):
+    fake_bs = MagicMock()
+    fake_bs.login.return_value = MagicMock(error_code="0", error_msg="success")
+    fields = ["date", "open", "high", "low", "close", "volume", "amount"]
+    fake_bs.query_history_k_data_plus.return_value = _make_fake_rs(_kline_rows(), fields)
+    with _patched_bs(fake_bs):
+        import importlib
+        import server.market.baostock_provider as mod
+        importlib.reload(mod)
+        from server.market.baostock_provider import BaostockProvider
+        await BaostockProvider().get_kline("600519", period=period, limit=20)
+
+    call = fake_bs.query_history_k_data_plus.call_args
+    assert call.kwargs["frequency"] == frequency
+    start = datetime.datetime.strptime(call.kwargs["start_date"], "%Y-%m-%d").date()
+    assert (datetime.date.today() - start).days >= 20 * days_per_bar
 
 
 @pytest.mark.asyncio

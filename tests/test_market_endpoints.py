@@ -63,3 +63,16 @@ async def test_quote_endpoint_requires_auth(client):
     r = await client.get("/api/quote/600519")  # client fixture provides auth
     # The client fixture is logged in, so this is just a sanity check.
     assert r.status_code in (200, 503)
+
+
+@pytest.mark.asyncio
+async def test_search_exact_code_has_direct_fallback(client):
+    with patch("server.market.router.get_chain") as gc:
+        chain = gc.return_value
+        chain.search = AsyncMock(return_value=[])
+        r = await client.get("/api/search?q=300607&limit=8")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["hits"][0]["ticker"] == "300607"
+    assert data["hits"][0]["market"] == "SZ"

@@ -10,6 +10,7 @@ import logging
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from .factory import get_chain
+from .models import SearchHit
 from .provider import NoProviderAvailable, ProviderNotFound
 
 log = logging.getLogger("stock-app")
@@ -19,6 +20,7 @@ router = APIRouter(prefix="/api")
 # Tickers: 6 digits (A-share) or HK 5-digit / US alpha-numeric.
 # Loose pattern — providers will reject truly bogus ones with NotFound.
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,16}$")
+_A_SHARE_CODE_RE = re.compile(r"^(?:sh|sz|bj)?(\d{6})(?:\.(?:sh|sz|bj))?$", re.I)
 
 
 def _validate_ticker(ticker: str) -> str:
@@ -26,6 +28,24 @@ def _validate_ticker(ticker: str) -> str:
     if not _TICKER_RE.match(ticker):
         raise HTTPException(status_code=400, detail="invalid ticker")
     return ticker
+
+
+def _market_for_code(code: str) -> str | None:
+    if code.startswith("6"):
+        return "SH"
+    if code.startswith(("0", "3")):
+        return "SZ"
+    if code.startswith(("4", "8", "92")):
+        return "BJ"
+    return None
+
+
+def _direct_code_hit(query: str) -> SearchHit | None:
+    match = _A_SHARE_CODE_RE.match(query.strip())
+    if not match:
+        return None
+    code = match.group(1)
+    return SearchHit(ticker=code, name=code, market=_market_for_code(code))
 
 
 @router.get("/quote/{ticker}")
@@ -105,6 +125,9 @@ async def api_search(request: Request, q: str = "", limit: int = 10):
     if limit < 1 or limit > 50:
         limit = 10
     hits = await get_chain().search(q, limit=limit)
+    direct = _direct_code_hit(q)
+    if direct and not any(h.ticker == direct.ticker for h in hits):
+        hits = [direct] + hits[: max(0, limit - 1)]
     return {"hits": [h.model_dump() for h in hits]}
 
 

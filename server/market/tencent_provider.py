@@ -14,6 +14,7 @@ import urllib.request
 from typing import List
 from .provider import ProviderUnavailable, ProviderNotFound
 from .models import Quote, KLine, Fundamentals, SearchHit
+from .resample import daily_fetch_limit, resample_kline
 
 log = logging.getLogger("stock-app")
 
@@ -32,7 +33,7 @@ def _sina_symbol(ticker: str) -> str:
         return "sh" + ticker
     if ticker.startswith(("0", "3")):
         return "sz" + ticker
-    if ticker.startswith(("4", "8")):
+    if ticker.startswith(("4", "8", "92")):
         return "bj" + ticker
     return "sz" + ticker
 
@@ -41,7 +42,7 @@ def _tencent_prefix(ticker: str) -> str:
     """'002050' → 'sz002050', '600519' → 'sh600519'."""
     if ticker.startswith("6"):
         return "sh" + ticker
-    if ticker.startswith(("4", "8")):
+    if ticker.startswith(("4", "8", "92")):
         return "bj" + ticker
     return "sz" + ticker
 
@@ -122,11 +123,14 @@ class TencentProvider:
     async def get_kline(
         self, ticker: str, period: str = "1d", limit: int = 120
     ) -> List[KLine]:
+        if period not in {"1d", "1w", "1m"}:
+            raise ProviderUnavailable(f"tencent: unsupported K-line period {period}")
         symbol = _sina_symbol(ticker)
-        # Only daily is supported via Sina; for weekly/monthly,
-        # fetch daily and resample client-side or return daily.
+        source_limit = daily_fetch_limit(period, limit)
+        # Sina exposes daily bars here. Weekly/monthly requests fetch enough
+        # source history and are aggregated after normalization.
         url = (
-            f"{_SINA_KLINE_URL}?symbol={urllib.parse.quote(symbol)}&scale=240&ma=no&datalen={limit}"
+            f"{_SINA_KLINE_URL}?symbol={urllib.parse.quote(symbol)}&scale=240&ma=no&datalen={source_limit}"
         )
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
@@ -141,7 +145,7 @@ class TencentProvider:
         if not bars or not isinstance(bars, list):
             return []
         out: List[KLine] = []
-        for b in bars[-limit:]:
+        for b in bars:
             try:
                 ts = int(time.mktime(time.strptime(b["day"], "%Y-%m-%d")))
                 out.append(KLine(
@@ -154,7 +158,7 @@ class TencentProvider:
                 ))
             except (KeyError, ValueError):
                 continue
-        return out
+        return resample_kline(out, period, limit)
 
     async def get_fundamentals(self, ticker: str) -> Fundamentals:
         raise ProviderUnavailable("tencent: fundamentals not available via Sina")

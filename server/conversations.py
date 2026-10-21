@@ -12,6 +12,81 @@ from .auth import require_auth
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 
+
+def _clean_object_artifacts(text: str) -> str:
+    """Remove JavaScript object-stringification artifacts from Claude CLI output."""
+    if not text:
+        return ""
+    cleaned = str(text).replace("[object Object]", "")
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _content_to_text(value) -> str:
+    """Convert Claude content blocks into readable text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _clean_object_artifacts(value)
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        return "\n".join(part for part in (_content_to_text(v) for v in value) if part)
+    if isinstance(value, dict):
+        typ = value.get("type", "")
+        if typ == "tool_use":
+            name = value.get("name", "tool")
+            detail = _content_to_text(value.get("input", ""))
+            return f"{name}: {detail}" if detail else str(name)
+        for key in ("text", "thinking", "content", "question", "summary"):
+            if key in value:
+                text = _content_to_text(value.get(key))
+                if text:
+                    return text
+        try:
+            return _clean_object_artifacts(json.dumps(value, ensure_ascii=False))
+        except TypeError:
+            return _clean_object_artifacts(str(value))
+    return _clean_object_artifacts(str(value))
+
+
+def _sanitize_json_value(value):
+    """Clean stored JSON message payloads without changing their structure."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _clean_object_artifacts(value)
+    if isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, list):
+        cleaned = []
+        for item in value:
+            val = _sanitize_json_value(item)
+            if val is not None:
+                cleaned.append(val)
+        return cleaned
+    if isinstance(value, dict):
+        cleaned = {str(k): _sanitize_json_value(v) for k, v in value.items()}
+        if cleaned.get("t") in {"think", "text"} and not str(cleaned.get("c", "")).strip():
+            return None
+        return cleaned
+    return _clean_object_artifacts(str(value))
+
+
+def _sanitize_stored_content(content: str) -> str:
+    """Clean legacy DB messages that predate renderer-side artifact stripping."""
+    if not isinstance(content, str):
+        return _content_to_text(content)
+    text = _clean_object_artifacts(content)
+    if not text.startswith("{"):
+        return text
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return text
+    cleaned = _sanitize_json_value(payload)
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
 def _list_jsonl_sessions(project_dir: str) -> list[str]:
     """List session IDs from a project directory, sorted by mtime desc."""
     proj = CLAUDE_PROJECTS / project_dir
@@ -42,7 +117,7 @@ def _read_jsonl_user_content(jsonl_path: Path) -> str | None:
                     except Exception:
                         content = str(msg)
                 if content and not str(content).startswith("[{'type':") and not str(content).startswith("[{'tool_use_id':"):
-                    return content
+                    return _content_to_text(content)
     return None
 
 
@@ -72,7 +147,7 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                     except Exception:
                         content = str(msg)
                 if content and not str(content).startswith("[{'type':") and not str(content).startswith("[{'tool_use_id':"):
-                    messages.append({"role": "user", "content": content})
+                    messages.append({"role": "user", "content": _content_to_text(content)})
 
             elif t == "assistant":
                 blocks = ev.get("message", {}).get("content", [])
@@ -80,14 +155,18 @@ def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
                 for b in blocks:
                     bt = b.get("type", "")
                     if bt == "text":
-                        chunks.append({"t": "text", "c": b.get("text", "")})
+                        text = _content_to_text(b.get("text", ""))
+                        if text:
+                            chunks.append({"t": "text", "c": text})
                     elif bt == "tool_use":
                         name = b.get("name", "?")
                         inp = b.get("input", {})
-                        detail = str(list(inp.values())[:1]) if inp else ""
+                        detail = _content_to_text(list(inp.values())[:1]) if inp else ""
                         chunks.append({"t": "tool", "c": name, "d": detail})
                     elif bt == "thinking":
-                        chunks.append({"t": "think", "c": b.get("thinking", "")})
+                        thought = _content_to_text(b.get("thinking", ""))
+                        if thought:
+                            chunks.append({"t": "think", "c": thought})
                 if not chunks:
                     continue
                 if messages and messages[-1]["role"] == "assistant":
@@ -148,7 +227,7 @@ def get_conv(cid: str, request: Request) -> dict:
             msgs = db.execute(
                 "SELECT role, content FROM messages WHERE conv_id=? ORDER BY id", [cid]
             ).fetchall()
-            messages = [{"role": m["role"], "content": m["content"]} for m in msgs]
+            messages = [{"role": m["role"], "content": _sanitize_stored_content(m["content"])} for m in msgs]
 
     return {
         "id": cid, "title": conv["title"], "skill": conv["skill"],

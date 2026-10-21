@@ -41,6 +41,28 @@ class TestJSONLReading:
         assert "think" in types
         assert "text" in types
 
+    def test_read_jsonl_strips_object_artifacts(self, tmp_path):
+        """Claude CLI object placeholders should not leak into restored chats."""
+        sid = "artifact-sid"
+        jsonl = tmp_path / f"{sid}.jsonl"
+        lines = [
+            json.dumps({"type": "user", "message": {"role": "user", "content": "question"}}),
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "[object Object]\n\nvisible thought\n[object Object]"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "[object Object]\nls"}},
+                {"type": "text", "text": "answer [object Object] done"},
+            ]}}),
+        ]
+        jsonl.write_text("\n".join(lines), encoding="utf-8")
+
+        from server.conversations import _read_jsonl_messages
+        messages = _read_jsonl_messages(sid, str(tmp_path))
+        payload = json.loads([m for m in messages if m["role"] == "assistant"][0]["content"])
+        rendered = json.dumps(payload, ensure_ascii=False)
+        assert "[object Object]" not in rendered
+        assert "visible thought" in rendered
+        assert "answer  done" in rendered
+
     def test_read_missing_jsonl(self):
         """Non-existent JSONL returns empty list."""
         from server.conversations import _read_jsonl_messages
@@ -141,4 +163,3 @@ class TestJSONLMessageFiltering:
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert len(user_msgs) == 1  # Only the real question
         assert user_msgs[0]["content"] == "实际问题"
-
