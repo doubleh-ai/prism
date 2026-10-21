@@ -22,7 +22,18 @@ from pathlib import Path
 
 HOST = "ubuntu@124.223.168.224"
 ISSUE = "https://api.github.com/repos/doubleh-ai/prism/issues/9"
-ACTIONS = ("inspect", "prepare", "stage", "quiesce", "switch", "verify", "rollback", "resume")
+ACTIONS = (
+    "inspect",
+    "prepare",
+    "diagnose_build",
+    "quarantine_failed_prepare",
+    "stage",
+    "quiesce",
+    "switch",
+    "verify",
+    "rollback",
+    "resume",
+)
 ROOT = Path(__file__).resolve().parent
 
 

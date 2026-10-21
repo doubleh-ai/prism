@@ -33,7 +33,18 @@ from contextlib import closing
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
 
-ACTIONS = {"inspect", "prepare", "stage", "quiesce", "switch", "verify", "rollback", "resume"}
+ACTIONS = {
+    "inspect",
+    "prepare",
+    "diagnose_build",
+    "quarantine_failed_prepare",
+    "stage",
+    "quiesce",
+    "switch",
+    "verify",
+    "rollback",
+    "resume",
+}
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
@@ -325,7 +336,10 @@ def run_command(args, *, env=None, timeout=120):
         capture
         and args[2:3] == ["--property=LoadState,ActiveState"]
         and len(args) == 4
-        and re.fullmatch(r"prism-stage-[0-9a-f]{12}\.service", args[-1])
+        and re.fullmatch(
+            r"prism-(?:stage-[0-9a-f]{12}|diagnose-[0-9a-f]{12}-(?:namespace|check|dryrun)-[0-9a-f]{8})\.service",
+            args[-1],
+        )
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
     )
     if result.returncode and not missing_stage:
@@ -335,8 +349,152 @@ def run_command(args, *, env=None, timeout=120):
     return result.stdout or b""
 
 
+def run_diagnostic(args, *, timeout=75):
+    """Keep at most 256 KiB in memory; never persist or print package output."""
+    process = subprocess.Popen(
+        args,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    output, truncated, timed_out = bytearray(), False, False
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            if not select.select([process.stdout], [], [], 0.1)[0]:
+                continue
+            block = os.read(process.stdout.fileno(), 65536)
+            if not block:
+                break
+            remaining = 256 * 1024 - len(output)
+            output.extend(block[:remaining])
+            if len(block) > remaining:
+                truncated = True
+                break
+        if truncated or timed_out:
+            process.terminate()  # The caller also stops only this fixed unit.
+        try:
+            code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            code = process.wait(timeout=5)
+        return {"return_code": code, "output": bytes(output), "truncated": truncated, "timed_out": timed_out}
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def safe_build_diagnostics(raw, *, release, packages):
+    """Extract fixed categories and already inventoried package identifiers only."""
+    categories, named, paths, system_paths, unknown = set(), set(), set(), set(), 0
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        if len(line) > 4096:
+            continue
+        lower = line.lower()
+        for token, code in (
+            ("no broken requirements found", "dependencies_consistent"),
+            ("which is not installed", "missing_dependency"),
+            ("has requirement", "dependency_conflict"),
+            ("conflicting dependencies", "resolver_conflict"),
+            ("resolutionimpossible", "resolver_conflict"),
+            ("no matching distribution found", "wheel_not_found"),
+            ("could not find a version", "wheel_not_found"),
+            ("permission denied", "permission_denied"),
+            ("read-only file system", "read_only_filesystem"),
+            ("do not match the hashes", "hash_mismatch"),
+            ("ignoring invalid distribution", "invalid_distribution"),
+            ("would install", "dry_run_ready"),
+            ("226/namespace", "namespace_setup_failed"),
+            ("status=226", "namespace_setup_failed"),
+            ("mount namespacing", "namespace_setup_failed"),
+            ("step namespace", "namespace_setup_failed"),
+            ("network namespacing", "network_namespace_setup_failed"),
+            ("operation not permitted", "operation_not_permitted"),
+            ("no such file or directory", "missing_path"),
+            ("invalid argument", "invalid_property_or_mount_argument"),
+        ):
+            if token in lower:
+                categories.add(code)
+        references = []
+        if re.search(r"(?:has requirement|requires .+, which is not installed)", line):
+            match = re.match(r"([A-Za-z][A-Za-z0-9_.-]{0,79})\s", line)
+            if match:
+                references.append(match[1])
+        for pattern in (
+            r"(?:has requirement|requires|requirement|distribution found for)\s+([A-Za-z][A-Za-z0-9_.-]{0,79})",
+        ):
+            references.extend(re.findall(pattern, line))
+        for name in references:
+            normalized = re.sub(r"[-_.]+", "-", name).lower()
+            if normalized in packages:
+                named.add(normalized)
+            else:
+                unknown += 1
+        if "permission denied" in lower or "read-only file system" in lower:
+            for value in re.findall(r"['\"]([^'\"\r\n]+)['\"]", line):
+                prefix = str(release) + "/"
+                if value.startswith(prefix):
+                    relative = value[len(prefix) :]
+                    parts = PurePosixPath(relative).parts
+                    if (
+                        parts
+                        and all(part not in {".", ".."} for part in parts)
+                        and len(relative) <= 240
+                        and re.fullmatch(r"[A-Za-z0-9_./+\-]+", relative)
+                    ):
+                        paths.add(relative)
+        if any(
+            token in lower
+            for token in ("namespac", "mount", "permission denied", "no such file", "invalid argument")
+        ):
+            for value in re.findall(r"/[A-Za-z0-9_./+\-]+", line):
+                value = value.rstrip("./")
+                if value in {
+                    "/run",
+                    "/run/user",
+                    "/run/systemd/unit-root",
+                    "/run/systemd/unit-root/run",
+                    "/run/systemd/unit-root/run/user",
+                    "/run/systemd/inaccessible/dir",
+                    "/run/systemd/inaccessible/reg",
+                    "/run/systemd/inaccessible/sock",
+                }:
+                    system_paths.add(value)
+                elif value.startswith("/run/systemd/"):
+                    system_paths.add("systemd_runtime_mount")
+                elif value == "/var/lib/prism-operations/staging":
+                    system_paths.add("staging_directory")
+                elif value.startswith(str(release) + "/"):
+                    relative = value[len(str(release)) + 1 :]
+                    if len(relative) <= 240 and all(
+                        part not in {".", ".."} for part in PurePosixPath(relative).parts
+                    ):
+                        paths.add(relative)
+    return {
+        "categories": sorted(categories) or ["unclassified_package_output"],
+        "packages": [{"name": name, "installed_version": packages[name]} for name in sorted(named)[:16]],
+        "candidate_relative_paths": sorted(paths)[:8],
+        "unrecognized_package_references": unknown,
+        "sandbox_system_paths": sorted(system_paths)[:8],
+    }
+
+
 class RemoteRelease:
-    def __init__(self, root=Path("/"), runner=run_command, permit=None, control=None, now=time.time):
+    def __init__(
+        self,
+        root=Path("/"),
+        runner=run_command,
+        permit=None,
+        control=None,
+        now=time.time,
+        diagnostic_runner=run_diagnostic,
+    ):
         self.root, self.run, self.permit, self.control, self.now = Path(root), runner, permit, control, now
         self.production = self.root / "home/ubuntu/stock-analyzer"
         self.old_venv = self.root / "home/ubuntu/stock-venv"
@@ -344,6 +502,7 @@ class RemoteRelease:
         self.operations = self.root / "var/lib/prism-operations"
         self.override = self.root / "etc/systemd/system/stock-app.service.d/90-prism-release.conf"
         self.record = None
+        self.diagnostic_runner = diagnostic_runner
 
     def checked(self, path):
         path = Path(path)
@@ -1095,6 +1254,378 @@ class RemoteRelease:
         )
         self.verify_external(self.record)
         self.verify_cli(self.record, self.release)
+
+    def no_stage_processes(self):
+        uid = pwd.getpwnam("prism-stage").pw_uid
+        for process in (self.root / "proc").iterdir():
+            if not process.name.isdigit():
+                continue
+            try:
+                # Non-dumpable processes can expose a root-owned /proc/PID.
+                # Only the kernel's real/effective/saved/fs UIDs establish UID.
+                with (process / "status").open("rb") as source:
+                    values = None
+                    for _ in range(64):
+                        line = source.readline(4097)
+                        if not line or len(line) > 4096:
+                            break
+                        if line.startswith(b"Uid:"):
+                            match = re.fullmatch(
+                                rb"Uid:[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]+([0-9]{1,10})[\t ]*\n?",
+                                line,
+                            )
+                            if match:
+                                values = tuple(int(value) for value in match.groups())
+                            break
+                if values is None or any(value > 4294967295 for value in values):
+                    raise ReleaseError("failed_prepare_process_status_rejected")
+                if uid in values:
+                    raise ReleaseError("failed_prepare_stage_process_active")
+            except FileNotFoundError:
+                try:
+                    process.stat()  # Only disappearance, never directory ownership.
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    raise ReleaseError("failed_prepare_process_inspection_failed") from None
+                raise ReleaseError("failed_prepare_process_status_rejected") from None
+            except OSError:
+                raise ReleaseError("failed_prepare_process_inspection_failed") from None
+
+    def failed_prepare_guard(self, *, candidate_required=True):
+        forbidden = (
+            "prepared.json",
+            "staged.json",
+            "previous.json",
+            "cutover.json",
+            "switched.json",
+            "recovery-intent.json",
+            "rollback.json",
+            "verified.json",
+            "admission.json",
+        )
+        if any(self.checked(self.record / name).exists() for name in forbidden):
+            raise ReleaseError("failed_prepare_only")
+        raw = self.checked(self.record / "journal.jsonl").read_bytes()
+        if len(raw) > 2 * 1024 * 1024:
+            raise ReleaseError("failed_prepare_journal_limit")
+        history = [json.loads(line) for line in raw.splitlines() if line]
+        prepares = [
+            row
+            for row in history
+            if row.get("stage") == "prepare" and row.get("outcome") in {"failed", "completed", "cancelled"}
+        ]
+        if (
+            not prepares
+            or prepares[-1].get("outcome") != "failed"
+            or any(row.get("outcome") == "completed" for row in prepares)
+        ):
+            raise ReleaseError("failed_prepare_record_required")
+        manifest_raw = self.checked(self.record / "manifest.json").read_bytes()
+        manifest = json.loads(manifest_raw)
+        if (
+            digest(manifest_raw) != self.request["manifest_sha256"]
+            or manifest.get("commit") != self.request["commit"]
+            or str(manifest.get("version", "")).endswith("-recovery")
+            or self.request.get("receipts", {}).get("recovery", {}).get("commit") == self.request["commit"]
+        ):
+            raise ReleaseError("failed_prepare_identity_rejected")
+        if self.runtime()["working_directory"] != str(self.production):
+            raise ReleaseError("failed_prepare_original_runtime_required")
+        self.no_stage_processes()
+        if candidate_required:
+            if not self.release.is_dir():
+                raise ReleaseError("failed_prepare_candidate_required")
+            if self.root == Path("/") and (
+                self.release.stat().st_uid != 0 or self.release.stat().st_mode & 0o022
+            ):
+                raise ReleaseError("failed_prepare_source_drift")
+            for item in manifest["files"]:
+                path = self.checked(self.release / safe_path(item["path"]))
+                info = path.stat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_size != item["size"]
+                    or digest(path.read_bytes()) != item["sha256"]
+                    or f"{stat.S_IMODE(info.st_mode):04o}" != item["mode"]
+                    or self.root == Path("/")
+                    and (info.st_uid != 0 or info.st_mode & 0o022)
+                ):
+                    raise ReleaseError("failed_prepare_source_drift")
+            if self.checked(self.release / ".deploy-revision").read_text().strip() != self.request["commit"]:
+                raise ReleaseError("failed_prepare_identity_rejected")
+            dependencies = self.request.get("receipts", {}).get("dependencies", {})
+            external = dependencies.get("external_sources_sha256")
+            self.verify_external(self.record, external)
+            self.check_cli_binary(dependencies.get("cli_binary_sha256"))
+            if self.checked(
+                self.release / ".engine-revision"
+            ).read_text().strip() != external or self.checked(
+                self.release / ".cli-revision"
+            ).read_text().strip() != dependencies.get("cli_binary_sha256"):
+                raise ReleaseError("failed_prepare_identity_rejected")
+        return manifest
+
+    def diagnostic_packages(self, lock, target):
+        packages = {"pip": "unknown", "setuptools": "unknown", "wheel": "unknown"}
+        for name in re.findall(r"^([A-Za-z][A-Za-z0-9_.-]{0,79})==", lock.decode("ascii"), re.M):
+            packages[re.sub(r"[-_.]+", "-", name).lower()] = "not_installed"
+        for metadata in target.glob("lib/python3.12/site-packages/*.dist-info/METADATA"):
+            self.checked(metadata)
+            if not metadata.is_file() or metadata.stat().st_size > 1024 * 1024:
+                raise ReleaseError("diagnostic_metadata_rejected")
+            with metadata.open("rb") as source:
+                header = source.read(65536).split(b"\n\n", 1)[0].decode("utf-8", errors="replace")
+            name = re.search(r"^Name: ([A-Za-z][A-Za-z0-9_.-]{0,79})$", header, re.M)
+            version = re.search(r"^Version: ([A-Za-z0-9.!+_\-]{1,64})$", header, re.M)
+            if name and version:
+                packages[re.sub(r"[-_.]+", "-", name[1]).lower()] = version[1]
+                for requirement in re.findall(
+                    r"^Requires-Dist: ([A-Za-z][A-Za-z0-9_.-]{0,79})(?:\W|$)", header, re.M
+                ):
+                    packages.setdefault(re.sub(r"[-_.]+", "-", requirement).lower(), "not_installed")
+        return packages
+
+    def stop_diagnostic_unit(self, unit):
+        raw = self.run(["/usr/bin/systemctl", "show", "--property=LoadState,ActiveState", unit]).decode()
+        values = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+        if values.get("LoadState") == "not-found":
+            self.no_stage_processes()
+            return
+        if values.get("ActiveState") not in {
+            "active",
+            "activating",
+            "deactivating",
+            "reloading",
+            "inactive",
+            "failed",
+        }:
+            raise ReleaseError("diagnostic_unit_state_unknown")
+        self.run(["/usr/bin/systemctl", "stop", unit])
+        self.no_stage_processes()
+
+    def diagnose_build(self):
+        self.failed_prepare_guard()
+        target = self.checked(self.release / ".venv")
+        binary = self.checked(target / "bin/python")
+        system = self.checked(self.root / "usr/bin/python3.12")
+        if not binary.is_file() or digest(binary.read_bytes()) != digest(system.read_bytes()):
+            raise ReleaseError("diagnostic_system_python_copy_required")
+        inputs = self.checked(self.operations / "build-inputs" / self.request["release_id"])
+        lock = self.checked(inputs / "core.lock").read_bytes()
+        expected_lock = self.request.get("receipts", {}).get("dependencies", {}).get("lock_sha256")
+        if digest(lock) != expected_lock or lock != (self.release / "requirements.lock").read_bytes():
+            raise ReleaseError("diagnostic_lock_mismatch")
+        packages = self.diagnostic_packages(lock, target)
+        report = {
+            "schema": 1,
+            "commit": self.request["commit"],
+            "checked_at": int(self.now()),
+            "dry_run_only": True,
+            "prepare_verified": False,
+            "production_changed": False,
+            "commands": {},
+        }
+        attempt = secrets.token_hex(4)
+        report["attempt"] = attempt
+        for phase, arguments in (
+            ("namespace", []),
+            ("check", ["check"]),
+            (
+                "dryrun",
+                [
+                    "install",
+                    "--dry-run",
+                    "--no-cache-dir",
+                    "--no-index",
+                    "--find-links",
+                    str(inputs),
+                    "--require-hashes",
+                    "--only-binary=:all:",
+                    "--upgrade",
+                    "-r",
+                    str(inputs / "core.lock"),
+                ],
+            ),
+        ):
+            self.boundary("diagnose_build_" + phase)
+            self.no_stage_processes()
+            unit = "prism-diagnose-" + self.request["commit"][:12] + "-" + phase + "-" + attempt + ".service"
+            command = [
+                "/usr/bin/systemd-run",
+                "--wait",
+                "--pipe",
+                "--quiet",
+                "--collect",
+                "--unit=" + unit,
+                "--uid=prism-stage",
+                "--gid=prism-stage",
+                "--property=PrivateNetwork=yes",
+                "--property=ProtectHome=yes",
+                "--property=ProtectProc=invisible",
+                "--property=NoNewPrivileges=yes",
+                "--property=PrivateTmp=yes",
+                "--property=ProtectSystem=strict",
+                "--property=InaccessiblePaths=/run -" + str(self.operations / "staging"),
+                "--property=MemoryMax=768M",
+                "--property=TasksMax=64",
+                "--property=CPUQuota=100%",
+                "--property=RuntimeMaxSec=60",
+                "--property=KillMode=control-group",
+                "--property=UMask=0077",
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "HOME=/nonexistent",
+                "PIP_CONFIG_FILE=/dev/null",
+                "PIP_NO_INPUT=1",
+                "PYTHONDONTWRITEBYTECODE=1",
+            ]
+            if phase == "namespace":
+                command.insert(command.index("/usr/bin/env"), "--property=ReadWritePaths=" + str(target))
+                command.append("/usr/bin/true")
+            else:
+                command.extend([str(binary), "-I", "-B", "-m", "pip", *arguments])
+            try:
+                observed = self.diagnostic_runner(command)
+                if observed["truncated"] or observed["timed_out"]:
+                    self.stop_diagnostic_unit(unit)
+                summary = safe_build_diagnostics(observed["output"], release=self.release, packages=packages)
+                summary.update({key: observed[key] for key in ("return_code", "truncated", "timed_out")})
+                journal = self.diagnostic_runner(
+                    [
+                        "/usr/bin/journalctl",
+                        "--no-pager",
+                        "-o",
+                        "cat",
+                        "-n",
+                        "40",
+                        "--since",
+                        "@" + str(int(self.now()) - 120),
+                        "-u",
+                        unit,
+                    ],
+                    timeout=10,
+                )
+                summary["unit_journal"] = safe_build_diagnostics(
+                    journal["output"], release=self.release, packages=packages
+                )
+                summary["unit_journal"].update(
+                    {key: journal[key] for key in ("return_code", "truncated", "timed_out")}
+                )
+                report["commands"][phase] = summary
+            finally:
+                self.stop_diagnostic_unit(unit)
+            if phase == "namespace" and (
+                observed["return_code"] != 0 or observed["truncated"] or observed["timed_out"]
+            ):
+                report["pip_checks_skipped"] = "namespace_preflight_failed"
+                break
+        report["service_stopped"] = True
+        filename = "build-diagnostic-" + secrets.token_hex(8) + ".json"
+        self.write(self.record / filename, encoded(report))
+        self.action_report = report
+
+    def quarantine_failed_prepare(self):
+        pointer = self.checked(self.record / "quarantine-intent.json")
+        intent = json.loads(pointer.read_bytes()) if pointer.exists() else None
+        resuming = isinstance(intent, dict) and intent.get("completed") is False
+        self.failed_prepare_guard(candidate_required=not resuming)
+        if not resuming:
+            nonce = secrets.token_hex(8)
+            private = self.checked(self.operations / "failed-prepares" / self.request["release_id"] / nonce)
+            failed = self.checked(self.root / "opt/prism/failed")
+            for path in (failed, private):
+                self.checked(path).mkdir(parents=True, exist_ok=True, mode=0o700)
+                path.chmod(0o700)
+                if self.root == Path("/") and path.stat().st_uid != 0:
+                    raise ReleaseError("root_owned_directory_required")
+            sources = [
+                self.release,
+                self.record / "dependencies",
+                self.operations / "build-inputs" / self.request["release_id"],
+            ]
+            destinations = [
+                failed / (self.request["commit"] + "-" + nonce),
+                private / "dependencies",
+                private / "build-inputs",
+            ]
+            items = []
+            for source, destination in zip(sources, destinations, strict=True):
+                info = self.checked(source).lstat()
+                if not stat.S_ISDIR(info.st_mode) or self.checked(destination).exists():
+                    raise ReleaseError("quarantine_directory_rejected")
+                if info.st_dev != destination.parent.stat().st_dev:
+                    raise ReleaseError("quarantine_cross_device_rejected")
+                items.append(
+                    {
+                        "source": str(source),
+                        "destination": str(destination),
+                        "device": info.st_dev,
+                        "inode": info.st_ino,
+                    }
+                )
+            intent = {
+                "schema": 1,
+                "commit": self.request["commit"],
+                "manifest_sha256": self.request["manifest_sha256"],
+                "nonce": nonce,
+                "completed": False,
+                "items": items,
+            }
+            self.write(pointer, encoded(intent))
+        nonce = intent.get("nonce", "")
+        private = self.operations / "failed-prepares" / self.request["release_id"] / nonce
+        expected_pairs = [
+            (self.release, self.root / "opt/prism/failed" / (self.request["commit"] + "-" + nonce)),
+            (self.record / "dependencies", private / "dependencies"),
+            (self.operations / "build-inputs" / self.request["release_id"], private / "build-inputs"),
+        ]
+        if (
+            intent.get("schema") != 1
+            or intent.get("commit") != self.request["commit"]
+            or intent.get("manifest_sha256") != self.request["manifest_sha256"]
+            or not re.fullmatch(r"[0-9a-f]{16}", nonce)
+            or not isinstance(intent.get("items"), list)
+            or len(intent["items"]) != 3
+        ):
+            raise ReleaseError("quarantine_intent_rejected")
+        self.boundary("quarantine_failed_prepare")
+        labels = ("quarantine_candidate", "quarantine_dependencies", "quarantine_build_inputs")
+        for label, item, (source, destination) in zip(labels, intent["items"], expected_pairs, strict=True):
+            if item.get("source") != str(source) or item.get("destination") != str(destination):
+                raise ReleaseError("quarantine_intent_rejected")
+            self.checked(source)
+            self.checked(destination)
+            if source.exists() == destination.exists():
+                raise ReleaseError("quarantine_state_requires_reconciliation")
+            current = source if source.exists() else destination
+            info = current.lstat()
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (
+                item.get("device"),
+                item.get("inode"),
+            ):
+                raise ReleaseError("quarantine_identity_changed")
+            if source.exists():
+                self.boundary(label)
+                if self.runtime()["working_directory"] != str(self.production):
+                    raise ReleaseError("failed_prepare_original_runtime_required")
+                self.no_stage_processes()
+                self.checked(source)
+                self.checked(destination)
+                if not source.exists() or destination.exists():
+                    raise ReleaseError("quarantine_state_requires_reconciliation")
+                info = source.lstat()
+                if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (
+                    item.get("device"),
+                    item.get("inode"),
+                ):
+                    raise ReleaseError("quarantine_identity_changed")
+                # Rename only: EXDEV or any conflict fails closed, never copy/delete.
+                source.rename(destination)
+        completed = dict(intent, completed=True, checked_at=int(self.now()))
+        self.write(self.record / ("quarantine-" + nonce + ".json"), encoded(completed))
+        self.write(pointer, encoded(completed))
 
     def build_command(self, target, phase, arguments):
         self.run(
@@ -2025,6 +2556,7 @@ class RemoteRelease:
         ):
             raise ReleaseError("invalid_request")
         self.request = request
+        self.action_report = None
         self.release = self.checked(self.releases / request["commit"])
         self.record = self.checked(self.operations / request["release_id"])
         if request["action"] == "inspect":
@@ -2058,9 +2590,12 @@ class RemoteRelease:
             self.journal(request["action"], "started")
             try:
                 getattr(self, request["action"])()
-                return self.journal(
+                result = self.journal(
                     "verified" if request["action"] == "verify" else request["action"], "completed"
                 )
+                if request["action"] == "diagnose_build":
+                    result["diagnostics"] = self.action_report
+                return result
             except Exception as error:
                 self.journal(
                     request["action"],
