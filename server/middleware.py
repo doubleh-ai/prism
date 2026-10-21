@@ -1,11 +1,11 @@
 """Cross-cutting middleware: request ID, error sanitization, logging."""
+
 import logging
 import sys
-import time
 import uuid
 from contextvars import ContextVar
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -17,9 +17,7 @@ from fastapi.responses import JSONResponse
 _request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 
-_SAFE_HEADER_CHARS = set(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
-)
+_SAFE_HEADER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
 def _is_safe_header_value(value: str) -> bool:
@@ -55,7 +53,9 @@ def configure_logging(log_file: str, level: str = "INFO") -> logging.Logger:
 
     # File handler — rotated. 10 MB × 5 = 50 MB total.
     file_handler = RotatingFileHandler(
-        str(log_path), maxBytes=10 * 1024 * 1024, backupCount=5,
+        str(log_path),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
@@ -119,9 +119,12 @@ def install_error_handlers(app: FastAPI) -> None:
         # the user sent). Return a stable, minimal shape.
         return JSONResponse(
             status_code=422,
-            content={"detail": "Request payload validation failed",
-                     "errors": [{"loc": list(e.get("loc", [])), "msg": e.get("msg", "")}
-                                for e in exc.errors()[:10]]},
+            content={
+                "detail": "Request payload validation failed",
+                "errors": [
+                    {"loc": list(e.get("loc", [])), "msg": e.get("msg", "")} for e in exc.errors()[:10]
+                ],
+            },
         )
 
     @app.exception_handler(Exception)
@@ -132,6 +135,5 @@ def install_error_handlers(app: FastAPI) -> None:
         # return a generic message externally.
         return JSONResponse(
             status_code=500,
-            content={"detail": "Internal server error",
-                     "request_id": rid},
+            content={"detail": "Internal server error", "request_id": rid},
         )

@@ -1,7 +1,11 @@
 # Secrets & environment
 .env
+.env.*
+!.env.example
 *.pem
 *.key
+*.p12
+*.pfx
 secret_key
 config/claude-settings.json
 
@@ -22,6 +26,17 @@ Thumbs.db
 # Project
 data/
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 app.log
 app.log.*
 *.log
@@ -30,10 +45,12 @@ app.log.*
 .pytest_cache/
 htmlcov/
 .coverage
+coverage.xml
 
 # Skills — tracking data is runtime-generated, should not be committed
 skills/*/tracking/*.json
 skills/*/tracking/*.csv
+skills/*/reports/
 skills/*/__pycache__/
 
 # Superpowers — brainstorming artifacts are runtime-generated
@@ -41,3 +58,19 @@ skills/*/__pycache__/
 
 # Accidental root-level files
 =*
+
+# Production state, private exports and recovery archives
+/.deploy-revision
+/.diagnose-report.py
+/-H
+/tmp/
+/reports/
+/sessions/
+/runs/
+/uploads/
+/backups/
+/.claude/
+/*.bundle
+/*.tgz
+/*.tar.gz
+/*.sparsebundle/

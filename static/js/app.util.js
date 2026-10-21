@@ -23,25 +23,34 @@ function safeUrl(u) { if (!u) return ''; var s=String(u).trim(); return /^(javas
   const renderer = new marked.Renderer();
   const origLink = renderer.link.bind(renderer);
   const origImage = renderer.image.bind(renderer);
-  renderer.link = function(href, title, text) {
-    return origLink(safeUrl(href), title, text);
+  renderer.link = function(token) {
+    token = Object.assign({}, token || {});
+    token.href = safeUrl(token.href) || '#';
+    return origLink(token);
   };
-  renderer.image = function(href, title, text) {
-    return origImage(safeUrl(href), title, text);
+  renderer.image = function(token) {
+    token = Object.assign({}, token || {});
+    token.href = safeUrl(token.href);
+    return origImage(token);
   };
   // Blockquotes are never intentional in this domain — render > as literal text,
   // preserving the original character so nothing is lost. This is the root fix
   // for the recurring ">供应链" / "">瓶颈" rendering bugs (marked was turning
   // those stray >'s into <blockquote> and the escaping regex was a band-aid).
-  renderer.blockquote = function(html) { return '<p><span class="md-gt">&gt;</span> ' + html + '</p>'; };
-  renderer.paragraph = function(text) { return '<p>' + text + '</p>'; };
+  renderer.blockquote = function(token) {
+    var html = this.parser.parse((token && token.tokens) || []);
+    return '<div class="md-literal-quote"><span class="md-gt">&gt;</span><div>' + html + '</div></div>';
+  };
+  renderer.paragraph = function(token) {
+    return '<p>' + this.parser.parseInline((token && token.tokens) || []) + '</p>\n';
+  };
   marked.setOptions({ renderer, gfm: true, breaks: true, headerIds: false, mangle: false });
 })();
 
 /* 净化 marked 输出：剥离危险标签、on* 事件、危险 URL scheme。 */
 function sanitizeHtml(html) {
   if (!html) return '';
-  var s = html;
+  var s = typeof html === 'string' ? html : String(html);
   // Pre-decode entity-encoded quotes so the regexes below catch
   // obfuscated on* handlers and javascript: URLs (e.g. &#34; → ").
   s = s.replace(/&quot;/gi, '"').replace(/&#0*34;/gi, '"');
@@ -114,7 +123,11 @@ function _balanceMarkdown(text) {
 }
 
 function render(t) {
-  try { return sanitizeHtml(marked.parse(escapeAllGt(_preGlossify(_balanceMarkdown(t))))); }
+  try {
+    var html = marked.parse(escapeAllGt(_preGlossify(_balanceMarkdown(t))));
+    if (typeof html !== 'string') return escHtml(t);
+    return sanitizeHtml(html).replace(/\[object Object\]/g, '');
+  }
   catch(e) { return escHtml(t); }
 }
 
@@ -132,5 +145,4 @@ function fixPunct(t) {
   t = t.replace(/([一-鿿㐀-䶿]),(\s|$)/g, '$1，$2');
   return t;
 }
-
 

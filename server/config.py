@@ -1,4 +1,6 @@
 """Prism — 应用配置"""
+
+import contextlib
 import os
 import secrets
 from pathlib import Path
@@ -21,10 +23,8 @@ else:
     # Restrict permissions: only the owner can read the secret. This
     # is best-effort on POSIX; ignored on Windows. In containers,
     # run as a non-root user so the file isn't world-readable.
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(SECRET_KEY_FILE, 0o600)
-    except OSError:
-        pass
 
 # ── LLM API Keys（每个平台独立配置）──
 # 兼容旧变量 LLM_API_KEY 作为 fallback
@@ -73,28 +73,41 @@ MODELS = {
 DEFAULT_MODEL = "minimax-m3"
 
 # ── Claude Code CLI ──
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN",
-    os.path.expanduser("~/.npm-global/bin/claude"))
-SKILLS_HOME = Path(os.environ.get("CLAUDE_SKILLS_HOME",
-    Path.home() / ".claude" / "skills"))
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", os.path.expanduser("~/.npm-global/bin/claude"))
+SKILLS_HOME = Path(os.environ.get("CLAUDE_SKILLS_HOME", Path.home() / ".claude" / "skills"))
+
+_DEFAULT_SKILL_FALLBACK_ROOTS = [
+    PROJECT_ROOT / "skills",
+    Path.home() / "skills",
+]
+_ENV_SKILL_FALLBACK_ROOTS = [
+    Path(p.strip()) for p in os.environ.get("CLAUDE_SKILL_FALLBACKS", "").split(os.pathsep) if p.strip()
+]
+SKILL_FALLBACK_ROOTS = []
+for _root in [*_ENV_SKILL_FALLBACK_ROOTS, *_DEFAULT_SKILL_FALLBACK_ROOTS]:
+    if _root not in SKILL_FALLBACK_ROOTS and _root != SKILLS_HOME:
+        SKILL_FALLBACK_ROOTS.append(_root)
 
 # ── Skill 映射（Claude Code 加载时用目录名查找） ──
 SKILL_MAP = {
     "bottleneck-hunter": {"dir": "serenity-bottleneck-hunter", "name": "瓶颈猎手"},
-    "serenity":           {"dir": "serenity-skill",            "name": "Serenity 卡点分析"},
-    "cn":                 {"dir": "force-chinese",             "name": "强制中文输出"},
+    "serenity": {"dir": "serenity-skill", "name": "Serenity 卡点分析"},
+    "cn": {"dir": "force-chinese", "name": "强制中文输出"},
 }
 
 # ── 速率限制 ──
 RATE_CHAT_PER_MIN = int(os.environ.get("RATE_CHAT_PER_MIN", "20"))
 RATE_LOGIN_PER_MIN = int(os.environ.get("RATE_LOGIN_PER_MIN", "10"))
 RATE_EXPLAIN_PER_MIN = int(os.environ.get("RATE_EXPLAIN_PER_MIN", "10"))
+CHAT_STREAM_HEARTBEAT_SECONDS = int(os.environ.get("PRISM_CHAT_STREAM_HEARTBEAT", "20"))
+CHAT_STREAM_IDLE_TIMEOUT_SECONDS = int(os.environ.get("PRISM_CHAT_STREAM_IDLE_TIMEOUT", "300"))
 
 # ── Admin ──
-# Comma-separated list of admin usernames (e.g. "alice,bob"). When set,
-# only these users can call /api/industry/seed. Leave empty for single-user
-# mode where any authenticated user is effectively admin.
-_ADMIN_RAW = os.environ.get("ADMIN_USERS", "")
+# Comma-separated list of admin usernames (e.g. "admin,alice").
+# Default is strict: only ADMIN_USER (or "admin" when unset) can access
+# the management console unless ADMIN_USERS explicitly overrides it.
+_DEFAULT_ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+_ADMIN_RAW = os.environ.get("ADMIN_USERS", _DEFAULT_ADMIN_USER)
 ADMIN_USERS = {u.strip() for u in _ADMIN_RAW.split(",") if u.strip()}
 
 # ── SQLite ──
@@ -133,8 +146,8 @@ LOG_FILE = os.environ.get("STOCK_LOG_FILE", str(PROJECT_ROOT / "app.log"))
 # 在本机被拦，作为兜底，待其可达时自动顶上。
 # 链路对单个 provider 的任意异常都做 failover，故顺序只影响首试延迟。
 MARKET_PROVIDERS = [
-    p.strip() for p in
-    os.environ.get("PRISM_MARKET_PROVIDERS", "tencent,akshare,baostock").split(",")
+    p.strip()
+    for p in os.environ.get("PRISM_MARKET_PROVIDERS", "tencent,akshare,baostock").split(",")
     if p.strip()
 ]
 # 各数据类型的 TTL（秒）。QUOTE 短、KLINE 中、FUNDAMENTALS 长。
@@ -151,8 +164,8 @@ BAOSTOCK_TIMEOUT = int(os.environ.get("PRISM_BAOSTOCK_TIMEOUT", "10"))
 # TradingAgents-astock 项目路径（默认与本项目同级）
 ASTOCK_PROJECT = os.environ.get("PRISM_ASTOCK_PROJECT", str(PROJECT_ROOT.parent / "TradingAgents-astock"))
 # LLM 配置：quick 用于分析师/辩论，deep 用于研判/决策
-ASTOCK_LLM_QUICK = os.environ.get("ASTOCK_LLM_QUICK", "deepseek-v4-pro")
-ASTOCK_LLM_DEEP = os.environ.get("ASTOCK_LLM_DEEP", "deepseek-v4-pro")
+ASTOCK_LLM_QUICK = os.environ.get("ASTOCK_LLM_QUICK", "deepseek-chat")
+ASTOCK_LLM_DEEP = os.environ.get("ASTOCK_LLM_DEEP", "deepseek-chat")
 ASTOCK_LLM_PROVIDER = os.environ.get("ASTOCK_LLM_PROVIDER", "deepseek")
 ASTOCK_LLM_BASE_URL = os.environ.get("ASTOCK_LLM_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", ""))
 ASTOCK_LLM_API_KEY = os.environ.get("ASTOCK_LLM_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
@@ -160,3 +173,37 @@ ASTOCK_DATA_VENDOR = os.environ.get("ASTOCK_DATA_VENDOR", "a_stock")
 ASTOCK_MAX_DEBATE_ROUNDS = int(os.environ.get("ASTOCK_MAX_DEBATE_ROUNDS", "1"))
 ASTOCK_OUTPUT_LANGUAGE = os.environ.get("ASTOCK_OUTPUT_LANGUAGE", "Chinese")
 ASTOCK_RESULTS_DIR = os.environ.get("ASTOCK_RESULTS_DIR", str(DATA_DIR / "analysis_reports"))
+ASTOCK_HARD_TIMEOUT_SECONDS = int(os.environ.get("PRISM_ASTOCK_HARD_TIMEOUT", "1800"))
+ASTOCK_CACHE_TTL_SECONDS = int(os.environ.get("PRISM_ASTOCK_CACHE_TTL", "86400"))
+ASTOCK_FAST_ANALYSTS = [
+    a.strip()
+    for a in os.environ.get("PRISM_ASTOCK_FAST_ANALYSTS", "market,fundamentals").split(",")
+    if a.strip()
+]
+ASTOCK_DEEP_ANALYSTS = [
+    a.strip()
+    for a in os.environ.get(
+        "PRISM_ASTOCK_DEEP_ANALYSTS",
+        "market,social,news,fundamentals,policy,hot_money,lockup",
+    ).split(",")
+    if a.strip()
+]
+ASTOCK_FAST_DEBATE_ROUNDS = int(os.environ.get("PRISM_ASTOCK_FAST_DEBATE_ROUNDS", "0"))
+ASTOCK_FAST_RISK_ROUNDS = int(os.environ.get("PRISM_ASTOCK_FAST_RISK_ROUNDS", "0"))
+ASTOCK_NO_PROXY_DOMAINS = [
+    d.strip()
+    for d in os.environ.get(
+        "PRISM_ASTOCK_NO_PROXY",
+        "eastmoney.com,push2.eastmoney.com,quote.eastmoney.com,"
+        "ths.com,thsi.cn,10jqka.com.cn,cls.cn,finance.sina.com.cn,"
+        "hq.sinajs.cn,sina.com.cn",
+    ).split(",")
+    if d.strip()
+]
+
+# Official HKUDS/Vibe-Trading sidecar. It is intentionally loopback-only in
+# production; Prism owns authentication and persists the user-facing record.
+VIBE_ENGINE_URL = os.environ.get("PRISM_VIBE_ENGINE_URL", "http://127.0.0.1:8899").rstrip("/")
+VIBE_ENGINE_TIMEOUT_SECONDS = int(os.environ.get("PRISM_VIBE_ENGINE_TIMEOUT", "1200"))
+VIBE_ENGINE_REVISION = os.environ.get("PRISM_VIBE_ENGINE_REVISION", "d456025")
+VIBE_ENGINE_VERSION = os.environ.get("PRISM_VIBE_ENGINE_VERSION", "0.1.11")

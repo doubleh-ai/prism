@@ -1,4 +1,5 @@
 """Static files are gzipped when client accepts it, and have immutable cache headers."""
+
 import pytest
 
 
@@ -6,7 +7,9 @@ import pytest
 async def test_static_js_gzipped_when_accepted(client):
     """/static/js/*.js with Accept-Encoding: gzip returns gzipped body."""
     import httpx
+
     from server.main import app
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as raw_client:
         r = await raw_client.get(
@@ -36,6 +39,15 @@ async def test_static_files_have_immutable_cache_control(client):
     cc = r.headers.get("cache-control", "")
     assert "max-age=31536000" in cc
     assert "immutable" in cc
+
+
+@pytest.mark.asyncio
+async def test_service_worker_script_is_never_immutable_cached(client):
+    """The update manifest itself must always be revalidated after deploys."""
+    r = await client.get("/static/sw.js")
+    cc = r.headers.get("cache-control", "")
+    assert "no-store" in cc
+    assert "immutable" not in cc
 
 
 @pytest.mark.asyncio

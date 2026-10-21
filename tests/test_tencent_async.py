@@ -1,13 +1,14 @@
-# -*- coding: utf-8 -*-
 """Tencent provider's urllib calls must not block the event loop.
 
 Strategy: mock urlopen to do a non-trivial amount of work, then call
 get_quote. During the call, schedule another coroutine on the loop and
 verify it runs — i.e. the loop is not blocked.
 """
+
 import asyncio
+import json
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_get_quote_does_not_block_event_loop():
@@ -53,7 +54,7 @@ def test_get_quote_does_not_block_event_loop():
     # The elapsed time should be <= 250ms (200ms upstream + 50ms scheduling
     # overhead), NOT 200ms + 200ms (which would mean the side task was
     # blocked behind the upstream call). Allow 300ms for CI noise.
-    assert elapsed < 0.3, f"Loop appears blocked: {elapsed*1000:.0f} ms elapsed"
+    assert elapsed < 0.3, f"Loop appears blocked: {elapsed * 1000:.0f} ms elapsed"
 
 
 def test_get_quote_returns_valid_quote():
@@ -88,7 +89,9 @@ def test_get_kline_does_not_block_event_loop():
     def fake_urlopen(req, timeout):
         time.sleep(0.2)
         m = MagicMock()
-        m.read.return_value = b'[{"day":"2024-01-01","open":1.0,"high":2.0,"low":0.5,"close":1.5,"volume":1000.0}]'
+        m.read.return_value = (
+            b'[{"day":"2024-01-01","open":1.0,"high":2.0,"low":0.5,"close":1.5,"volume":1000.0}]'
+        )
         m.__enter__ = lambda s: s
         m.__exit__ = lambda s, *a: None
         return m
@@ -104,4 +107,34 @@ def test_get_kline_does_not_block_event_loop():
     kline, elapsed = asyncio.run(main())
     assert len(kline) == 1
     assert kline[0].close == 1.5
-    assert elapsed < 0.3, f"K-line loop appears blocked: {elapsed*1000:.0f} ms"
+    assert elapsed < 0.3, f"K-line loop appears blocked: {elapsed * 1000:.0f} ms"
+
+
+def test_get_kline_builds_weekly_bars_and_fetches_enough_daily_history():
+    from server.market.tencent_provider import TencentProvider
+
+    captured = {}
+    payload = [
+        {"day": "2024-01-29", "open": 10, "high": 12, "low": 9, "close": 11, "volume": 100},
+        {"day": "2024-02-02", "open": 11, "high": 14, "low": 10, "close": 13, "volume": 200},
+        {"day": "2024-02-05", "open": 13, "high": 15, "low": 12, "close": 14, "volume": 300},
+    ]
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        response = MagicMock()
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda value, *args: None
+        return response
+
+    async def main():
+        provider = TencentProvider()
+        with patch("server.market.tencent_provider.urllib.request.urlopen", new=fake_urlopen):
+            return await provider.get_kline("600519", "1w", 2)
+
+    bars = asyncio.run(main())
+    assert "datalen=60" in captured["url"]
+    assert len(bars) == 2
+    assert (bars[0].open, bars[0].high, bars[0].low, bars[0].close) == (10, 14, 9, 13)
+    assert bars[0].volume == 300

@@ -4,6 +4,9 @@
 
 Object.assign(App, {
   _marketSearchDebounce: null,
+  _currentKlineLimit: 120,
+  _klinePeriodLimits: {'1d':120, '1w':104, '1m':60},
+  _klineMaVisible: {MA5:true, MA10:true, MA20:true, MA60:false},
   openMarket: function() {
     var modal = document.getElementById('marketModal');
     if (!modal) return;
@@ -94,14 +97,23 @@ Object.assign(App, {
     if (mode === this._mode) return;
     var prev = this._mode;
     this._mode = mode;
+    var telemetryFeature = mode === 'reports' ? 'report' : mode;
+    if (this._trackUiEvent && (telemetryFeature !== 'admin' || this.isAdmin)) {
+      this._trackUiEvent(telemetryFeature, 'open');
+    }
     if (prev === 'industry' && mode !== 'industry') this._leaveIndustry();
     var shell = document.getElementById('appShell');
     if (shell) shell.setAttribute('data-mode', mode);
+    var compact = this._isCompactViewport && this._isCompactViewport();
+    var needsDrawer = mode !== 'chat' && mode !== 'industry';
     var btns = document.querySelectorAll('.icon-rail-btn');
     for (var i = 0; i < btns.length; i++) {
       btns[i].classList.toggle('active', btns[i].getAttribute('data-mode') === mode);
     }
+    var adminEntry = document.getElementById('adminEntry');
+    if (adminEntry) adminEntry.classList.toggle('active', mode === 'admin');
     if (mode === 'market') {
+      if (this._initMarketWorkbench) this._initMarketWorkbench();
       this._loadWatchlist();
       this._renderWatchlist();
       this._startWatchlistRefresh();
@@ -113,7 +125,7 @@ Object.assign(App, {
     } else if (mode === 'analysis') {
       this._stopWatchlistRefresh();
       // Ensure sidebar is visible (don't auto-collapse).
-      if (shell) shell.classList.remove('collapsed');
+      if (shell && !compact) shell.classList.remove('collapsed');
       var aq = document.getElementById('analysisQ');
       if (aq) setTimeout(function() { aq.focus(); }, 50);
       // Try to restore a running/completed analysis (survives page refresh)
@@ -122,50 +134,108 @@ Object.assign(App, {
         document.getElementById('analysisPanelInner').innerHTML = '<div class="market-empty-state">从左侧搜索股票，点击"一键分析"生成结构化分析报告</div>';
       }
       this._warmupSearch();
+    } else if (mode === 'reports') {
+      this._stopWatchlistRefresh();
+      if (shell && !compact) shell.classList.remove('collapsed');
+      this._initReports();
+    } else if (mode === 'vibe') {
+      this._stopWatchlistRefresh();
+      if (shell && !compact) shell.classList.remove('collapsed');
+      this._initVibe();
     } else if (mode === 'industry') {
       this._stopWatchlistRefresh();
       this._initIndustry();
+    } else if (mode === 'admin') {
+      this._stopWatchlistRefresh();
+      if (shell && !compact) shell.classList.remove('collapsed');
+      this._initAdmin();
     } else {
       this._stopWatchlistRefresh();
     }
+    if (shell && compact) shell.classList.toggle('mobile-sidebar-open', needsDrawer);
   },
 
   _showMarketEmpty: function() {
     var inner = document.getElementById('marketPanelInner');
-    if (inner) inner.innerHTML = '<div class="market-empty-state">从左侧搜索，或点击自选股票查看行情</div>';
+    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>从左侧搜索或点击自选，也可以先从全市场指标选股开始。</span><div><button type="button" onclick="App._showMarketWorkspace(\'screener\')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace(\'library\')">配置指标库</button></div></div>';
   },
 
   // ── 自选列表（localStorage） ──
+  _normalizeTicker: function(ticker) {
+    var t = String(ticker || '').trim().toUpperCase().replace(/\s+/g, '');
+    var prefixed = t.match(/^(SH|SZ|BJ)(\d{6})$/);
+    if (prefixed) return prefixed[2];
+    var suffixed = t.match(/^(\d{6})\.(SH|SZ|BJ)$/);
+    if (suffixed) return suffixed[1];
+    return t;
+  },
+  _normalizeWatchEntry: function(item) {
+    if (!item) return null;
+    var ticker = this._normalizeTicker(item.ticker || item.code || item.symbol || item);
+    if (!ticker) return null;
+    return {
+      ticker: ticker,
+      name: String(item.name || item.title || ticker).trim() || ticker,
+      price: item.price == null ? null : item.price,
+      pct: item.pct == null ? (item.change_pct == null ? null : item.change_pct) : item.pct
+    };
+  },
   _loadWatchlist: function() {
     try {
       var raw = localStorage.getItem('prism-watchlist');
       var parsed = raw ? JSON.parse(raw) : [];
-      this._watchlist = Array.isArray(parsed) ? parsed : [];
+      var rows = Array.isArray(parsed) ? parsed : [];
+      var seen = {};
+      var clean = [];
+      for (var i = 0; i < rows.length; i++) {
+        var row = this._normalizeWatchEntry(rows[i]);
+        if (!row || seen[row.ticker]) continue;
+        seen[row.ticker] = true;
+        clean.push(row);
+      }
+      this._watchlist = clean;
+      if (clean.length !== rows.length) this._saveWatchlist();
     } catch (e) { this._watchlist = []; }
   },
   _saveWatchlist: function() {
     try { localStorage.setItem('prism-watchlist', JSON.stringify(this._watchlist)); } catch (e) {}
   },
   _findWatchIndex: function(ticker) {
+    ticker = this._normalizeTicker(ticker);
     for (var i = 0; i < this._watchlist.length; i++) {
       if (this._watchlist[i].ticker === ticker) return i;
     }
     return -1;
   },
   _addToWatchlist: function(ticker, name) {
-    if (this._findWatchIndex(ticker) >= 0) return;
-    this._watchlist.push({ticker: ticker, name: name || ticker, price: null, pct: null});
+    var row = this._normalizeWatchEntry({ticker: ticker, name: name});
+    if (!row) return false;
+    var existing = this._findWatchIndex(row.ticker);
+    if (existing >= 0) {
+      if (name && (!this._watchlist[existing].name || this._watchlist[existing].name === this._watchlist[existing].ticker)) {
+        this._watchlist[existing].name = String(name).trim();
+        this._saveWatchlist();
+        this._renderWatchlist();
+      }
+      return false;
+    }
+    this._watchlist.push(row);
     this._saveWatchlist();
     this._renderWatchlist();
     this._refreshWatchlist();
+    if (this._trackUiEvent) this._trackUiEvent('market', 'watchlist_add', 'ticker', row.ticker, row.name);
+    return true;
   },
   _removeFromWatchlist: function(ticker, ev) {
     if (ev) ev.stopPropagation();
+    ticker = this._normalizeTicker(ticker);
     var i = this._findWatchIndex(ticker);
     if (i < 0) return;
+    var removed = this._watchlist[i];
     this._watchlist.splice(i, 1);
     this._saveWatchlist();
     this._renderWatchlist();
+    if (this._trackUiEvent) this._trackUiEvent('market', 'watchlist_remove', 'ticker', ticker, removed && removed.name);
   },
   _renderWatchlist: function() {
     var el = document.getElementById('watchlist');
@@ -191,7 +261,7 @@ Object.assign(App, {
           '<span class="watchlist-item__name">' + esc(w.name || '') + '</span>' +
           '<span class="watchlist-item__price">' + price + '</span>' +
           '<span class="watchlist-item__pct ' + pctCls + '">' + pctTxt + '</span>' +
-          '<button class="watchlist-item__del" title="移除">×</button>';
+          '<button class="watchlist-item__del" title="移除自选" aria-label="移除 ' + escAttr(w.ticker) + '">×</button>';
         div.addEventListener('click', function() { self._selectStock(w.ticker, w.name); });
         var del = div.querySelector('.watchlist-item__del');
         if (del) del.addEventListener('click', function(e) { self._removeFromWatchlist(w.ticker, e); });
@@ -235,17 +305,21 @@ Object.assign(App, {
         for (var t in quotes) {
           var q = quotes[t];
           if (q.error) continue;
+          var quoteTicker = self._normalizeTicker(q.ticker || q.code || q.symbol || t);
           for (var wi = 0; wi < self._watchlist.length; wi++) {
-            if (self._watchlist[wi].ticker === t) {
+            if (self._watchlist[wi].ticker === quoteTicker) {
               self._watchlist[wi].price = q.price;
               self._watchlist[wi].pct = q.change_pct;
-              self._watchlist[wi].name = q.name || self._watchlist[wi].name;
+              if (q.name && q.name !== quoteTicker) self._watchlist[wi].name = q.name;
               changed = true;
               break;
             }
           }
         }
-        if (changed) self._renderWatchlist();
+        if (changed) {
+          self._saveWatchlist();
+          self._renderWatchlist();
+        }
       });
     }).catch(function() {});
   },
@@ -256,15 +330,21 @@ Object.assign(App, {
     clearTimeout(this._marketSidebarDebounce);
     var q = (e.target.value || '').trim();
     var box = document.getElementById('marketSidebarResults');
+    this._marketSearchSeq = (this._marketSearchSeq || 0) + 1;
+    var seq = this._marketSearchSeq;
     if (!q) { if (box) box.innerHTML = ''; return; }
-    this._marketSidebarDebounce = setTimeout(function() { self._marketSidebarRunSearch(q); }, 250);
+    this._marketSidebarDebounce = setTimeout(function() { self._marketSidebarRunSearch(q, seq); }, 250);
   },
-  _marketSidebarRunSearch: async function(q) {
+  _marketSidebarRunSearch: async function(q, seq) {
     var box = document.getElementById('marketSidebarResults');
     if (!box) return;
     var r = await this.api('/api/search?q=' + encodeURIComponent(q) + '&limit=10');
+    if (seq && seq !== this._marketSearchSeq) return;
+    var input = document.getElementById('marketSidebarQ');
+    if (seq && input && (input.value || '').trim() !== q) return;
     if (!r.ok) { box.innerHTML = '<div class="market-search-empty">搜索失败</div>'; return; }
     var data = await r.json();
+    if (seq && seq !== this._marketSearchSeq) return;
     var hits = data.hits || [];
     if (!hits.length) { box.innerHTML = '<div class="market-search-empty">未找到匹配股票</div>'; return; }
     var self = this;
@@ -281,9 +361,15 @@ Object.assign(App, {
           '<span class="market-hit__name">' + esc(h.name) + '</span>' +
           '<button class="market-hit__add' + (added ? ' added' : '') + '">' + (added ? '✓ 已加' : '⊕ 自选') + '</button>';
         li.addEventListener('click', function(ev) {
-          if (ev.target.classList.contains('market-hit__add')) {
+          var addBtn = ev.target.closest ? ev.target.closest('.market-hit__add') : null;
+          if (addBtn) {
             ev.stopPropagation();
-            if (!added) { self._addToWatchlist(h.ticker, h.name); self._marketSidebarRunSearch(q); }
+            if (addBtn.classList.contains('added')) return;
+            var didAdd = self._addToWatchlist(h.ticker, h.name);
+            addBtn.classList.add('added');
+            addBtn.textContent = '✓ 已加';
+            addBtn.disabled = true;
+            if (self._toast) self._toast((didAdd ? '已加入自选：' : '已在自选：') + self._normalizeTicker(h.ticker));
           } else {
             self._selectStock(h.ticker, h.name);
           }
@@ -295,12 +381,14 @@ Object.assign(App, {
 
   // ── 主面板：选股 + 渲染 ──
   _selectStock: function(ticker, name) {
+    if (this._showMarketWorkspace) this._showMarketWorkspace('quote');
     this._currentTicker = ticker;
     this._currentName = name || '';
     this._renderWatchlist();
     this._renderQuoteCard(ticker, name);
     this._renderKline(ticker, this._currentPeriod);
     this._renderFundamentals(ticker);
+    this._closeMobileSidebar();
   },
   _fmtVolume: function(v) {
     var n = Number(v);
@@ -313,8 +401,11 @@ Object.assign(App, {
     var inner = document.getElementById('marketPanelInner');
     if (!inner) return;
     inner.innerHTML =
-      '<div class="market-quote-card"><div class="market-loading-state">加载 ' + esc(ticker) + ' 行情中…</div></div>' +
-      '<div class="market-kline-wrap"></div><div class="market-fundamentals"></div>';
+      '<div class="market-detail-layout"><div class="market-detail-primary">' +
+        '<div class="market-quote-card"><div class="market-loading-state">加载 ' + esc(ticker) + ' 行情中…</div></div>' +
+        '<div class="market-kline-wrap"></div>' +
+      '</div><aside class="market-detail-aside"><div class="market-fundamentals"></div><div class="market-indicator-dock" id="marketIndicatorDock"></div></aside></div>';
+    if (this._renderIndicatorDock) this._renderIndicatorDock();
     var r = await this.api('/api/quote/' + encodeURIComponent(ticker));
     var card = inner.querySelector('.market-quote-card');
     if (!r.ok) {
@@ -322,6 +413,16 @@ Object.assign(App, {
       return;
     }
     var q = await r.json();
+    var officialName = String(q.name || '').trim();
+    if (officialName && officialName !== ticker) {
+      this._currentName = officialName;
+      var watchIndex = this._findWatchIndex(ticker);
+      if (watchIndex >= 0 && this._watchlist[watchIndex].name !== officialName) {
+        this._watchlist[watchIndex].name = officialName;
+        this._saveWatchlist();
+        this._renderWatchlist();
+      }
+    }
     var big = (q.price != null && Number(q.price) >= 100);
     var price = (q.price == null) ? '—' : Number(q.price).toFixed(big ? 2 : 3);
     var chgNum = q.change;
@@ -338,7 +439,7 @@ Object.assign(App, {
     card.innerHTML =
       '<div class="market-qc-head">' +
         '<span class="market-qc-code">' + esc(ticker) + '</span>' +
-        '<span class="market-qc-name">' + esc(name || q.name || '') + '</span>' +
+        '<span class="market-qc-name">' + esc(officialName || name || '') + '</span>' +
         '<button class="market-qc-ask" onclick="App._askAboutStock()">问 AI</button>' +
       '</div>' +
       '<div class="market-qc-price-row">' +
@@ -354,8 +455,12 @@ Object.assign(App, {
       '<div class="market-qc-src">数据来源: ' + esc(q.source || '—') + ' · ' +
         new Date((q.timestamp || 0) * 1000).toLocaleString('zh-CN') + '</div>';
   },
-  _renderKline: async function(ticker, period) {
+  _renderKline: async function(ticker, period, limit) {
     this._currentPeriod = period;
+    var defaults = {'1d':120, '1w':104, '1m':60};
+    limit = Math.max(12, Math.min(500, Number(limit || this._klinePeriodLimits[period] || defaults[period] || 120)));
+    this._currentKlineLimit = limit;
+    this._klinePeriodLimits[period] = limit;
     var inner = document.getElementById('marketPanelInner');
     var wrap = inner ? inner.querySelector('.market-kline-wrap') : null;
     if (!wrap) return;
@@ -363,8 +468,22 @@ Object.assign(App, {
     var tabs = periods.map(function(p) {
       return '<button class="market-kline-period' + (p[0] === period ? ' active' : '') + '" onclick="App._renderKline(' + JSON.stringify(ticker).replace(/"/g,'&quot;') + ',' + JSON.stringify(p[0]).replace(/"/g,'&quot;') + ')">' + p[1] + '</button>';
     }).join('');
-    wrap.innerHTML = '<div class="market-kline-hd"><h4>K 线图</h4>' + tabs + '</div><div class="market-kline-empty">加载 K 线中…</div>';
-    var r = await this.api('/api/quote/' + encodeURIComponent(ticker) + '/kline?period=' + encodeURIComponent(period) + '&limit=120');
+    var rangeSets = {
+      '1d': [[60,'3月'],[120,'半年'],[250,'1年'],[500,'全部']],
+      '1w': [[26,'半年'],[52,'1年'],[104,'2年'],[260,'5年']],
+      '1m': [[12,'1年'],[24,'2年'],[60,'5年'],[120,'10年']]
+    };
+    var ranges = (rangeSets[period] || rangeSets['1d']).map(function(item) {
+      return '<button class="market-kline-range' + (item[0] === limit ? ' active' : '') + '" onclick="App._renderKline(' + JSON.stringify(ticker).replace(/"/g,'&quot;') + ',' + JSON.stringify(period).replace(/"/g,'&quot;') + ',' + item[0] + ')">' + item[1] + '</button>';
+    }).join('');
+    var maNames = ['MA5','MA10','MA20','MA60'];
+    var self = this;
+    var maToggles = maNames.map(function(ma) {
+      var checked = self._klineMaVisible[ma] !== false;
+      return '<label class="market-kline-ma' + (checked ? ' active' : '') + '"><input type="checkbox" ' + (checked ? 'checked ' : '') + 'onchange="App._toggleKlineSeries(\'' + ma + '\',this.checked);this.parentNode.classList.toggle(\'active\',this.checked)"><span>' + ma + '</span></label>';
+    }).join('');
+    wrap.innerHTML = '<div class="market-kline-hd"><h4>K 线</h4><div class="market-kline-segment">' + tabs + '</div><div class="market-kline-segment range">' + ranges + '</div><div class="market-kline-tools"><div class="market-kline-ma-list">' + maToggles + '</div><button class="market-kline-icon" title="复位缩放" aria-label="复位缩放" onclick="App._resetKlineZoom()">↺</button><button class="market-kline-icon" title="全屏查看" aria-label="全屏查看" onclick="App._toggleKlineFullscreen()">⛶</button></div></div><div class="market-kline-empty">加载 K 线中…</div>';
+    var r = await this.api('/api/quote/' + encodeURIComponent(ticker) + '/kline?period=' + encodeURIComponent(period) + '&limit=' + limit);
     var emptyEl = wrap.querySelector('.market-kline-empty');
     if (!r.ok) { if (emptyEl) emptyEl.textContent = 'K 线数据加载失败'; return; }
     var data = await r.json();
@@ -376,11 +495,31 @@ Object.assign(App, {
     wrap.appendChild(chartDiv);
     this.renderKlineChart(chartDiv, kline);
   },
+  _toggleKlineSeries: function(name, visible) {
+    this._klineMaVisible[name] = !!visible;
+    if (!this._klineChart) return;
+    try {
+      this._klineChart.dispatchAction({type: visible ? 'legendSelect' : 'legendUnSelect', name: name});
+    } catch (e) {}
+  },
+  _resetKlineZoom: function() {
+    if (!this._klineChart) return;
+    try { this._klineChart.dispatchAction({type:'dataZoom', start:0, end:100}); } catch (e) {}
+  },
+  _toggleKlineFullscreen: function() {
+    var inner = document.getElementById('marketPanelInner');
+    var wrap = inner ? inner.querySelector('.market-kline-wrap') : null;
+    if (!wrap) return;
+    try {
+      if (document.fullscreenElement === wrap) document.exitFullscreen();
+      else if (wrap.requestFullscreen) wrap.requestFullscreen();
+    } catch (e) {}
+  },
   _chartPalette: function() {
     var dark = document.documentElement.classList.contains('dark');
     return dark
-      ? {up:'#ef5350', dn:'#26a69a', ma1:'#fbbf24', ma2:'#a78bfa', grid:'#202228', axl:'#282a32', txt:'#706c64', cross:'#706c64', tipBg:'#18191e', tipBd:'#282a32', tipTxt:'#d8d5cd', zoomBd:'#282a32', zoomFill:'#202228'}
-      : {up:'#d6332f', dn:'#1f9d83', ma1:'#cf8a3a', ma2:'#7c5fd0', grid:'#d2cec3', axl:'#c8c2b4', txt:'#8a8478', cross:'#9d9890', tipBg:'#ffffff', tipBd:'#e2e0da', tipTxt:'#1c1a16', zoomBd:'#d5d2cb', zoomFill:'#ebe9e4'};
+      ? {rise:'#ef5350', fall:'#26a69a', up:'#ef5350', dn:'#26a69a', ma1:'#fbbf24', ma2:'#a78bfa', grid:'#202228', axl:'#282a32', txt:'#706c64', cross:'#706c64', tipBg:'#18191e', tipBd:'#282a32', tipTxt:'#d8d5cd', zoomBd:'#282a32', zoomFill:'#202228'}
+      : {rise:'#d6332f', fall:'#1f9d83', up:'#d6332f', dn:'#1f9d83', ma1:'#cf8a3a', ma2:'#7c5fd0', grid:'#d2cec3', axl:'#c8c2b4', txt:'#8a8478', cross:'#9d9890', tipBg:'#ffffff', tipBd:'#e2e0da', tipTxt:'#1c1a16', zoomBd:'#d5d2cb', zoomFill:'#ebe9e4'};
   },
   renderKlineChart: function(container, kline) {
     if (typeof echarts === 'undefined') { container.innerHTML = '图表库未加载'; return; }
@@ -544,6 +683,8 @@ Object.assign(App, {
   _analysisTicker: null,
   _analysisName: "",
   _analysisSidebarDebounce: null,
+  _analysisSearchSeq: 0,
+  _marketSearchSeq: 0,
 
   // Pre-warm the backend stock-list cache so the first real search is instant.
   _warmupSearch: function() {
@@ -568,15 +709,21 @@ Object.assign(App, {
     clearTimeout(this._analysisSidebarDebounce);
     var q = (e.target.value || "").trim();
     var box = document.getElementById("analysisSearchResults");
+    this._analysisSearchSeq = (this._analysisSearchSeq || 0) + 1;
+    var seq = this._analysisSearchSeq;
     if (!q) { if (box) box.innerHTML = ""; return; }
-    this._analysisSidebarDebounce = setTimeout(function() { self._analysisRunSearch(q); }, 150);
+    this._analysisSidebarDebounce = setTimeout(function() { self._analysisRunSearch(q, seq); }, 150);
   },
-  _analysisRunSearch: async function(q) {
+  _analysisRunSearch: async function(q, seq) {
     var box = document.getElementById("analysisSearchResults");
     if (!box) return;
     var r = await this.api("/api/search?q=" + encodeURIComponent(q) + "&limit=8");
+    if (seq && seq !== this._analysisSearchSeq) return;
+    var input = document.getElementById("analysisQ");
+    if (seq && input && (input.value || "").trim() !== q) return;
     if (!r.ok) { box.innerHTML = "<div class=\"market-search-empty\">搜索失败</div>"; return; }
     var data = await r.json();
+    if (seq && seq !== this._analysisSearchSeq) return;
     var hits = data.hits || [];
     if (!hits.length) { box.innerHTML = "<div class=\"market-search-empty\">未找到匹配股票</div>"; return; }
     var self = this;

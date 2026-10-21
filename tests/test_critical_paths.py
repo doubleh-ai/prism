@@ -6,13 +6,12 @@ Focuses on:
 - api_view_report (size cap, missing file, traversal)
 - explain-term (cache behavior, fallback)
 """
-import os
-import re
+
 import sys
-import json
 import time
-import pytest
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -21,17 +20,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 class TestChatHelpers:
     def test_cwd_to_project_dir(self):
         from server.chat import _cwd_to_project_dir
+
         out = _cwd_to_project_dir("/home/ubuntu/.claude/skills/foo")
         assert out == "-home-ubuntu--claude-skills-foo"
 
     def test_cwd_to_project_dir_strips_leading_slash(self):
         from server.chat import _cwd_to_project_dir
+
         out = _cwd_to_project_dir("relative/path")
         assert out.startswith("-")
         assert "/" not in out[1:].replace("-", "", 1) or "-" in out  # converts / to -
 
     def test_extract_refs_simple(self):
         from server.chat import _extract_refs_from_tool_result
+
         content = "Here are results:\n1. [Title One](https://example.com/1) - snippet about one\n2. [Title Two](https://example.com/2) - snippet about two"
         refs = _extract_refs_from_tool_result(content)
         assert len(refs) == 2
@@ -41,12 +43,14 @@ class TestChatHelpers:
 
     def test_extract_refs_dedupes(self):
         from server.chat import _extract_refs_from_tool_result
+
         content = "[A](https://x.com) and [A again](https://x.com)"
         refs = _extract_refs_from_tool_result(content)
         assert len(refs) == 1
 
     def test_extract_refs_ignores_non_http(self):
         from server.chat import _extract_refs_from_tool_result
+
         content = "[a](file://x) [b](#anchor) [c](https://real.com)"
         refs = _extract_refs_from_tool_result(content)
         urls = [r["url"] for r in refs]
@@ -54,6 +58,7 @@ class TestChatHelpers:
 
     def test_extract_refs_truncates_long_snippet(self):
         from server.chat import _extract_refs_from_tool_result
+
         long_snip = "x" * 200
         content = f"[t](https://x.com) {long_snip}"
         refs = _extract_refs_from_tool_result(content)
@@ -101,9 +106,9 @@ class TestConversations:
         cid = cr.json()["id"]
         # Add a message via chat_stream is hard without Claude; use the DB directly
         from server.database import get_db
+
         with get_db() as db:
-            db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                       [cid, "user", "hello"])
+            db.execute("INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [cid, "user", "hello"])
         # Now permanent delete
         r = await client.delete(f"/api/convs/{cid}/permanent", cookies=auth_cookies)
         assert r.status_code == 200
@@ -125,8 +130,7 @@ class TestReportEdgeCases:
     @pytest.mark.asyncio
     async def test_report_filename_with_path_traversal_rejected(self, client, auth_cookies):
         """Filename with `..` must be rejected with 400."""
-        r = await client.get("/api/reports/some-conv/..%2F..%2Fetc%2Fpasswd",
-                             cookies=auth_cookies)
+        r = await client.get("/api/reports/some-conv/..%2F..%2Fetc%2Fpasswd", cookies=auth_cookies)
         assert r.status_code in (400, 404, 422)
 
     @pytest.mark.asyncio
@@ -147,6 +151,7 @@ class TestRateLimiting:
     async def test_login_rate_limit_enforced(self, client):
         """Hammer the login endpoint — should hit 429 within the window."""
         from server.config import RATE_LOGIN_PER_MIN
+
         statuses = []
         for _ in range(RATE_LOGIN_PER_MIN + 5):
             r = await client.post("/api/login", json={"username": "x", "password": "y"})
@@ -156,32 +161,39 @@ class TestRateLimiting:
 
     def test_atomic_check_rate_limit(self):
         """The rate limiter must be atomic — concurrent calls can't double-count."""
-        import threading
-        from server.database import check_rate_limit, get_db, init_db
-        from pathlib import Path
         import tempfile
+        import threading
+        from pathlib import Path
+
+        from server.database import check_rate_limit, init_db
+
         with tempfile.TemporaryDirectory() as td:
             from server import database
+
             database.DB_PATH = Path(td) / "rl.db"
             init_db()
             key = "test:concurrent"
             cap = 10
             window = 60
             results = []
+
             def worker():
                 # Each thread claims a slot; only `cap` should succeed.
                 results.append(check_rate_limit(key, cap, window))
+
             threads = [threading.Thread(target=worker) for _ in range(20)]
-            for t in threads: t.start()
-            for t in threads: t.join()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
             # The first `cap` calls return True; the rest must return False.
             trues = sum(1 for r in results if r)
             assert trues == cap, f"Expected {cap} true, got {trues} (race condition!)"
 
     def test_rate_limit_window_resets(self):
         """After the window expires, the counter resets to 1 (not 0+1)."""
-        import time
         from server.database import check_rate_limit
+
         key = "test:reset"
         cap = 2
         # Use a 1-second window so we can wait it out
@@ -199,9 +211,9 @@ class TestRateLimiting:
 class TestLoginSession:
     @pytest.mark.asyncio
     async def test_login_success_sets_token_cookie(self, client, test_user):
-        r = await client.post("/api/login", json={
-            "username": test_user["username"], "password": test_user["password"]
-        })
+        r = await client.post(
+            "/api/login", json={"username": test_user["username"], "password": test_user["password"]}
+        )
         assert r.status_code == 200
         body = r.json()
         assert body["user"] == test_user["username"]
@@ -214,9 +226,7 @@ class TestLoginSession:
 
     @pytest.mark.asyncio
     async def test_login_wrong_password_is_403(self, client, test_user):
-        r = await client.post("/api/login", json={
-            "username": test_user["username"], "password": "wrong"
-        })
+        r = await client.post("/api/login", json={"username": test_user["username"], "password": "wrong"})
         assert r.status_code == 403
 
     @pytest.mark.asyncio

@@ -1,9 +1,10 @@
 """Test fixtures — isolated temp DB, test client, test user"""
-import os
+
+import json
 import sys
 import tempfile
-import json
 from pathlib import Path
+
 import pytest
 
 # Ensure server package is importable
@@ -17,10 +18,12 @@ def temp_data_dir(monkeypatch):
         monkeypatch.setenv("STOCK_DATA_DIR", td)
         # Re-import config to pick up new DATA_DIR
         import server.config
+
         server.config.DATA_DIR = Path(td)
         server.config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         # Reset DB_PATH
         import server.database
+
         server.database.DB_PATH = Path(td) / "chat.db"
         # Reset thread-local connection (Task 4) — without this, the
         # previous test's connection (pointing to a deleted tempdir)
@@ -35,14 +38,14 @@ def temp_data_dir(monkeypatch):
 @pytest.fixture
 def test_user():
     """Create a test user and return credentials."""
-    from server.database import get_db
     from server.auth import hash_password
+    from server.database import get_db
+
     username = "testuser"
     password = "testpass123"
     pw_hash = hash_password(password)
     with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)",
-                   [username, pw_hash])
+        db.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?,?)", [username, pw_hash])
     return {"username": username, "password": password}
 
 
@@ -50,6 +53,7 @@ def test_user():
 def auth_cookies(test_user):
     """Login and return auth cookies dict."""
     from server.auth import create_session
+
     token = create_session(test_user["username"])
     return {"token": token}
 
@@ -63,7 +67,9 @@ CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
 async def client():
     """Async HTTP test client for FastAPI with CSRF headers pre-injected."""
     from httpx import ASGITransport, AsyncClient
+
     from server.main import app
+
     transport = ASGITransport(app=app)
 
     async def _send(method, url, **kw):
@@ -76,10 +82,12 @@ async def client():
 
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         _client = c
+
         # Wrap with a helper that auto-injects CSRF headers
         class CSRFClient:
             def __getattr__(self, name):
                 return getattr(c, name)
+
         # Simpler: monkey-patch the request method
         orig_request = c.request
 
@@ -97,18 +105,27 @@ async def client():
 @pytest.fixture
 def sample_jsonl():
     """Create a temporary JSONL file matching Claude Code format."""
-    import uuid
     import shutil
+    import uuid
+
     sid = str(uuid.uuid4())
     d = tempfile.mkdtemp()
     path = Path(d) / f"{sid}.jsonl"
     lines = [
         json.dumps({"type": "user", "message": {"role": "user", "content": "测试问题？"}}),
-        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "用户问了一个测试问题，需要简单回答。"},
-            {"type": "tool_use", "name": "Bash", "input": {"command": "echo test"}},
-            {"type": "text", "text": "这是一个测试回答。"}
-        ]}}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "用户问了一个测试问题，需要简单回答。"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "echo test"}},
+                        {"type": "text", "text": "这是一个测试回答。"},
+                    ],
+                },
+            }
+        ),
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
     yield sid, path

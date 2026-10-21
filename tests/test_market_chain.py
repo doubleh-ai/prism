@@ -1,19 +1,26 @@
 """ProviderChain — failover order, dead-provider skip, stale fallback."""
-import pytest
+
 import asyncio
-from server.market.chain import ProviderChain
+
+import pytest
+
 from server.market.cache import MarketCache
+from server.market.chain import ProviderChain
+from server.market.models import Fundamentals, KLine, Quote
 from server.market.provider import (
-    MarketDataProvider, ProviderUnavailable, NoProviderAvailable,
+    NoProviderAvailable,
+    ProviderUnavailable,
 )
-from server.market.models import Quote, KLine, Fundamentals, SearchHit
 
 
 class FakeProvider:
     def __init__(self, name, quote=None, fail=False, raise_notfound=False):
         self.name = name
         self._quote = quote or Quote(
-            ticker="X", price=1.0, timestamp=1, source=name,
+            ticker="X",
+            price=1.0,
+            timestamp=1,
+            source=name,
         )
         self._fail = fail
         self._raise_notfound = raise_notfound
@@ -78,8 +85,12 @@ async def test_stale_fallback_when_all_fail():
     # (chain.py checks fresh cache first and returns immediately; only when
     # cache.get() returns None does it try providers and fall back to get_stale).
     import time
-    cache.set("quote:akshare:600519", {"ticker": "600519", "price": 999.0,
-                                        "timestamp": 1, "source": "akshare"}, ttl=1)
+
+    cache.set(
+        "quote:akshare:600519",
+        {"ticker": "600519", "price": 999.0, "timestamp": 1, "source": "akshare"},
+        ttl=1,
+    )
     time.sleep(1.2)
     a = FakeProvider("akshare", fail=True)
     b = FakeProvider("baostock", fail=True)
@@ -141,13 +152,43 @@ async def test_concurrent_requests_coalesce_to_single_upstream_call():
             await asyncio.sleep(0.2)
             return Quote(ticker=ticker, price=10.0, timestamp=1, source=self.name)
 
-        async def get_kline(self, *a, **k): return []
-        async def get_fundamentals(self, *a, **k): return Fundamentals(ticker=a[0], timestamp=1, source=self.name)
-        async def search(self, *a, **k): return []
-        async def health(self): return True
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_fundamentals(self, *a, **k):
+            return Fundamentals(ticker=a[0], timestamp=1, source=self.name)
+
+        async def search(self, *a, **k):
+            return []
+
+        async def health(self):
+            return True
 
     p = SlowProvider()
     chain = ProviderChain([p], cache=cache)
     results = await asyncio.gather(*[chain.get_quote("600519") for _ in range(10)])
     assert all(r[0].price == 10.0 for r in results)
     assert p.calls == 1, f"expected 1 upstream call, got {p.calls}"
+
+
+@pytest.mark.asyncio
+async def test_kline_chain_normalizes_daily_only_provider_and_uses_v2_cache_key():
+    class DailyOnlyProvider(FakeProvider):
+        name = "daily-only"
+
+        async def get_kline(self, ticker, period="1d", limit=120):
+            return [
+                KLine(timestamp=1706486400, open=10, high=12, low=9, close=11, volume=100),
+                KLine(timestamp=1706832000, open=11, high=14, low=10, close=13, volume=200),
+                KLine(timestamp=1707091200, open=13, high=15, low=12, close=14, volume=300),
+            ]
+
+    cache = MarketCache()
+    chain = ProviderChain([DailyOnlyProvider("daily-only")], cache=cache)
+    bars, stale = await chain.get_kline("600519", period="1w", limit=2)
+
+    assert stale is False
+    assert len(bars) == 2
+    assert (bars[0].open, bars[0].close, bars[0].volume) == (10, 13, 300)
+    cached, _ = cache.get("kline-v2:daily-only:600519:1w:2")
+    assert cached is not None

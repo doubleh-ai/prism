@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════
-   Prism — Analysis Mode (v0.10 astock)
+   Prism — Analysis Mode (v0.19.7 astock)
    ═══════════════════════════════════════ */
 Object.assign(App, {
 
@@ -11,6 +11,8 @@ Object.assign(App, {
   _analysisCurrentStage: "",
   _analysisProgressPct: 0,
   _analysisAttachAttempted: false,
+  _analysisMode: "fast",
+  _analysisSelectedAgents: ["market", "fundamentals"],
 
   _analysisStageLabels: {
     analysts: "分析师研报", debate: "多空辩论", research: "研判整合",
@@ -26,7 +28,24 @@ Object.assign(App, {
     fundamentals: "基本面分析师", policy: "政策分析师",
     hot_money: "游资追踪师", lockup: "解禁监控师"
   },
+  _analysisModeLabels: {
+    fast: "快速分析",
+    deep: "深度分析"
+  },
   _analysisAgentDone: {},
+
+  _setAnalysisMode: function(mode) {
+    mode = mode === "deep" ? "deep" : "fast";
+    this._analysisMode = mode;
+    var input = document.getElementById("analysisMode");
+    if (input) input.value = mode;
+    var buttons = document.querySelectorAll(".analysis-mode-btn");
+    for (var i = 0; i < buttons.length; i++) {
+      var active = buttons[i].getAttribute("data-mode") === mode;
+      buttons[i].classList.toggle("active", active);
+      buttons[i].setAttribute("aria-pressed", active ? "true" : "false");
+    }
+  },
 
   /* ── 一键分析 (astock) ── */
   _runAnalysis: async function() {
@@ -34,6 +53,12 @@ Object.assign(App, {
     if (this._analysisStreaming) { this._stopAnalysis(); return; }
 
     var ticker = this._analysisTicker, name = this._analysisName;
+    var modeEl = document.getElementById("analysisMode");
+    var forceEl = document.getElementById("analysisForceRefresh");
+    var mode = (modeEl && modeEl.value) || "fast";
+    var forceRefresh = !!(forceEl && forceEl.checked);
+    this._analysisMode = mode;
+    this._analysisSelectedAgents = this._analysisAgentsForMode(mode);
     this._analysisAgentDone = {};
     this._analysisEvents = [];
     this._analysisCurrentStage = "";
@@ -43,7 +68,7 @@ Object.assign(App, {
     document.getElementById("analysisPanelInner").innerHTML =
       '<div class="ap-container">' +
         this._buildProgressBar() +
-        '<div class="ap-status" id="apStatus">正在启动分析引擎…</div>' +
+        '<div class="ap-status" id="apStatus">正在启动' + esc(this._analysisModeLabels[mode] || "分析") + '…</div>' +
         '<div class="ap-agent-grid" id="apAgentGrid"></div>' +
         '<div class="ap-stream" id="apStream"><div class="ap-stream-hd" onclick="App._toggleStream()">🧠 分析过程 <span class="ap-stream-cnt"></span></div><div class="ap-stream-body" id="apStreamBody"></div></div>' +
       '</div>' +
@@ -53,14 +78,21 @@ Object.assign(App, {
 
     var r = await this.api("/api/analysis/start", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ticker: ticker, name: name})
+      body: JSON.stringify({ticker: ticker, name: name, mode: mode, force_refresh: forceRefresh})
     });
     if (!r.ok) {
       document.getElementById("analysisPanelInner").innerHTML =
         '<div class="market-empty-state">启动分析失败，请重试</div>';
       return;
     }
-    this._analysisId = (await r.json()).analysis_id;
+    var data = await r.json();
+    this._analysisId = data.analysis_id;
+    this._analysisMode = data.mode || mode;
+    this._setAnalysisMode(this._analysisMode);
+    this._analysisSelectedAgents = (data.selected_analysts && data.selected_analysts.length)
+      ? data.selected_analysts
+      : this._analysisAgentsForMode(this._analysisMode);
+    this._renderAgentGrid();
     this._analysisStreaming = true;
     this._saveAnalysisState();
     this._connectAnalysisStream();
@@ -96,7 +128,9 @@ Object.assign(App, {
   _renderAgentGrid: function() {
     var grid = document.getElementById("apAgentGrid");
     if (!grid) return;
-    var agents = ["market","social","news","fundamentals","policy","hot_money","lockup"];
+    var agents = (this._analysisSelectedAgents && this._analysisSelectedAgents.length)
+      ? this._analysisSelectedAgents
+      : this._analysisAgentsForMode(this._analysisMode);
     var html = "";
     for (var i = 0; i < agents.length; i++) {
       var a = agents[i], done = this._analysisAgentDone[a];
@@ -106,6 +140,18 @@ Object.assign(App, {
         '</div>';
     }
     grid.innerHTML = html;
+  },
+
+  _analysisAgentsForMode: function(mode) {
+    return mode === "deep"
+      ? ["market","social","news","fundamentals","policy","hot_money","lockup"]
+      : ["market","fundamentals"];
+  },
+
+  _analysisEventLabel: function(agent, node, label) {
+    var title = label || this._analysisAgentLabels[agent] || node || agent || "";
+    if (/^messages$/i.test(title)) return "";
+    return title;
   },
 
   _updateProgress: function(pct) {
@@ -137,12 +183,14 @@ Object.assign(App, {
   },
 
   /* ── Live stream of agent outputs ── */
-  _appendStreamItem: function(agent, node, text) {
+  _appendStreamItem: function(agent, node, text, label) {
     var body = document.getElementById("apStreamBody");
     if (!body || !text) return;
+    var title = this._analysisEventLabel(agent, node, label);
+    if (!title) return;
     var item = document.createElement("div");
     item.className = "ap-stream-item";
-    item.innerHTML = '<div class="ap-stream-item-hd"><b>' + esc(node || agent) + '</b></div>' +
+    item.innerHTML = '<div class="ap-stream-item-hd"><b>' + esc(title) + '</b></div>' +
       '<div class="ap-stream-item-txt">' + esc((text || "").slice(0, 450)) + '</div>';
     body.appendChild(item);
     while (body.children.length > 12) body.removeChild(body.firstChild);
@@ -151,6 +199,22 @@ Object.assign(App, {
     if (cnt) cnt.textContent = (body.children.length) + " 条";
     var s = document.getElementById("apStream");
     if (s) s.classList.remove("folded");
+  },
+
+  _appendTimingItem: function(ev) {
+    var body = document.getElementById("apStreamBody");
+    if (!body || !ev || !ev.node) return;
+    var title = this._analysisEventLabel(ev.agent, ev.node, ev.label);
+    if (!title) return;
+    var item = document.createElement("div");
+    item.className = "ap-stream-item ap-stream-item--timing";
+    item.innerHTML = '<div class="ap-stream-item-hd"><b>' + esc(title) + '</b><span>' +
+      esc((ev.duration || 0) + "s") + '</span></div>';
+    body.appendChild(item);
+    while (body.children.length > 12) body.removeChild(body.firstChild);
+    body.scrollTop = body.scrollHeight;
+    var cnt = document.querySelector(".ap-stream-cnt");
+    if (cnt) cnt.textContent = (body.children.length) + " 条";
   },
 
   _toggleStream: function() {
@@ -213,21 +277,31 @@ Object.assign(App, {
         this._saveAnalysisState();
         break;
       case "agent_done":
-        this._analysisAgentDone[ev.agent] = true;
+        if (ev.agent && ev.agent !== "messages") this._analysisAgentDone[ev.agent] = true;
         this._renderAgentGrid();
         this._saveAnalysisState();
         break;
       case "agent_output":
-        this._appendStreamItem(ev.agent, ev.node, ev.text);
+        this._appendStreamItem(ev.agent, ev.node, ev.text, ev.label);
+        break;
+      case "timing":
+        this._appendTimingItem(ev);
         break;
       case "done":
         this._analysisStreaming = false;
         this._updateProgress(100);
         var s = document.getElementById("apStatus");
-        if (s) s.textContent = "✅ 分析完成";
+        if (s) {
+          var total = ev.timings && ev.timings.total_seconds ? "，耗时 " + ev.timings.total_seconds + "s" : "";
+          s.textContent = ev.cached ? "使用缓存报告" : ("分析完成" + total);
+        }
         // Fold the live-stream panel — the final dashboard now shows the synthesized result.
         var stream = document.getElementById("apStream");
         if (stream) stream.classList.add("folded");
+        if (ev.mode) this._setAnalysisMode(ev.mode);
+        if (ev.report && ev.report._analysis_meta && ev.report._analysis_meta.selected_analysts) {
+          this._analysisSelectedAgents = ev.report._analysis_meta.selected_analysts;
+        }
         this._lastReport = ev.report;
         this._lastSignal = ev.signal;
         this._renderFinalReport(ev.report, ev.signal);
@@ -252,18 +326,61 @@ Object.assign(App, {
   },
 
   /* ── Final report ── */
+  _analysisTextValue: function(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value.replace(/^\s*\[object Object\]\s*$/gm, "").trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) {
+      return value.map(function(x) { return App._analysisTextValue(x); }).filter(Boolean).join("\n").trim();
+    }
+    if (typeof value === "object") {
+      var keys = ["text", "content", "result", "output", "message", "summary", "thesis",
+        "rationale", "verdict", "final_decision", "final_trade_decision", "trader_investment_plan"];
+      for (var i = 0; i < keys.length; i++) {
+        if (value[keys[i]] !== undefined) {
+          var hit = App._analysisTextValue(value[keys[i]]);
+          if (hit) return hit;
+        }
+      }
+      return Object.keys(value).map(function(k) {
+        return App._analysisTextValue(value[k]);
+      }).filter(Boolean).join("\n").trim();
+    }
+    return String(value || "").replace(/^\s*\[object Object\]\s*$/gm, "").trim();
+  },
+
+  _analysisMetaHtml: function(report) {
+    var meta = report && report._analysis_meta;
+    if (!meta) return "";
+    var agents = (meta.selected_analysts || []).map(function(a) {
+      return App._analysisAgentLabels[a] || a;
+    }).join("、");
+    var total = meta.timings && meta.timings.total_seconds ? meta.timings.total_seconds + "s" : "";
+    var bits = [
+      this._analysisModeLabels[meta.mode] || meta.mode || "分析",
+      meta.cached ? "缓存命中" : "实时生成",
+      meta.trade_date ? "交易日 " + meta.trade_date : "",
+      agents ? "Agent " + agents : "",
+      total ? "耗时 " + total : ""
+    ].filter(Boolean);
+    return '<div class="ap-meta">' + bits.map(function(b) {
+      return '<span>' + esc(b) + '</span>';
+    }).join("") + '</div>';
+  },
+
   _renderTextReport: function(report, signal) {
     var container = document.getElementById("apReport");
     if (!container) return;
     container.style.display = "block";
 
-    var rating = signal || "—";
+    var rating = this._analysisTextValue(signal || (report && report.signal)) || "—";
     var rc = /buy/i.test(rating) ? "green" : /sell/i.test(rating) ? "red" : "yellow";
-    var html = '<div class="ar-card ar-rating ar-rating--' + rc + '">' +
+    var html = this._analysisMetaHtml(report) +
+      '<div class="ar-card ar-rating ar-rating--' + rc + '">' +
       '<div class="ar-rating-badge">' + rating + '</div>' +
       '<div class="ar-rating-sub">投资评级</div></div>';
 
-    var decision = report ? (report.final_decision || "") : "";
+    var decision = report ? this._analysisTextValue(report.final_decision || "") : "";
     if (decision) {
       html += '<div class="ar-card"><h4>📝 投资决策</h4><div class="ar-body">' + App._renderMarkdown(decision) + '</div></div>';
     }
@@ -291,7 +408,7 @@ Object.assign(App, {
     }
 
     // Trader
-    var tp = report ? (report.trader_plan || "") : "";
+    var tp = report ? this._analysisTextValue(report.trader_plan || "") : "";
     if (tp) html += '<div class="ar-card"><h4>📊 交易方案</h4><div class="ar-body">' + App._renderMarkdown(tp) + '</div></div>';
 
     // Risk
@@ -303,7 +420,10 @@ Object.assign(App, {
       html += '</div>';
     }
 
-    html += '<button class="analysis-run-btn" style="margin:var(--sp-16) 0" onclick="App._addAnalysisToChat()">💬 添加到对话</button>';
+    html += '<div class="ap-report-actions">' +
+      '<button class="analysis-run-btn" onclick="App._saveAnalysisReport()">保存到报告库</button>' +
+      '<button class="analysis-run-btn" onclick="App._addAnalysisToChat()">添加到对话</button>' +
+      '</div>';
     container.innerHTML = html;
     container.scrollIntoView({behavior: "smooth"});
   },
@@ -313,13 +433,17 @@ Object.assign(App, {
     var container = document.getElementById("apReport");
     if (!container) return;
     container.style.display = "block";
-    container.innerHTML = this._renderDashboard(report.structured, report, signal) +
-      '<button class="analysis-run-btn ap-add-chat" onclick="App._addAnalysisToChat()">💬 添加到对话</button>';
+    container.innerHTML = this._analysisMetaHtml(report) +
+      this._renderDashboard(report.structured, report, signal) +
+      '<div class="ap-report-actions">' +
+      '<button class="analysis-run-btn" onclick="App._saveAnalysisReport()">保存到报告库</button>' +
+      '<button class="analysis-run-btn" onclick="App._addAnalysisToChat()">添加到对话</button>' +
+      '</div>';
     container.scrollIntoView({behavior: "smooth"});
   },
 
   _renderDashboard: function(st, report, signal) {
-    var sig = st.signal || signal || "—";
+    var sig = this._analysisTextValue(st.signal || signal) || "—";
     var sc = /买入|buy/i.test(sig) ? "up" : /卖出|sell/i.test(sig) ? "dn" : "neutral";
     var conf = Math.max(0, Math.min(100, parseInt(st.confidence, 10) || 0));
     var h = '<div class="ap-dash">';
@@ -328,13 +452,13 @@ Object.assign(App, {
       '<div class="ap-hero-left">' +
         '<div class="ap-hero-name">' + esc(this._analysisName || "") +
           '<span class="ap-hero-ticker">' + esc(this._analysisTicker || (report && report.ticker) || "") + '</span></div>' +
-        '<div class="ap-hero-thesis">' + esc(st.thesis || "") + '</div></div>' +
+        '<div class="ap-hero-thesis">' + esc(this._analysisTextValue(st.thesis || "")) + '</div></div>' +
       '<div class="ap-hero-right"><div class="ap-signal ap-signal--' + sc + '">' + esc(sig) + '</div>' +
         this._confRing(conf) + '</div></div>';
 
     var m = st.metrics || {};
     h += '<div class="ap-tiles">' + this._tile("估值", m.valuation) + this._tile("增长", m.growth) +
-      this._tile("风险", (m.risk_score !== undefined && m.risk_score !== "" && m.risk_score !== null) ? (m.risk_score + "/10") : "") +
+      this._tile("风险", (m.risk_score !== undefined && m.risk_score !== "" && m.risk_score !== null) ? (this._analysisTextValue(m.risk_score) + "/10") : "") +
       this._tile("动量", m.momentum) + '</div>';
 
     var dg = st.analyst_digests || [];
@@ -347,9 +471,9 @@ Object.assign(App, {
     var bb = st.bull_bear || {};
     if (bb.bull || bb.bear) {
       h += '<div class="ap-section ap-debate">' +
-        '<div class="ap-debate-col ap-bull"><h5>🐂 多方</h5><p>' + esc(bb.bull || "—") + '</p></div>' +
-        '<div class="ap-debate-col ap-bear"><h5>🐉 空方</h5><p>' + esc(bb.bear || "—") + '</p></div>' +
-        (bb.judge ? '<div class="ap-debate-judge">裁决：<b>' + esc(bb.judge) + '</b></div>' : '') + '</div>';
+        '<div class="ap-debate-col ap-bull"><h5>🐂 多方</h5><p>' + esc(this._analysisTextValue(bb.bull || "—")) + '</p></div>' +
+        '<div class="ap-debate-col ap-bear"><h5>🐉 空方</h5><p>' + esc(this._analysisTextValue(bb.bear || "—")) + '</p></div>' +
+        (bb.judge ? '<div class="ap-debate-judge">裁决：<b>' + esc(this._analysisTextValue(bb.judge)) + '</b></div>' : '') + '</div>';
     }
 
     var tr = st.trade || {}, risk = (report && report.risk_debate) || {};
@@ -366,10 +490,10 @@ Object.assign(App, {
       this._riskCol("激进", risk.aggressive, "up") + this._riskCol("中性", risk.neutral, "neutral") +
       this._riskCol("保守", risk.conservative, "dn") + '</div></div></div>';
 
-    var verdict = st.verdict_summary || (report && report.final_decision) || "";
+    var verdict = this._analysisTextValue(st.verdict_summary || (report && report.final_decision) || "");
     if (verdict) {
       h += '<div class="ap-section ap-final"><h4>🎯 最终决策</h4><div class="ap-body">' +
-        (st.verdict_summary ? esc(st.verdict_summary) : App._renderMarkdown(verdict)) + '</div></div>';
+        (st.verdict_summary ? esc(verdict) : App._renderMarkdown(verdict)) + '</div></div>';
     }
     h += '</div>';
     return h;
@@ -385,6 +509,7 @@ Object.assign(App, {
   },
 
   _tile: function(k, v) {
+    v = this._analysisTextValue(v || "");
     var cls = /高|强/i.test(v || "") ? "hi" : /低|弱/i.test(v || "") ? "lo" : "";
     return '<div class="ap-tile"><span class="ap-tile-k">' + k + '</span>' +
       '<span class="ap-tile-v ' + cls + '">' + esc(v || "—") + '</span></div>';
@@ -392,9 +517,9 @@ Object.assign(App, {
 
   _analystCard: function(d) {
     var ic = {market:"📈",social:"💬",news:"📰",fundamentals:"💰",policy:"🏛",hot_money:"🔥",lockup:"🔒"}[d.agent] || "▪";
-    var v = d.verdict || "";
+    var v = this._analysisTextValue(d.verdict || "");
     var vc = /多/i.test(v) ? "up" : /空/i.test(v) ? "dn" : "neutral";
-    var bl = (d.bullets || []).map(function(b) { return "<li>" + esc(b) + "</li>"; }).join("");
+    var bl = (d.bullets || []).map(function(b) { return "<li>" + esc(App._analysisTextValue(b)) + "</li>"; }).join("");
     return '<div class="ap-acard"><div class="ap-acard-hd"><span class="ap-acard-ic">' + ic + '</span>' +
       '<span class="ap-acard-nm">' + esc(this._analysisAgentLabels[d.agent] || d.agent) + '</span>' +
       '<span class="ap-verdict ap-verdict--' + vc + '">' + esc(v || "—") + '</span></div>' +
@@ -402,7 +527,7 @@ Object.assign(App, {
   },
 
   _tradeField: function(k, v) {
-    return '<div class="ap-tf"><span class="ap-tf-k">' + k + '</span><span class="ap-tf-v">' + esc(v || "—") + '</span></div>';
+    return '<div class="ap-tf"><span class="ap-tf-k">' + k + '</span><span class="ap-tf-v">' + esc(this._analysisTextValue(v || "—")) + '</span></div>';
   },
 
   _riskCol: function(title, text, cls) {
@@ -410,7 +535,18 @@ Object.assign(App, {
       '<div class="ap-risk-col-body">' + (text ? App._renderMarkdown(text) : "—") + '</div></div>';
   },
 
+  _normalizeAnalysisMarkdown: function(text) {
+    text = this._analysisTextValue(text);
+    if (!text) return "";
+    return text
+      .replace(/\r\n?/g, "\n")
+      .replace(/^[A-Za-z][A-Za-z /&-]{1,48}Analyst\s*:\s*(?=#{1,6}\s+)/gmi, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  },
+
   _renderMarkdown: function(text) {
+    text = this._normalizeAnalysisMarkdown(text);
     if (!text) return "";
     try { return sanitizeHtml(marked.parse(escapeAllGt(text))); }
     catch(e) { return escHtml(text); }
@@ -424,8 +560,10 @@ Object.assign(App, {
       if (this._analysisEvents[i].type === "done") { le = this._analysisEvents[i]; break; }
     }
     if (le && le.report) {
-      if (le.report.final_decision) report += le.report.final_decision + "\n\n";
-      if (le.report.trader_plan) report += "### 交易方案\n" + le.report.trader_plan + "\n\n";
+      var finalDecision = this._analysisTextValue(le.report.final_decision || "");
+      var traderPlan = this._analysisTextValue(le.report.trader_plan || "");
+      if (finalDecision) report += finalDecision + "\n\n";
+      if (traderPlan) report += "### 交易方案\n" + traderPlan + "\n\n";
     }
     this.switchMode("chat");
     var input = document.getElementById("input");
@@ -441,6 +579,8 @@ Object.assign(App, {
       name: this._analysisName,
       startTime: this._analysisStartTime,
       streaming: this._analysisStreaming,
+      mode: this._analysisMode,
+      selectedAgents: this._analysisSelectedAgents,
       stage: this._analysisCurrentStage,
       progress: this._analysisProgressPct,
       agentDone: this._analysisAgentDone,
@@ -463,10 +603,13 @@ Object.assign(App, {
     this._analysisTicker = state.ticker;
     this._analysisName = state.name;
     this._analysisStartTime = state.startTime || Date.now();
+    this._analysisMode = state.mode || "fast";
+    this._analysisSelectedAgents = state.selectedAgents || this._analysisAgentsForMode(this._analysisMode);
     this._analysisCurrentStage = state.stage || "";
     this._analysisProgressPct = state.progress || 0;
     this._analysisAgentDone = state.agentDone || {};
     this._analysisEvents = [];
+    this._setAnalysisMode(this._analysisMode);
 
     // Rebuild the in-progress UI
     document.getElementById("analysisPanelInner").innerHTML =
@@ -501,6 +644,8 @@ Object.assign(App, {
         this._updateProgress(100);
         var s = document.getElementById("apStatus");
         if (s) s.textContent = "✅ 分析完成";
+        this._setAnalysisMode(data.mode || this._analysisMode);
+        this._analysisSelectedAgents = data.selected_analysts || this._analysisSelectedAgents;
         this._renderFinalReport(data.report, data.signal);
       }
     }

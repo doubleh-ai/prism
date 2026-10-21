@@ -1,8 +1,9 @@
 """代理健康检测 — TCP ping + 智能 fallback"""
+
 import asyncio
 import logging
 import os
-from typing import Dict
+
 from lru import LRU
 
 log = logging.getLogger("stock-app")
@@ -14,9 +15,7 @@ _CACHE_TTL = 30  # seconds between re-checks
 async def _check_tcp(host: str, port: int, timeout: float = 2.0) -> bool:
     """Return True if TCP connection succeeds within timeout."""
     try:
-        _, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
-        )
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
         writer.close()
         await asyncio.sleep(0)  # let close finish
         return True
@@ -28,7 +27,7 @@ async def get_proxy_config(
     host: str = "127.0.0.1",
     port: int = 7890,
     timeout: float = 2.0,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Return proxy env vars if reachable, empty dict otherwise.
 
     Results are cached for CACHE_TTL seconds to avoid repeated TCP pings.
@@ -47,7 +46,7 @@ async def get_proxy_config(
         return cached.get("config", {})
 
     reachable = await _check_tcp(host, port, timeout)
-    config: Dict[str, str] = {}
+    config: dict[str, str] = {}
     if reachable:
         proxy_url = f"http://{host}:{port}"
         config = {

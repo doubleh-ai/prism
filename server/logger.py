@@ -1,21 +1,29 @@
 """结构化日志模块 — 按事件类型记录"""
-import time, logging, functools
+
+import functools
+import logging
+import time
 
 log = logging.getLogger("stock-app")
 
+
 class Event:
     """日志事件构造器"""
+
     def __init__(self, action: str):
         self.data = {"action": action, "ts": int(time.time() * 1000)}
 
     def who(self, user: str) -> "Event":
-        self.data["user"] = user; return self
+        self.data["user"] = user
+        return self
 
     def what(self, **kw) -> "Event":
-        self.data.update(kw); return self
+        self.data.update(kw)
+        return self
 
     def how_long(self, t0: float) -> "Event":
-        self.data["elapsed_ms"] = int((time.time() - t0) * 1000); return self
+        self.data["elapsed_ms"] = int((time.time() - t0) * 1000)
+        return self
 
     def info(self):
         parts = [f"{k}={v}" for k, v in self.data.items()]
@@ -41,7 +49,9 @@ class Event:
 
     @staticmethod
     def claude(user: str, pid: int, duration: float, tokens: int, chunks: int):
-        return Event("claude_done").who(user).what(pid=pid, duration_ms=duration, tokens=tokens, chunks=chunks)
+        return (
+            Event("claude_done").who(user).what(pid=pid, duration_ms=duration, tokens=tokens, chunks=chunks)
+        )
 
     @staticmethod
     def auth(user: str, result: str):
@@ -59,6 +69,7 @@ class Event:
 # 性能装饰器
 def timed(what: str):
     """记录函数执行时间"""
+
     def deco(fn):
         @functools.wraps(fn)
         async def wrapper(*a, **kw):
@@ -67,5 +78,7 @@ def timed(what: str):
             ms = int((time.time() - t0) * 1000)
             log.info(f"perf | op={what} | elapsed_ms={ms}")
             return result
+
         return wrapper
+
     return deco

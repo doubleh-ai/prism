@@ -1,0 +1,24 @@
+diff --git a/agent/src/session/service.py b/agent/src/session/service.py
+--- a/agent/src/session/service.py
++++ b/agent/src/session/service.py
+@@ -258,11 +258,19 @@ class SessionService:
+             ),
+         )
+ 
++        iteration_budget = 50
++        if session_config:
++            try:
++                iteration_budget = int(session_config.get("max_iterations", 50))
++            except (TypeError, ValueError):
++                iteration_budget = 50
++        iteration_budget = max(3, min(50, iteration_budget))
++
+         agent = AgentLoop(
+             registry=registry,
+             llm=llm,
+             event_callback=event_callback,
+-            max_iterations=50,
++            max_iterations=iteration_budget,
+             persistent_memory=pm,
+         )
+         self._active_loops[session_id] = agent

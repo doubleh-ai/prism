@@ -1,14 +1,21 @@
 """Market data HTTP endpoints — happy + 503 + stale + 404."""
+
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock
+
 from server.market.models import Quote
 
 
 @pytest.mark.asyncio
 async def test_quote_endpoint_happy_path(client):
     fake_quote = Quote(
-        ticker="600519", price=1680.5, change=12.3, change_pct=0.74,
-        timestamp=1718700000, source="akshare",
+        ticker="600519",
+        price=1680.5,
+        change=12.3,
+        change_pct=0.74,
+        timestamp=1718700000,
+        source="akshare",
     )
     with patch("server.market.router.get_chain") as gc:
         chain = gc.return_value
@@ -25,8 +32,11 @@ async def test_quote_endpoint_happy_path(client):
 @pytest.mark.asyncio
 async def test_quote_endpoint_stale_path(client):
     fake_quote = Quote(
-        ticker="600519", price=999.0, timestamp=1718700000,
-        source="akshare", stale=True,
+        ticker="600519",
+        price=999.0,
+        timestamp=1718700000,
+        source="akshare",
+        stale=True,
     )
     with patch("server.market.router.get_chain") as gc:
         chain = gc.return_value
@@ -41,6 +51,7 @@ async def test_quote_endpoint_stale_path(client):
 @pytest.mark.asyncio
 async def test_quote_endpoint_no_provider(client):
     from server.market.provider import NoProviderAvailable
+
     with patch("server.market.router.get_chain") as gc:
         chain = gc.return_value
         chain.get_quote = AsyncMock(side_effect=NoProviderAvailable("none"))
@@ -63,3 +74,16 @@ async def test_quote_endpoint_requires_auth(client):
     r = await client.get("/api/quote/600519")  # client fixture provides auth
     # The client fixture is logged in, so this is just a sanity check.
     assert r.status_code in (200, 503)
+
+
+@pytest.mark.asyncio
+async def test_search_exact_code_has_direct_fallback(client):
+    with patch("server.market.router.get_chain") as gc:
+        chain = gc.return_value
+        chain.search = AsyncMock(return_value=[])
+        r = await client.get("/api/search?q=300607&limit=8")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["hits"][0]["ticker"] == "300607"
+    assert data["hits"][0]["market"] == "SZ"

@@ -1,6 +1,6 @@
 """Test Claude Code JSONL reading and parsing"""
+
 import json
-import pytest
 from pathlib import Path
 
 
@@ -11,6 +11,7 @@ class TestJSONLReading:
         """Extract first user message for title."""
         sid, path = sample_jsonl
         from server.conversations import _read_jsonl_user_content
+
         content = _read_jsonl_user_content(path)
         assert content == "测试问题？"
 
@@ -18,6 +19,7 @@ class TestJSONLReading:
         """Read full messages from JSONL."""
         sid, path = sample_jsonl
         from server.conversations import _read_jsonl_messages
+
         messages = _read_jsonl_messages(sid, str(path.parent))
 
         assert len(messages) >= 1
@@ -41,15 +43,51 @@ class TestJSONLReading:
         assert "think" in types
         assert "text" in types
 
+    def test_read_jsonl_strips_object_artifacts(self, tmp_path):
+        """Claude CLI object placeholders should not leak into restored chats."""
+        sid = "artifact-sid"
+        jsonl = tmp_path / f"{sid}.jsonl"
+        lines = [
+            json.dumps({"type": "user", "message": {"role": "user", "content": "question"}}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "[object Object]\n\nvisible thought\n[object Object]",
+                            },
+                            {"type": "tool_use", "name": "Bash", "input": {"command": "[object Object]\nls"}},
+                            {"type": "text", "text": "answer [object Object] done"},
+                        ],
+                    },
+                }
+            ),
+        ]
+        jsonl.write_text("\n".join(lines), encoding="utf-8")
+
+        from server.conversations import _read_jsonl_messages
+
+        messages = _read_jsonl_messages(sid, str(tmp_path))
+        payload = json.loads([m for m in messages if m["role"] == "assistant"][0]["content"])
+        rendered = json.dumps(payload, ensure_ascii=False)
+        assert "[object Object]" not in rendered
+        assert "visible thought" in rendered
+        assert "answer  done" in rendered
+
     def test_read_missing_jsonl(self):
         """Non-existent JSONL returns empty list."""
         from server.conversations import _read_jsonl_messages
+
         msgs = _read_jsonl_messages("nonexistent", "nonexistent")
         assert msgs == []
 
     def test_user_content_missing_jsonl(self):
         """Non-existent JSONL returns None."""
         from server.conversations import _read_jsonl_user_content
+
         c = _read_jsonl_user_content(Path("/nonexistent/file.jsonl"))
         assert c is None
 
@@ -59,22 +97,26 @@ class TestCwdToProjectDir:
 
     def test_standard_path(self):
         from server.chat import _cwd_to_project_dir
+
         result = _cwd_to_project_dir("/home/ubuntu/.claude/skills/serenity-bottleneck-hunter")
         # Hidden dirs: .claude becomes -claude → produces --claude
         assert result == "-home-ubuntu--claude-skills-serenity-bottleneck-hunter"
 
     def test_simple_path(self):
         from server.chat import _cwd_to_project_dir
+
         result = _cwd_to_project_dir("/tmp")
         assert result == "-tmp"
 
     def test_no_trailing_slash(self):
         from server.chat import _cwd_to_project_dir
+
         result = _cwd_to_project_dir("/home/user/project")
         assert result == "-home-user-project"
 
     def test_hidden_dir_conversion(self):
         from server.chat import _cwd_to_project_dir
+
         # .config should become -config
         result = _cwd_to_project_dir("/home/user/.config/app")
         assert result == "-home-user--config-app"
@@ -90,15 +132,32 @@ class TestJSONLMessageFiltering:
         jsonl = tmp_path / f"{sid}.jsonl"
         lines = [
             json.dumps({"type": "user", "message": {"role": "user", "content": "真实问题"}}),
-            json.dumps({"type": "user", "message": {"role": "user", "content": "[{'type': 'tool_result', 'content': 'ls output...'}]"}}),
-            json.dumps({"type": "user", "message": {"role": "user", "content": "[{'type': 'text', 'text': 'skill content...'}]"}}),
-            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "text", "text": "回答内容"}
-            ]}}),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "[{'type': 'tool_result', 'content': 'ls output...'}]",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "[{'type': 'text', 'text': 'skill content...'}]"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "回答内容"}]},
+                }
+            ),
         ]
         jsonl.write_text("\n".join(lines), encoding="utf-8")
 
         from server.conversations import _read_jsonl_messages
+
         messages = _read_jsonl_messages(sid, proj_dir)
 
         user_msgs = [m for m in messages if m["role"] == "user"]
@@ -112,13 +171,17 @@ class TestJSONLMessageFiltering:
         jsonl = tmp_path / f"{sid}.jsonl"
         lines = [
             json.dumps({"type": "user", "message": {"role": "user", "content": "dict格式问题"}}),
-            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "text", "text": "dict格式回答"}
-            ]}}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "dict格式回答"}]},
+                }
+            ),
         ]
         jsonl.write_text("\n".join(lines), encoding="utf-8")
 
         from server.conversations import _read_jsonl_messages
+
         messages = _read_jsonl_messages(sid, str(tmp_path))
         assert len(messages) == 2
         assert messages[0]["content"] == "dict格式问题"
@@ -129,16 +192,27 @@ class TestJSONLMessageFiltering:
         jsonl = tmp_path / f"{sid}.jsonl"
         lines = [
             json.dumps({"type": "user", "message": {"role": "user", "content": "实际问题"}}),
-            json.dumps({"type": "user", "message": {"role": "user", "content": "[{'tool_use_id': 'call_123', 'type': 'tool_result', 'content': 'output...'}]"}}),
-            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "text", "text": "回答"}
-            ]}}),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "[{'tool_use_id': 'call_123', 'type': 'tool_result', 'content': 'output...'}]",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "回答"}]},
+                }
+            ),
         ]
         jsonl.write_text("\n".join(lines), encoding="utf-8")
 
         from server.conversations import _read_jsonl_messages
+
         messages = _read_jsonl_messages(sid, str(tmp_path))
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert len(user_msgs) == 1  # Only the real question
         assert user_msgs[0]["content"] == "实际问题"
-

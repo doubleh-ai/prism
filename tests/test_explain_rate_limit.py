@@ -1,4 +1,5 @@
 """/api/explain-term rate limit — 10 requests per user per minute."""
+
 import pytest
 
 
@@ -17,7 +18,7 @@ async def test_explain_term_429_after_10(client, test_user):
     # happens BEFORE the subprocess).
     for i in range(10):
         r = await client.post("/api/explain-term", json={"term": f"term{i}"})
-        assert r.status_code != 429, f"Call {i+1} unexpectedly rate-limited"
+        assert r.status_code != 429, f"Call {i + 1} unexpectedly rate-limited"
 
     # 11th call must be rate-limited
     r = await client.post("/api/explain-term", json={"term": "term11"})
@@ -28,8 +29,8 @@ async def test_explain_term_429_after_10(client, test_user):
 @pytest.mark.asyncio
 async def test_explain_term_rate_limit_per_user(client):
     """Different users have independent rate-limit buckets."""
-    from server.database import create_user, get_db
     from server.auth import hash_password
+    from server.database import create_user, get_db
 
     # Create two users
     for u in ["alice", "bob"]:

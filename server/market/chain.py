@@ -6,15 +6,23 @@ provider. If every provider fails, the chain returns the most recent
 cached value (even if expired) and flags ``stale=True``. If no cache
 exists either, raises :class:`NoProviderAvailable`.
 """
-import logging
+
 import json
-import time
-from typing import List, Dict, Tuple, Any
-from .provider import (
-    MarketDataProvider, ProviderUnavailable, ProviderNotFound, NoProviderAvailable,
-)
+import logging
+from typing import TYPE_CHECKING, Any
+
 from .cache import MarketCache
-from .models import Quote, KLine, Fundamentals, SearchHit
+from .models import Fundamentals, KLine, Quote, SearchHit
+from .provider import (
+    MarketDataProvider,
+    NoProviderAvailable,
+    ProviderNotFound,
+    ProviderUnavailable,
+)
+from .resample import resample_kline
+
+if TYPE_CHECKING:
+    import asyncio
 
 log = logging.getLogger("stock-app")
 
@@ -24,9 +32,9 @@ class ProviderChain:
 
     def __init__(
         self,
-        providers: List[MarketDataProvider],
+        providers: list[MarketDataProvider],
         cache: MarketCache,
-        ttls: Dict[str, int] | None = None,
+        ttls: dict[str, int] | None = None,
     ):
         self.providers = providers
         self.cache = cache
@@ -35,7 +43,7 @@ class ProviderChain:
         # coalescing_key share a single upstream task instead of all
         # hitting the provider. Without this, N concurrent users for
         # ticker 600519 would all burn provider quota in parallel.
-        self._inflight: Dict[str, "asyncio.Task"] = {}
+        self._inflight: dict[str, asyncio.Task] = {}
 
     def _cache_key(self, method: str, provider_name: str, *parts: str) -> str:
         return f"{method}:{provider_name}:" + ":".join(parts)
@@ -44,6 +52,7 @@ class ProviderChain:
         """Run ``runner()``; if another caller is already running for ``key``,
         await its result instead of starting a duplicate call."""
         import asyncio
+
         existing = self._inflight.get(key)
         if existing is not None and not existing.done():
             return await existing
@@ -63,7 +72,7 @@ class ProviderChain:
         cache_parts: tuple,
         invoke,  # async callable: (provider) -> result
         ttl_attr: str,
-    ) -> Tuple[Any, bool]:
+    ) -> tuple[Any, bool]:
         """Run ``invoke(p)`` over each provider; cache success; fall back to stale.
 
         ``invoke`` is called as ``await invoke(provider)``.
@@ -106,11 +115,9 @@ class ProviderChain:
                 if method == "fundamentals":
                     return Fundamentals(**{**val, "stale": True}), True
                 return val, True
-        raise NoProviderAvailable(
-            f"all providers failed: {[p.name for p in self.providers]}"
-        ) from last_err
+        raise NoProviderAvailable(f"all providers failed: {[p.name for p in self.providers]}") from last_err
 
-    async def get_quote(self, ticker: str) -> Tuple[Quote, bool]:
+    async def get_quote(self, ticker: str) -> tuple[Quote, bool]:
         # Fresh cache check before trying providers
         for p in self.providers:
             key = self._cache_key("quote", p.name, ticker)
@@ -123,8 +130,10 @@ class ProviderChain:
             return await self._coalesce(
                 co_key,
                 lambda: self._with_failover(
-                    "quote", (ticker,),
-                    lambda p: p.get_quote(ticker), "quote",
+                    "quote",
+                    (ticker,),
+                    lambda p: p.get_quote(ticker),
+                    "quote",
                 ),
             )
         except NoProviderAvailable:
@@ -136,25 +145,25 @@ class ProviderChain:
                     return Quote(**{**val, "stale": True}), True
             raise
 
-    async def get_kline(
-        self, ticker: str, period: str = "1d", limit: int = 120
-    ) -> Tuple[List[KLine], bool]:
+    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> tuple[list[KLine], bool]:
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
         async def _invoke(p):
             kls = await p.get_kline(ticker, period=period, limit=limit)
-            return [KLine(**k.model_dump()) for k in kls]
+            normalized = [KLine(**k.model_dump()) for k in kls]
+            return resample_kline(normalized, period, limit)
+
         # Custom path — bypass _with_failover's list handling
         last_err = None
 
         # Check cache first
         for p in self.providers:
-            key = self._cache_key("kline", p.name, ticker, period, str(limit))
+            key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
             val, _ = self.cache.get(key)
             if val is not None:
                 return [KLine(**k) for k in val], False
 
         # Coalesce concurrent identical requests
-        co_key = f"kline:{ticker}:{period}:{limit}"
+        co_key = f"kline-v2:{ticker}:{period}:{limit}"
 
         async def _runner():
             nonlocal last_err
@@ -171,12 +180,12 @@ class ProviderChain:
                     # provider instead of caching/returning an empty chart.
                     last_err = ProviderNotFound(f"{p.name}: no kline for {ticker}")
                     continue
-                key = self._cache_key("kline", p.name, ticker, period, str(limit))
+                key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
                 self.cache.set(key, [k.model_dump() for k in kls], ttl=self.ttls.get("kline", 300))
                 return kls, False
             # All providers failed — fall back to stale
             for p in self.providers:
-                key = self._cache_key("kline", p.name, ticker, period, str(limit))
+                key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
                 val, _ = self.cache.get_stale(key)
                 if val is not None:
                     return [KLine(**k) for k in val], True
@@ -186,17 +195,19 @@ class ProviderChain:
 
         return await self._coalesce(co_key, _runner)
 
-    async def get_fundamentals(self, ticker: str) -> Tuple[Fundamentals, bool]:
+    async def get_fundamentals(self, ticker: str) -> tuple[Fundamentals, bool]:
         co_key = f"fundamentals:{ticker}"
         return await self._coalesce(
             co_key,
             lambda: self._with_failover(
-                "fundamentals", (ticker,),
-                lambda p: p.get_fundamentals(ticker), "fundamentals",
+                "fundamentals",
+                (ticker,),
+                lambda p: p.get_fundamentals(ticker),
+                "fundamentals",
             ),
         )
 
-    async def search(self, query: str, limit: int = 10) -> List[SearchHit]:
+    async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
         """Search is best-effort across all providers; returns first non-empty list."""
         for p in self.providers:
             try:
@@ -208,5 +219,5 @@ class ProviderChain:
                 continue
         return []
 
-    async def health(self) -> Dict[str, bool]:
+    async def health(self) -> dict[str, bool]:
         return {p.name: await p.health() for p in self.providers}
