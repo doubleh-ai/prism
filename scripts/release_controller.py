@@ -31,6 +31,7 @@ ACTIONS = (
     "finish_stage",
     "integration_astock",
     "integration_cli",
+    "validate_legacy_retirement",
     "quiesce",
     "switch",
     "verify",
@@ -48,6 +49,10 @@ INTEGRATION_PROBES = {
         "cli_protocol_probe.py",
         "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789",
     ),
+}
+RETIREMENT_HELPERS = {
+    "retirement_probe.py": "1e70d84879e9b217bb7b83ba5ece8947b4f11b201a48ef33976ed6207c423971",
+    "retirement_validation.py": "d96f4ea8262b70f1974b1613f2b8441363c8c25af56ad017078daedc3c2e77e9",
 }
 
 # This small stdlib loader stays below Linux's single-argument limit. The
@@ -203,6 +208,19 @@ def request_for(args):
             integration_probe_sha256=approved,
             integration_attempt=attempt,
         )
+    if args.action == "validate_legacy_retirement":
+        helpers = {}
+        for filename, approved in RETIREMENT_HELPERS.items():
+            if getattr(args, filename.removesuffix(".py") + "_sha256", None) != approved:
+                raise ControlError("approved_retirement_helpers_required")
+            helpers[filename] = {
+                "sha256": approved,
+                "content": base64.b64encode(trusted_source(filename, approved)).decode(),
+            }
+        attempt = getattr(args, "retirement_attempt", None) or args.release_id
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", attempt):
+            raise ControlError("retirement_attempt_rejected")
+        request.update(retirement_helpers=helpers, retirement_attempt=attempt)
     if args.source_manifest:
         manifest = json.loads(outside_git(args.source_manifest).read_bytes())
         canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -390,6 +408,9 @@ def main():
         "astock-probe-sha256",
         "cli-probe-sha256",
         "integration-attempt",
+        "retirement-probe-sha256",
+        "retirement-validation-sha256",
+        "retirement-attempt",
     ):
         parser.add_argument("--" + name)
     parser.add_argument("--stop-file", required=True, help="Private operator stop flag outside Git")

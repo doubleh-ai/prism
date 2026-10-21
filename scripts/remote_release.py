@@ -27,9 +27,10 @@ import subprocess
 import sys
 import tarfile
 import time
+import types
 import urllib.error
 import urllib.request
-from contextlib import closing
+from contextlib import closing, contextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
 
@@ -42,6 +43,7 @@ ACTIONS = {
     "finish_stage",
     "integration_astock",
     "integration_cli",
+    "validate_legacy_retirement",
     "quiesce",
     "switch",
     "verify",
@@ -65,6 +67,21 @@ INTEGRATION_PROBES = {
     "integration_astock": ("astock", "a89af482aee19ec561c42a53274fdf7262c7dc2793d0e64095f774c11c71219b"),
     "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
 }
+RETIREMENT_HELPERS = {
+    "retirement_probe.py": "1e70d84879e9b217bb7b83ba5ece8947b4f11b201a48ef33976ed6207c423971",
+    "retirement_validation.py": "d96f4ea8262b70f1974b1613f2b8441363c8c25af56ad017078daedc3c2e77e9",
+}
+RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
+RETIREMENT_CASE_IDS = {
+    "int-executor",
+    "int-post",
+    "int-nested",
+    "int-async",
+    "int-daemon",
+    "int-child",
+    "term-control",
+}
+RETIREMENT_PROPERTIES = "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,ExecMainCode,ExecMainStatus,ExecMainExitTimestampMonotonic,Result,Transient"
 INTEGRATION_BOOT_CHECKS = {
     "production_environment_denied",
     "production_process_environment_denied",
@@ -482,7 +499,21 @@ def run_command(args, *, env=None, timeout=120):
         )
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
     )
-    if result.returncode and not missing_stage:
+    missing_retirement = (
+        capture
+        and args[2:3] == ["--property=" + RETIREMENT_PROPERTIES]
+        and len(args) == 4
+        and re.fullmatch(
+            r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
+            args[-1],
+        )
+        and b"LoadState=not-found" in (result.stdout or b"").splitlines()
+        and all(
+            line.split(b"=", 1)[0].decode("ascii", "replace") in RETIREMENT_PROPERTIES.split(",")
+            for line in (result.stdout or b"").splitlines()
+        )
+    )
+    if result.returncode and not (missing_stage or missing_retirement):
         raise ReleaseError("command_failed")
     if result.stdout and len(result.stdout) > 65536:
         raise ReleaseError("command_output_limit")
@@ -2528,6 +2559,426 @@ class RemoteRelease:
                 self.action_report = report
                 self.write(receipt, encoded(report))
 
+    def retirement_sources(self):
+        supplied = self.request.get("retirement_helpers")
+        if type(supplied) is not dict or set(supplied) != set(RETIREMENT_HELPERS):
+            raise ReleaseError("approved_retirement_helpers_required")
+        contents = {}
+        for filename, approved in RETIREMENT_HELPERS.items():
+            item = supplied[filename]
+            if (
+                type(item) is not dict
+                or set(item) != {"sha256", "content"}
+                or item["sha256"] != approved
+                or type(item["content"]) is not str
+                or len(item["content"]) > 180000
+            ):
+                raise ReleaseError("approved_retirement_helpers_required")
+            try:
+                raw = base64.b64decode(item["content"], validate=True)
+            except ValueError:
+                raise ReleaseError("approved_retirement_helpers_required") from None
+            if not 0 < len(raw) <= 131072 or digest(raw) != approved:
+                raise ReleaseError("approved_retirement_helpers_required")
+            contents[filename] = raw
+        return contents
+
+    def retirement_sealed_sources(self, directory):
+        for path, names in ((directory, {"scripts"}), (directory / "scripts", set(RETIREMENT_HELPERS))):
+            self.checked(path)
+            info = path.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o555
+                or (self.root == Path("/") and info.st_uid != 0)
+                or {item.name for item in path.iterdir()} != names
+            ):
+                raise ReleaseError("retirement_helper_directory_rejected")
+        contents = {}
+        for filename, expected in RETIREMENT_HELPERS.items():
+            path = self.checked(directory / "scripts" / filename)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as source:
+                info = os.fstat(source.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or stat.S_IMODE(info.st_mode) != 0o444
+                    or info.st_nlink != 1
+                    or info.st_size > 131072
+                    or (self.root == Path("/") and info.st_uid != 0)
+                ):
+                    raise ReleaseError("retirement_helper_file_rejected")
+                raw = source.read(131073)
+                if (
+                    digest(raw) != expected
+                    or self.cli_identity(info) != self.cli_identity(os.fstat(source.fileno()))
+                    or self.cli_identity(info) != self.cli_identity(path.lstat())
+                ):
+                    raise ReleaseError("retirement_helper_source_changed")
+            contents[filename] = raw
+        return contents
+
+    def install_retirement_helpers(self, contents):
+        directory = self.checked(
+            self.root / "opt/prism/validation/helpers" / digest(encoded(RETIREMENT_HELPERS))
+        )
+        if not directory.exists():
+            self.boundary("retirement_install_helpers")
+            self.public_directory(directory.parent.parent)
+            self.public_directory(directory.parent)
+            directory.mkdir(mode=0o700)
+            (directory / "scripts").mkdir(mode=0o700)
+            for filename, raw in contents.items():
+                self.write(directory / "scripts" / filename, raw, 0o444)
+            (directory / "scripts").chmod(0o555)
+            directory.chmod(0o555)
+        self.retirement_sealed_sources(directory)
+        return directory
+
+    @contextmanager
+    def retirement_modules(self, directory):
+        names = ("scripts", "scripts.retirement_probe", "scripts.retirement_validation")
+        if any(name in sys.modules for name in names):
+            raise ReleaseError("retirement_module_namespace_rejected")
+        contents = self.retirement_sealed_sources(directory)
+        package = types.ModuleType("scripts")
+        package.__path__ = [str(directory / "scripts")]
+        sys.modules["scripts"] = package
+        try:
+            modules = {}
+            for filename in RETIREMENT_HELPERS:
+                short = filename.removesuffix(".py")
+                module = types.ModuleType("scripts." + short)
+                module.__file__, module.__package__ = str(directory / "scripts" / filename), "scripts"
+                setattr(package, short, module)
+                sys.modules[module.__name__] = module
+                exec(compile(contents[filename], module.__file__, "exec"), module.__dict__)
+                modules[short] = module
+            yield modules["retirement_probe"], modules["retirement_validation"]
+        finally:
+            for name in reversed(names):
+                sys.modules.pop(name, None)
+
+    def retirement_baseline(self):
+        runtime = self.runtime()
+        receipts = self.request["receipts"]
+        if runtime["working_directory"] != str(self.production) or runtime["fingerprint"] != receipts.get(
+            "expected_current_fingerprint"
+        ):
+            raise ReleaseError("retirement_original_runtime_changed")
+        source_sha = self.source_inventory(self.request.get("source_manifest", {}), self.production)
+        if source_sha != receipts.get("expected_source_manifest_sha256"):
+            raise ReleaseError("retirement_original_source_changed")
+        base_sha = receipts.get("dependencies", {}).get("base_environment_sha256")
+        if base_sha != RETIREMENT_BASE_ENV_SHA256 or tree_digest(self.old_venv)[0] != base_sha:
+            raise ReleaseError("retirement_original_environment_changed")
+        return {
+            "production_pid": self.process_id(SERVICE),
+            "runtime_fingerprint": runtime["fingerprint"],
+            "source_manifest_sha256": source_sha,
+            "base_environment_sha256": base_sha,
+        }
+
+    def retirement_case_result(self, value):
+        keys = {
+            "case_id",
+            "passed",
+            "clean_exit_zero",
+            "executor_results_preserved",
+            "expected_counterexample",
+            "production_quiescence_proven",
+            "task_census_still_required",
+        }
+        if (
+            type(value) is not dict
+            or set(value) != keys
+            or type(value.get("case_id")) is not str
+            or value["case_id"] not in RETIREMENT_CASE_IDS
+            or any(type(item) is not bool for key, item in value.items() if key != "case_id")
+            or value["production_quiescence_proven"] is not False
+            or value["task_census_still_required"] is not True
+        ):
+            raise ReleaseError("retirement_safe_result_rejected")
+
+    def retirement_summary(self, value, bindings, probe, validation):
+        fixed = {
+            "schema": 1,
+            "bindings": bindings,
+            "production_quiescence_proven": False,
+            "task_census_still_required": True,
+            "actual_linux_collection": True,
+            "validates_single_main_signal_only": True,
+            "systemctl_stop_end_to_end_proven": False,
+            "probe_source_sha256": RETIREMENT_HELPERS["retirement_probe.py"],
+            "python_minor": "3.12",
+            "pinned_versions": dict(probe.VERSIONS),
+            "uvicorn_server_sha256": probe.UVICORN_SHA256,
+            "uvloop_binary_sha256": probe.UVLOOP_SHA256,
+            "bundle_sha256": probe.bundle_identity(),
+            "wrapper_sha256": validation.wrapper_directory().name,
+        }
+        keys = {*fixed, "retirement_validation_passed", "cases", "synthetic_cleanup_verified"}
+        if (
+            type(value) is not dict
+            or set(value)
+            not in (keys | {"actual_linux_acceptance_requires_root_collection"}, keys | {"error_code"})
+            or any(
+                type(value.get(key)) is not type(item) or value[key] != item for key, item in fixed.items()
+            )
+            or type(value.get("retirement_validation_passed")) is not bool
+            or type(value.get("synthetic_cleanup_verified")) is not bool
+            or type(value.get("cases")) is not list
+            or len(value["cases"]) > 7
+        ):
+            raise ReleaseError("retirement_safe_result_rejected")
+        for case in value["cases"]:
+            self.retirement_case_result(case)
+        case_ids = [case["case_id"] for case in value["cases"]]
+        if len(case_ids) != len(set(case_ids)):
+            raise ReleaseError("retirement_safe_result_rejected")
+        if "error_code" in value:
+            if (
+                type(value["error_code"]) is not str
+                or not re.fullmatch(r"retirement_[a-z0-9_]{1,80}", value["error_code"])
+                or value["retirement_validation_passed"]
+            ):
+                raise ReleaseError("retirement_safe_result_rejected")
+        elif value["actual_linux_acceptance_requires_root_collection"] is not True:
+            raise ReleaseError("retirement_safe_result_rejected")
+        if value["retirement_validation_passed"] and (
+            set(case_ids) != RETIREMENT_CASE_IDS
+            or not all(case["passed"] for case in value["cases"])
+            or not value["synthetic_cleanup_verified"]
+        ):
+            raise ReleaseError("retirement_safe_result_rejected")
+        return value
+
+    def retirement_event(self, event, value, bindings, probe, validation):
+        if event == "retirement_validation_result":
+            return self.retirement_summary(value, bindings, probe, validation)
+        if event == "synthetic_case_result":
+            self.retirement_case_result(value)
+            return value
+        fields = {
+            "bundle_copy_intent": {"bundle_sha256": "digest"},
+            "public_bundles_verified": {"bundle_sha256": "digest", "wrapper_sha256": "digest"},
+            "synthetic_start_intent": {"case_id": "case", "nonce": "nonce"},
+            "actual_isolation_verified": {
+                "case_id": "case",
+                "invocation_id": "nonce",
+                "main_pid": "number",
+                "start_ticks": "number",
+                "uid": "number",
+                "control_group": "group",
+                "actual_private_network_and_mounts": "true",
+                "runtime_bind_same_inode": "true",
+                "production_directory_access_denied": "true",
+                "inet_socket_creation_denied": "true",
+            },
+            "synthetic_signal_intent": {
+                "case_id": "case",
+                "invocation_id": "nonce",
+                "signal": "signal",
+                "signal_at_monotonic_us": "number",
+            },
+            "synthetic_runner_join_observed": {
+                "case_id": "case",
+                "server_unwound_with_executor_pending": "true",
+            },
+            "synthetic_exit_observed": {
+                "case_id": "case",
+                "recursive_member_count": "number",
+                "exit_code": "number",
+                "exit_status": "number",
+            },
+        }.get(event)
+        if fields is None or type(value) is not dict or set(value) != set(fields):
+            raise ReleaseError("retirement_safe_event_rejected")
+        for key, category in fields.items():
+            item = value[key]
+            valid = (
+                item is True
+                if category == "true"
+                else type(item) is int and 0 <= item < 2**63
+                if category == "number"
+                else type(item) is str
+                and (
+                    bool(DIGEST.fullmatch(item))
+                    if category == "digest"
+                    else bool(re.fullmatch(r"[0-9a-f]{32}", item))
+                    if category == "nonce"
+                    else item in RETIREMENT_CASE_IDS
+                    if category == "case"
+                    else item in {"SIGINT", "SIGTERM"}
+                    if category == "signal"
+                    else bool(
+                        re.fullmatch(
+                            r"/system.slice/prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
+                            item,
+                        )
+                    )
+                )
+            )
+            if not valid:
+                raise ReleaseError("retirement_safe_event_rejected")
+        return value
+
+    def validate_legacy_retirement(self):
+        self.verify_tree()
+        contents = self.retirement_sources()
+        baseline = self.retirement_baseline()
+        attempt = self.request.get("retirement_attempt", self.request["release_id"])
+        if type(attempt) is not str or not RELEASE_ID.fullmatch(attempt):
+            raise ReleaseError("retirement_attempt_rejected")
+        directory = self.checked(self.record / "legacy-retirement" / attempt)
+        if directory.exists():
+            raise ReleaseError("retirement_attempt_already_exists")
+        self.boundary("retirement_attempt")
+        directory.mkdir(parents=True, mode=0o700)
+        self.write(
+            directory / "identity.json",
+            encoded(
+                {
+                    "commit": self.request["commit"],
+                    "attempt": attempt,
+                    "helpers": RETIREMENT_HELPERS,
+                    "baseline": baseline,
+                }
+            ),
+        )
+        events = self.checked(directory / "events.jsonl")
+        fd = os.open(events, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        count, chain = 0, "0" * 64
+        summary = None
+        passed, baseline_verified_after, error_code = False, False, None
+        recorded_summary, cancelled_code = None, None
+        try:
+            # The append fd's name and attempt hierarchy must survive a crash,
+            # before the helper may emit its first durable intent.
+            for parent in (directory, directory.parent, self.record):
+                directory_fd = os.open(
+                    self.checked(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            helper_root = self.install_retirement_helpers(contents)
+            bindings = {
+                "commit": self.request["commit"],
+                "release_id": self.request["release_id"],
+                "base_environment_sha256": baseline["base_environment_sha256"],
+            }
+            with self.retirement_modules(helper_root) as (probe, validation):
+
+                def record(event, value):
+                    nonlocal count, chain, recorded_summary
+                    value = self.retirement_event(event, value, bindings, probe, validation)
+                    if recorded_summary is not None:
+                        raise ReleaseError("retirement_events_after_summary_rejected")
+                    entry = (
+                        encoded(
+                            {
+                                "sequence": count + 1,
+                                "at": int(self.now()),
+                                "previous_sha256": chain,
+                                "event": event,
+                                "details": value,
+                            }
+                        )
+                        + b"\n"
+                    )
+                    if len(entry) > 16384:
+                        raise ReleaseError("retirement_event_limit")
+                    offset = 0
+                    while offset < len(entry):
+                        written = os.write(fd, entry[offset:])
+                        if written <= 0:
+                            raise ReleaseError("retirement_event_write_failed")
+                        offset += written
+                    os.fsync(fd)
+                    count += 1
+                    chain = digest(entry)
+                    if event == "retirement_validation_result":
+                        recorded_summary = value
+
+                def boundary(label):
+                    nonlocal cancelled_code
+                    allowed = {"retirement_copy_public_libraries"} | {
+                        "retirement_" + phase + "_" + case
+                        for phase in ("start", "signal")
+                        for case in RETIREMENT_CASE_IDS
+                    }
+                    if label not in allowed:
+                        raise ReleaseError("retirement_boundary_rejected")
+                    try:
+                        self.boundary(label)
+                    except ReleaseError as error:
+                        if str(error) in {
+                            "operator_stop",
+                            "fresh_operator_permit_required",
+                            "permit_timeout",
+                            "controller_disconnected",
+                        }:
+                            cancelled_code = str(error)
+                        raise
+                    if (
+                        self.process_id(SERVICE) != baseline["production_pid"]
+                        or self.runtime()["fingerprint"] != baseline["runtime_fingerprint"]
+                    ):
+                        raise ReleaseError("retirement_original_runtime_changed")
+
+                def run(argv, *, timeout):
+                    if type(timeout) not in {int, float} or not 0 < timeout <= 15:
+                        raise ReleaseError("retirement_command_timeout_rejected")
+                    return self.run(argv, timeout=timeout)
+
+                summary = self.retirement_summary(
+                    validation.run_validation(bindings, boundary=boundary, run=run, record=record),
+                    bindings,
+                    probe,
+                    validation,
+                )
+                if recorded_summary != summary:
+                    raise ReleaseError("retirement_durable_summary_required")
+                if cancelled_code is not None:
+                    raise ReleaseError(cancelled_code)
+            if self.retirement_baseline() != baseline:
+                raise ReleaseError("retirement_original_baseline_changed")
+            baseline_verified_after = True
+            if not summary["retirement_validation_passed"] or not summary["synthetic_cleanup_verified"]:
+                raise ReleaseError("legacy_retirement_validation_failed")
+            passed = True
+            self.action_report = {
+                "attempt": attempt,
+                "summary": summary,
+                "events": count,
+                "last_event_sha256": chain,
+                "production_verified": False,
+                "passed": True,
+                "baseline_verified_after": True,
+            }
+        except Exception as error:
+            error_code = failure_code(error)
+            raise
+        finally:
+            os.close(fd)
+            self.write(
+                directory / "receipt.json",
+                encoded(
+                    {
+                        "attempt": attempt,
+                        "summary": summary,
+                        "events": count,
+                        "last_event_sha256": chain,
+                        "production_verified": False,
+                        "passed": passed,
+                        "baseline_verified_after": baseline_verified_after,
+                        "failure_code": error_code,
+                    }
+                ),
+            )
+
     def seed_stage_probes(self, stage):
         """Create disposable owners only in the not-yet-started private DB copy."""
         expected = self.checked(self.operations / "staging" / self.request["release_id"])
@@ -3492,6 +3943,8 @@ class RemoteRelease:
                     result["stage_cleanup"] = self.action_report
                 elif request["action"] in INTEGRATION_PROBES:
                     result["integration"] = self.action_report
+                elif request["action"] == "validate_legacy_retirement":
+                    result["legacy_retirement"] = self.action_report
                 return result
             except Exception as error:
                 self.journal(

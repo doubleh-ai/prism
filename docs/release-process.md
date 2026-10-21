@@ -121,3 +121,15 @@ Astock 探针自行完成上述导入前握手，随后仅导入固定来源并�
 上述分项实现与离线回归不能代替真实 Linux 运行回执，更不能代替有范围的真实模型、搜索、抓取、行情和研究质量验收。只有实际执行且内核身份、握手、结果及停止检查均通过，才可将对应分项标记通过；它们不会标记生产发布成功。
 
 生产 drop-in 的固定非秘密约束（CLI、数据/日志路径、内部 API、封存 Astock 引擎、单 worker、production 环境和禁写 bytecode）统一放在最终 `ExecStart=/usr/bin/env` 参数中。systemd 的 EnvironmentFile 可以覆盖 Environment，故不再依赖 Environment 来绑定这些路径；原 EnvironmentFile 仅继承配置与凭证。固定路径拒绝空白、引号、反斜线、百分号、美元符和其他 systemd 特殊字符，避免参数展开或分词；不读出配置值。离线测试用冲突的合成环境实际执行 `/usr/bin/env` 验证优先级；实际执行 integration 时还会在独立 root 工作根生成无凭证的冲突合成 EnvironmentFile 与 service 片段，用固定 `systemd-analyze verify` 仅解析启动命令，真实 `.env` 路径已替换且不会读取，不启动该合成 unit。Mac 回归不宣称已完成 Linux systemd 解析或生产启动验收。
+
+## 旧执行器的独立合成退役验证
+
+`validate_legacy_retirement` 只验证已绑定旧依赖下的合成信号协议，不停止生产，不证明真实任务已排空。它要求与既有候选相同的备份、兼容性与单写许可，重新核对原生产运行指纹、源码清单和完整旧环境摘要，测试后再次核对。独立 attempt 的 root 私有记录不可覆盖；发生失败或取消仍保留事件、结果和自然清理状态，新 attempt 也不能绕过尚存的合成工作负载。
+
+Mac 必须提供两个已批准的公开 helper 的固定摘要；远端再次核内置摘要，只把这两份字节装入 `/opt/prism/validation/helpers/<批准源码映射摘要>/scripts/`，目录 0555、文件 0444、root 所有、无链接、无清单外文件。以受信任系统 Python 在内存建立固定包命名空间并编译实际封存文件，不添加候选或旧环境到 root 的导入路径。旧依赖只按固定公开清单作为数据复制；它们仅在独立 DynamicUser 的合成服务内导入。
+
+固定 helper 使用 7 个随机合成 unit，分别观察 executor、后处理、嵌套线程及异步任务、daemon、子进程和 SIGTERM 的边界。每个真实事件经过严格安全字段验证，追加到私有 `events.jsonl` 并 fsync 后才继续，序号和摘要链保留事件次序；返回结果必须与最后一条持久 summary 完全一致。每个启动/信号边界都重新核操作许可和生产运行指纹；只有固定随机合成 unit 可以接收一次信号，生产 unit 仅允许只读身份检查。
+
+合成服务有 45 秒自然退出期限，子任务有固定自然期限，父控制器最多观察 55 秒清理；失败不强杀、不重试信号、不向生产发信号。仅在 MainPID 为零且递归 cgroup 已空后停止该空合成 unit。未观察到清理完成会阻止成功，不能将 SSH 断开或一次退出码视为已清理。
+
+即便 7 项全部通过，回执仍明确 `production_quiescence_proven=false`、`systemctl_stop_end_to_end_proven=false`、`task_census_still_required=true`。通过的反例表示已实际观察到相应任务可能丢失，不表示允许直接退役生产。此动作不写 admission、不更改 switch 门禁，也不证明真实会话或研究已安全完成；生产任务排空必须使用另行审查的实际清点和状态机。
