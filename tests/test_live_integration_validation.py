@@ -210,7 +210,7 @@ def preflight(validation):
         "schema": 1,
         "kind": "preflight",
         "binding": validation.binding,
-        "facts": {"public_dns_pinned": True, "upstream_tls_verified": True},
+        "facts": {"public_dns_pinned": True, "upstream_tls_verified": True, "broker_memory_sealed": True},
         "filesystem_checks": dict.fromkeys(supervisor.BROKER_FILESYSTEM_CHECKS, True),
         "negative_errno": dict.fromkeys([*supervisor.NEGATIVE_TARGETS, "disallowed_public"], 13),
         "positive_peers": ["1.1.1.1"],
@@ -225,6 +225,7 @@ def preflight(validation):
         lambda value: value["negative_errno"].update(vibe=True),
         lambda value: value["facts"].update(upstream_tls_verified=1),
         lambda value: value["filesystem_checks"].update(config_write_denied=False),
+        lambda value: value["facts"].update(broker_memory_sealed=False),
         lambda value: value.update(positive_peers=["10.0.0.1"]),
         lambda value: value.update(positive_peers=["1.1.1.1", "1.1.1.1"]),
     ],
@@ -791,6 +792,7 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
     )
     namespace["Path"] = SyntheticPath
     namespace["root_source"] = lambda *args: events.append("source_verified") or b"pass\n"
+    namespace["seal_memory"] = lambda: events.append("memory_sealed") or True
     namespace["denied_open"] = lambda path, **kw: events.append("filesystem_canary") or not failed_canary
     namespace["os"] = types.SimpleNamespace(getuid=lambda: 2002, getpid=lambda: 654)
     namespace["sys"] = types.SimpleNamespace(
@@ -824,18 +826,58 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
     if failed_canary:
         with pytest.raises(RuntimeError, match="broker_filesystem_rejected"):
             namespace["main"]()
-        assert events == ["filesystem_canary"] * 4 and not channel.outgoing
+        assert events == ["memory_sealed"] + ["filesystem_canary"] * 4 and not channel.outgoing
     else:
         namespace["main"]()
         stream = Channel(channel.outgoing)
         messages = [supervisor.receive(stream) for _ in range(5)]
         assert [value["kind"] for value in messages] == ["hello", "preflight", "key", "authorized", "summary"]
-        assert events[:5] == ["filesystem_canary"] * 4 + ["source_verified"]
+        assert events[:6] == ["memory_sealed"] + ["filesystem_canary"] * 4 + ["source_verified"]
         assert (
             events.index("tls_public_peer")
             < events.index("root_allow_received")
             < events.index("key_received")
         )
         assert messages[1]["filesystem_checks"] == dict.fromkeys(supervisor.BROKER_FILESYSTEM_CHECKS, True)
+        assert messages[1]["facts"]["broker_memory_sealed"] is True
         assert all(number == 13 for number in messages[1]["negative_errno"].values())
         assert "public-synthetic-key-only" not in json.dumps(messages)
+
+
+@pytest.mark.parametrize("failure", [None, "rlimit", "setdumpable", "getdumpable"])
+def test_broker_itself_seals_and_reads_dumpability_before_key(failure):
+    parsed = ast.parse(supervisor.BROKER_BOOTSTRAP)
+    parsed.body = [node for node in parsed.body if not isinstance(node, ast.Try)]
+    namespace = {}
+    exec(compile(parsed, "offline-broker-memory-guard", "exec"), namespace)
+    calls = []
+    namespace["resource"] = types.SimpleNamespace(
+        RLIMIT_CORE=4,
+        setrlimit=lambda kind, value: calls.append(("limit", kind, value)),
+        getrlimit=lambda kind: (0, 1) if failure == "rlimit" else (0, 0),
+    )
+
+    def prctl(*args):
+        calls.append(args)
+        return 1 if failure == ("setdumpable" if args[0] == 4 else "getdumpable") else 0
+
+    namespace["ctypes"] = types.SimpleNamespace(
+        CDLL=lambda *args, **kwargs: types.SimpleNamespace(prctl=prctl), c_int=int, c_ulong=int
+    )
+    if failure:
+        with pytest.raises(RuntimeError, match="broker_memory_unsealed"):
+            namespace["seal_memory"]()
+    else:
+        assert namespace["seal_memory"]() is True
+        assert calls == [("limit", 4, (0, 0)), (4, 0, 0, 0, 0), (3, 0, 0, 0, 0)]
+
+
+def test_live_attempt_cannot_overflow_linux_unix_socket_path():
+    value = request()
+    value["release_id"] = "a" * 40
+    supervisor.validate_request(value)
+    path = "/var/lib/prism-operations/integration/" + value["release_id"] + "/live/broker/model.sock"
+    assert len(path.encode()) <= 107
+    value["release_id"] += "a"
+    with pytest.raises(supervisor.ValidationError, match="request_rejected"):
+        supervisor.validate_request(value)

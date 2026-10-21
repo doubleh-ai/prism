@@ -71,9 +71,9 @@ INTEGRATION_PROBES = {
     "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
 }
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "dc9ea1216acba4fa46bf5f2ec4b0aa51e0ab1719b4bed6bc679c5138041239e9",
-    "live_integration_worker.py": "b269d8d0293f60741ed41278bfeacd7615e578bec52562593937280b2e2ac6f0",
-    "live_integration_transport.py": "20e7f1ea12a575590c54beaa21f75fd5b0e5964b58b16aa79212039051d3a2bd",
+    "live_integration_validation.py": "8d207325efe0169e2ba9a1072f657722b65bd7501f14925104b0f7b79281f12b",
+    "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
+    "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
 }
 LIVE_STAGES = {
@@ -127,8 +127,8 @@ LIVE_SOURCE_PINS = {
     if name != "live_integration_validation.py"
 }
 RETIREMENT_HELPERS = {
-    "retirement_probe.py": "d94cd09a9ed4746b69996660539a8d7f1f124c6b09cb257423179f50ed2ce5e8",
-    "retirement_validation.py": "5c4ba8016b58f4dc0dff035cce683047fd545e4189bff8179a2465a1f5e414a1",
+    "retirement_probe.py": "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624",
+    "retirement_validation.py": "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e",
 }
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
 ASTOCK_ERROR_DETAILS = {
@@ -2379,7 +2379,7 @@ class RemoteRelease:
                 self.request.get("action") != "integration_live"
                 or module is None
                 or type(attempt) is not str
-                or not RELEASE_ID.fullmatch(attempt)
+                or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt)
                 or getattr(self, "_live_attempt", None) != attempt
             ):
                 raise ValueError
@@ -2427,11 +2427,13 @@ class RemoteRelease:
                     "witness",
                     "kernel",
                     "sources",
+                    "broker_memory_sealed",
                 }
                 or type(allow["schema"]) is not int
                 or allow["schema"] != 1
                 or allow["sources"] != LIVE_SOURCE_PINS
                 or allow["policy_sha256"] != LIVE_SOURCE_PINS["policy"]
+                or allow["broker_memory_sealed"] is not True
                 or type(allow["allowed_at"]) is not int
                 or not 0 <= self.now() - allow["allowed_at"] <= 120
             ):
@@ -2697,6 +2699,7 @@ class RemoteRelease:
             "cleanup_error_class",
             "broker_negative_errno",
             "broker_filesystem_checks",
+            "broker_memory_sealed",
             "provider_peer_count",
             "bootstrap_proof_sha256",
             "worker_result_sha256",
@@ -2736,6 +2739,7 @@ class RemoteRelease:
             "research_quality_verified",
             "production_verified",
             "units_stopped",
+            "broker_memory_sealed",
         }
         requests = value.get("requests")
         errno = value.get("broker_negative_errno")
@@ -2802,6 +2806,7 @@ class RemoteRelease:
             or value["cleanup_error_class"] is not None
             or value["stage"] != "complete"
             or value["units_stopped"] is not True
+            or value["broker_memory_sealed"] is not True
             or any(
                 value[key] is not True
                 for key in (
@@ -2832,7 +2837,7 @@ class RemoteRelease:
         self.live_environment_binding()
         contents = self.live_helper_sources()
         attempt = self.request.get("integration_attempt")
-        if type(attempt) is not str or not RELEASE_ID.fullmatch(attempt):
+        if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
             raise ReleaseError("explicit_live_integration_attempt_required")
         baseline = self.live_original_state()
         work = self.checked(self.operations / "integration" / attempt / "live")

@@ -154,6 +154,9 @@ def test_mac_requires_all_four_explicit_pins_new_attempt_and_opaque_receipt(prep
     args.integration_attempt = None
     with pytest.raises(controller.ControlError, match="explicit_live_integration_attempt_required"):
         controller.request_for(args)
+    args.integration_attempt = "a" * 41
+    with pytest.raises(controller.ControlError, match="explicit_live_integration_attempt_required"):
+        controller.request_for(args)
 
 
 def gate_fixture(prepared, monkeypatch):
@@ -256,6 +259,7 @@ def gate_fixture(prepared, monkeypatch):
         "schema": 1,
         "binding": binding,
         "policy_sha256": remote.LIVE_SOURCE_PINS["policy"],
+        "broker_memory_sealed": True,
         "bootstrap_proof_sha256": remote.digest(remote.encoded(proof)),
         "allowed_at": NOW,
         "witness": {"binding": binding, "checked_at": NOW, "checks": dict.fromkeys(helper.WITNESSES, True)},
@@ -351,6 +355,7 @@ def test_executor_memory_guard_sets_and_reads_only_current_process(failure, monk
         "core",
         "source",
         "core_kernel",
+        "broker_memory",
     ],
 )
 def test_bad_gate_stops_before_any_env_open(prepared, monkeypatch, change):
@@ -362,11 +367,13 @@ def test_bad_gate_stops_before_any_env_open(prepared, monkeypatch, change):
         path.chmod(0o644)
     elif change == "allow_hardlink":
         os.link(path, work / "other")
-    elif change in {"expired", "nonce"}:
+    elif change in {"expired", "nonce", "broker_memory"}:
         if change == "expired":
             allow["allowed_at"] = NOW - 121
-        else:
+        elif change == "nonce":
             allow["binding"]["nonce"] = "f" * 32
+        else:
+            allow["broker_memory_sealed"] = False
         path.chmod(0o600)
         path.write_bytes(remote.encoded(allow))
         path.chmod(0o444)
@@ -466,6 +473,7 @@ def safe_summary(data):
         "cleanup_error_class": None,
         "broker_negative_errno": dict.fromkeys([*helper.NEGATIVE_TARGETS, "disallowed_public"], 13),
         "broker_filesystem_checks": dict.fromkeys(helper.BROKER_FILESYSTEM_CHECKS, True),
+        "broker_memory_sealed": True,
         "provider_peer_count": 1,
         "bootstrap_proof_sha256": "c" * 64,
         "worker_result_sha256": "d" * 64,

@@ -435,3 +435,108 @@ async def test_failed_bootstrap_never_imports_candidate_or_runs_qa(monkeypatch):
     monkeypatch.setattr(worker, "prepare_candidate", lambda *args: pytest.fail("candidate import forbidden"))
     with pytest.raises(worker.WorkerError, match="bootstrap_isolation_rejected"):
         await worker.run_worker(types.SimpleNamespace())
+
+
+@pytest.fixture
+def clean_candidate_site(tmp_path, monkeypatch):
+    for name in tuple(worker.sys.modules):
+        if name.startswith(worker.STARTUP_NAMES):
+            monkeypatch.delitem(worker.sys.modules, name)
+    (tmp_path / ".venv/lib/python3.12/site-packages").mkdir(parents=True)
+    return tmp_path
+
+
+def test_worker_explicit_site_activation_never_executes_ubuntu_or_user_hooks(
+    clean_candidate_site, monkeypatch
+):
+    import site
+
+    called = []
+    monkeypatch.setattr(site, "execsitecustomize", lambda: called.append("ubuntu-apport-hook"))
+    monkeypatch.setattr(site, "execusercustomize", lambda: called.append("user-hook"))
+    original = (site.execsitecustomize, site.execusercustomize, site.addpackage)
+
+    def main():
+        site.execsitecustomize()
+        site.execusercustomize()
+        called.append("normal-site")
+
+    monkeypatch.setattr(site, "main", main)
+    worker.activate_candidate_site(clean_candidate_site)
+    assert called == ["normal-site"]
+    assert (site.execsitecustomize, site.execusercustomize, site.addpackage) == original
+
+
+def test_actual_prepare_candidate_uses_safe_site_activation(clean_candidate_site, tmp_path, monkeypatch):
+    import site
+
+    candidate, work = clean_candidate_site, tmp_path / "synthetic-work"
+    hooks, imported = [], []
+    with monkeypatch.context() as patch:
+        patch.setattr(worker.os, "environ", {})
+        patch.setattr(worker.os, "chdir", lambda path: None)
+        patch.setattr(worker.tempfile, "tempdir", None)
+        patch.setattr(worker.resource, "setrlimit", lambda *args: None)
+        patch.setattr(worker.sys, "prefix", str(candidate / ".venv"))
+        patch.setattr(worker.sys, "path", [str(worker.Path(worker.sys.base_prefix) / "lib")])
+        patch.setattr(
+            worker.sys,
+            "modules",
+            {
+                name: value
+                for name, value in worker.sys.modules.items()
+                if name != "server" and not name.startswith("server.")
+            },
+        )
+        patch.setattr(site, "execsitecustomize", lambda: hooks.append("system-hook"))
+        patch.setattr(site, "execusercustomize", lambda: hooks.append("user-hook"))
+        patch.setattr(site, "main", lambda: (site.execsitecustomize(), site.execusercustomize()))
+
+        def load(name):
+            imported.append(name)
+            return types.SimpleNamespace(
+                DB_PATH=work / "data/chat.db", __file__=str(candidate / "server/synthetic.py")
+            )
+
+        patch.setattr(worker.importlib, "import_module", load)
+        result = worker.prepare_candidate(candidate, candidate / "synthetic-cli", work)
+        assert "server.main" in result and "server.database" in imported
+        assert not hooks
+
+
+@pytest.mark.parametrize("failure", ["pth", "site_error"])
+def test_worker_site_hooks_restored_even_when_pth_or_initialization_fails(
+    clean_candidate_site, monkeypatch, failure
+):
+    import site
+
+    original = (site.execsitecustomize, site.execusercustomize, site.addpackage)
+
+    def main():
+        if failure == "pth":
+            site.addpackage("/synthetic", "untrusted.pth", set())
+        raise RuntimeError("synthetic initialization failure")
+
+    monkeypatch.setattr(site, "main", main)
+    with pytest.raises(worker.WorkerError if failure == "pth" else RuntimeError):
+        worker.activate_candidate_site(clean_candidate_site)
+    assert (site.execsitecustomize, site.execusercustomize, site.addpackage) == original
+
+
+@pytest.mark.parametrize("name", worker.STARTUP_NAMES)
+def test_worker_rejects_preloaded_startup_modules_before_site_main(clean_candidate_site, monkeypatch, name):
+    import site
+
+    monkeypatch.setitem(worker.sys.modules, name, types.ModuleType(name))
+    monkeypatch.setattr(site, "main", lambda: pytest.fail("preloaded startup must block site.main"))
+    with pytest.raises(worker.WorkerError, match="startup_hook_imported"):
+        worker.activate_candidate_site(clean_candidate_site)
+
+
+def test_worker_rejects_candidate_pth_before_site_main(clean_candidate_site, monkeypatch):
+    import site
+
+    (clean_candidate_site / ".venv/lib/python3.12/site-packages/untrusted.pth").write_text("never executed\n")
+    monkeypatch.setattr(site, "main", lambda: pytest.fail(".pth must block site.main"))
+    with pytest.raises(worker.WorkerError, match="startup_hook_rejected"):
+        worker.activate_candidate_site(clean_candidate_site)

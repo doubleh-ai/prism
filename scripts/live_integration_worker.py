@@ -41,6 +41,7 @@ from urllib.parse import urlsplit
 
 POLICY_SHA256 = "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9"
 TOOLS = {"indicator_list", "research_read"}
+STARTUP_NAMES = ("sitecustomize", "usercustomize", "patch_ssl")
 BOOT_CHECKS = {
     "production_home_denied",
     "production_proc_denied",
@@ -260,6 +261,39 @@ def verify_cli(path, digest):
             raise WorkerError("cli_source_rejected")
 
 
+def activate_candidate_site(candidate):
+    """Activate the venv without executing system/user hooks or any .pth."""
+    sites = list((candidate / ".venv/lib").glob("python*/site-packages"))
+    if len(sites) != 1 or any(
+        path.name.endswith(".pth") or path.name.startswith(STARTUP_NAMES) for path in sites[0].rglob("*")
+    ):
+        raise WorkerError("startup_hook_rejected")
+    if any(name.startswith(STARTUP_NAMES) for name in sys.modules):
+        raise WorkerError("startup_hook_imported")
+    import site
+
+    original_site, original_user, original_package = (
+        site.execsitecustomize,
+        site.execusercustomize,
+        site.addpackage,
+    )
+
+    def reject_package(*args, **kwargs):
+        raise WorkerError("startup_hook_rejected")
+
+    try:
+        site.execsitecustomize = lambda: None
+        site.execusercustomize = lambda: None
+        site.addpackage = reject_package
+        site.main()
+    finally:
+        site.execsitecustomize = original_site
+        site.execusercustomize = original_user
+        site.addpackage = original_package
+    if any(name.startswith(STARTUP_NAMES) for name in sys.modules):
+        raise WorkerError("startup_hook_imported")
+
+
 def prepare_candidate(candidate, cli, work):
     os.environ.clear()
     os.environ.update(
@@ -279,15 +313,7 @@ def prepare_candidate(candidate, cli, work):
     os.chdir(work)
     tempfile.tempdir = str(work / "tmp")
     resource.setrlimit(resource.RLIMIT_FSIZE, (4 * 1024 * 1024, 4 * 1024 * 1024))
-    sites = list((candidate / ".venv/lib").glob("python*/site-packages"))
-    if len(sites) != 1 or any(
-        path.name.endswith(".pth") or path.name.startswith(("sitecustomize", "usercustomize", "patch_ssl"))
-        for path in sites[0].rglob("*")
-    ):
-        raise WorkerError("startup_hook_rejected")
-    import site
-
-    site.main()
+    activate_candidate_site(candidate)
     allowed = (Path(sys.base_prefix) / "lib", candidate / ".venv")
     if Path(sys.prefix) != candidate / ".venv" or any(
         not path or not any(Path(path).is_relative_to(root) for root in allowed) for path in sys.path

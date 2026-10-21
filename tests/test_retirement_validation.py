@@ -74,7 +74,7 @@ def test_launch_only_targets_one_fixed_synthetic_unit_with_a_private_run(case_id
     }
     assert properties["DynamicUser"] == "yes"
     assert properties["RemainAfterExit"] == "yes"
-    assert properties["TemporaryFileSystem"] == "/run:ro"
+    assert properties["TemporaryFileSystem"] == "/run:ro /run/systemd:ro,mode=000 /run/dbus:ro,mode=000"
     assert properties["BindPaths"] == case["host_runtime_directory"] + ":" + case["runtime_directory"]
     assert properties["ReadWritePaths"] == case["runtime_directory"]
     assert properties["SendSIGKILL"] == "no"
@@ -89,8 +89,6 @@ def test_launch_only_targets_one_fixed_synthetic_unit_with_a_private_run(case_id
         "/var/lib",
         "/etc",
         "/opt/prism/releases",
-        "/run/systemd",
-        "/run/dbus",
     ]
     # No mandatory child path can fail merely because production has not
     # created it yet; the existing ancestors also conceal future children.
@@ -590,6 +588,13 @@ def test_actual_mount_witness_requires_ro_tmpfs_and_the_same_runtime_inode(monke
         scope.setattr(validation.os, "stat", fake_stat)
         scope.setattr(validation.Path, "lstat", lambda path: fake_stat(path))
         validation._mounts(123, runtime, "/run/private/host-storage")
+        for mutated in (
+            mountinfo.replace(b"/run/systemd ro - tmpfs", b"/run/systemd rw - tmpfs"),
+            mountinfo.replace(b"/run/dbus ro - tmpfs", b"/run/dbus ro - ext4"),
+        ):
+            scope.setattr(probe, "_read_regular", lambda *_, raw=mutated: (raw, None))
+            with pytest.raises(validation.RetirementValidationError, match="runtime_ipc_mount_rejected"):
+                validation._mounts(123, runtime, "/run/private/host-storage")
         monkeypatch.setattr(
             probe, "_read_regular", lambda *_: (mountinfo.replace(b"/run ro", b"/run rw"), None)
         )

@@ -24,6 +24,25 @@ def synthetic_approved_policy_source(monkeypatch):
     monkeypatch.setattr(transport, "load_policy", lambda path: policy)
 
 
+@pytest.fixture
+def clean_upstream_environment(monkeypatch):
+    prohibited = {
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "SSLKEYLOGFILE",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+    }
+    for name in tuple(transport.os.environ):
+        if name.upper() in prohibited:
+            monkeypatch.delenv(name, raising=False)
+
+
 def binding():
     return {
         "candidate": "a" * 40,
@@ -372,6 +391,7 @@ def test_immutable_permit_requires_all_pid_uid_namespace_source_and_canary_bindi
         "bootstrap_proof_sha256": hashlib.sha256(b"proof").hexdigest(),
         "allowed_at": 1000,
         "sources": {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()},
+        "broker_memory_sealed": True,
         "kernel": kernel,
         "witness": {
             "binding": identity,
@@ -388,6 +408,10 @@ def test_immutable_permit_requires_all_pid_uid_namespace_source_and_canary_bindi
         lambda name: types.SimpleNamespace(pw_uid=1001 if name == "prism-integration" else 1002),
     )
     assert transport.verify_allow(tmp_path, identity, policy, proof_raw=b"proof", now=lambda: 1001) == kernel
+    allow["broker_memory_sealed"] = False
+    with pytest.raises(transport.TransportError, match="root_allow_rejected"):
+        transport.verify_allow(tmp_path, identity, policy, now=lambda: 1001)
+    allow["broker_memory_sealed"] = True
     allow["witness"]["checks"]["metadata_denied"] = 1
     with pytest.raises(transport.TransportError):
         transport.verify_allow(tmp_path, identity, policy, now=lambda: 1001)
@@ -401,7 +425,7 @@ def test_immutable_permit_requires_all_pid_uid_namespace_source_and_canary_bindi
         transport.verify_allow(tmp_path, identity, policy, now=lambda: 1001)
 
 
-def test_dns_pin_and_tls_sni_are_actual_connection_inputs(monkeypatch):
+def test_dns_pin_and_tls_sni_are_actual_connection_inputs(monkeypatch, clean_upstream_environment):
     raw = Channel()
     used = []
     context = types.SimpleNamespace(
@@ -416,14 +440,12 @@ def test_dns_pin_and_tls_sni_are_actual_connection_inputs(monkeypatch):
     )
     monkeypatch.setattr(transport.socket, "socket", lambda *args: raw)
     monkeypatch.setattr(transport.ssl, "create_default_context", lambda: context)
-    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
-        monkeypatch.delenv(name, raising=False)
     secured = transport.PinnedUpstream(policy).connect(transport.time.monotonic() + 2)
     assert secured is raw and raw.connected == [("8.8.8.8", 443)] and used == ["api.deepseek.com"]
     assert context.minimum_version == ssl.TLSVersion.TLSv1_2
 
 
-def test_mixed_private_dns_answer_is_rejected_before_dial(monkeypatch):
+def test_mixed_private_dns_answer_is_rejected_before_dial(monkeypatch, clean_upstream_environment):
     monkeypatch.setattr(
         transport.socket,
         "getaddrinfo",
@@ -432,9 +454,39 @@ def test_mixed_private_dns_answer_is_rejected_before_dial(monkeypatch):
     monkeypatch.setattr(
         transport.socket, "socket", lambda *args: pytest.fail("private/mixed DNS must not dial")
     )
-    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
-        monkeypatch.delenv(name, raising=False)
     with pytest.raises(transport.TransportError, match="upstream_dns_rejected"):
+        transport.PinnedUpstream(policy).connect(transport.time.monotonic() + 2)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "ALL_PROXY",
+        "SSL_CERT_FILE",
+        "ssl_cert_dir",
+        "SSLKEYLOGFILE",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+    ],
+)
+def test_dirty_upstream_environment_is_rejected_before_dns_or_dial(
+    monkeypatch, clean_upstream_environment, name
+):
+    monkeypatch.setenv(name, "public-synthetic-inherited-value")
+    monkeypatch.setattr(
+        transport.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: pytest.fail("dirty environment must be rejected before DNS"),
+    )
+    monkeypatch.setattr(
+        transport.socket, "socket", lambda *args, **kwargs: pytest.fail("dirty environment must never dial")
+    )
+    with pytest.raises(transport.TransportError, match="upstream_environment_rejected"):
         transport.PinnedUpstream(policy).connect(transport.time.monotonic() + 2)
 
 

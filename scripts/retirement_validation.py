@@ -21,7 +21,7 @@ from pathlib import Path
 
 from scripts import retirement_probe as probe
 
-PROBE_SOURCE_SHA256 = "d94cd09a9ed4746b69996660539a8d7f1f124c6b09cb257423179f50ed2ce5e8"
+PROBE_SOURCE_SHA256 = "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624"
 PRODUCTION_UNIT = "stock-app.service"
 PROPERTIES = (
     "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,"
@@ -346,7 +346,6 @@ def launch_command(plan, case_id):
     runtime = case["runtime_directory"]
     properties.update(
         RemainAfterExit="yes",
-        TemporaryFileSystem="/run:ro",
         BindPaths=case["host_runtime_directory"] + ":" + runtime,
         ReadOnlyPaths=properties["ReadOnlyPaths"] + " " + str(wrapper_directory()),
     )
@@ -532,7 +531,11 @@ def _mounts(pid, runtime, host_runtime):
     if (host.st_dev, host.st_ino, host.st_uid) != (inside.st_dev, inside.st_ino, inside.st_uid):
         reject("retirement_runtime_bind_mismatch")
     for path in ("/run/systemd", "/run/dbus"):
-        if path.encode() not in mounts or b"ro" not in mounts[path.encode()][0]:
+        if (
+            path.encode() not in mounts
+            or b"ro" not in mounts[path.encode()][0]
+            or mounts[path.encode()][1] != b"tmpfs"
+        ):
             reject("retirement_runtime_ipc_mount_rejected")
         outside = Path(path).lstat()
         masked = (Path("/proc") / str(pid) / "root" / path.lstrip("/")).lstat()

@@ -70,15 +70,13 @@ def test_observer_only_holds_a_wants_reference_and_executes_fixed_public_true(ca
     assert props["Wants"] == case["unit"]
     assert not set(props) & {"PartOf", "BindsTo", "PropagatesStopTo"}
     assert props["DynamicUser"] == props["PrivateNetwork"] == props["NoNewPrivileges"] == "yes"
-    assert props["TemporaryFileSystem"] == "/run:ro"
+    assert props["TemporaryFileSystem"] == "/run:ro /run/systemd:ro,mode=000 /run/dbus:ro,mode=000"
     assert props["InaccessiblePaths"].split() == [
         "/home",
         "/root",
         "/var/lib",
         "/etc",
         "/opt/prism/releases",
-        "/run/systemd",
-        "/run/dbus",
     ]
     assert "ReadWritePaths" not in props
     assert command[command.index("--") + 1 :] == ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "/usr/bin/true"]

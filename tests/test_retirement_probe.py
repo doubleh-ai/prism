@@ -121,7 +121,9 @@ def test_descriptor_cannot_choose_a_host_unit_uid_or_executable():
         assert properties["Restart"] == "no"
         assert properties["TimeoutStopSec"] == properties["RuntimeMaxSec"] == "infinity"
         assert case["signal"] == ("SIGTERM" if case["case_id"] == "term-control" else "SIGINT")
+        assert properties["TemporaryFileSystem"] == "/run:ro /run/systemd:ro,mode=000 /run/dbus:ro,mode=000"
         masks = properties["InaccessiblePaths"].split()
+        assert "/run/systemd" not in masks and "/run/dbus" not in masks
         assert "/etc" in masks and "/var/lib" in masks
         assert not any(path.startswith("-") for path in masks)
         for protected in ("/etc/prism", "/var/lib/prism", "/var/lib/prism-operations"):

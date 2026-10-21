@@ -39,8 +39,8 @@ CGROUP = Path("/sys/fs/cgroup")
 RESOLV = Path("/etc/resolv.conf")
 RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
 SOURCE_PINS = {
-    "worker": "b269d8d0293f60741ed41278bfeacd7615e578bec52562593937280b2e2ac6f0",
-    "transport": "20e7f1ea12a575590c54beaa21f75fd5b0e5964b58b16aa79212039051d3a2bd",
+    "worker": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
+    "transport": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "policy": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
 }
 BOOT_CHECKS = {
@@ -113,7 +113,7 @@ SAFE_ERRORS = {
 # No site or candidate import; exact sealed transport/policy only. Real key is
 # requested over this one root-owned, peer-verified UDS after the root permit.
 BROKER_BOOTSTRAP = r"""
-import contextlib, errno, hashlib, importlib.util, ipaddress, json, os, socket, stat, struct, sys, time
+import contextlib, ctypes, errno, hashlib, importlib.util, ipaddress, json, os, resource, socket, stat, struct, sys, time
 from pathlib import Path
 
 def packed(value):
@@ -151,9 +151,17 @@ def denied_open(path,write=False):
         return error.errno in ({errno.EACCES,errno.EPERM,errno.EROFS} if write else {errno.EACCES,errno.EPERM,errno.ENOENT})
     os.close(fd)
     return False
+def seal_memory():
+    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+    if resource.getrlimit(resource.RLIMIT_CORE)!=(0,0): raise RuntimeError("broker_memory_unsealed")
+    call=ctypes.CDLL(None,use_errno=True).prctl
+    call.argtypes=[ctypes.c_int,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong];call.restype=ctypes.c_int
+    if call(4,0,0,0,0)!=0 or call(3,0,0,0,0)!=0 or resource.getrlimit(resource.RLIMIT_CORE)!=(0,0): raise RuntimeError("broker_memory_unsealed")
+    return True
 def main():
     config=json.loads(sys.argv[1]); work=Path(config["work"])
     if sys.platform!="linux" or os.getuid()!=config["broker_uid"] or os.getuid()==0 or not sys.flags.isolated or not sys.flags.no_site or not sys.flags.dont_write_bytecode: raise RuntimeError("broker_identity_rejected")
+    memory_sealed=seal_memory()
     filesystem={"production_home_denied":denied_open("/home/ubuntu/stock-analyzer/.env"),"production_proc_denied":denied_open("/proc/"+str(config["production_pid"])+"/environ"),"config_write_denied":denied_open("/home/ubuntu/stock-analyzer/.env",write=True),"staging_directory_denied":denied_open("/var/lib/prism-operations/staging")}
     if any(value is not True for value in filesystem.values()): raise RuntimeError("broker_filesystem_rejected")
     source=work/"transport.py"; raw=root_source(source,config["transport_sha256"])
@@ -182,7 +190,7 @@ def main():
             for name,target in launch["negative_targets"].items():
                 with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:
                     probe.settimeout(0.5);negative[name]=probe.connect_ex(tuple(target))
-            channel.sendall(packed({"schema":1,"kind":"preflight","binding":identity,"facts":facts,"negative_errno":negative,"positive_peers":sorted(observed),"filesystem_checks":filesystem}))
+            channel.sendall(packed({"schema":1,"kind":"preflight","binding":identity,"facts":{**facts,"broker_memory_sealed":memory_sealed},"negative_errno":negative,"positive_peers":sorted(observed),"filesystem_checks":filesystem}))
             reply=receive(channel)
             if reply!={"schema":1,"kind":"allowed","nonce":config["nonce"]}: raise RuntimeError("ipc_rejected")
         def key_provider():
@@ -308,7 +316,7 @@ def validate_request(request):
         or type(request.get("schema")) is not int
         or request["schema"] != 1
         or not isinstance(request.get("release_id"), str)
-        or not re.fullmatch("[a-z0-9][a-z0-9-]{7,63}", request["release_id"])
+        or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", request["release_id"])
         or not isinstance(request.get("candidate"), str)
         or not re.fullmatch("[0-9a-f]{40}", request["candidate"])
         or not isinstance(request.get("cli_sha256"), str)
@@ -499,6 +507,7 @@ class Validation:
             "cleanup_error_class": None,
             "broker_negative_errno": {},
             "broker_filesystem_checks": {},
+            "broker_memory_sealed": False,
             "provider_peer_count": 0,
             "bootstrap_proof_sha256": None,
             "worker_result_sha256": None,
@@ -914,7 +923,7 @@ class Validation:
             or value.get("kind") != "preflight"
             or value.get("binding") != self.binding
             or not isinstance(value.get("facts"), dict)
-            or set(value["facts"]) != {"public_dns_pinned", "upstream_tls_verified"}
+            or set(value["facts"]) != {"public_dns_pinned", "upstream_tls_verified", "broker_memory_sealed"}
             or any(flag is not True for flag in value["facts"].values())
             or not isinstance(value.get("filesystem_checks"), dict)
             or set(value["filesystem_checks"]) != BROKER_FILESYSTEM_CHECKS
@@ -934,6 +943,7 @@ class Validation:
             raise ValidationError("broker_preflight_rejected")
         self.report["broker_negative_errno"] = value["negative_errno"]
         self.report["broker_filesystem_checks"] = value["filesystem_checks"]
+        self.report["broker_memory_sealed"] = True
         self.report["provider_peer_count"] = len(set(value["positive_peers"]))
 
     def allow(self):
@@ -949,6 +959,7 @@ class Validation:
             "schema": 1,
             "binding": self.binding,
             "policy_sha256": SOURCE_PINS["policy"],
+            "broker_memory_sealed": self.report["broker_memory_sealed"],
             "bootstrap_proof_sha256": self.proof_sha,
             "allowed_at": checked,
             "sources": dict(SOURCE_PINS),

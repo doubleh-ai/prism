@@ -17,8 +17,8 @@ from pathlib import Path
 from scripts import retirement_probe as probe
 from scripts import retirement_validation as base
 
-PROBE_SOURCE_SHA256 = "d94cd09a9ed4746b69996660539a8d7f1f124c6b09cb257423179f50ed2ce5e8"
-VALIDATION_SOURCE_SHA256 = "5c4ba8016b58f4dc0dff035cce683047fd545e4189bff8179a2465a1f5e414a1"
+PROBE_SOURCE_SHA256 = "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624"
+VALIDATION_SOURCE_SHA256 = "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e"
 PYTHON_VERSION = "3.12.3"
 CASES = ("int-executor", "int-post")
 POLICY = {
@@ -108,7 +108,6 @@ def observer_command(plan, case_id):
         WorkingDirectory="/",
         RemainAfterExit="yes",
         Wants=case["unit"],
-        TemporaryFileSystem="/run:ro",
         StandardOutput="null",
         StandardError="null",
     )

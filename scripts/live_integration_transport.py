@@ -185,7 +185,7 @@ def fixed_work(work):
         str(work) != os.fspath(work)
         or work.name != "live"
         or work.parent.parent != Path("/var/lib/prism-operations/integration")
-        or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", work.parent.name)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,39}", work.parent.name)
     ):
         raise TransportError("fixed_workdir_required")
     locked(work)
@@ -208,11 +208,13 @@ def verify_allow(work, binding, policy, *, proof_raw=None, now=time.time):
             "witness",
             "kernel",
             "sources",
+            "broker_memory_sealed",
         }
         or type(allow.get("schema")) is not int
         or allow["schema"] != 1
         or allow.get("binding") != binding
         or allow.get("policy_sha256") != POLICY_SHA256
+        or allow.get("broker_memory_sealed") is not True
         or not isinstance(allow.get("bootstrap_proof_sha256"), str)
         or not DIGEST.fullmatch(allow["bootstrap_proof_sha256"])
         or type(allow.get("allowed_at")) is not int

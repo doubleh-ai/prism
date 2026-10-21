@@ -140,6 +140,8 @@ Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth �
 
 ## 有界真实模型与搜索联调
 
+本动作的 attempt 限 8–40 个 ASCII 小写字母、数字或连字符，避免固定 Unix socket 路径超限。worker 激活 site 时临时禁用系统和用户启动钩子、拒绝任何 .pth，并在 finally 恢复三个 site 函数，预加载的启动模块也拒绝。broker 在本次自身进程实际设置并回读 `RLIMIT_CORE=0` 和 `PR_SET_DUMPABLE=0` 后，才发出可信 preflight 的 `broker_memory_sealed=true`；root 将它绑定到当前允许文件，root reader 和 transport 均须核验。不能只依赖 core 管道处理器遵守大小限制。上述更改不操作主机 core 配置或生产进程。
+
 固定 `integration_live` 动作已实现接线和禁网回归，真实 Linux 运行仍须独立回执。Mac 必须显式给出新的 `--integration-attempt` 和四个已审查摘要：`--live-validation-sha256`、`--live-worker-sha256`、`--live-transport-sha256`、`--live-policy-sha256`。远端再次核固定摘要，将公开 helper 字节封存在 root 锁定目录；root 只编译标准库监督器，候选、模型 CLI 及第三方包在独立 UID 内执行。它不执行切流、生产重启或部署。
 
 生产非隐藏源码清单继续保持原遍历规则，`.env` 不进入源码清单或公开产物。新私有 receipts 使用 `model_environment` 的精确三个字段 `sha256`、`size`、`mode` 绑定原配置，值不得公开。摘要应来自已验证加密备份并与当前只读配置核对；当前 mode 绑定不能冒充旧备份 mode 已比对。读取器不执行 shell、dotenv 替换或配置代码，只选现有 `DEEPSEEK_API_KEY`；该项缺失时才允许旧 `LLM_API_KEY` fallback，不选其他供应商的 key。

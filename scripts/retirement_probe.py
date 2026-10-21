@@ -424,6 +424,9 @@ def descriptor(request, *, nonce=None):
             "WorkingDirectory": str(runtime),
             "PrivateNetwork": "yes",
             "PrivateTmp": "yes",
+            # Nested private tmpfs creates its target after the empty /run
+            # mount. InaccessiblePaths cannot create an absent /run child.
+            "TemporaryFileSystem": "/run:ro /run/systemd:ro,mode=000 /run/dbus:ro,mode=000",
             "ProtectHome": "yes",
             "ProtectSystem": "strict",
             "ProtectProc": "invisible",
@@ -445,7 +448,7 @@ def descriptor(request, *, nonce=None):
             "ReadWritePaths": str(runtime),
             # Mask existing ancestors as well as future children; optional '-'
             # paths would expose a later-created production directory.
-            "InaccessiblePaths": "/home /root /var/lib /etc /opt/prism/releases /run/systemd /run/dbus",
+            "InaccessiblePaths": "/home /root /var/lib /etc /opt/prism/releases",
             "NoExecPaths": "/run /tmp /var/tmp /home /root",
             "UMask": "0077",
             "CapabilityBoundingSet": "",
