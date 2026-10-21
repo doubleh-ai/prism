@@ -413,11 +413,12 @@ def descriptor(request, *, nonce=None):
     for case_id, profile, signal_name, expectation in CASES:
         unit_base = "prism-retirement-probe-" + token + "-" + case_id
         runtime = RUNTIME_ROOT / unit_base
+        storage = unit_base + "-storage"
         properties = {
             "Type": "exec",
             "Slice": "system.slice",
             "DynamicUser": "yes",
-            "RuntimeDirectory": unit_base,
+            "RuntimeDirectory": storage,
             "RuntimeDirectoryMode": "0700",
             "RuntimeDirectoryPreserve": "yes",
             "WorkingDirectory": str(runtime),
@@ -488,6 +489,8 @@ def descriptor(request, *, nonce=None):
                 "expectation": expectation,
                 "unit": unit_base + ".service",
                 "runtime_directory": str(runtime),
+                "host_runtime_directory": str(RUNTIME_ROOT / "private" / storage),
+                "managed_runtime_alias": str(RUNTIME_ROOT / storage),
                 "socket_path": str(runtime / "server.sock"),
                 "control_group": "/system.slice/" + unit_base + ".service",
                 "signal": signal_name,
@@ -683,7 +686,7 @@ def _start_ticks(raw, pid):
 def read_markers(plan, case_id):
     """Return only fixed marker booleans after binding their synthetic identities."""
     case = _case(plan, case_id)
-    root = Path(case["runtime_directory"])
+    root = Path(case["host_runtime_directory"])
     if root.is_symlink() or stat.S_IMODE(root.stat().st_mode) != 0o700:
         raise RetirementProbeError("retirement_workspace_rejected")
     owner = root.stat().st_uid

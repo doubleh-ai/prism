@@ -325,8 +325,8 @@ def test_marker_read_emits_only_bound_boolean_states(tmp_path, monkeypatch):
     monkeypatch.setattr(probe.pwd, "getpwnam", mock.Mock(side_effect=KeyError))
     value = plan()
     case = value["cases"][0]
-    root = Path(case["runtime_directory"])
-    root.mkdir(mode=0o700)
+    root = Path(case["host_runtime_directory"])
+    root.mkdir(parents=True, mode=0o700)
     source = root / "fixture_ready.json"
     payload = {
         "nonce": TOKEN,

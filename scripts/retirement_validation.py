@@ -21,7 +21,7 @@ from pathlib import Path
 
 from scripts import retirement_probe as probe
 
-PROBE_SOURCE_SHA256 = "ed09ba0a6a587231a3a63f4de3753885107e1f38f799ddb1d6b16a21beb674bd"
+PROBE_SOURCE_SHA256 = "cc59a350e18a26ebe70d35e239998e296e4159cce5c45b9a8498d1c8ab8da54a"
 PRODUCTION_UNIT = "stock-app.service"
 PROPERTIES = (
     "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,"
@@ -55,10 +55,30 @@ import stat
 import sys
 import time
 
+phase='arguments'
+def failed(kind):
+    # Relative dir_fd also works if the manager supplied an unexpected physical
+    # cwd. Never copy exception text, arbitrary paths, environment or argv.
+    if len(sys.argv)!=6:return
+    _,_,profile,nonce,binding,_=sys.argv
+    if not re.fullmatch('[0-9a-f]{32}',nonce) or not re.fullmatch('[0-9a-f]{64}',binding):return
+    if profile not in {'executor','post_complete','nested_thread','async_task','daemon_thread','orphan_child'}:return
+    fd=os.open('.',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        if info.st_uid!=os.geteuid() or info.st_uid==0 or stat.S_IMODE(info.st_mode)!=0o700:return
+        out=os.open('validation_failure.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
+        with os.fdopen(out,'w') as stream:
+            json.dump({'nonce':nonce,'binding_sha256':binding,'case_profile':profile,'at_ns':time.monotonic_ns(),'phase':phase,'error_type':kind},stream,sort_keys=True)
+            stream.flush();os.fsync(stream.fileno())
+    finally:os.close(fd)
+
 def main():
+    global phase
     if len(sys.argv)!=6 or sys.argv[1]!='serve':raise SystemExit(2)
     _,_,profile,nonce,binding,bundle=sys.argv
     if not re.fullmatch('[0-9a-f]{32}',nonce) or not re.fullmatch('[0-9a-f]{64}',binding) or bundle!='__BUNDLE__':raise SystemExit(2)
+    phase='runtime_layout'
     root=Path.cwd()
     if sys.platform!='linux' or sys.version_info[:2]!=(3,12) or root.parent!=Path('/run') or not root.name.startswith('prism-retirement-probe-'+nonce+'-'):raise SystemExit(2)
     uid=os.geteuid()
@@ -79,6 +99,7 @@ def main():
         with os.fdopen(fd,'w') as stream:
             json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
         os.rename(pending,target)
+    phase='isolation'
     hidden=True
     for path in ('/home/ubuntu/stock-analyzer','/home/ubuntu/Vibe-Trading','/root','/var/lib/prism','/etc/prism','/opt/prism/releases','/var/lib/prism-operations'):
         try:
@@ -100,12 +121,14 @@ def main():
     endpoints_hidden=not any(Path(path).exists() for path in ('/run/systemd/private','/run/dbus/system_bus_socket'))
     mark('validation_isolation',uid_nonroot=True,production_paths_hidden=hidden,inet_sockets_denied=sockets_denied,run_readonly=readonly,runtime_endpoints_hidden=endpoints_hidden)
     if not all((hidden,sockets_denied,readonly,endpoints_hidden)):raise SystemExit(2)
+    phase='fixture_source'
     fixture=Path('/opt/prism/validation')/bundle/'fixture.py'
     fd=os.open(fixture,os.O_RDONLY|os.O_NOFOLLOW)
     with os.fdopen(fd,'rb') as stream:
         st=os.fstat(stream.fileno())
         if st.st_uid!=0 or st.st_mode&0o222 or st.st_nlink!=1 or hashlib.file_digest(stream,'sha256').hexdigest()!='__FIXTURE__':raise SystemExit(2)
     sys.path.insert(0,str(fixture.parent/'vendor'))
+    phase='vendor_import'
     import uvicorn
     original=uvicorn.Server.serve
     async def bounded_serve(server,*args,**kwargs):
@@ -119,9 +142,15 @@ def main():
             mark('validation_server_finished',finished=True)
     uvicorn.Server.serve=bounded_serve
     sys.argv[0]=str(fixture)
+    phase='fixture_run'
     runpy.run_path(str(fixture),run_name='__main__')
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except (Exception,SystemExit) as exc:
+        try:failed('system_exit' if isinstance(exc,SystemExit) else 'exception')
+        except Exception:pass
+        raise
 """
 
 
@@ -310,7 +339,7 @@ def launch_command(plan, case_id):
     properties.update(
         RemainAfterExit="yes",
         TemporaryFileSystem="/run:ro",
-        BindPaths=runtime + ":" + runtime,
+        BindPaths=case["host_runtime_directory"] + ":" + runtime,
         ReadOnlyPaths=properties["ReadOnlyPaths"] + " " + str(wrapper_directory()),
     )
     command = list(case["command"])
@@ -370,9 +399,66 @@ def _uids(pid):
     return values[0]
 
 
+def _host_runtime(plan, case_id):
+    """Accept only systemd's one exact managed alias, never arbitrary resolve().
+
+    The host stores retained DynamicUser files below root-only /run/private.
+    The child receives that directory at a DIFFERENT ordinary /run mountpoint.
+    This avoids automatic RuntimeDirectory symlinks replacing its working dir.
+    """
+    probe._require_linux()
+    case = probe._case(plan, case_id)
+    physical = Path(case["host_runtime_directory"])
+    alias = Path(case["managed_runtime_alias"])
+    descriptors = []
+    try:
+        run = os.open(probe.RUNTIME_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptors.append(run)
+        first = os.fstat(run)
+        if first.st_uid != 0 or first.st_gid != 0 or stat.S_IMODE(first.st_mode) != 0o755:
+            reject("retirement_host_run_owner_rejected")
+        private = os.open("private", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=run)
+        descriptors.append(private)
+        parent = os.fstat(private)
+        if parent.st_uid != 0 or parent.st_gid != 0 or stat.S_IMODE(parent.st_mode) != 0o700:
+            reject("retirement_host_private_owner_rejected")
+        link = os.stat(alias.name, dir_fd=run, follow_symlinks=False)
+        if (
+            not stat.S_ISLNK(link.st_mode)
+            or link.st_uid != 0
+            or link.st_gid != 0
+            or link.st_nlink != 1
+            or stat.S_IMODE(link.st_mode) != 0o777
+            or os.readlink(alias.name, dir_fd=run) != "private/" + physical.name
+        ):
+            reject("retirement_managed_runtime_alias_rejected")
+        target = os.open(
+            physical.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=private
+        )
+        descriptors.append(target)
+        info = os.fstat(target)
+        actual = os.stat(alias.name, dir_fd=run)
+        if (
+            info.st_uid <= 0
+            or info.st_gid != info.st_uid
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or (actual.st_dev, actual.st_ino, actual.st_uid, actual.st_gid)
+            != (info.st_dev, info.st_ino, info.st_uid, info.st_gid)
+            or _stable(link) != _stable(os.stat(alias.name, dir_fd=run, follow_symlinks=False))
+            or _stable(info) != _stable(os.fstat(target))
+            or _stable(parent) != _stable(os.fstat(private))
+            or _stable(first) != _stable(os.fstat(run))
+        ):
+            reject("retirement_host_runtime_binding_rejected")
+        return physical
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def _isolation(plan, case_id):
     case = probe._case(plan, case_id)
-    root = Path(case["runtime_directory"])
+    root = _host_runtime(plan, case_id)
     info = root.lstat()
     forbidden = {0}
     for name in probe.FORBIDDEN_USERS:
@@ -411,7 +497,7 @@ def _isolation(plan, case_id):
     return info.st_uid
 
 
-def _mounts(pid, runtime):
+def _mounts(pid, runtime, host_runtime):
     raw, _ = probe._read_regular(Path("/proc") / str(pid) / "mountinfo", 1024 * 1024)
     mounts = {}
     for line in raw.splitlines():
@@ -430,20 +516,50 @@ def _mounts(pid, runtime):
         or os.stat(f"/proc/{pid}/ns/mnt").st_ino == os.stat("/proc/self/ns/mnt").st_ino
     ):
         reject("retirement_actual_mounts_rejected")
-    host, inside = Path(runtime).stat(), (Path("/proc") / str(pid) / "root" / runtime.lstrip("/")).stat()
+    host = Path(host_runtime).lstat()
+    inside_path = Path("/proc") / str(pid) / "root" / runtime.lstrip("/")
+    inside = inside_path.lstat()
+    if not stat.S_ISDIR(inside.st_mode) or stat.S_ISLNK(inside.st_mode):
+        reject("retirement_child_runtime_not_directory")
     if (host.st_dev, host.st_ino, host.st_uid) != (inside.st_dev, inside.st_ino, inside.st_uid):
         reject("retirement_runtime_bind_mismatch")
 
 
 def _deadline(case):
-    path = Path(case["runtime_directory"]) / "validation_deadline.json"
+    path = Path(case["host_runtime_directory"]) / "validation_deadline.json"
     return path.exists() or path.is_symlink()
+
+
+def _wrapper_failure(plan, case_id):
+    case = probe._case(plan, case_id)
+    root = _host_runtime(plan, case_id)
+    marker = root / "validation_failure.json"
+    if not marker.exists() and not marker.is_symlink():
+        return None
+    raw, info = probe._read_regular(marker, 8192)
+    data = json.loads(raw)
+    if (
+        type(data) is not dict
+        or set(data) != {"nonce", "binding_sha256", "case_profile", "at_ns", "phase", "error_type"}
+        or info.st_uid != root.lstat().st_uid
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or data["nonce"] != plan["nonce"]
+        or data["binding_sha256"] != plan["binding_sha256"]
+        or data["case_profile"] != case["profile"]
+        or type(data["at_ns"]) is not int
+        or data["at_ns"] <= 0
+        or data["phase"]
+        not in {"arguments", "runtime_layout", "isolation", "fixture_source", "vendor_import", "fixture_run"}
+        or data["error_type"] not in {"system_exit", "exception"}
+    ):
+        reject("retirement_wrapper_diagnostic_rejected")
+    return "retirement_wrapper_" + data["phase"] + "_" + data["error_type"]
 
 
 def server_finished(plan, case_id, signal_at):
     """Serve must unwind before opening work: otherwise executor-join is unproven."""
     case = probe._case(plan, case_id)
-    marker = Path(case["runtime_directory"]) / "validation_server_finished.json"
+    marker = _host_runtime(plan, case_id) / "validation_server_finished.json"
     if not marker.exists() and not marker.is_symlink():
         return False
     uid = _isolation(plan, case_id)
@@ -467,9 +583,9 @@ def server_finished(plan, case_id, signal_at):
 
 def _open_gate(plan, case_id):
     """No permit is needed to release only this run's synthetic work on cleanup."""
-    case = probe._case(plan, case_id)
+    probe._case(plan, case_id)
     _isolation(plan, case_id)
-    directory = os.open(case["runtime_directory"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = os.open(_host_runtime(plan, case_id), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         try:
             fd = os.open(
@@ -487,7 +603,7 @@ def _open_gate(plan, case_id):
 
 
 def _request_fixture(case, uid, pid):
-    path = Path(case["socket_path"])
+    path = Path(case["host_runtime_directory"]) / "server.sock"
     info = path.lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid:
         reject("retirement_socket_rejected")
@@ -592,7 +708,7 @@ class Validation:
         for member in identity["cgroup"]["members"]:
             if _uids(member) != uid:
                 reject("retirement_descendant_uid_rejected")
-        _mounts(pid, case["runtime_directory"])
+        _mounts(pid, case["runtime_directory"], _host_runtime(self.plan, case["case_id"]))
         binary = Path("/usr/bin/python3.12").stat()
         actual = (Path("/proc") / str(pid) / "exe").stat()
         if (
@@ -609,7 +725,11 @@ class Validation:
         }
 
     def _ready(self, case):
-        root = Path(case["runtime_directory"])
+        root = Path(case["host_runtime_directory"])
+        if root.exists():
+            failure = _wrapper_failure(self.plan, case["case_id"])
+            if failure:
+                reject(failure)
         needed = ("validation_isolation.json", "fixture_ready.json", "server.sock")
         if not all((root / name).exists() for name in needed):
             return None
@@ -675,7 +795,9 @@ class Validation:
         self.check_production()
         self.boundary("retirement_start_" + case_id)
         runtime = Path(case["runtime_directory"])
-        if runtime.exists() or runtime.is_symlink():
+        host = Path(case["host_runtime_directory"])
+        alias = Path(case["managed_runtime_alias"])
+        if any(path.exists() or path.is_symlink() for path in (runtime, host, alias)):
             reject("retirement_runtime_already_exists")
         self.record("synthetic_start_intent", {"case_id": case_id, "nonce": self.plan["nonce"]})
         self.start_intents[case_id] = int(self.monotonic() * 1_000_000)
@@ -710,7 +832,7 @@ class Validation:
             )
 
         before = self.poll(phase_ready, 5)
-        gate = runtime / "release-work"
+        gate = _host_runtime(self.plan, case_id) / "release-work"
         if gate.exists() or gate.is_symlink() or _deadline(case):
             reject("retirement_gate_not_closed")
         self.boundary("retirement_signal_" + case_id)
@@ -834,7 +956,7 @@ class Validation:
         process = PROC_ROOT / before["ExecMainPID"]
         if process.exists() or process.is_symlink():
             return False
-        root = Path(case["runtime_directory"])
+        root = Path(case["host_runtime_directory"])
         if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
             return False
         group = probe.CGROUP_ROOT / case["control_group"].lstrip("/")
@@ -871,6 +993,8 @@ class Validation:
                     group = probe.CGROUP_ROOT / case["control_group"].lstrip("/")
                     return not group.exists() and not group.is_symlink()
                 if _number(state.get("MainPID")) == 0 and self._empty(case):
+                    if state.get("ActiveState") == "failed" and case["case_id"] not in self.signals:
+                        return False  # Retain an unvalidated failed startup unit.
                     return self._retire_empty_unit(case, state["InvocationID"])
                 self.sleep(0.1)
         except Exception:

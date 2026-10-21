@@ -75,7 +75,7 @@ def test_launch_only_targets_one_fixed_synthetic_unit_with_a_private_run(case_id
     assert properties["DynamicUser"] == "yes"
     assert properties["RemainAfterExit"] == "yes"
     assert properties["TemporaryFileSystem"] == "/run:ro"
-    assert properties["BindPaths"] == case["runtime_directory"] + ":" + case["runtime_directory"]
+    assert properties["BindPaths"] == case["host_runtime_directory"] + ":" + case["runtime_directory"]
     assert properties["ReadWritePaths"] == case["runtime_directory"]
     assert properties["SendSIGKILL"] == "no"
     assert properties["KillMode"] == "process"
@@ -174,12 +174,15 @@ def test_data_copy_reader_binds_content_to_stable_stat_and_size(tmp_path, monkey
 
 
 def isolation_fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        validation, "_host_runtime", lambda plan, cid: Path(probe._case(plan, cid)["host_runtime_directory"])
+    )
     monkeypatch.setattr(probe, "RUNTIME_ROOT", tmp_path.resolve())
     monkeypatch.setattr(validation.pwd, "getpwnam", mock.Mock(side_effect=KeyError))
     value = plan()
     case = value["cases"][0]
-    root = Path(case["runtime_directory"])
-    root.mkdir(mode=0o700)
+    root = Path(case["host_runtime_directory"])
+    root.mkdir(parents=True, mode=0o700)
     data = {
         "nonce": NONCE,
         "binding_sha256": value["binding_sha256"],
@@ -255,6 +258,9 @@ def test_mutated_case_cannot_signal_or_stop_production_even_through_internal_met
 
 
 def case_harness(tmp_path, monkeypatch, case_id, *, dispatch_error=False, deny_signal=False):
+    monkeypatch.setattr(
+        validation, "_host_runtime", lambda plan, cid: Path(probe._case(plan, cid)["host_runtime_directory"])
+    )
     monkeypatch.setattr(probe, "RUNTIME_ROOT", tmp_path.resolve())
     monkeypatch.setattr(probe.secrets, "token_hex", lambda _: NONCE)
     actions = []
@@ -412,7 +418,7 @@ def namespace_failure_fixture(tmp_path, monkeypatch):
     (probe.CGROUP_ROOT / "cgroup.controllers").write_text("cpu memory")
     controller = validation.Validation(REQUEST, boundary=mock.Mock(), run=mock.Mock(), record=mock.Mock())
     case = controller.plan["cases"][0]
-    Path(case["runtime_directory"]).mkdir(parents=True, mode=0o700)
+    Path(case["host_runtime_directory"]).mkdir(parents=True, mode=0o700)
     controller.active_case = case
     controller.start_intents[case["case_id"]] = 100
     state = {
@@ -482,7 +488,7 @@ def test_no_work_witness_rejects_pid_reuse_markers_links_and_unbound_attempts(
     if obstacle == "pid":
         (validation.PROC_ROOT / "123").mkdir(parents=True)
     elif obstacle == "marker":
-        (Path(case["runtime_directory"]) / "fixture_ready.json").write_text("{}")
+        (Path(case["host_runtime_directory"]) / "fixture_ready.json").write_text("{}")
     elif obstacle == "group_link":
         group = probe.CGROUP_ROOT / case["control_group"].lstrip("/")
         group.parent.mkdir(parents=True)
@@ -570,18 +576,19 @@ def test_actual_mount_witness_requires_ro_tmpfs_and_the_same_runtime_inode(monke
             return SimpleNamespace(st_ino=3)
         if value == "/proc/self/ns/mnt":
             return SimpleNamespace(st_ino=4)
-        if value in {runtime, "/proc/123/root" + runtime}:
-            return SimpleNamespace(st_dev=1, st_ino=2, st_uid=4321)
+        if value in {"/run/private/host-storage", "/proc/123/root" + runtime}:
+            return SimpleNamespace(st_dev=1, st_ino=2, st_uid=4321, st_mode=stat.S_IFDIR | 0o700)
         return original(path, **kwargs)
 
     with monkeypatch.context() as scope:
         scope.setattr(validation.os, "stat", fake_stat)
-        validation._mounts(123, runtime)
+        scope.setattr(validation.Path, "lstat", lambda path: fake_stat(path))
+        validation._mounts(123, runtime, "/run/private/host-storage")
         monkeypatch.setattr(
             probe, "_read_regular", lambda *_: (mountinfo.replace(b"/run ro", b"/run rw"), None)
         )
         with pytest.raises(validation.RetirementValidationError, match="actual_mounts_rejected"):
-            validation._mounts(123, runtime)
+            validation._mounts(123, runtime, "/run/private/host-storage")
 
 
 def test_serve_unwind_witness_must_follow_signal_and_match_actual_runtime_owner(tmp_path, monkeypatch):
@@ -626,3 +633,112 @@ def test_uds_peer_must_be_the_proven_fixture_main_pid_and_uid(monkeypatch, peer)
             with pytest.raises(validation.RetirementValidationError, match="peer_rejected"):
                 validation._request_fixture(case, 4321, 123)
             connection.sendall.assert_not_called()
+
+
+def managed_layout_fixture(tmp_path, monkeypatch):
+    # These owner substitutions are unit-test inputs, not Linux evidence.
+    root = tmp_path.resolve() / "run"
+    root.mkdir(mode=0o755)
+    root.chmod(0o755)
+    (root / "private").mkdir(mode=0o700)
+    monkeypatch.setattr(probe, "RUNTIME_ROOT", root)
+    monkeypatch.setattr(probe, "_require_linux", lambda: None)
+    value = plan()
+    case = value["cases"][0]
+    physical = Path(case["host_runtime_directory"])
+    physical.mkdir(mode=0o700)
+    alias = Path(case["managed_runtime_alias"])
+    alias.symlink_to("private/" + physical.name)
+    old_stat, old_fstat = validation.os.stat, validation.os.fstat
+    root_ids = {(p.stat().st_dev, p.stat().st_ino) for p in (root, root / "private")}
+    target_id = (physical.stat().st_dev, physical.stat().st_ino)
+
+    def normalized(info):
+        data = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        if (info.st_dev, info.st_ino) in root_ids or stat.S_ISLNK(info.st_mode):
+            data.update(st_uid=0, st_gid=0)
+        if stat.S_ISLNK(info.st_mode):
+            data.update(st_mode=stat.S_IFLNK | 0o777)
+        elif (info.st_dev, info.st_ino) == target_id:
+            data.update(st_gid=info.st_uid)
+        return SimpleNamespace(**data)
+
+    monkeypatch.setattr(validation.os, "stat", lambda *a, **k: normalized(old_stat(*a, **k)))
+    monkeypatch.setattr(validation.os, "fstat", lambda fd: normalized(old_fstat(fd)))
+    return value, case, root, physical, alias
+
+
+def test_host_retained_runtime_is_exact_private_storage_and_child_mount_is_a_distinct_name(
+    tmp_path, monkeypatch
+):
+    value, case, _, physical, _ = managed_layout_fixture(tmp_path, monkeypatch)
+    assert validation._host_runtime(value, case["case_id"]) == physical
+    assert case["properties"]["RuntimeDirectory"].endswith("-storage")
+    assert Path(case["runtime_directory"]).name != Path(case["managed_runtime_alias"]).name
+    assert case["runtime_directory"] not in case["host_runtime_directory"]
+
+
+@pytest.mark.parametrize(
+    "target", ["../private/escape", "/run/private/other", "private/other", "private/../private/other"]
+)
+def test_managed_alias_never_accepts_other_relative_absolute_or_normalized_targets(
+    tmp_path, monkeypatch, target
+):
+    value, case, _, _, alias = managed_layout_fixture(tmp_path, monkeypatch)
+    alias.unlink()
+    alias.symlink_to(target)
+    with pytest.raises(validation.RetirementValidationError, match="managed_runtime_alias_rejected"):
+        validation._host_runtime(value, case["case_id"])
+
+
+@pytest.mark.parametrize("which", ["run_mode", "private_mode", "target_mode", "target_symlink"])
+def test_host_runtime_requires_root_only_private_ancestor_and_no_target_symlink(tmp_path, monkeypatch, which):
+    value, case, root, physical, _ = managed_layout_fixture(tmp_path, monkeypatch)
+    if which == "run_mode":
+        root.chmod(0o777)
+    if which == "private_mode":
+        (root / "private").chmod(0o755)
+    if which == "target_mode":
+        physical.chmod(0o755)
+    if which == "target_symlink":
+        physical.rmdir()
+        physical.symlink_to(root, target_is_directory=True)
+    with pytest.raises((OSError, validation.RetirementValidationError)):
+        validation._host_runtime(value, case["case_id"])
+
+
+def test_managed_runtime_private_ancestor_cannot_itself_be_a_link(tmp_path, monkeypatch):
+    value, case, root, physical, alias = managed_layout_fixture(tmp_path, monkeypatch)
+    alias.unlink()
+    physical.rmdir()
+    (root / "private").rmdir()
+    alternate = root / "alternate"
+    alternate.mkdir()
+    (root / "private").symlink_to(alternate, target_is_directory=True)
+    with pytest.raises(OSError):
+        validation._host_runtime(value, case["case_id"])
+
+
+def test_wrapper_failure_diagnostics_are_fixed_phase_type_with_no_exception_text(tmp_path, monkeypatch):
+    value, case, isolation, _ = isolation_fixture(tmp_path, monkeypatch)
+    payload = {
+        "nonce": NONCE,
+        "binding_sha256": value["binding_sha256"],
+        "case_profile": case["profile"],
+        "at_ns": 1,
+        "phase": "runtime_layout",
+        "error_type": "system_exit",
+    }
+    marker = isolation.parent / "validation_failure.json"
+    marker.write_text(json.dumps(payload))
+    marker.chmod(0o600)
+    assert (
+        validation._wrapper_failure(value, case["case_id"]) == "retirement_wrapper_runtime_layout_system_exit"
+    )
+    payload["exception_text"] = "private must not be accepted"
+    marker.write_text(json.dumps(payload))
+    with pytest.raises(validation.RetirementValidationError, match="wrapper_diagnostic_rejected"):
+        validation._wrapper_failure(value, case["case_id"])
+    source = validation.wrapper_source()
+    ast.parse(source)
+    assert b"dir_fd=fd" in source and b"str(exc)" not in source

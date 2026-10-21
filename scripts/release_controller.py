@@ -51,8 +51,8 @@ INTEGRATION_PROBES = {
     ),
 }
 RETIREMENT_HELPERS = {
-    "retirement_probe.py": "ed09ba0a6a587231a3a63f4de3753885107e1f38f799ddb1d6b16a21beb674bd",
-    "retirement_validation.py": "d142f8bb58092e0e61e422b32191762debe0ad7dc6c0d517f639f116d392b722",
+    "retirement_probe.py": "cc59a350e18a26ebe70d35e239998e296e4159cce5c45b9a8498d1c8ab8da54a",
+    "retirement_validation.py": "4e329edbfa86c1d91165c414923f64a88cc3f77a261cddb2e413498f50de7b16",
 }
 
 # This small stdlib loader stays below Linux's single-argument limit. The
