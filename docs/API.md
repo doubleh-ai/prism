@@ -1,6 +1,7 @@
 # Prism API Reference
 
-All endpoints are JSON over HTTP. Authentication is via a session
+Endpoints are JSON over HTTP unless a stream or file is documented.
+Authentication is via a session
 cookie (`token`) issued by `/api/login`. The cookie is `HttpOnly`
 and (in production) `Secure`; `SameSite=strict` by default.
 
@@ -14,6 +15,70 @@ and (in production) `Secure`; `SameSite=strict` by default.
 - **Validation errors**: 422 with `{"detail": "...", "errors": [...]}`.
 - **Rate limit**: 429 on `chat` (20/min/user) and `login`
   (10/min/IP).
+
+## Health and release observations
+
+### `GET /health/ready`
+
+Public, read-only basic application/database readiness. No session, CLI,
+model call, skill scan, or third-party probe is required. The database
+check performs `SELECT 1`.
+
+- 200 when `status` is `ready`; 503 when it is `unready`.
+- Only these fields are returned:
+
+```json
+{
+  "status": "ready",
+  "version": "v0.19.7",
+  "deployed_revision": "unknown",
+  "checked_at": 1792540800,
+  "tz": "Asia/Shanghai"
+}
+```
+
+`checked_at` is a Unix timestamp in seconds. The revision is a full
+40-character hexadecimal commit identifier or `unknown`; missing or
+invalid version metadata is also `unknown`. Unknown deployment identity
+does not imply an unavailable database. Conversely, `ready` does not
+verify model access, market data, authenticated user flows, production
+identity, or a completed release. Deployment acceptance must separately
+match the observed revision to the immutable candidate and verify the
+required features. The Docker healthcheck uses this endpoint.
+
+### `GET /api/admin/health`
+
+Requires an administrator session. Returns the existing on-demand
+diagnostic snapshot, including the database check, CLI version check,
+skill availability, and whether model credentials are configured (not
+their values). The built-in `prism-research` method is required for the
+aggregate result; missing optional legacy methods do not fail it. This
+snapshot is not a real model call or release acceptance test.
+
+### `GET /api/admin/operations`
+
+Requires an administrator session. Returns read-only release observations
+for the configured Prism repository: actual GitHub workflow states and
+links, observation time/cache freshness, candidate-only delivery limits,
+and metadata for this application instance. GitHub observations may be
+cached for 180 seconds; failures or stale data must remain visible rather
+than becoming a passing result. No GitHub token is exposed or required by
+the public-repository observer.
+
+The current controller has no production adapter: `can_deploy` and
+`can_rollback` are false, and the local runtime is not verified as
+production. CI and candidate workflow results are not deployment records.
+GitHub links open the real workflow page; cancellation there requires
+GitHub confirmation and does not roll back any environment. There is no
+deployment, restart, cancellation, or rollback mutation on this endpoint.
+
+### `GET /api/releases`
+
+Requires a normal authenticated session. Returns application version,
+declared deployment revision, and entries parsed from `CHANGELOG.md`.
+These are descriptive metadata, not proof that a production release
+completed. See [release-process.md](release-process.md) for the current
+scope and requirements for a future production controller.
 
 ## Auth
 

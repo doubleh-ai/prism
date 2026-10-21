@@ -19,6 +19,11 @@ Object.assign(App, {
       this.switchMode('chat');
       return;
     }
+    if (this._adminTab === 'operations' && this._activateOperations) {
+      this._renderAdminUsers(this.user);
+      this._activateOperations();
+      return;
+    }
     this._loadAdminUsers();
   },
 
@@ -199,8 +204,11 @@ Object.assign(App, {
   },
 
   _adminSetTab: function(tab) {
+    if (!this.isAdmin) return;
+    if (this._pauseOperations) this._pauseOperations();
     this._adminTab = tab || 'overview';
     this._renderAdminUsers(this._adminCurrentUser || this.user);
+    if (this._adminTab === 'operations' && this._activateOperations) this._activateOperations();
   },
 
   _adminInspectUser: async function(username) {
@@ -232,7 +240,7 @@ Object.assign(App, {
     var claude = checks.claude_cli || {};
     var skills = h.skills || [];
     var models = h.models || [];
-    var defaultSkill = skills.filter(function(s){ return s.id === 'bottleneck-hunter'; })[0] || {};
+    var defaultSkill = skills.filter(function(s){ return s.id === 'prism-research'; })[0] || {};
     var configuredModels = models.filter(function(m){ return !!m.configured; }).length;
     var cards = [
       this._adminStatusPill(!!h.ok, '总览', (h.version || '-') + ' · ' + (h.deployed_revision || '未部署')),
@@ -586,7 +594,7 @@ Object.assign(App, {
 
   _renderAdminTabs: function() {
     var tabs = [
-      ['overview', '概览'], ['features', '功能分析'], ['activity', '用户行为'],
+      ['overview', '概览'], ['operations', '发布控制台'], ['features', '功能分析'], ['activity', '用户行为'],
       ['diagnostics', '异常诊断'], ['accounts', '账号管理'], ['health', '系统健康']
     ];
     return '<div class="admin-tabs" role="tablist">' + tabs.map(function(tab) {
@@ -706,10 +714,12 @@ Object.assign(App, {
   _renderAdminUsers: function(currentUser) {
     var inner = document.getElementById('adminPanelInner');
     if (!inner) return;
+    if (!this.isAdmin) { inner.textContent = '无管理权限'; return; }
     this._adminCurrentUser = currentUser || this.user;
     this._adminDisposeCharts();
     var content = '';
-    if (this._adminTab === 'features') content = this._renderAdminFeaturesTab();
+    if (this._adminTab === 'operations') content = this._renderOperationsPanel ? this._renderOperationsPanel() : '<div class="admin-empty">发布控制台未加载，请刷新页面。</div>';
+    else if (this._adminTab === 'features') content = this._renderAdminFeaturesTab();
     else if (this._adminTab === 'activity') content = this._renderAdminActivityTab();
     else if (this._adminTab === 'diagnostics') content = this._renderAdminDiagnosticsTab();
     else if (this._adminTab === 'accounts') content = this._renderAdminAccounts(this._adminCurrentUser);
@@ -717,7 +727,7 @@ Object.assign(App, {
     else { this._adminTab = 'overview'; content = this._renderAdminStats() + this._renderAdminAnalytics(); }
     inner.innerHTML = '<div class="admin-console">' +
       '<div class="admin-head"><div><h2>管理看板</h2><div class="admin-head-meta">运营、功能、用户行为、账号与系统状态</div></div>' +
-      '<div class="admin-toolbar"><button class="admin-btn" onclick="App.openReleaseNotes()">更新日志</button><button class="admin-btn primary" onclick="App._loadAdminUsers()">刷新</button></div></div>' +
+      '<div class="admin-toolbar"><button class="admin-btn" onclick="App.openReleaseNotes()">更新日志</button><button class="admin-btn primary" onclick="'+(this._adminTab === 'operations' ? 'App._loadOperations()' : 'App._loadAdminUsers()')+'">刷新</button></div></div>' +
       this._renderAdminTabs() + content + '</div>';
     if (this._adminTab === 'overview') {
       var self = this;

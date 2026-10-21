@@ -21,4 +21,4 @@ def test_workbench_real_javascript_behavior():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "workbench runtime ok: 14 scenarios" in result.stdout
+    assert "workbench runtime ok: 15 scenarios" in result.stdout
