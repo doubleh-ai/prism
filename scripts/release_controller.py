@@ -36,6 +36,56 @@ ACTIONS = (
     "resume",
 )
 ROOT = Path(__file__).resolve().parent
+MAX_EXECUTOR_SOURCE = 512 * 1024
+
+# This small stdlib loader stays below Linux's single-argument limit. The
+# expected digest comes from trusted_source(), never from the stdin header.
+EXECUTOR_BOOTSTRAP = r"""
+import hashlib
+import json
+import sys
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise ValueError("invalid_digest")
+    expected = sys.argv[1]
+    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+        raise ValueError("invalid_digest")
+    stream = sys.stdin.buffer
+    line = stream.readline(257)
+    if len(line) > 256 or not line.endswith(b"\n"):
+        raise ValueError("invalid_source_header")
+    header = json.loads(line)
+    if not isinstance(header, dict) or set(header) != {"source_length", "source_sha256"}:
+        raise ValueError("invalid_source_header")
+    length = header["source_length"]
+    if type(length) is not int or not 0 < length <= 512 * 1024 or header["source_sha256"] != expected:
+        raise ValueError("invalid_source_header")
+    chunks = []
+    remaining = length
+    while remaining:
+        block = stream.read(min(remaining, 65536))
+        if not block:
+            raise ValueError("truncated_source")
+        chunks.append(block)
+        remaining -= len(block)
+    source = b"".join(chunks)
+    if stream.read(1) != b"\n" or hashlib.sha256(source).hexdigest() != expected:
+        raise ValueError("source_digest_mismatch")
+    # Keep this exact buffered object alive: the reviewed executor reads the
+    # following request frame and operator permits from sys.stdin.buffer.
+    filename = "/__prism_reviewed_executor__.py"
+    sys.argv = [filename]
+    exec(compile(source, filename, "exec"), {"__name__": "__main__", "__file__": filename, "__package__": None})
+
+
+try:
+    main()
+except Exception:
+    print('{"error":"executor_bootstrap_rejected"}', flush=True)
+    raise SystemExit(1) from None
+"""
 
 
 class ControlError(RuntimeError):
@@ -181,7 +231,11 @@ def request_for(args):
 
 
 def ssh_argv(source):
-    command = "/usr/bin/sudo -n /usr/bin/python3 -I -c " + shlex.quote(source.decode())
+    if not isinstance(source, bytes) or not 0 < len(source) <= MAX_EXECUTOR_SOURCE:
+        raise ControlError("reviewed_executor_source_limits")
+    command = (
+        "/usr/bin/sudo -n /usr/bin/python3 -I -B -S -c " + shlex.quote(EXECUTOR_BOOTSTRAP) + " " + sha(source)
+    )
     return [
         "/usr/bin/ssh",
         "-T",
@@ -217,6 +271,10 @@ def execute(request, source, stop_file, *, popen=subprocess.Popen, gate=check_ga
         payload = json.dumps(request, separators=(",", ":")).encode()
         if len(payload) > 384 * 1024 * 1024:
             raise ControlError("request_limits")
+        process.stdin.write(
+            json.dumps({"source_length": len(source), "source_sha256": sha(source)}).encode() + b"\n"
+        )
+        process.stdin.write(source + b"\n")
         process.stdin.write(json.dumps({"length": len(payload)}).encode() + b"\n")
         process.stdin.write(payload + b"\n")
         process.stdin.flush()
