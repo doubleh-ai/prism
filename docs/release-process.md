@@ -53,6 +53,8 @@ Nginx 操作只允许 `stock-analyzer`、`stock-app` 的固定 enabled→availab
 
 2026-10-22 的第二次实际准备在隔离安装启动阶段失败，已观察到 `226/NAMESPACE`，具体挂载原因尚待实际诊断；未生成 `prepared.json`，生产未改变。固定 `diagnose_build` 保留这次失败，先以 `/usr/bin/true` 和原构建沙盒（含原候选写路径）检测命名空间设置，失败即跳过 pip。预检通过后，两条只读 pip 命令均无外网、HOME、其他隔离数据库或候选写权限。合并输出流在内存中限 256 KiB，超限或超时只终止该诊断 unit；限定 unit 的近期 journal 同样限长读取，只保存固定类别、已清点包名/版本、候选相对路径和固定系统挂载路径，原始异常与输出不落盘。非零退出码作为诊断事实返回，不能转换成准备成功。
 
+原组合失败后，可继续执行固定的四项 `/usr/bin/true` 诊断矩阵：去掉可选 staging 屏蔽、使用只读私有 `/run` 并保留 staging 屏蔽、仅屏蔽运行时 dbus/systemd 路径、去掉运行时路径屏蔽的基本命名空间。四项都保留独立 UID、PrivateNetwork、ProtectHome、ProtectProc、NoNewPrivileges、PrivateTmp、严格文件系统与资源限制，每项使用独立 unit/随机数、许可和 60 秒上限；不运行候选或 Python。每项安全结果及时保存在私有回执，便于中断后追溯。任一变体成功都仅用于定位配置冲突，不能允许 pip、宣称隔离已验收或准备成功；只有原组合预检成功才进入 pip 诊断。
+
 失败候选隔离动作拒绝已准备、已 stage、已切流或恢复候选；生产实际工作目录必须仍是原目录，`prism-stage` 不得有残留进程。进程检查只读取内核 `/proc/<pid>/status` 的四个 `Uid`，任一匹配均拒绝，无法读取或解析则停止；不能用可能属于 root 的 `/proc` 目录所有者替代。它仅将候选 rename 到 `/opt/prism/failed/<提交>-<随机数>`，依赖输入移到 root 私有失败 attempt 目录；跨设备 rename 失败时不回退复制/删除。每个 rename 都重新取得固定边界许可，然后复核实际运行目录、残留进程及 inode/设备；断线后只能核对同一意图续做。旧失败 journal 不改写，共享引擎/CLI 不改；完成后原身份可重新执行 `prepare`。
 
 Astock 源码按固定来源的真实清单复制到 `/opt/prism/engines/astock/<清单摘要>`；只复制允许的执行源码和资源，校验字节并规范目标权限。原可写开发目录不作为新生产引擎路径。外部源码、准备后的环境及候选在后续阶段重复核验。

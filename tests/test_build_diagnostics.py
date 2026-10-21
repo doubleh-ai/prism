@@ -117,7 +117,97 @@ def test_namespace_failure_is_observed_and_skips_pip_without_weakening_isolation
     assert "namespace_setup_failed" in namespace["categories"]
     assert "missing_path" in namespace["unit_journal"]["categories"]
     assert namespace["unit_journal"]["sandbox_system_paths"] == ["/run/systemd/unit-root/run"]
+    assert set(report["namespace_variants"]) == {
+        "without_optional_staging",
+        "private_run_tmpfs",
+        "masked_runtime_endpoints",
+        "basic_namespace",
+    }
     assert all("pip" not in command for command in failed.diagnostics)
+
+
+def test_variant_success_never_allows_pip_and_all_variants_are_fixed_true_only(failed):
+    def diagnose(args, **kwargs):
+        failed.diagnostics.append(args)
+        original = any(arg.startswith("--unit=prism-diagnose-") and "-namespace-" in arg for arg in args)
+        return {"return_code": 226 if original else 0, "output": b"", "truncated": False, "timed_out": False}
+
+    failed.engine.diagnostic_runner = diagnose
+    data = dict(failed.data, action="diagnose_build", namespace_variants=["--property=PrivateNetwork=no"])
+    report = failed.engine.execute(data)["diagnostics"]
+    assert report["original_namespace_succeeded"] is False
+    assert report["prepare_verified"] is False
+    assert report["pip_checks_skipped"] == "namespace_preflight_failed"
+    commands = [args for args in failed.diagnostics if args[0] == "/usr/bin/systemd-run"]
+    assert len(commands) == 5
+    assert all(command[-1] == "/usr/bin/true" and "pip" not in command for command in commands)
+    assert len({next(arg for arg in command if arg.startswith("--unit=")) for command in commands}) == 5
+    for command in commands:
+        for flag in (
+            "--uid=prism-stage",
+            "--property=PrivateNetwork=yes",
+            "--property=ProtectHome=yes",
+            "--property=ProtectProc=invisible",
+            "--property=NoNewPrivileges=yes",
+            "--property=PrivateTmp=yes",
+            "--property=ProtectSystem=strict",
+            "--property=RuntimeMaxSec=60",
+            "--property=ReadWritePaths=" + str(failed.engine.release / ".venv"),
+        ):
+            assert flag in command
+        assert "--property=PrivateNetwork=no" not in command
+    assert "--property=InaccessiblePaths=/run" in commands[1]
+    assert "--property=TemporaryFileSystem=/run:ro" in commands[2]
+    assert "--property=InaccessiblePaths=-" + str(failed.engine.operations / "staging") in commands[2]
+    assert "--property=InaccessiblePaths=-/run/dbus -/run/systemd" in commands[3]
+    assert not any(arg.startswith("--property=InaccessiblePaths=") for arg in commands[4])
+    for name, result in report["namespace_variants"].items():
+        assert result["return_code"] == 0
+        assert result["diagnostic_only"] is True
+        assert result["isolation_verified"] is False
+        assert result["prepare_verified"] is False
+        assert "diagnose_build_" + name in failed.boundaries
+
+
+def test_matrix_interruption_preserves_completed_diagnostic_results(failed):
+    def diagnose(args, **kwargs):
+        failed.diagnostics.append(args)
+        return {"return_code": 226, "output": b"", "truncated": False, "timed_out": False}
+
+    failed.engine.diagnostic_runner = diagnose
+    failed.engine.permit = lambda nonce, label: None if label == "diagnose_build_private_run_tmpfs" else nonce
+    with pytest.raises(remote.ReleaseError, match="permit"):
+        failed.engine.execute(dict(failed.data, action="diagnose_build"))
+    paths = list(failed.engine.record.glob("build-diagnostic-*.json"))
+    assert len(paths) == 1
+    partial = json.loads(paths[0].read_bytes())
+    assert partial["commands"]["namespace"]["return_code"] == 226
+    assert set(partial["namespace_variants"]) == {"without_optional_staging"}
+    assert not (failed.engine.record / "prepared.json").exists()
+    assert len([args for args in failed.diagnostics if args[0] == "/usr/bin/systemd-run"]) == 2
+
+
+@pytest.mark.parametrize("phase", ["runonly", "privaterun", "runtimemasks", "basicnamespace"])
+def test_only_fixed_matrix_units_accept_a_collected_notfound_state(phase):
+    result = types.SimpleNamespace(returncode=1, stdout=b"LoadState=not-found\nActiveState=inactive\n")
+    with mock.patch.object(remote.subprocess, "run", return_value=result):
+        remote.run_command(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=LoadState,ActiveState",
+                "prism-diagnose-" + "a" * 12 + "-" + phase + "-" + "1" * 8 + ".service",
+            ]
+        )
+        with pytest.raises(remote.ReleaseError, match="command_failed"):
+            remote.run_command(
+                [
+                    "/usr/bin/systemctl",
+                    "show",
+                    "--property=LoadState,ActiveState",
+                    "prism-diagnose-" + "a" * 12 + "-arbitrary-" + "1" * 8 + ".service",
+                ]
+            )
 
 
 @pytest.mark.parametrize(

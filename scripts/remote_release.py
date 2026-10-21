@@ -337,7 +337,7 @@ def run_command(args, *, env=None, timeout=120):
         and args[2:3] == ["--property=LoadState,ActiveState"]
         and len(args) == 4
         and re.fullmatch(
-            r"prism-(?:stage-[0-9a-f]{12}|diagnose-[0-9a-f]{12}-(?:namespace|check|dryrun)-[0-9a-f]{8})\.service",
+            r"prism-(?:stage-[0-9a-f]{12}|diagnose-[0-9a-f]{12}-(?:namespace|check|dryrun|runonly|privaterun|runtimemasks|basicnamespace)-[0-9a-f]{8})\.service",
             args[-1],
         )
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
@@ -1404,6 +1404,104 @@ class RemoteRelease:
         self.run(["/usr/bin/systemctl", "stop", unit])
         self.no_stage_processes()
 
+    def observe_diagnostic(self, command, unit, packages):
+        try:
+            observed = self.diagnostic_runner(command)
+            if observed["truncated"] or observed["timed_out"]:
+                self.stop_diagnostic_unit(unit)
+            summary = safe_build_diagnostics(observed["output"], release=self.release, packages=packages)
+            summary.update({key: observed[key] for key in ("return_code", "truncated", "timed_out")})
+            journal = self.diagnostic_runner(
+                [
+                    "/usr/bin/journalctl",
+                    "--no-pager",
+                    "-o",
+                    "cat",
+                    "-n",
+                    "40",
+                    "--since",
+                    "@" + str(int(self.now()) - 120),
+                    "-u",
+                    unit,
+                ],
+                timeout=10,
+            )
+            summary["unit_journal"] = safe_build_diagnostics(
+                journal["output"], release=self.release, packages=packages
+            )
+            summary["unit_journal"].update(
+                {key: journal[key] for key in ("return_code", "truncated", "timed_out")}
+            )
+            return summary
+        finally:
+            self.stop_diagnostic_unit(unit)
+
+    def diagnose_namespace_variants(self, target, packages, report, report_path):
+        """Fixed /usr/bin/true matrix only; no candidate/Python acceptance."""
+        variants = (
+            ("without_optional_staging", "runonly", ["--property=InaccessiblePaths=/run"]),
+            (
+                "private_run_tmpfs",
+                "privaterun",
+                [
+                    "--property=TemporaryFileSystem=/run:ro",
+                    "--property=InaccessiblePaths=-" + str(self.operations / "staging"),
+                ],
+            ),
+            (
+                "masked_runtime_endpoints",
+                "runtimemasks",
+                ["--property=InaccessiblePaths=-/run/dbus -/run/systemd"],
+            ),
+            ("basic_namespace", "basicnamespace", []),
+        )
+        result = {}
+        for name, phase, properties in variants:
+            self.boundary("diagnose_build_" + name)
+            self.no_stage_processes()
+            nonce = secrets.token_hex(4)
+            unit = "prism-diagnose-" + self.request["commit"][:12] + "-" + phase + "-" + nonce + ".service"
+            command = [
+                "/usr/bin/systemd-run",
+                "--wait",
+                "--pipe",
+                "--quiet",
+                "--collect",
+                "--unit=" + unit,
+                "--uid=prism-stage",
+                "--gid=prism-stage",
+                "--property=PrivateNetwork=yes",
+                "--property=ProtectHome=yes",
+                "--property=ProtectProc=invisible",
+                "--property=NoNewPrivileges=yes",
+                "--property=PrivateTmp=yes",
+                "--property=ProtectSystem=strict",
+                "--property=ReadWritePaths=" + str(target),
+                *properties,
+                "--property=MemoryMax=768M",
+                "--property=TasksMax=64",
+                "--property=CPUQuota=100%",
+                "--property=RuntimeMaxSec=60",
+                "--property=KillMode=control-group",
+                "--property=UMask=0077",
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "HOME=/nonexistent",
+                "PIP_CONFIG_FILE=/dev/null",
+                "PIP_NO_INPUT=1",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "/usr/bin/true",
+            ]
+            summary = self.observe_diagnostic(command, unit, packages)
+            summary.update(
+                attempt=nonce, diagnostic_only=True, isolation_verified=False, prepare_verified=False
+            )
+            result[name] = summary
+            report["namespace_variants"] = result
+            self.write(report_path, encoded(report))
+        return result
+
     def diagnose_build(self):
         self.failed_prepare_guard()
         target = self.checked(self.release / ".venv")
@@ -1428,6 +1526,8 @@ class RemoteRelease:
         }
         attempt = secrets.token_hex(4)
         report["attempt"] = attempt
+        filename = "build-diagnostic-" + secrets.token_hex(8) + ".json"
+        report_path = self.record / filename
         for phase, arguments in (
             ("namespace", []),
             ("check", ["check"]),
@@ -1486,44 +1586,23 @@ class RemoteRelease:
                 command.append("/usr/bin/true")
             else:
                 command.extend([str(binary), "-I", "-B", "-m", "pip", *arguments])
-            try:
-                observed = self.diagnostic_runner(command)
-                if observed["truncated"] or observed["timed_out"]:
-                    self.stop_diagnostic_unit(unit)
-                summary = safe_build_diagnostics(observed["output"], release=self.release, packages=packages)
-                summary.update({key: observed[key] for key in ("return_code", "truncated", "timed_out")})
-                journal = self.diagnostic_runner(
-                    [
-                        "/usr/bin/journalctl",
-                        "--no-pager",
-                        "-o",
-                        "cat",
-                        "-n",
-                        "40",
-                        "--since",
-                        "@" + str(int(self.now()) - 120),
-                        "-u",
-                        unit,
-                    ],
-                    timeout=10,
-                )
-                summary["unit_journal"] = safe_build_diagnostics(
-                    journal["output"], release=self.release, packages=packages
-                )
-                summary["unit_journal"].update(
-                    {key: journal[key] for key in ("return_code", "truncated", "timed_out")}
-                )
-                report["commands"][phase] = summary
-            finally:
-                self.stop_diagnostic_unit(unit)
+            summary = self.observe_diagnostic(command, unit, packages)
+            report["commands"][phase] = summary
             if phase == "namespace" and (
-                observed["return_code"] != 0 or observed["truncated"] or observed["timed_out"]
+                summary["return_code"] != 0 or summary["truncated"] or summary["timed_out"]
             ):
                 report["pip_checks_skipped"] = "namespace_preflight_failed"
+                report["original_namespace_succeeded"] = False
+                self.write(report_path, encoded(report))
+                report["namespace_variants"] = self.diagnose_namespace_variants(
+                    target, packages, report, report_path
+                )
                 break
+            if phase == "namespace":
+                report["original_namespace_succeeded"] = True
+            self.write(report_path, encoded(report))
         report["service_stopped"] = True
-        filename = "build-diagnostic-" + secrets.token_hex(8) + ".json"
-        self.write(self.record / filename, encoded(report))
+        self.write(report_path, encoded(report))
         self.action_report = report
 
     def quarantine_failed_prepare(self):
