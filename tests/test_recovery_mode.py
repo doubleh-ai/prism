@@ -297,3 +297,15 @@ def test_additive_new_schema_and_retired_names_survive_recovery_init(monkeypatch
             "insufficient",
             "excluded",
         }
+
+
+async def test_recovery_exact_entry_accepts_unix_socket_login_and_still_blocks_writes(test_user):
+    from server.recovery import app
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=None), base_url="http://stage.test"
+    ) as client:
+        response = await client.post("/api/login", json=test_user)
+        assert response.status_code == 200
+        assert (await client.get("/api/me")).json()["user"] == test_user["username"]
+        assert (await client.post("/api/convs", json={})).status_code == 503
