@@ -131,6 +131,7 @@ class Fixture(unittest.TestCase):
             "production_pid": pid,
             "dedicated_user": True,
             "separate_network_namespace": True,
+            "read_only_private_runtime_mount": True,
             "checked_at": NOW,
         }
         self.engine.old_venv.joinpath("lib/python3.12/site-packages").mkdir(parents=True)
@@ -216,6 +217,7 @@ class Fixture(unittest.TestCase):
                         "production_http",
                         "sidecar_http",
                         "candidate_write",
+                        "private_runtime_write",
                     )
                 },
             }
@@ -371,7 +373,8 @@ class Fixture(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                "--property=InaccessiblePaths=/run -" + str(self.engine.operations / "staging") in args
+                "--property=InaccessiblePaths=-" + str(self.engine.operations / "staging") in args
+                and "--property=TemporaryFileSystem=/run:ro" in args
                 for args in builds
             )
         )
@@ -758,7 +761,7 @@ class Fixture(unittest.TestCase):
         for item in [
             "--property=PrivateNetwork=yes",
             "--property=ProtectHome=yes",
-            "--property=InaccessiblePaths=/run",
+            "--property=TemporaryFileSystem=/run:ro",
             "--property=MemoryMax=768M",
             "--property=TasksMax=64",
             "--property=CPUQuota=100%",
@@ -821,6 +824,17 @@ class Fixture(unittest.TestCase):
             self.engine.execute(dict(self.data, action="stage"))
         self.assertFalse((self.engine.record / "staged.json").exists())
         self.assertFalse((self.engine.record / "stage-isolation.json").exists())
+
+    def test_stage_requires_the_parents_actual_private_readonly_runtime_evidence(self):
+        self.prepared()
+        self.database()
+        self.engine.stage_process_identity = lambda pid: {
+            "stage_pid": 222,
+            "read_only_private_runtime_mount": False,
+        }
+        with self.assertRaisesRegex(remote.ReleaseError, "stage_private_runtime_mount_required"):
+            self.engine.execute(dict(self.data, action="stage"))
+        self.assertFalse((self.engine.record / "staged.json").exists())
 
     def test_prepared_extra_source_and_environment_tampering_rejected(self):
         release = self.prepared()

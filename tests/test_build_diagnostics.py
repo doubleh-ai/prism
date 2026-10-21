@@ -91,7 +91,8 @@ def test_diagnosis_returns_nonzero_facts_without_marking_prepared_or_rewriting_f
             "--property=ProtectSystem=strict",
         ):
             assert flag in command
-        assert "--property=InaccessiblePaths=/run -" + str(failed.engine.operations / "staging") in command
+        assert "--property=InaccessiblePaths=-" + str(failed.engine.operations / "staging") in command
+        assert "--property=TemporaryFileSystem=/run:ro" in command
     assert any(arg.startswith("--property=ReadWritePaths=") for arg in commands[0])
     assert all(
         not any(arg.startswith("--property=ReadWritePaths=") for arg in command) for command in commands[1:]

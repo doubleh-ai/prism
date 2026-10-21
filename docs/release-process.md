@@ -51,7 +51,9 @@ Nginx 操作只允许 `stock-analyzer`、`stock-app` 的固定 enabled→availab
 
 核心升级使用与候选 `requirements.lock` 相同摘要的完整哈希锁和离线 wheelhouse，执行 `pip check`。安装和候选导入都使用受限 `prism-stage` 用户，不以 root 执行旧环境代码。继承环境中额外的 Astock 依赖有独立摘要，不能声称核心锁覆盖整个环境。
 
-2026-10-22 的第二次实际准备在隔离安装启动阶段失败，已观察到 `226/NAMESPACE`，具体挂载原因尚待实际诊断；未生成 `prepared.json`，生产未改变。固定 `diagnose_build` 保留这次失败，先以 `/usr/bin/true` 和原构建沙盒（含原候选写路径）检测命名空间设置，失败即跳过 pip。预检通过后，两条只读 pip 命令均无外网、HOME、其他隔离数据库或候选写权限。合并输出流在内存中限 256 KiB，超限或超时只终止该诊断 unit；限定 unit 的近期 journal 同样限长读取，只保存固定类别、已清点包名/版本、候选相对路径和固定系统挂载路径，原始异常与输出不落盘。非零退出码作为诊断事实返回，不能转换成准备成功。
+2026-10-22 的第二次实际准备在隔离安装启动阶段失败，已观察到 `226/NAMESPACE`；未生成 `prepared.json`，生产未改变。真实 `/usr/bin/true` 矩阵中，原 `/run` 屏蔽、去掉可选 staging 屏蔽及仅屏蔽运行时端点均返回 226；只读私有 `/run` 和基本命名空间返回 0，所有诊断 unit 已停止。构建、stage 与规范诊断因此将 `InaccessiblePaths=/run` 改为 `TemporaryFileSystem=/run:ro`；原 PrivateNetwork、ProtectHome、ProtectProc、NoNewPrivileges、严格文件系统与资源限制保留，构建/诊断仍屏蔽 staging 目录。该事实只证明固定诊断能启动，尚不代表候选获准。
+
+固定 `diagnose_build` 保留这些失败，先以 `/usr/bin/true` 和当前规范构建沙盒（含候选写路径）检测命名空间设置，失败即跳过 pip。报告将规范运行时策略标记为 `read_only_private_run`。预检通过后，两条只读 pip 命令均无外网、HOME、其他隔离数据库或候选写权限。合并输出流在内存中限 256 KiB，超限或超时只终止该诊断 unit；限定 unit 的近期 journal 同样限长读取，只保存固定类别、已清点包名/版本、候选相对路径和固定系统挂载路径，原始异常与输出不落盘。非零退出码作为诊断事实返回，不能转换成准备成功。
 
 原组合失败后，可继续执行固定的四项 `/usr/bin/true` 诊断矩阵：去掉可选 staging 屏蔽、使用只读私有 `/run` 并保留 staging 屏蔽、仅屏蔽运行时 dbus/systemd 路径、去掉运行时路径屏蔽的基本命名空间。四项都保留独立 UID、PrivateNetwork、ProtectHome、ProtectProc、NoNewPrivileges、PrivateTmp、严格文件系统与资源限制，每项使用独立 unit/随机数、许可和 60 秒上限；不运行候选或 Python。每项安全结果及时保存在私有回执，便于中断后追溯。任一变体成功都仅用于定位配置冲突，不能允许 pip、宣称隔离已验收或准备成功；只有原组合预检成功才进入 pip 诊断。
 
@@ -70,6 +72,8 @@ Claude CLI 从已审查的固定本机官方安装路径读取；摘要、链接
 真正的 Linux 验收必须用无秘密哨兵证明不能读取生产用户的进程、HOME/临时文件，也不能连接生产 8088/8899；随后对隔离副本验证迁移、鉴权、历史和核心功能。单元测试里出现隔离参数不等于内核已执行隔离。真实外部模型和行情另做有范围的验收，不能用模拟结果替代。
 
 阶段启动器在加载候选和第三方包之前，实际尝试打开生产配置与生产进程环境，并尝试连接固定生产端口；只记录拒绝结果，不读取内容。证明绑定提交、随机数、进程及时间，父进程另外核对实际用户和网络命名空间；任何不符均停止。阶段通信 socket 的权限操作固定到已打开的同一 inode，拒绝链接及路径替换。上述实现仍须真实 Linux 验收。生产和恢复入口显式使用单个 worker，并启用 `NoNewPrivileges`，避免继承环境改变进程模型或让应用取得 sudo 权限。
+
+stage 启动器还会以随机数命名的独占 canary 检查 `/run` 写入被拒绝，不读取文件内容。父进程从已验证 PID 的 `/proc/<pid>/root/run` 打开实际目录并核对 inode/设备、root 所有权及 `statvfs` 只读标记，要求它不同于主机 `/run`，随后重新核 PID、用户和网络。只有实际检查通过才记录 `read_only_private_runtime_mount=true`；配置参数或导入前 canary 单独都不能替代此证据。
 
 ## 备份、恢复和私有回执
 

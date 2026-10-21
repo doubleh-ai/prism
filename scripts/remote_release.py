@@ -130,6 +130,7 @@ def main(arguments):
         "production_http": denied_connect(8088),
         "sidecar_http": denied_connect(8899),
         "candidate_write": denied_open(release + "/.stage-write-probe-" + nonce, writable=True),
+        "private_runtime_write": denied_open("/run/.prism-stage-write-probe-" + nonce, writable=True),
     }
     proof = {
         "schema": 1,
@@ -1522,6 +1523,7 @@ class RemoteRelease:
             "dry_run_only": True,
             "prepare_verified": False,
             "production_changed": False,
+            "canonical_runtime_policy": "read_only_private_run",
             "commands": {},
         }
         attempt = secrets.token_hex(4)
@@ -1566,7 +1568,8 @@ class RemoteRelease:
                 "--property=NoNewPrivileges=yes",
                 "--property=PrivateTmp=yes",
                 "--property=ProtectSystem=strict",
-                "--property=InaccessiblePaths=/run -" + str(self.operations / "staging"),
+                "--property=TemporaryFileSystem=/run:ro",
+                "--property=InaccessiblePaths=-" + str(self.operations / "staging"),
                 "--property=MemoryMax=768M",
                 "--property=TasksMax=64",
                 "--property=CPUQuota=100%",
@@ -1724,7 +1727,8 @@ class RemoteRelease:
                 "--property=PrivateTmp=yes",
                 "--property=ProtectSystem=strict",
                 "--property=ReadWritePaths=" + str(target),
-                "--property=InaccessiblePaths=/run -" + str(self.operations / "staging"),
+                "--property=TemporaryFileSystem=/run:ro",
+                "--property=InaccessiblePaths=-" + str(self.operations / "staging"),
                 "--property=MemoryMax=768M",
                 "--property=TasksMax=64",
                 "--property=CPUQuota=100%",
@@ -2075,7 +2079,7 @@ class RemoteRelease:
                 "--property=PrivateTmp=yes",
                 "--property=ProtectSystem=strict",
                 "--property=ReadWritePaths=" + str(stage),
-                "--property=InaccessiblePaths=/run",
+                "--property=TemporaryFileSystem=/run:ro",
                 "--property=MemoryMax=768M",
                 "--property=TasksMax=64",
                 "--property=CPUQuota=100%",
@@ -2118,6 +2122,8 @@ class RemoteRelease:
         if not self.is_socket(socket):
             raise ReleaseError("stage_socket_unavailable")
         identity = self.stage_process_identity(production_pid)
+        if identity.get("read_only_private_runtime_mount") is not True:
+            raise ReleaseError("stage_private_runtime_mount_required")
         proof = self.stage_proof(stage, nonce, issued_at, production_pid, identity["stage_pid"], application)
         self.write(self.record / "stage-isolation.json", encoded({"proof": proof, "identity": identity}))
         self.publish_stage_socket(socket)
@@ -2130,6 +2136,7 @@ class RemoteRelease:
                     "external_integrations_verified": False,
                     "isolation_proof_sha256": digest(encoded(proof)),
                     "journeys_sha256": journeys_digest,
+                    "read_only_private_runtime_mount": True,
                 }
             ),
         )
@@ -2139,6 +2146,31 @@ class RemoteRelease:
         if not re.fullmatch(rb"[1-9][0-9]{0,9}", value) or int(value) <= 1:
             raise ReleaseError("stage_process_identity_unavailable")
         return int(value)
+
+    def stage_runtime_mount(self, process):
+        """Inspect the verified PID's actual mount, never a systemd flag."""
+        runtime = process / "root/run"  # /proc/PID/root is an intentional kernel link.
+        try:
+            descriptor = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                private = os.fstat(descriptor)
+                filesystem = os.fstatvfs(descriptor)
+                current = runtime.stat()
+                host = (self.root / "run").stat()
+                if (
+                    not stat.S_ISDIR(private.st_mode)
+                    or private.st_uid != 0
+                    or private.st_mode & 0o022
+                    or (private.st_dev, private.st_ino) == (host.st_dev, host.st_ino)
+                    or (private.st_dev, private.st_ino) != (current.st_dev, current.st_ino)
+                    or not filesystem.f_flag & os.ST_RDONLY
+                ):
+                    raise ReleaseError("stage_private_runtime_mount_rejected")
+            finally:
+                os.close(descriptor)
+        except OSError:
+            raise ReleaseError("stage_private_runtime_mount_unavailable") from None
+        return True
 
     def stage_process_identity(self, production_pid):
         unit = "prism-stage-" + self.request["commit"][:12]
@@ -2154,11 +2186,22 @@ class RemoteRelease:
             or (process / "ns/net").readlink() == (production / "ns/net").readlink()
         ):
             raise ReleaseError("stage_process_identity_mismatch")
+        runtime_verified = self.stage_runtime_mount(process)
+        if runtime_verified is not True:
+            raise ReleaseError("stage_private_runtime_mount_required")
+        if (
+            self.process_id(unit) != stage_pid
+            or self.process_id(SERVICE) != production_pid
+            or process.stat().st_uid != pwd.getpwnam("prism-stage").pw_uid
+            or (process / "ns/net").readlink() == (production / "ns/net").readlink()
+        ):
+            raise ReleaseError("stage_process_identity_mismatch")
         return {
             "stage_pid": stage_pid,
             "production_pid": production_pid,
             "dedicated_user": True,
             "separate_network_namespace": True,
+            "read_only_private_runtime_mount": runtime_verified,
             "checked_at": int(self.now()),
         }
 
@@ -2200,6 +2243,7 @@ class RemoteRelease:
                 "operation_denied",
             },
             "candidate_write": {"permission_denied", "operation_denied", "read_only_filesystem"},
+            "private_runtime_write": {"permission_denied", "operation_denied", "read_only_filesystem"},
         }
         checks = proof.get("checks", {})
         if (

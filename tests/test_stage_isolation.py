@@ -26,7 +26,7 @@ class ProofStream(io.StringIO):
         return 99
 
 
-def bootstrap(*, readable=None, writable=False, connection_code=errno.ECONNREFUSED):
+def bootstrap(*, readable=None, writable=False, runtime_writable=False, connection_code=errno.ECONNREFUSED):
     module = types.ModuleType("isolated_stage_bootstrap_test")
     exec(compile(remote.STAGE_BOOTSTRAP, "fixed-stage-bootstrap", "exec"), module.__dict__)
     stream, events = ProofStream(), []
@@ -35,7 +35,11 @@ def bootstrap(*, readable=None, writable=False, connection_code=errno.ECONNREFUS
         events.append(("open", path, flags))
         if path.endswith("/isolation-proof.json"):
             return 99
-        if path == readable or (writable and "/.stage-write-probe-" in path):
+        if (
+            path == readable
+            or (writable and "/.stage-write-probe-" in path)
+            or (runtime_writable and path.startswith("/run/.prism-stage-write-probe-"))
+        ):
             return 42
         raise PermissionError(errno.EACCES, "synthetic diagnostic must not be exposed")
 
@@ -136,6 +140,20 @@ def test_writable_candidate_only_creates_exclusive_canary_and_blocks_start():
     uvicorn.run.assert_not_called()
 
 
+def test_writable_runtime_canary_blocks_import_without_reading_any_content():
+    module, stream, events, _, site, uvicorn, importer = bootstrap(runtime_writable=True)
+    with pytest.raises(RuntimeError, match="stage_isolation_probe_failed"):
+        invoke(module, importer)
+    canary = "/run/.prism-stage-write-probe-" + NONCE
+    flags = next(event[2] for event in events if event[:2] == ("open", canary))
+    assert flags & os.O_EXCL and flags & os.O_NOFOLLOW
+    module.os.unlink.assert_called_once_with(canary)
+    module.os.read.assert_not_called()
+    assert json.loads(stream.getvalue())["checks"]["private_runtime_write"]["blocked"] is False
+    site.main.assert_not_called()
+    uvicorn.run.assert_not_called()
+
+
 @pytest.mark.parametrize("changed", [{"issued_at": NOW - 121}, {"application": "os:system"}])
 def test_stale_or_arbitrary_entry_rejected_before_syscalls(changed):
     module, _, events, _, _, _, importer = bootstrap()
@@ -173,6 +191,7 @@ def test_real_process_validation_rejects_shared_network_namespace(tmp_path, monk
     engine.request = {"commit": COMMIT}
     engine.process_id = lambda unit: 111 if unit == remote.SERVICE else 222
     engine.run = lambda *args: b"prism-stage"
+    engine.stage_runtime_mount = lambda process: True  # This test isolates netns validation.
     monkeypatch.setattr(remote.pwd, "getpwnam", lambda name: types.SimpleNamespace(pw_uid=os.getuid()))
     for pid in (111, 222):
         folder = tmp_path / "proc" / str(pid) / "ns"
@@ -183,6 +202,60 @@ def test_real_process_validation_rejects_shared_network_namespace(tmp_path, monk
     (tmp_path / "proc/222/ns/net").unlink()
     (tmp_path / "proc/222/ns/net").symlink_to("net:[5678]")
     assert engine.stage_process_identity(111)["separate_network_namespace"] is True
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "private_readonly",
+        "host_mount",
+        "writable",
+        "foreign_owner",
+        "world_writable",
+        "changed_path",
+        "unavailable",
+    ],
+)
+def test_parent_uses_actual_pid_runtime_mount_identity_owner_and_readonly_flag(tmp_path, monkeypatch, case):
+    engine = remote.RemoteRelease(tmp_path)
+    process = tmp_path / "proc/222"
+    runtime = process / "root/run"
+    host = tmp_path / "run"
+    private = types.SimpleNamespace(st_dev=2, st_ino=222, st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+    host_info = types.SimpleNamespace(st_dev=1, st_ino=111)
+    current = types.SimpleNamespace(st_dev=2, st_ino=222)
+    if case == "host_mount":
+        host_info = types.SimpleNamespace(st_dev=2, st_ino=222)
+    if case == "foreign_owner":
+        private.st_uid = 999
+    if case == "world_writable":
+        private.st_mode = stat.S_IFDIR | 0o777
+    if case == "changed_path":
+        current.st_ino = 333
+    opened = mock.Mock(side_effect=PermissionError if case == "unavailable" else None, return_value=99)
+
+    def observed(path, *args, **kwargs):
+        assert path in {runtime, host}
+        return current if path == runtime else host_info
+
+    with monkeypatch.context() as patched:
+        patched.setattr(remote.os, "open", opened)
+        patched.setattr(remote.os, "close", mock.Mock())
+        patched.setattr(remote.os, "fstat", lambda descriptor: private)
+        patched.setattr(
+            remote.os,
+            "fstatvfs",
+            lambda descriptor: types.SimpleNamespace(f_flag=0 if case == "writable" else os.ST_RDONLY),
+        )
+        patched.setattr(Path, "stat", observed)
+        if case == "private_readonly":
+            assert engine.stage_runtime_mount(process) is True
+            flags = opened.call_args.args[1]
+            assert opened.call_args.args[0] == runtime
+            assert flags & os.O_DIRECTORY and flags & os.O_NOFOLLOW
+        else:
+            with pytest.raises(remote.ReleaseError, match="stage_private_runtime_mount"):
+                engine.stage_runtime_mount(process)
 
 
 @pytest.mark.parametrize(
