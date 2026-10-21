@@ -64,7 +64,7 @@ CLI_ENTRY = "home/ubuntu/.npm-global/bin/claude"
 CLI_SOURCE = "home/ubuntu/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 MAX_CLI_BINARY = 512 * 1024 * 1024
 INTEGRATION_PROBES = {
-    "integration_astock": ("astock", "a89af482aee19ec561c42a53274fdf7262c7dc2793d0e64095f774c11c71219b"),
+    "integration_astock": ("astock", "996224f01f3cef5da20237c2936fd9910b389419a7e97af853fc67de0913972a"),
     "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
 }
 RETIREMENT_HELPERS = {
@@ -72,6 +72,46 @@ RETIREMENT_HELPERS = {
     "retirement_validation.py": "d96f4ea8262b70f1974b1613f2b8441363c8c25af56ad017078daedc3c2e77e9",
 }
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
+ASTOCK_ERROR_DETAILS = {
+    "astock_import_contract_rejected",
+    "bootstrap_identity_rejected",
+    "bootstrap_isolation_rejected",
+    "candidate_site_packages_required",
+    "candidate_site_prefix_mismatch",
+    "credential_environment_rejected",
+    "dedicated_integration_user_required",
+    "engine_output_path_rejected",
+    "fixed_workdir_required",
+    "import_error",
+    "invalid_arguments",
+    "invalid_identity",
+    "isolated_candidate_interpreter_required",
+    "module_not_found",
+    "module_source_mismatch",
+    "operating_system_error",
+    "outside_database_rejected",
+    "outside_network_rejected",
+    "outside_write_rejected",
+    "private_result_write_failed",
+    "private_source_read_rejected",
+    "private_workdir_required",
+    "root_allow_rejected",
+    "root_allow_unavailable",
+    "source_revision_mismatch",
+    "startup_hook_imported",
+    "startup_hook_rejected",
+    "subprocess_rejected",
+    "symlink_path_rejected",
+    "synthetic_certificate_failed",
+    "synthetic_configuration_rejected",
+    "synthetic_tls_cleanup_failed",
+    "tls_verification_rejected",
+    "trusted_probe_source_required",
+    "unexpected_error",
+    "unlocked_source_rejected",
+    "untrusted_python_path",
+    "workdir_reused",
+}
 RETIREMENT_CASE_IDS = {
     "int-executor",
     "int-post",
@@ -2226,7 +2266,7 @@ class RemoteRelease:
                 "private_result_write_failed",
                 "invalid_arguments",
             }
-            extra = set()
+            extra = {"error_detail"}
         else:
             identity.update(
                 cli_sha256=cli_sha,
@@ -2270,6 +2310,14 @@ class RemoteRelease:
             )
         ):
             raise ReleaseError("integration_result_rejected")
+        if action == "integration_astock":
+            detail = value.get("error_detail")
+            if (
+                (detail is not None and (type(detail) is not str or detail not in ASTOCK_ERROR_DETAILS))
+                or (value["passed"] and detail is not None)
+                or (not value["passed"] and detail is None)
+            ):
+                raise ReleaseError("integration_result_rejected")
         if action == "integration_cli":
             requests = value.get("requests")
             if (

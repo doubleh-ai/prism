@@ -104,6 +104,7 @@ def integration_fixture(fixture, monkeypatch, action="integration_astock", corru
                     network_namespace_verified=False,
                     live_model_verified=False,
                     live_market_verified=False,
+                    error_detail=None,
                 )
                 name = "result.json"
             else:
@@ -251,6 +252,45 @@ def test_new_attempt_keeps_existing_evidence(prepared, monkeypatch):
     prepared.engine.execute(data)
     assert old.read_bytes() == original
     assert state["work"].parent.name == "release-new-attempt-002"
+
+
+@pytest.mark.parametrize(
+    "passed,detail,accepted",
+    [
+        (False, "startup_hook_rejected", True),
+        (False, "module_not_found", True),
+        (False, "unreviewed diagnostic text", False),
+        (False, None, False),
+        (True, "startup_hook_rejected", False),
+        (True, None, True),
+    ],
+)
+def test_astock_diagnostics_accept_only_fixed_failure_categories(
+    prepared, monkeypatch, passed, detail, accepted
+):
+    data, state = integration_fixture(prepared, monkeypatch)
+    prepared.engine.execute(data)
+    value = dict(state["result"], passed=passed, error_detail=detail)
+    value["error_class"] = None if passed else "astock_import_rejected"
+    path = state["work"] / "output/result.json"
+    path.write_bytes(remote.encoded(value))
+    expected = {key: value for key, value in state["proof"].items() if key not in {"checks", "checked_at"}}
+    if accepted:
+        result, _ = prepared.engine.integration_result(
+            "integration_astock", state["work"], os.getuid(), expected, prepared.cli_digest
+        )
+        assert result["error_detail"] == detail
+    else:
+        with pytest.raises(remote.ReleaseError, match="integration_result_rejected"):
+            prepared.engine.integration_result(
+                "integration_astock", state["work"], os.getuid(), expected, prepared.cli_digest
+            )
+
+
+def test_astock_diagnostic_enum_matches_frozen_probe():
+    from scripts import integration_probe
+
+    assert remote.ASTOCK_ERROR_DETAILS == integration_probe.ERROR_DETAILS
 
 
 @pytest.mark.parametrize(

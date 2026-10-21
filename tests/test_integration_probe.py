@@ -360,6 +360,79 @@ def test_astock_import_uses_frozen_modules_and_synthetic_config(work, tmp_path, 
     assert sys.path[:2] == [str(candidate), str(engine)]
 
 
+def test_explicit_site_main_cannot_execute_ubuntu_apport_or_user_hook(work, tmp_path, monkeypatch):
+    candidate, engine = tmp_path / "candidate", tmp_path / "engine"
+    modules = fake_imports(candidate, engine, work, monkeypatch)
+    import site
+
+    ubuntu_hook = mock.Mock(side_effect=AssertionError("Ubuntu system hook must never execute"))
+    user_hook = mock.Mock(side_effect=AssertionError("User hook must never execute"))
+    monkeypatch.setattr(site, "execsitecustomize", ubuntu_hook)
+    monkeypatch.setattr(site, "execusercustomize", user_hook)
+    original_package = site.addpackage
+
+    def ubuntu_site_main():
+        site.execsitecustomize()
+        site.execusercustomize()
+
+    monkeypatch.setattr(site, "main", ubuntu_site_main)
+    probe.import_engine(candidate, engine, work)
+    ubuntu_hook.assert_not_called()
+    user_hook.assert_not_called()
+    assert site.execsitecustomize is ubuntu_hook and site.execusercustomize is user_hook
+    assert site.addpackage is original_package
+    modules["server.analysis_engine"]._ensure_astock.assert_called_once_with()
+
+
+def test_site_functions_are_restored_even_when_site_main_raises(work, tmp_path, monkeypatch):
+    candidate, engine = tmp_path / "candidate", tmp_path / "engine"
+    modules = fake_imports(candidate, engine, work, monkeypatch)
+    import site
+
+    original_site, original_user, original_package = (
+        site.execsitecustomize,
+        site.execusercustomize,
+        site.addpackage,
+    )
+    monkeypatch.setattr(site, "main", mock.Mock(side_effect=RuntimeError("synthetic-private-detail")))
+    with pytest.raises(RuntimeError):
+        probe.import_engine(candidate, engine, work)
+    assert site.execsitecustomize is original_site and site.execusercustomize is original_user
+    assert site.addpackage is original_package
+    modules["server.analysis_engine"]._ensure_astock.assert_not_called()
+
+
+def test_global_pth_is_rejected_before_its_code_can_execute(work, tmp_path, monkeypatch):
+    candidate, engine = tmp_path / "candidate", tmp_path / "engine"
+    modules = fake_imports(candidate, engine, work, monkeypatch)
+    import site
+
+    execute_pth = mock.Mock(side_effect=AssertionError("global pth must not execute"))
+    monkeypatch.setattr(site, "addpackage", execute_pth)
+    monkeypatch.setattr(
+        site, "main", lambda: site.addpackage("/usr/lib/python3/dist-packages", "synthetic.pth", set())
+    )
+    with pytest.raises(probe.ProbeError, match="startup_hook_rejected"):
+        probe.import_engine(candidate, engine, work)
+    execute_pth.assert_not_called()
+    assert site.addpackage is execute_pth
+    modules["server.analysis_engine"]._ensure_astock.assert_not_called()
+
+
+def test_already_loaded_system_startup_hook_is_still_rejected(work, tmp_path, monkeypatch):
+    candidate, engine = tmp_path / "candidate", tmp_path / "engine"
+    modules = fake_imports(candidate, engine, work, monkeypatch)
+    import site
+
+    main = mock.Mock()
+    monkeypatch.setattr(site, "main", main)
+    sys.modules["sitecustomize"] = types.ModuleType("sitecustomize")
+    with pytest.raises(probe.ProbeError, match="startup_hook_imported"):
+        probe.import_engine(candidate, engine, work)
+    main.assert_not_called()
+    modules["server.analysis_engine"]._ensure_astock.assert_not_called()
+
+
 def test_astock_wrong_module_origin_is_not_treated_as_success(work, tmp_path, monkeypatch):
     candidate, engine = tmp_path / "candidate", tmp_path / "engine"
     modules = fake_imports(candidate, engine, work, monkeypatch)
@@ -466,6 +539,7 @@ def test_success_records_only_its_limited_scope(work, monkeypatch):
     mock_probe_runtime(work, monkeypatch)
     result = probe.run_probe(arguments(work))
     assert result["passed"] is True and result["error_class"] is None
+    assert result["error_detail"] is None
     assert len(result["checks"]) == 7 and all(result["checks"].values())
     assert result["network_namespace_verified"] is False
     assert result["live_model_verified"] is result["live_market_verified"] is False
@@ -480,6 +554,26 @@ def test_failed_import_never_reports_success_or_raw_exception(work, monkeypatch)
     assert "astock_import_and_fixed_sources" not in result["checks"]
     assert "synthetic-never-printed" not in json.dumps(result)
     assert result["error_class"] == "probe_execution_failed"
+    assert result["error_detail"] == "import_error"
+
+
+@pytest.mark.parametrize(
+    "error,detail",
+    [
+        (probe.ProbeError("startup_hook_imported"), "startup_hook_imported"),
+        (probe.ProbeError("synthetic-secret-message"), "unexpected_error"),
+        (ModuleNotFoundError("synthetic-secret-module-name"), "module_not_found"),
+        (PermissionError("synthetic-secret-file-name"), "operating_system_error"),
+        (RuntimeError("synthetic-secret-response"), "unexpected_error"),
+    ],
+)
+def test_diagnostic_detail_is_a_fixed_safe_enum_without_exception_text(work, monkeypatch, error, detail):
+    mock_probe_runtime(work, monkeypatch)
+    monkeypatch.setattr(probe, "import_engine", mock.Mock(side_effect=error))
+    result = probe.run_probe(arguments(work))
+    assert result["passed"] is False and result["error_detail"] == detail
+    assert result["error_detail"] in probe.ERROR_DETAILS
+    assert "synthetic-secret" not in json.dumps(result)
 
 
 def test_failed_tls_is_nonzero_and_does_not_turn_timeout_into_cert_rejection(work, monkeypatch, capfd):

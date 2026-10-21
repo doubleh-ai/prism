@@ -34,10 +34,66 @@ RELEASE_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
 OPERATIONS = Path("/var/lib/prism-operations/integration")
 STARTUP_NAMES = ("sitecustomize", "usercustomize", "patch_ssl")
 TLS_CLIENTS = ("urllib", "requests", "httpx")
+ERROR_DETAILS = frozenset(
+    {
+        "astock_import_contract_rejected",
+        "bootstrap_identity_rejected",
+        "bootstrap_isolation_rejected",
+        "candidate_site_packages_required",
+        "candidate_site_prefix_mismatch",
+        "credential_environment_rejected",
+        "dedicated_integration_user_required",
+        "engine_output_path_rejected",
+        "fixed_workdir_required",
+        "invalid_arguments",
+        "invalid_identity",
+        "isolated_candidate_interpreter_required",
+        "module_source_mismatch",
+        "outside_database_rejected",
+        "outside_network_rejected",
+        "outside_write_rejected",
+        "private_source_read_rejected",
+        "private_workdir_required",
+        "root_allow_rejected",
+        "root_allow_unavailable",
+        "source_revision_mismatch",
+        "startup_hook_imported",
+        "startup_hook_rejected",
+        "subprocess_rejected",
+        "symlink_path_rejected",
+        "synthetic_certificate_failed",
+        "synthetic_configuration_rejected",
+        "synthetic_tls_cleanup_failed",
+        "tls_verification_rejected",
+        "trusted_probe_source_required",
+        "unlocked_source_rejected",
+        "untrusted_python_path",
+        "workdir_reused",
+        "module_not_found",
+        "import_error",
+        "operating_system_error",
+        "unexpected_error",
+        "private_result_write_failed",
+    }
+)
 
 
 class ProbeError(RuntimeError):
     """Only fixed safe categories cross the controller boundary."""
+
+
+def safe_error_detail(error):
+    """Fixed enum only; never serialize exception text, module names or paths."""
+    if isinstance(error, ProbeError):
+        detail = error.args[0] if len(error.args) == 1 else None
+        return detail if isinstance(detail, str) and detail in ERROR_DETAILS else "unexpected_error"
+    if isinstance(error, ModuleNotFoundError):
+        return "module_not_found"
+    if isinstance(error, ImportError):
+        return "import_error"
+    if isinstance(error, OSError):
+        return "operating_system_error"
+    return "unexpected_error"
 
 
 def encoded(value):
@@ -338,7 +394,26 @@ def import_engine(candidate, engine, work):
     sites = startup_clean(candidate)
     import site
 
-    site.main()
+    # -S avoided automatic startup. Do not let explicit site.main run Ubuntu's
+    # global apport/sitecustomize, user hooks or any inherited .pth file.
+    original_site, original_user, original_package = (
+        site.execsitecustomize,
+        site.execusercustomize,
+        site.addpackage,
+    )
+
+    def reject_package(*args, **kwargs):
+        raise ProbeError("startup_hook_rejected")
+
+    try:
+        site.execsitecustomize = lambda: None
+        site.execusercustomize = lambda: None
+        site.addpackage = reject_package
+        site.main()
+    finally:
+        site.execsitecustomize = original_site
+        site.execusercustomize = original_user
+        site.addpackage = original_package
     if Path(sys.prefix) != candidate / ".venv" or str(sites) not in sys.path:
         raise ProbeError("candidate_site_prefix_mismatch")
     # No user site, old editable source, CWD, inherited PYTHONPATH or /home.
@@ -544,6 +619,7 @@ def run_probe(args):
         "passed": False,
         "checks": {},
         "error_class": None,
+        "error_detail": None,
         "network_namespace_verified": False,
         "live_model_verified": False,
         "live_market_verified": False,
@@ -574,6 +650,7 @@ def run_probe(args):
             result["passed"] = True
     except Exception as error:
         result["error_class"] = failure if isinstance(error, ProbeError) else "probe_execution_failed"
+        result["error_detail"] = safe_error_detail(error)
     result["checked_at"] = int(time.time())
     if work is not None:
         try:
@@ -581,6 +658,7 @@ def run_probe(args):
         except (OSError, ProbeError):
             result["passed"] = False
             result["error_class"] = "private_result_write_failed"
+            result["error_detail"] = "private_result_write_failed"
     return result
 
 
@@ -607,6 +685,7 @@ def main(argv=None):
             "probe": "astock_import_tls",
             "passed": False,
             "error_class": "invalid_arguments",
+            "error_detail": "invalid_arguments",
         }
     try:
         os.write(summary, encoded(result) + b"\n")

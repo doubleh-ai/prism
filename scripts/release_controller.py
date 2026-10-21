@@ -43,7 +43,7 @@ MAX_EXECUTOR_SOURCE = 512 * 1024
 INTEGRATION_PROBES = {
     "integration_astock": (
         "integration_probe.py",
-        "a89af482aee19ec561c42a53274fdf7262c7dc2793d0e64095f774c11c71219b",
+        "996224f01f3cef5da20237c2936fd9910b389419a7e97af853fc67de0913972a",
     ),
     "integration_cli": (
         "cli_protocol_probe.py",
