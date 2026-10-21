@@ -33,6 +33,7 @@ ACTIONS = (
     "integration_cli",
     "integration_live",
     "validate_legacy_retirement",
+    "validate_legacy_stop",
     "quiesce",
     "switch",
     "verify",
@@ -55,6 +56,11 @@ RETIREMENT_HELPERS = {
     "retirement_probe.py": "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624",
     "retirement_validation.py": "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e",
 }
+RETIREMENT_STOP_HELPERS = {
+    **RETIREMENT_HELPERS,
+    "retirement_stop_validation.py": "f0dd83ad2f3bc78dbe9018c100661a5ec1cec6b2fa9bee08eef6ec91cb67ff87",
+}
+RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 LIVE_INTEGRATION_HELPERS = {
     "live_integration_validation.py": "8d207325efe0169e2ba9a1072f657722b65bd7501f14925104b0f7b79281f12b",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
@@ -244,6 +250,35 @@ def request_for(args):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", attempt):
             raise ControlError("retirement_attempt_rejected")
         request.update(retirement_helpers=helpers, retirement_attempt=attempt)
+    if args.action == "validate_legacy_stop":
+        helpers = {}
+        for filename, approved in RETIREMENT_STOP_HELPERS.items():
+            field = (
+                "retirement_stop_sha256"
+                if filename == "retirement_stop_validation.py"
+                else filename.removesuffix(".py") + "_sha256"
+            )
+            if getattr(args, field, None) != approved:
+                raise ControlError("approved_retirement_helpers_required")
+            helpers[filename] = {
+                "sha256": approved,
+                "content": base64.b64encode(trusted_source(filename, approved)).decode(),
+            }
+        attempt = getattr(args, "retirement_stop_attempt", None)
+        proof = getattr(args, "retirement_proof_attempt", None)
+        if any(
+            type(item) is not str or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", item)
+            for item in (attempt, proof)
+        ):
+            raise ControlError("explicit_retirement_stop_and_proof_attempts_required")
+        if (
+            receipts.get("system_python_sha256") != RETIREMENT_SYSTEM_PYTHON_SHA256
+            or not args.source_manifest
+        ):
+            raise ControlError("retirement_stop_private_bindings_required")
+        request.update(
+            retirement_stop_helpers=helpers, retirement_stop_attempt=attempt, retirement_proof_attempt=proof
+        )
     if args.source_manifest:
         manifest = json.loads(outside_git(args.source_manifest).read_bytes())
         canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -438,6 +473,9 @@ def main():
         "retirement-probe-sha256",
         "retirement-validation-sha256",
         "retirement-attempt",
+        "retirement-stop-sha256",
+        "retirement-stop-attempt",
+        "retirement-proof-attempt",
     ):
         parser.add_argument("--" + name)
     parser.add_argument("--stop-file", required=True, help="Private operator stop flag outside Git")

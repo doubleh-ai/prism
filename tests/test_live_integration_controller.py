@@ -578,3 +578,36 @@ def test_fixed_orchestration_persists_safe_failure_and_never_calls_key_early(pre
     with pytest.raises(remote.ReleaseError, match="live_integration_attempt_already_exists"):
         engine.execute(data)
     assert (directory / "receipt.json").read_bytes() == original_receipt
+
+
+@pytest.mark.parametrize(
+    "kind", ["resolve", "worker", "broker", "other_python", "other_unit", "glob", "query_flag"]
+)
+def test_actual_runner_captures_only_fixed_live_dns_and_two_exact_unit_inventories(monkeypatch, kind):
+    unit = "prism-live-worker-" + COMMIT[:12] + "-" + "a" * 32 + ".service"
+    inventories = ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
+    argv = {
+        "resolve": remote.LIVE_RESOLVE_COMMAND,
+        "worker": inventories + [unit],
+        "broker": inventories + [unit.replace("-worker-", "-broker-")],
+        "other_python": ["/usr/bin/python3", "-I", "-B", "-S", "-c", "print('untrusted')"],
+        "other_unit": inventories + ["stock-app.service"],
+        "glob": inventories + ["prism-live-*.service"],
+        "query_flag": inventories + [unit, "--full"],
+    }[kind]
+    calls = []
+
+    def subprocess_run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=b"actual-public-output\n" if kwargs["stdout"] == remote.subprocess.PIPE else None,
+        )
+
+    monkeypatch.setattr(remote.subprocess, "run", subprocess_run)
+    actual = remote.run_command(argv, timeout=8)
+    captured = kind in {"resolve", "worker", "broker"}
+    assert actual == (b"actual-public-output\n" if captured else b"")
+    assert calls[0][1]["stdout"] == (remote.subprocess.PIPE if captured else remote.subprocess.DEVNULL)
+    assert calls[0][1]["stderr"] == remote.subprocess.DEVNULL
+    assert remote.LIVE_RESOLVE_CODE == helper.RESOLVE_CODE

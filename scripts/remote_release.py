@@ -47,6 +47,7 @@ ACTIONS = {
     "integration_cli",
     "integration_live",
     "validate_legacy_retirement",
+    "validate_legacy_stop",
     "quiesce",
     "switch",
     "verify",
@@ -76,6 +77,8 @@ LIVE_INTEGRATION_HELPERS = {
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
 }
+LIVE_RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
+LIVE_RESOLVE_COMMAND = ["/usr/bin/python3", "-I", "-B", "-S", "-c", LIVE_RESOLVE_CODE]
 LIVE_STAGES = {
     "request_validated",
     "accounts",
@@ -130,6 +133,11 @@ RETIREMENT_HELPERS = {
     "retirement_probe.py": "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624",
     "retirement_validation.py": "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e",
 }
+RETIREMENT_STOP_HELPERS = {
+    **RETIREMENT_HELPERS,
+    "retirement_stop_validation.py": "f0dd83ad2f3bc78dbe9018c100661a5ec1cec6b2fa9bee08eef6ec91cb67ff87",
+}
+RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
 ASTOCK_ERROR_DETAILS = {
     "astock_import_contract_rejected",
@@ -181,6 +189,31 @@ RETIREMENT_CASE_IDS = {
     "term-control",
 }
 RETIREMENT_PROPERTIES = "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,ExecMainCode,ExecMainStatus,ExecMainExitTimestampMonotonic,Result,Transient"
+RETIREMENT_STOP_PROPERTIES = (
+    RETIREMENT_PROPERTIES
+    + ",KillSignal,KillMode,SendSIGKILL,SendSIGHUP,TimeoutStopUSec,Restart,ExecStop,ExecStopPost,WatchdogUSec,RuntimeMaxUSec,NRestarts,RemainAfterExit,Job"
+)
+RETIREMENT_OBSERVER_PROPERTIES = (
+    RETIREMENT_PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit"
+)
+RETIREMENT_PYTHON_VERSION_COMMAND = [
+    "/usr/bin/python3.12",
+    "-I",
+    "-S",
+    "-B",
+    "-c",
+    "import sys; print('.'.join(map(str,sys.version_info[:3])))",
+]
+RETIREMENT_OBSERVER_INVENTORY = [
+    "/usr/bin/systemctl",
+    "list-units",
+    "--all",
+    "--no-pager",
+    "--no-legend",
+    "--plain",
+    "prism-retirement-stop-ref-*.service",
+]
+
 INTEGRATION_BOOT_CHECKS = {
     "production_environment_denied",
     "production_process_environment_denied",
@@ -628,7 +661,20 @@ def validate_archive(raw, expected, manifest_digest):
 
 def run_command(args, *, env=None, timeout=120):
     """Suppress package/systemd logs: they can contain paths or configuration."""
-    capture = args[:2] == ["/usr/bin/systemctl", "show"]
+    capture = (
+        args[:2] == ["/usr/bin/systemctl", "show"]
+        or args
+        in (
+            RETIREMENT_PYTHON_VERSION_COMMAND,
+            RETIREMENT_OBSERVER_INVENTORY,
+            LIVE_RESOLVE_COMMAND,
+        )
+        or (
+            len(args) == 6
+            and args[:5] == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
+            and re.fullmatch(r"prism-live-(?:worker|broker)-[0-9a-f]{12}-[0-9a-f]{32}\.service", args[5])
+        )
+    )
     result = subprocess.run(
         args,
         env=env,
@@ -648,17 +694,35 @@ def run_command(args, *, env=None, timeout=120):
         )
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
     )
-    missing_retirement = (
-        capture
-        and args[2:3] == ["--property=" + RETIREMENT_PROPERTIES]
-        and len(args) == 4
-        and re.fullmatch(
-            r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
-            args[-1],
+    retirement_properties = None
+    if len(args) == 4 and args[:2] == ["/usr/bin/systemctl", "show"]:
+        patterns = (
+            (
+                RETIREMENT_PROPERTIES,
+                r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
+            ),
+            (
+                RETIREMENT_STOP_PROPERTIES,
+                r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
+            ),
+            (
+                RETIREMENT_OBSERVER_PROPERTIES,
+                r"prism-retirement-stop-ref-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
+            ),
         )
+        retirement_properties = next(
+            (
+                properties
+                for properties, pattern in patterns
+                if args[2] == "--property=" + properties and re.fullmatch(pattern, args[3])
+            ),
+            None,
+        )
+    missing_retirement = (
+        retirement_properties is not None
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
         and all(
-            line.split(b"=", 1)[0].decode("ascii", "replace") in RETIREMENT_PROPERTIES.split(",")
+            line.split(b"=", 1)[0].decode("ascii", "replace") in retirement_properties.split(",")
             for line in (result.stdout or b"").splitlines()
         )
     )
@@ -2362,7 +2426,11 @@ class RemoteRelease:
         module = types.ModuleType("reviewed_live_integration_validation")
         module.__file__ = str(directory / "live_integration_validation.py")
         exec(compile(sealed["live_integration_validation.py"], module.__file__, "exec"), module.__dict__)
-        if module.SOURCE_PINS != LIVE_SOURCE_PINS or module.SAFE_ERRORS != LIVE_ERRORS:
+        if (
+            module.SOURCE_PINS != LIVE_SOURCE_PINS
+            or module.SAFE_ERRORS != LIVE_ERRORS
+            or module.RESOLVE_CODE != LIVE_RESOLVE_CODE
+        ):
             raise ReleaseError("live_helper_source_rejected")
         self._live_module = module
         try:
@@ -2950,14 +3018,10 @@ class RemoteRelease:
                             "--shell",
                             "/usr/sbin/nologin",
                         ] and argv[-1] in {"prism-integration", "prism-integration-broker"}
-                    elif argv == ["/usr/sbin/groupadd", "--system", "prism-integration-bridge"] or argv == [
-                        "/usr/bin/python3",
-                        "-I",
-                        "-B",
-                        "-S",
-                        "-c",
-                        module.RESOLVE_CODE,
-                    ]:
+                    elif argv in (
+                        ["/usr/sbin/groupadd", "--system", "prism-integration-bridge"],
+                        LIVE_RESOLVE_COMMAND,
+                    ):
                         allowed = True
                     if not allowed:
                         raise ReleaseError("live_command_rejected")
@@ -3484,12 +3548,13 @@ class RemoteRelease:
                 self.action_report = report
                 self.write(receipt, encoded(report))
 
-    def retirement_sources(self):
-        supplied = self.request.get("retirement_helpers")
-        if type(supplied) is not dict or set(supplied) != set(RETIREMENT_HELPERS):
+    def retirement_sources(self, *, stop=False):
+        approved_helpers = RETIREMENT_STOP_HELPERS if stop else RETIREMENT_HELPERS
+        supplied = self.request.get("retirement_stop_helpers" if stop else "retirement_helpers")
+        if type(supplied) is not dict or set(supplied) != set(approved_helpers):
             raise ReleaseError("approved_retirement_helpers_required")
         contents = {}
-        for filename, approved in RETIREMENT_HELPERS.items():
+        for filename, approved in approved_helpers.items():
             item = supplied[filename]
             if (
                 type(item) is not dict
@@ -3508,8 +3573,9 @@ class RemoteRelease:
             contents[filename] = raw
         return contents
 
-    def retirement_sealed_sources(self, directory):
-        for path, names in ((directory, {"scripts"}), (directory / "scripts", set(RETIREMENT_HELPERS))):
+    def retirement_sealed_sources(self, directory, *, stop=False):
+        approved_helpers = RETIREMENT_STOP_HELPERS if stop else RETIREMENT_HELPERS
+        for path, names in ((directory, {"scripts"}), (directory / "scripts", set(approved_helpers))):
             self.checked(path)
             info = path.lstat()
             if (
@@ -3520,7 +3586,7 @@ class RemoteRelease:
             ):
                 raise ReleaseError("retirement_helper_directory_rejected")
         contents = {}
-        for filename, expected in RETIREMENT_HELPERS.items():
+        for filename, expected in approved_helpers.items():
             path = self.checked(directory / "scripts" / filename)
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             with os.fdopen(fd, "rb") as source:
@@ -3543,9 +3609,10 @@ class RemoteRelease:
             contents[filename] = raw
         return contents
 
-    def install_retirement_helpers(self, contents):
+    def install_retirement_helpers(self, contents, *, stop=False):
+        approved_helpers = RETIREMENT_STOP_HELPERS if stop else RETIREMENT_HELPERS
         directory = self.checked(
-            self.root / "opt/prism/validation/helpers" / digest(encoded(RETIREMENT_HELPERS))
+            self.root / "opt/prism/validation/helpers" / digest(encoded(approved_helpers))
         )
         if not directory.exists():
             self.boundary("retirement_install_helpers")
@@ -3557,21 +3624,22 @@ class RemoteRelease:
                 self.write(directory / "scripts" / filename, raw, 0o444)
             (directory / "scripts").chmod(0o555)
             directory.chmod(0o555)
-        self.retirement_sealed_sources(directory)
+        self.retirement_sealed_sources(directory, stop=stop)
         return directory
 
     @contextmanager
-    def retirement_modules(self, directory):
-        names = ("scripts", "scripts.retirement_probe", "scripts.retirement_validation")
+    def retirement_modules(self, directory, *, stop=False):
+        approved_helpers = RETIREMENT_STOP_HELPERS if stop else RETIREMENT_HELPERS
+        names = ("scripts", *("scripts." + name.removesuffix(".py") for name in approved_helpers))
         if any(name in sys.modules for name in names):
             raise ReleaseError("retirement_module_namespace_rejected")
-        contents = self.retirement_sealed_sources(directory)
+        contents = self.retirement_sealed_sources(directory, stop=stop)
         package = types.ModuleType("scripts")
         package.__path__ = [str(directory / "scripts")]
         sys.modules["scripts"] = package
         try:
             modules = {}
-            for filename in RETIREMENT_HELPERS:
+            for filename in approved_helpers:
                 short = filename.removesuffix(".py")
                 module = types.ModuleType("scripts." + short)
                 module.__file__, module.__package__ = str(directory / "scripts" / filename), "scripts"
@@ -3579,7 +3647,7 @@ class RemoteRelease:
                 sys.modules[module.__name__] = module
                 exec(compile(contents[filename], module.__file__, "exec"), module.__dict__)
                 modules[short] = module
-            yield modules["retirement_probe"], modules["retirement_validation"]
+            yield tuple(modules[name.removesuffix(".py")] for name in approved_helpers)
         finally:
             for name in reversed(names):
                 sys.modules.pop(name, None)
@@ -3903,6 +3971,599 @@ class RemoteRelease:
                     }
                 ),
             )
+
+    def retirement_private_record(self, path, *, limit=262144, json_value=True):
+        """Read a controller-owned immutable record, never a candidate-supplied path."""
+        path = self.checked(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+                or info.st_size > limit
+                or (self.root == Path("/") and info.st_uid != 0)
+            ):
+                raise ReleaseError("retirement_private_record_rejected")
+            raw = source.read(limit + 1)
+            if (
+                len(raw) > limit
+                or self.cli_identity(info) != self.cli_identity(os.fstat(source.fileno()))
+                or self.cli_identity(info) != self.cli_identity(path.lstat())
+            ):
+                raise ReleaseError("retirement_private_record_changed")
+        try:
+            return (json.loads(raw) if json_value else raw), digest(raw)
+        except (ValueError, UnicodeError):
+            raise ReleaseError("retirement_private_record_rejected") from None
+
+    def retirement_signal_proof(self, baseline, bindings, probe, validation):
+        attempt = self.request.get("retirement_proof_attempt")
+        if type(attempt) is not str or not RELEASE_ID.fullmatch(attempt):
+            raise ReleaseError("retirement_signal_proof_required")
+        directory = self.checked(self.record / "legacy-retirement" / attempt)
+        if not directory.is_dir():
+            raise ReleaseError("retirement_signal_proof_required")
+        identity, identity_sha = self.retirement_private_record(directory / "identity.json")
+        if identity != {
+            "commit": self.request["commit"],
+            "attempt": attempt,
+            "helpers": RETIREMENT_HELPERS,
+            "baseline": baseline,
+        }:
+            raise ReleaseError("retirement_signal_proof_identity_changed")
+        receipt, receipt_sha = self.retirement_private_record(directory / "receipt.json")
+        keys = {
+            "attempt",
+            "summary",
+            "events",
+            "last_event_sha256",
+            "production_verified",
+            "passed",
+            "baseline_verified_after",
+            "failure_code",
+        }
+        if (
+            type(receipt) is not dict
+            or set(receipt) != keys
+            or receipt["attempt"] != attempt
+            or receipt["passed"] is not True
+            or receipt["production_verified"] is not False
+            or receipt["baseline_verified_after"] is not True
+            or receipt["failure_code"] is not None
+            or type(receipt["events"]) is not int
+            or not 1 <= receipt["events"] <= 256
+        ):
+            raise ReleaseError("retirement_signal_proof_required")
+        summary = self.retirement_summary(receipt["summary"], bindings, probe, validation)
+        if not summary["retirement_validation_passed"] or not summary["synthetic_cleanup_verified"]:
+            raise ReleaseError("retirement_signal_proof_required")
+        plan = probe.descriptor(bindings, nonce="0" * 32)
+        expected = {case["case_id"]: case["expectation"] for case in plan["cases"]}
+        for case in summary["cases"]:
+            positive = expected[case["case_id"]] == "executor_preserved"
+            if case["executor_results_preserved"] is not positive or case["expected_counterexample"] is not (
+                not positive
+            ):
+                raise ReleaseError("retirement_signal_proof_case_rejected")
+        raw, events_sha = self.retirement_private_record(
+            directory / "events.jsonl", limit=1048576, json_value=False
+        )
+        lines, chain = raw.splitlines(keepends=True), "0" * 64
+        observed, nonce, final = {}, None, None
+        try:
+            for number, line in enumerate(lines, 1):
+                row = json.loads(line)
+                if (
+                    type(row) is not dict
+                    or set(row) != {"sequence", "at", "previous_sha256", "event", "details"}
+                    or type(row["sequence"]) is not int
+                    or row["sequence"] != number
+                    or type(row["at"]) is not int
+                    or row["at"] <= 0
+                    or row["previous_sha256"] != chain
+                    or not line.endswith(b"\n")
+                    or final is not None
+                ):
+                    raise ReleaseError("retirement_signal_proof_chain_rejected")
+                details = self.retirement_event(row["event"], row["details"], bindings, probe, validation)
+                case_id = details.get("case_id")
+                if case_id:
+                    per_case = observed.setdefault(case_id, {})
+                    if row["event"] in per_case:
+                        raise ReleaseError("retirement_signal_proof_chain_rejected")
+                    per_case[row["event"]] = details
+                    if row["event"] == "synthetic_start_intent":
+                        nonce = nonce or details["nonce"]
+                        if nonce != details["nonce"]:
+                            raise ReleaseError("retirement_signal_proof_chain_rejected")
+                if row["event"] == "retirement_validation_result":
+                    final = details
+                chain = digest(line)
+        except (ValueError, UnicodeError, TypeError, AttributeError):
+            raise ReleaseError("retirement_signal_proof_chain_rejected") from None
+        if (
+            len(lines) != receipt["events"]
+            or chain != receipt["last_event_sha256"]
+            or final != summary
+            or set(observed) != RETIREMENT_CASE_IDS
+        ):
+            raise ReleaseError("retirement_signal_proof_chain_rejected")
+        summary_cases = {case["case_id"]: case for case in summary["cases"]}
+        for case_id, events in observed.items():
+            required = {
+                "synthetic_start_intent",
+                "actual_isolation_verified",
+                "synthetic_signal_intent",
+                "synthetic_exit_observed",
+                "synthetic_case_result",
+            }
+            if not required <= set(events) or events["synthetic_case_result"] != summary_cases[case_id]:
+                raise ReleaseError("retirement_signal_proof_case_rejected")
+            order = list(events)
+            phases = [
+                "synthetic_start_intent",
+                "actual_isolation_verified",
+                "synthetic_signal_intent",
+                "synthetic_exit_observed",
+                "synthetic_case_result",
+            ]
+            if [order.index(phase) for phase in phases] != sorted(order.index(phase) for phase in phases):
+                raise ReleaseError("retirement_signal_proof_case_rejected")
+            isolation, signal = events["actual_isolation_verified"], events["synthetic_signal_intent"]
+            descriptor = probe._case(probe.descriptor(bindings, nonce=nonce), case_id)
+            if (
+                isolation["invocation_id"] != signal["invocation_id"]
+                or isolation["control_group"] != descriptor["control_group"]
+                or signal["signal"] != descriptor["signal"]
+                or isolation["main_pid"] <= 1
+                or isolation["uid"] <= 0
+                or isolation["start_ticks"] <= 0
+                or signal["signal_at_monotonic_us"] <= 0
+            ):
+                raise ReleaseError("retirement_signal_proof_case_rejected")
+        return {
+            "attempt": attempt,
+            "identity_sha256": identity_sha,
+            "receipt_sha256": receipt_sha,
+            "events_sha256": events_sha,
+            "last_event_sha256": chain,
+        }
+
+    def retirement_stop_summary(self, value, bindings, probe, validation, stop):
+        fixed = {
+            "schema": 1,
+            "bindings": bindings,
+            "stop_binding_sha256": stop.descriptor(
+                bindings, expected_python_sha256=RETIREMENT_SYSTEM_PYTHON_SHA256
+            )["binding_sha256"],
+            "actual_linux_collection": True,
+            "production_quiescence_proven": False,
+            "all_production_memory_persisted": False,
+            "task_census_still_required": True,
+            "python_version": "3.12.3",
+            "python_binary_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
+            "probe_source_sha256": RETIREMENT_HELPERS["retirement_probe.py"],
+            "validation_source_sha256": RETIREMENT_HELPERS["retirement_validation.py"],
+            "bundle_sha256": probe.bundle_identity(),
+            "uvicorn_server_sha256": probe.UVICORN_SHA256,
+            "uvloop_binary_sha256": probe.UVLOOP_SHA256,
+            "policy_sha256": probe.sha256(probe.encoded(stop.POLICY)),
+        }
+        keys = {
+            *fixed,
+            "retirement_stop_validation_passed",
+            "systemctl_stop_end_to_end_proven",
+            "synthetic_cleanup_verified",
+            "cases",
+        }
+        if (
+            type(value) is not dict
+            or set(value) not in (keys, keys | {"error_code"})
+            or any(type(value.get(k)) is not type(v) or value[k] != v for k, v in fixed.items())
+            or any(
+                type(value.get(k)) is not bool
+                for k in (
+                    "retirement_stop_validation_passed",
+                    "systemctl_stop_end_to_end_proven",
+                    "synthetic_cleanup_verified",
+                )
+            )
+            or value["systemctl_stop_end_to_end_proven"] != value["retirement_stop_validation_passed"]
+            or type(value["cases"]) is not list
+            or len(value["cases"]) > 2
+        ):
+            raise ReleaseError("retirement_stop_safe_result_rejected")
+        for case in value["cases"]:
+            self.retirement_case_result(case)
+            if case["case_id"] not in stop.CASES or case["expected_counterexample"] is not False:
+                raise ReleaseError("retirement_stop_safe_result_rejected")
+        ids = [case["case_id"] for case in value["cases"]]
+        if ids != list(stop.CASES)[: len(ids)]:
+            raise ReleaseError("retirement_stop_safe_result_rejected")
+        if "error_code" in value and (
+            type(value["error_code"]) is not str
+            or not re.fullmatch(r"retirement_[a-z0-9_]{1,90}", value["error_code"])
+            or value["retirement_stop_validation_passed"]
+        ):
+            raise ReleaseError("retirement_stop_safe_result_rejected")
+        if value["retirement_stop_validation_passed"] and (
+            ids != list(stop.CASES)
+            or not value["synthetic_cleanup_verified"]
+            or not all(
+                case["passed"] and case["clean_exit_zero"] and case["executor_results_preserved"]
+                for case in value["cases"]
+            )
+        ):
+            raise ReleaseError("retirement_stop_safe_result_rejected")
+        return value
+
+    def retirement_stop_event(self, event, value, bindings, probe, validation, stop):
+        if event == "retirement_stop_validation_result":
+            return self.retirement_stop_summary(value, bindings, probe, validation, stop)
+        if event in {
+            "bundle_copy_intent",
+            "public_bundles_verified",
+            "synthetic_start_intent",
+            "synthetic_exit_observed",
+        }:
+            value = self.retirement_event(event, value, bindings, probe, validation)
+            if "case_id" in value and value["case_id"] not in stop.CASES:
+                raise ReleaseError("retirement_stop_safe_event_rejected")
+            return value
+        fields = {
+            "synthetic_observer_release_intent": {"case_id": "case", "invocation_id": "nonce"},
+            "synthetic_observer_start_intent": {"case_id": "case"},
+            "synthetic_stop_actual_isolation": {
+                "case_id": "case",
+                "invocation": "nonce",
+                "pid": "positive",
+                "uid": "positive",
+                "start_ticks": "positive",
+                "actual_kernel_verified": "true",
+            },
+            "synthetic_stop_intent": {
+                "case_id": "case",
+                "invocation_id": "nonce",
+                "pid": "positive",
+                "start_ticks": "positive",
+                "stop_at_monotonic_us": "positive",
+            },
+            "synthetic_stop_committed": {"case_id": "case", "invocation_id": "nonce"},
+            "synthetic_stop_runner_join_observed": {
+                "case_id": "case",
+                "stop_job_waited_with_executor_pending": "true",
+            },
+        }.get(event)
+        if event == "synthetic_stop_case_result":
+            extra = {"systemctl_stop_end_to_end_proven", "stop_dispatches", "exit_monotonic_us"}
+            if type(value) is not dict or not extra <= set(value):
+                raise ReleaseError("retirement_stop_safe_event_rejected")
+            self.retirement_case_result({k: v for k, v in value.items() if k not in extra})
+            if (
+                value["case_id"] not in stop.CASES
+                or value["expected_counterexample"] is not False
+                or value["systemctl_stop_end_to_end_proven"] is not True
+                or type(value["stop_dispatches"]) is not int
+                or value["stop_dispatches"] != 1
+                or type(value["exit_monotonic_us"]) is not int
+                or not 0 < value["exit_monotonic_us"] < 2**63
+            ):
+                raise ReleaseError("retirement_stop_safe_event_rejected")
+            return value
+        if fields is None or type(value) is not dict or set(value) != set(fields):
+            raise ReleaseError("retirement_stop_safe_event_rejected")
+        for key, kind in fields.items():
+            item = value[key]
+            valid = (
+                item is True
+                if kind == "true"
+                else type(item) is int and 0 < item < 2**63
+                if kind == "positive"
+                else type(item) is str
+                and (item in stop.CASES if kind == "case" else bool(re.fullmatch(r"[0-9a-f]{32}", item)))
+            )
+            if not valid:
+                raise ReleaseError("retirement_stop_safe_event_rejected")
+        return value
+
+    def validate_legacy_stop(self):
+        self.verify_tree()
+        attempt = self.request.get("retirement_stop_attempt")
+        if type(attempt) is not str or not RELEASE_ID.fullmatch(attempt):
+            raise ReleaseError("explicit_retirement_stop_attempt_required")
+        if self.request["receipts"].get("system_python_sha256") != RETIREMENT_SYSTEM_PYTHON_SHA256:
+            raise ReleaseError("retirement_system_python_binding_required")
+        contents = self.retirement_sources(stop=True)
+        baseline = self.retirement_baseline()
+        bindings = {
+            "commit": self.request["commit"],
+            "release_id": self.request["release_id"],
+            "base_environment_sha256": baseline["base_environment_sha256"],
+        }
+        directory = self.checked(self.record / "legacy-stop" / attempt)
+        if directory.exists():
+            raise ReleaseError("retirement_stop_attempt_already_exists")
+        # A failed/partial stop is not permission for a new nonce or uncertain retry.
+        parent = directory.parent
+        if parent.exists():
+            for previous in parent.iterdir():
+                prior, _ = self.retirement_private_record(previous / "receipt.json")
+                if (
+                    prior.get("passed") is not True
+                    or prior.get("baseline_verified_after") is not True
+                    or prior.get("summary", {}).get("synthetic_cleanup_verified") is not True
+                ):
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
+        helper_root = self.install_retirement_helpers(contents, stop=True)
+        with self.retirement_modules(helper_root, stop=True) as (probe, validation, stop):
+            proof = self.retirement_signal_proof(baseline, bindings, probe, validation)
+            self.boundary("retirement_stop_attempt")
+            if self.retirement_baseline() != baseline:
+                raise ReleaseError("retirement_original_baseline_changed")
+            directory.mkdir(parents=True, mode=0o700)
+            self.write(
+                directory / "identity.json",
+                encoded(
+                    {
+                        "commit": self.request["commit"],
+                        "attempt": attempt,
+                        "helpers": RETIREMENT_STOP_HELPERS,
+                        "baseline": baseline,
+                        "signal_proof": proof,
+                        "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
+                    }
+                ),
+            )
+            fd = os.open(
+                self.checked(directory / "events.jsonl"),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+            )
+            count, chain, summary, recorded = 0, "0" * 64, None, None
+            passed, after, error_code, cancelled = False, False, None, None
+            nonce, plan = None, None
+            state, consumed, observer_consumed = {}, set(), set()
+            allowed_boundaries = {"retirement_copy_public_libraries"} | {
+                "retirement_stop_" + phase + "_" + case
+                for phase in ("start", "observer", "prepare", "dispatch")
+                for case in stop.CASES
+            }
+            try:
+                for path in (directory, directory.parent, self.record):
+                    parent_fd = os.open(
+                        self.checked(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                    )
+                    try:
+                        os.fsync(parent_fd)
+                    finally:
+                        os.close(parent_fd)
+
+                def bind_nonce(value):
+                    nonlocal nonce, plan
+                    if nonce is not None and value != nonce:
+                        raise ReleaseError("retirement_stop_nonce_changed")
+                    nonce = value
+                    plan = probe.descriptor(bindings, nonce=nonce)
+
+                def boundary(label):
+                    nonlocal cancelled
+                    if label not in allowed_boundaries:
+                        raise ReleaseError("retirement_stop_boundary_rejected")
+                    try:
+                        self.boundary(label)
+                    except ReleaseError as error:
+                        if str(error) in {
+                            "operator_stop",
+                            "fresh_operator_permit_required",
+                            "permit_timeout",
+                            "controller_disconnected",
+                        }:
+                            cancelled = str(error)
+                        raise
+                    if self.retirement_baseline() != baseline:
+                        raise ReleaseError("retirement_original_baseline_changed")
+
+                def record(event, value):
+                    nonlocal count, chain, recorded
+                    value = self.retirement_stop_event(event, value, bindings, probe, validation, stop)
+                    value = json.loads(encoded(value))
+                    if recorded is not None:
+                        raise ReleaseError("retirement_events_after_summary_rejected")
+                    case_id = value.get("case_id")
+                    if case_id:
+                        events = state.setdefault(case_id, {})
+                        if event in events:
+                            raise ReleaseError("retirement_stop_duplicate_event")
+                        if event == "synthetic_start_intent":
+                            bind_nonce(value["nonce"])
+                        elif event == "synthetic_stop_actual_isolation":
+                            if "synthetic_start_intent" not in events or value["pid"] <= 1:
+                                raise ReleaseError("retirement_stop_event_order_rejected")
+                        elif event in {"synthetic_stop_intent", "synthetic_stop_committed"}:
+                            live = events.get("synthetic_stop_actual_isolation", {})
+                            if value["invocation_id"] != live.get("invocation"):
+                                raise ReleaseError("retirement_stop_event_identity_rejected")
+                            if event == "synthetic_stop_intent" and any(
+                                value[k] != live.get(k) for k in ("pid", "start_ticks")
+                            ):
+                                raise ReleaseError("retirement_stop_event_identity_rejected")
+                            if event == "synthetic_stop_committed" and "synthetic_stop_intent" not in events:
+                                raise ReleaseError("retirement_stop_event_order_rejected")
+                        elif (
+                            event == "synthetic_stop_runner_join_observed"
+                            and case_id not in consumed
+                            or event == "synthetic_stop_case_result"
+                            and (
+                                case_id not in consumed
+                                or "synthetic_stop_runner_join_observed" not in events
+                                or value["exit_monotonic_us"]
+                                <= events["synthetic_stop_intent"]["stop_at_monotonic_us"]
+                            )
+                        ):
+                            raise ReleaseError("retirement_stop_event_order_rejected")
+                        events[event] = value
+                    if (
+                        event == "retirement_stop_validation_result"
+                        and value["retirement_stop_validation_passed"]
+                    ):
+                        for case in value["cases"]:
+                            events = state.get(case["case_id"], {})
+                            observed = events.get("synthetic_stop_case_result", {})
+                            if (
+                                case["case_id"] not in consumed
+                                or case["case_id"] not in observer_consumed
+                                or {k: observed.get(k) for k in case} != case
+                            ):
+                                raise ReleaseError("retirement_stop_durable_case_required")
+                    entry = (
+                        encoded(
+                            {
+                                "sequence": count + 1,
+                                "at": int(self.now()),
+                                "previous_sha256": chain,
+                                "event": event,
+                                "details": value,
+                            }
+                        )
+                        + b"\n"
+                    )
+                    if len(entry) > 16384 or count >= 256:
+                        raise ReleaseError("retirement_event_limit")
+                    offset = 0
+                    while offset < len(entry):
+                        written = os.write(fd, entry[offset:])
+                        if written <= 0:
+                            raise ReleaseError("retirement_event_write_failed")
+                        offset += written
+                    os.fsync(fd)
+                    count += 1
+                    chain = digest(entry)
+                    if event == "retirement_stop_validation_result":
+                        recorded = value
+
+                def run(argv, *, timeout):
+                    nonlocal cancelled
+                    if (
+                        type(argv) is not list
+                        or any(type(arg) is not str for arg in argv)
+                        or type(timeout) not in {int, float}
+                        or not 0 < timeout <= 15
+                    ):
+                        raise ReleaseError("retirement_stop_command_rejected")
+                    try:
+                        self.stop()
+                    except ReleaseError as error:
+                        cancelled = str(error)
+                        raise
+                    if argv == stop.VERSION_COMMAND or argv == stop.OBSERVER_INVENTORY:
+                        return self.run(argv, timeout=timeout)
+                    if argv == ["/usr/bin/systemctl", "show", "--property=" + validation.PROPERTIES, SERVICE]:
+                        return self.run(argv, timeout=timeout)
+                    if len(argv) == 4 and argv[:2] == ["/usr/bin/systemctl", "show"]:
+                        match = re.fullmatch(
+                            r"prism-retirement-(probe|stop-ref)-([0-9a-f]{32})-(int-executor|int-post)\.service",
+                            argv[3],
+                        )
+                        if match:
+                            bind_nonce(match[2])
+                            properties = stop.PROPERTIES if match[1] == "probe" else stop.OBSERVER_PROPERTIES
+                            if argv[2] == "--property=" + properties:
+                                return self.run(argv, timeout=timeout)
+                    if plan is not None:
+                        for case_id in stop.CASES:
+                            events = state.get(case_id, {})
+                            if (
+                                argv == validation.launch_command(plan, case_id)
+                                and "synthetic_start_intent" in events
+                            ):
+                                if "launch_dispatched" in events:
+                                    raise ReleaseError("retirement_stop_command_already_consumed")
+                                events["launch_dispatched"] = True
+                                return self.run(argv, timeout=timeout)
+                            if (
+                                argv == stop.observer_command(plan, case_id)
+                                and "synthetic_observer_start_intent" in events
+                            ):
+                                if "observer_dispatched" in events:
+                                    raise ReleaseError("retirement_stop_command_already_consumed")
+                                events["observer_dispatched"] = True
+                                return self.run(argv, timeout=timeout)
+                            unit = probe._case(plan, case_id)["unit"]
+                            observer = stop.observer_unit(plan, case_id)
+                            if argv == ["/usr/bin/systemctl", "stop", "--no-block", unit]:
+                                if "synthetic_stop_committed" not in events or case_id in consumed:
+                                    raise ReleaseError("retirement_stop_command_already_consumed")
+                                consumed.add(case_id)  # Before uncertain delivery: never retry.
+                                return self.run(argv, timeout=timeout)
+                            if argv == ["/usr/bin/systemctl", "stop", "--no-block", observer]:
+                                if (
+                                    "synthetic_observer_release_intent" not in events
+                                    or case_id in observer_consumed
+                                ):
+                                    raise ReleaseError("retirement_stop_command_already_consumed")
+                                try:
+                                    self.boundary("retirement_stop_release_observer_" + case_id)
+                                except ReleaseError as error:
+                                    if str(error) in {
+                                        "operator_stop",
+                                        "fresh_operator_permit_required",
+                                        "permit_timeout",
+                                        "controller_disconnected",
+                                    }:
+                                        cancelled = str(error)
+                                    raise
+                                if self.retirement_baseline() != baseline:
+                                    raise ReleaseError("retirement_original_baseline_changed")
+                                observer_consumed.add(case_id)
+                                return self.run(argv, timeout=timeout)
+                    raise ReleaseError("retirement_stop_command_rejected")
+
+                summary = self.retirement_stop_summary(
+                    stop.run_stop_validation(
+                        bindings,
+                        expected_python_sha256=RETIREMENT_SYSTEM_PYTHON_SHA256,
+                        boundary=boundary,
+                        run=run,
+                        record=record,
+                    ),
+                    bindings,
+                    probe,
+                    validation,
+                    stop,
+                )
+                if recorded != summary:
+                    raise ReleaseError("retirement_durable_summary_required")
+                if cancelled is not None:
+                    raise ReleaseError(cancelled)
+                if self.retirement_baseline() != baseline:
+                    raise ReleaseError("retirement_original_baseline_changed")
+                after = True
+                if (
+                    not summary["retirement_stop_validation_passed"]
+                    or not summary["synthetic_cleanup_verified"]
+                ):
+                    raise ReleaseError("legacy_stop_validation_failed")
+                passed = True
+            except Exception as error:
+                error_code = failure_code(error)
+                raise
+            finally:
+                os.close(fd)
+                report = {
+                    "attempt": attempt,
+                    "signal_proof": proof,
+                    "summary": summary,
+                    "events": count,
+                    "last_event_sha256": chain,
+                    "production_verified": False,
+                    "passed": passed,
+                    "baseline_verified_after": after,
+                    "failure_code": error_code,
+                }
+                self.write(directory / "receipt.json", encoded(report))
+                self.action_report = report
 
     def seed_stage_probes(self, stage):
         """Create disposable owners only in the not-yet-started private DB copy."""
@@ -4870,6 +5531,8 @@ class RemoteRelease:
                     result["integration"] = self.action_report
                 elif request["action"] == "validate_legacy_retirement":
                     result["legacy_retirement"] = self.action_report
+                elif request["action"] == "validate_legacy_stop":
+                    result["legacy_stop"] = self.action_report
                 return result
             except Exception as error:
                 self.journal(

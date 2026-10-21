@@ -136,6 +136,14 @@ Mac 必须提供两个已批准的公开 helper 的固定摘要；远端再次�
 
 实际 Linux 首轮合成服务因不存在的必需屏蔽子目录，在 Python 启动前以 226/NAMESPACE 失败。后续描述符改用实际存在的 `/var/lib` 与 `/etc` 祖先遮罩，限制更严格，不创建那些生产目录。命名空间启动失败只有在原 Invocation/ExecMainPID、退出码 226、无存活 PID、空运行目录及空或不存在的递归 cgroup 一致时，才可记录无工作负载；原失败 unit 与回执保留，不发送清理信号，也不将失败改成通过。
 
+### 合成 systemctl stop 端到端验收
+
+`validate_legacy_stop` 是独立实验动作，接线及禁网测试不能替代实际 Linux 停止回执。它只覆盖 `int-executor`、`int-post` 两个合成服务及其空 observer，不停止 `stock-app.service`、Vibe 或 staging。必须显式提供新的 `--retirement-stop-attempt`、既有成功信号实验的 `--retirement-proof-attempt` 和三个固定摘要：`--retirement-probe-sha256`、`--retirement-validation-sha256`、`--retirement-stop-sha256`。私有 receipts 还须绑定已审核系统 Python 的 `system_python_sha256`；helper 实际复核系统 Python 字节与 3.12.3 版本，不接受候选自行声明。
+
+前置证明只从同一 release 的 root 私有控制器记录读取，核完整 identity、候选、原生产源码/运行指纹/旧环境、当前两 helper pin、事件链和最后 summary，并要求七个不同 case 均通过、清理和事后基线复核成功。三个正例与四个预期反例分别核对；反例通过只表示已观察到其限制。缺记录、摘要链变化、旧 pin 或基线漂移均拒绝。三个 helper 由 Mac 与远端双重固定摘要校验后封存 root 0555/0444，root 不导入候选或旧包。
+
+停止意图、身份和单次提交先追加到 `legacy-stop/<attempt>/events.jsonl`，逐条 fsync 并保留序号/摘要链。执行器只允许本次完整随机数下两服务和 observer 的精确启动、show、单次 `stop --no-block`、固定库存查询与版本查询；拒绝 kill、restart、其他 Python 和生产停止。每个受控边界重新取得 Issue #9/STOP 许可并核完整原基线，空 observer 释放也有独立许可。未确认的派发不重试；失败或部分记录保持原样，并阻止新 nonce 自动继续。成功必须有实际退出、递归 cgroup 空和持久结果证据。`systemctl_stop_end_to_end_proven` 只表示合成实验；`production_quiescence_proven`、`all_production_memory_persisted`、`production_verified` 仍为 false，真实任务清点仍必须完成。
+
 Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth 执行，结束后恢复 site 函数。来源核验只额外接受封存引擎内六个实际存在的 PEP 420 命名空间包：必须具有真正的 NamespaceLoader，唯一搜索目录与 spec 一致，且该目录为无链接、root 锁定的预期路径。混合路径、引擎外目录、任意无文件模块均拒绝。安全结果只增加固定枚举 error_detail，绝不记录原异常文本、模块名称或配置；真实 Linux 通过仍须单独取得新 attempt 的实际回执。
 
 ## 有界真实模型与搜索联调
@@ -143,6 +151,8 @@ Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth �
 本动作的 attempt 限 8–40 个 ASCII 小写字母、数字或连字符，避免固定 Unix socket 路径超限。worker 激活 site 时临时禁用系统和用户启动钩子、拒绝任何 .pth，并在 finally 恢复三个 site 函数，预加载的启动模块也拒绝。broker 在本次自身进程实际设置并回读 `RLIMIT_CORE=0` 和 `PR_SET_DUMPABLE=0` 后，才发出可信 preflight 的 `broker_memory_sealed=true`；root 将它绑定到当前允许文件，root reader 和 transport 均须核验。不能只依赖 core 管道处理器遵守大小限制。上述更改不操作主机 core 配置或生产进程。
 
 固定 `integration_live` 动作已实现接线和禁网回归，真实 Linux 运行仍须独立回执。Mac 必须显式给出新的 `--integration-attempt` 和四个已审查摘要：`--live-validation-sha256`、`--live-worker-sha256`、`--live-transport-sha256`、`--live-policy-sha256`。远端再次核固定摘要，将公开 helper 字节封存在 root 锁定目录；root 只编译标准库监督器，候选、模型 CLI 及第三方包在独立 UID 内执行。它不执行切流、生产重启或部署。
+
+根执行器只为已冻结的固定 DeepSeek DNS 解析命令和两个完整随机数 unit 的精确库存查询捕获公开元数据输出，解析源码同时与监督器核对；其他 Python 或任意 unit 查询不会因此获得输出通道。此连接修复本身不证明已发出模型请求或读取了凭证。
 
 生产非隐藏源码清单继续保持原遍历规则，`.env` 不进入源码清单或公开产物。新私有 receipts 使用 `model_environment` 的精确三个字段 `sha256`、`size`、`mode` 绑定原配置，值不得公开。摘要应来自已验证加密备份并与当前只读配置核对；当前 mode 绑定不能冒充旧备份 mode 已比对。读取器不执行 shell、dotenv 替换或配置代码，只选现有 `DEEPSEEK_API_KEY`；该项缺失时才允许旧 `LLM_API_KEY` fallback，不选其他供应商的 key。
 
