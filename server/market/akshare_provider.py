@@ -16,6 +16,7 @@ import re
 import time
 
 from ..config import AKSHARE_TIMEOUT
+from ..work_lifecycle import get_manager
 from .clock import market_timestamp
 from .models import Fundamentals, KLine, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
@@ -204,7 +205,8 @@ class AkshareProvider:
         symbol = _sina_symbol(ticker)
         try:
             df = await _with_timeout(
-                asyncio.to_thread(
+                get_manager().run_blocking(
+                    "market",
                     ak.stock_zh_a_daily,
                     symbol=symbol,
                     adjust="qfq",
@@ -263,7 +265,8 @@ class AkshareProvider:
         symbol = _sina_symbol(ticker)
         try:
             df = await _with_timeout(
-                asyncio.to_thread(
+                get_manager().run_blocking(
+                    "market",
                     ak.stock_zh_a_daily,
                     symbol=symbol,
                     adjust="qfq",

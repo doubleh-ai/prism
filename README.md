@@ -6,6 +6,10 @@
 
 # Prism
 
+> **本分支为 `v0.19.8-recovery` 有限恢复候选。** 唯一恢复入口为 `server.recovery:app`，不可用环境变量关闭限制。保留登录、本人数据库历史和行情读取；除登录/退出外，所有 API 写入返回 503。新研究、扫描、模型调用和旧共享 HTML/PDF 下载不开放。外部 CLI 档案和未归属文件保全，不自动认领。下述完整产品说明属于历史基线，不能作为本分支恢复能力承诺，也不要运行其快速安装命令来覆盖生产。
+
+该候选继承新增数据库字段和账号退休保护，不降级或恢复数据库。`server.main:app` 仅保留供旧基线回归，**不是安全恢复入口**。部署必须由外部受控执行器绑定完整提交、依赖锁、`server.recovery:app` 和真实恢复验收记录；本地测试不证明 Linux 隔离验证或生产恢复已经完成。具体边界见 [发布流程](docs/release-process.md)。
+
 > AI-powered investment research platform for the Chinese A-share market.
 > Multi-agent analysis, live market data, industry graph — all in one self-hosted app.
 

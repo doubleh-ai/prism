@@ -4,6 +4,14 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [v0.19.8-recovery] - 2026-10-21
+
+### 有限恢复入口
+- 固定使用 `server.recovery:app`，保留登录、退出、本人数据库历史和行情读取；新研究与其他 API 写入暂停。
+- 共享文件报告入口不开放，旧 Vibe GET 不恢复任务；页面与健康元信息持续标明恢复模式。
+- 保留增量数据库及退休用户名隔离；不回滚或删除用户数据。
+- 依赖哈希锁随候选保全；删除关闭 TLS 校验的旧安装脚本。
+
 ## [Unreleased] — 研究工作台
 
 ### Added

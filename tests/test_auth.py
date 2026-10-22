@@ -148,3 +148,37 @@ class TestRequireAuth:
         with pytest.raises(HTTPException) as exc:
             require_auth(request, optional=False)
         assert exc.value.status_code == 401
+
+
+@pytest.mark.parametrize("client_address", [None, ("127.0.0.2", 1234)])
+async def test_login_without_tcp_address_keeps_authentication_and_shared_rate_limit(
+    test_user, monkeypatch, client_address
+):
+    from httpx import ASGITransport, AsyncClient
+
+    from server import auth
+    from server.database import get_db
+    from server.main import app
+
+    monkeypatch.setattr(auth, "RATE_LOGIN_PER_MIN", 2)
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=client_address), base_url="http://stage.test"
+    ) as client:
+        response = await client.post("/api/login", json=test_user)
+        assert response.status_code == 200
+        assert (await client.get("/api/me")).json()["user"] == test_user["username"]
+        response = await client.post(
+            "/api/login",
+            json={**test_user, "password": "wrong"},
+            headers={"X-Forwarded-For": "198.51.100.12"},
+        )
+        assert response.status_code == 403
+        response = await client.post(
+            "/api/login", json=test_user, headers={"X-Forwarded-For": "198.51.100.13"}
+        )
+        assert response.status_code == 429
+    expected = "login:local-unix-socket" if client_address is None else "login:127.0.0.2"
+    with get_db() as db:
+        assert [row[0] for row in db.execute("SELECT key FROM rate_limits WHERE key LIKE 'login:%'")] == [
+            expected
+        ]

@@ -9,6 +9,8 @@ import time
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException
+
 from .config import DATA_DIR, SQLITE_MMAP_SIZE
 
 DB_PATH = DATA_DIR / "chat.db"
@@ -422,7 +424,81 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_analysis_runs_user_started
                 ON analysis_runs(username,started_at DESC);
+            CREATE TABLE IF NOT EXISTS owned_report_files (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                conv_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                filename TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_owned_report_files_owner
+                ON owned_report_files(username,conv_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS user_watchlist (
+                username TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(username,ticker)
+            );
+            CREATE TABLE IF NOT EXISTS retired_usernames (
+                username TEXT PRIMARY KEY,
+                retired_at INTEGER NOT NULL
+            );
         """)
+        # Preserve legacy orphaned data without assigning it to a newly created
+        # account with the same name. No historical records are deleted.
+        for table in (
+            "conversations",
+            "saved_reports",
+            "indicators",
+            "vibe_plans",
+            "indicator_scan_jobs",
+            "analysis_runs",
+            "capability_runs",
+            "capability_calls",
+            "owned_report_files",
+            "user_watchlist",
+            "research_runs",
+        ):
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]
+            ).fetchone():
+                continue
+            conn.execute(
+                f"INSERT OR IGNORE INTO retired_usernames(username,retired_at) "
+                f"SELECT DISTINCT username,strftime('%s','now') FROM {table} t "
+                "WHERE username<>'' AND NOT EXISTS(SELECT 1 FROM users u WHERE u.username=t.username)"
+            )
+        # Keep account isolation when an older compatible program is restored:
+        # legacy code cannot silently recreate a retired username either.
+        conn.executescript("""
+            CREATE TRIGGER IF NOT EXISTS users_retire_after_delete
+            AFTER DELETE ON users
+            BEGIN
+                INSERT OR IGNORE INTO retired_usernames(username,retired_at)
+                    VALUES(OLD.username,strftime('%s','now'));
+                DELETE FROM sessions WHERE username=OLD.username;
+                UPDATE capability_runs SET revoked=1 WHERE username=OLD.username;
+            END;
+            CREATE TRIGGER IF NOT EXISTS users_deny_retired_insert
+            BEFORE INSERT ON users
+            WHEN EXISTS(SELECT 1 FROM retired_usernames r WHERE r.username=NEW.username)
+            BEGIN
+                SELECT RAISE(ABORT,'retired_username');
+            END;
+        """)
+        with suppress(sqlite3.OperationalError):
+            conn.execute("ALTER TABLE capability_calls ADD COLUMN arguments_json TEXT NOT NULL DEFAULT '{}'")
+        for column in ("evaluated", "insufficient", "excluded"):
+            with suppress(sqlite3.OperationalError):
+                conn.execute(
+                    f"ALTER TABLE indicator_scan_jobs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
         for _col, _spec in {
             "params_json": "TEXT NOT NULL DEFAULT '{}'",
             "plan_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -445,9 +521,26 @@ def init_db():
 
 def create_user(username: str, password_hash: str):
     with get_db() as db:
-        db.execute(
-            "INSERT OR REPLACE INTO users (username, password_hash, disabled_at) VALUES (?,?,NULL)",
-            [username, password_hash],
+        db.execute("SAVEPOINT create_account")
+        try:
+            if db.execute("SELECT 1 FROM retired_usernames WHERE username=?", [username]).fetchone():
+                raise HTTPException(409, "该用户名已停用保留，不能重新创建；请使用新用户名")
+            cur = db.execute(
+                "INSERT OR IGNORE INTO users(username,password_hash) VALUES(?,?)", [username, password_hash]
+            )
+            if not cur.rowcount:
+                raise HTTPException(409, "用户名已存在")
+            db.execute("RELEASE create_account")
+        except BaseException:
+            db.execute("ROLLBACK TO create_account")
+            db.execute("RELEASE create_account")
+            raise
+
+
+def is_username_retired(username: str) -> bool:
+    with get_db() as db:
+        return (
+            db.execute("SELECT 1 FROM retired_usernames WHERE username=?", [username]).fetchone() is not None
         )
 
 
@@ -497,10 +590,24 @@ def set_user_disabled(username: str, disabled: bool) -> bool:
 
 def delete_user_account(username: str) -> bool:
     with get_db() as db:
-        cur = db.execute("DELETE FROM users WHERE username=?", [username])
-        db.execute("DELETE FROM sessions WHERE username=?", [username])
-        db.execute("DELETE FROM indicator_seed_versions WHERE username=?", [username])
-        return cur.rowcount > 0
+        db.execute("SAVEPOINT retire_account")
+        try:
+            if not db.execute("SELECT 1 FROM users WHERE username=?", [username]).fetchone():
+                db.execute("RELEASE retire_account")
+                return False
+            db.execute(
+                "INSERT OR IGNORE INTO retired_usernames(username,retired_at) VALUES(?,?)",
+                [username, int(time.time())],
+            )
+            db.execute("DELETE FROM sessions WHERE username=?", [username])
+            db.execute("UPDATE capability_runs SET revoked=1 WHERE username=?", [username])
+            db.execute("DELETE FROM users WHERE username=?", [username])
+            db.execute("RELEASE retire_account")
+            return True
+        except BaseException:
+            db.execute("ROLLBACK TO retire_account")
+            db.execute("RELEASE retire_account")
+            raise
 
 
 def admin_usage_stats() -> dict:

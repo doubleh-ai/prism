@@ -362,8 +362,8 @@ class TestReleaseMetadata:
         r = await client.get("/api/releases", cookies=auth_cookies)
         assert r.status_code == 200
         data = r.json()
-        assert data["version"] == "v0.19.7"
-        assert data["latest"]["version"] == "v0.19.7"
+        assert data["version"] == "v0.19.8-recovery"
+        assert data["latest"]["version"] == "v0.19.8-recovery"
         assert data["releases"]
         assert data["releases"][0]["sections"]
 
@@ -681,7 +681,7 @@ class TestAdminAccountManagement:
         r = await client.get("/api/admin/health", cookies=auth_cookies)
         assert r.status_code == 200
         data = r.json()
-        assert data["version"] == "v0.19.7"
+        assert data["version"] == "v0.19.8-recovery"
         assert "checks" in data
         assert "database" in data["checks"]
         assert "claude_cli" in data["checks"]

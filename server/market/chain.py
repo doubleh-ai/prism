@@ -9,8 +9,10 @@ exists either, raises :class:`NoProviderAvailable`.
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from ..work_adapters import async_work
+from ..work_lifecycle import WorkHandle, get_manager
 from .cache import MarketCache
 from .models import Fundamentals, KLine, Quote, SearchHit
 from .provider import (
@@ -20,9 +22,6 @@ from .provider import (
     ProviderUnavailable,
 )
 from .resample import resample_kline
-
-if TYPE_CHECKING:
-    import asyncio
 
 log = logging.getLogger("stock-app")
 
@@ -43,7 +42,7 @@ class ProviderChain:
         # coalescing_key share a single upstream task instead of all
         # hitting the provider. Without this, N concurrent users for
         # ticker 600519 would all burn provider quota in parallel.
-        self._inflight: dict[str, asyncio.Task] = {}
+        self._inflight: dict[str, WorkHandle] = {}
 
     def _cache_key(self, method: str, provider_name: str, *parts: str) -> str:
         return f"{method}:{provider_name}:" + ":".join(parts)
@@ -51,20 +50,30 @@ class ProviderChain:
     async def _coalesce(self, key: str, runner):
         """Run ``runner()``; if another caller is already running for ``key``,
         await its result instead of starting a duplicate call."""
-        import asyncio
+        handle = self._inflight.get(key)
+        if handle is None or handle.done():
 
-        existing = self._inflight.get(key)
-        if existing is not None and not existing.done():
-            return await existing
-        task = asyncio.create_task(runner())
-        self._inflight[key] = task
-        try:
-            return await task
-        finally:
-            # Only drop the entry if it's still ours; another call may
-            # have re-registered while we were awaiting.
-            if self._inflight.get(key) is task:
-                self._inflight.pop(key, None)
+            async def execute(_lease):
+                try:
+                    return await runner(), None
+                except Exception as exc:
+                    # A completed business failure can be retried after actual
+                    # resources finish. Cancellation/unknown BaseException still
+                    # fails the owned task and keeps it blocked for reconciliation.
+                    return None, exc
+
+            handle = get_manager().start("market", execute)
+            self._inflight[key] = handle
+
+            def completed(done):
+                if self._inflight.get(key) is done:
+                    self._inflight.pop(key, None)
+
+            handle.add_done_callback(completed)
+        value, error = await handle.wait_result()
+        if error is not None:
+            raise error
+        return value
 
     async def _with_failover(
         self,
@@ -117,6 +126,7 @@ class ProviderChain:
                 return val, True
         raise NoProviderAvailable(f"all providers failed: {[p.name for p in self.providers]}") from last_err
 
+    @async_work("market")
     async def get_quote(self, ticker: str) -> tuple[Quote, bool]:
         # Fresh cache check before trying providers
         for p in self.providers:
@@ -145,6 +155,7 @@ class ProviderChain:
                     return Quote(**{**val, "stale": True}), True
             raise
 
+    @async_work("market")
     async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> tuple[list[KLine], bool]:
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
         async def _invoke(p):
@@ -195,6 +206,7 @@ class ProviderChain:
 
         return await self._coalesce(co_key, _runner)
 
+    @async_work("market")
     async def get_fundamentals(self, ticker: str) -> tuple[Fundamentals, bool]:
         co_key = f"fundamentals:{ticker}"
         return await self._coalesce(
@@ -207,6 +219,7 @@ class ProviderChain:
             ),
         )
 
+    @async_work("market")
     async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
         """Search is best-effort across all providers; returns first non-empty list."""
         for p in self.providers:
@@ -219,5 +232,6 @@ class ProviderChain:
                 continue
         return []
 
+    @async_work("market")
     async def health(self) -> dict[str, bool]:
         return {p.name: await p.health() for p in self.providers}

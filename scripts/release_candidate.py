@@ -33,7 +33,7 @@ MAX_TAR_BYTES = MAX_TOTAL_BYTES + MAX_MANIFEST_BYTES + MAX_FILES * 1024 + 10240
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
-TOP_FILES = {"requirements.txt", "requirements-extra.txt", "CHANGELOG.md", "LICENSE"}
+TOP_FILES = {"requirements.txt", "requirements-extra.txt", "requirements.lock", "CHANGELOG.md", "LICENSE"}
 BUILTIN_FILES = {"skills/prism-research/CLAUDE.md", "skills/force-chinese/CLAUDE.md"}
 REQUIRED_FILES = {
     "server/main.py",

@@ -34,6 +34,9 @@ def _make_fake_rs(rows, fields):
 
 def _patched_bs(fake_bs):
     """Context manager that reloads baostock_provider with a fake baostock."""
+    import importlib
+
+    importlib.import_module("server.market.baostock_provider")
     return patch.dict("sys.modules", {"baostock": fake_bs})
 
 
