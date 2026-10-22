@@ -277,7 +277,51 @@ async def _run_claude_stream(
             return
         env["PRISM_CAPABILITY_TOKEN"] = bridge_token
         env["PRISM_CAPABILITY_URL"] = CAPABILITY_INTERNAL_URL
-    proc, registered = None, False
+    proc, registered, spawning = None, False, None
+    cleanup_requested = asyncio.Event()
+
+    async def stop_and_reap(_cleanup_lease):
+        # Reserve ownership before launch: a failed birth-identity check can
+        # block the parent, but must never prevent its actual child cleanup.
+        try:
+            await cleanup_requested.wait()
+            if spawning is None:
+                return
+            child, child_registered = await spawning.wait()
+            if child.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    child.terminate()
+                try:
+                    await asyncio.wait_for(wait_process(_lease, child, child_registered), timeout=3)
+                except TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        child.kill()
+                    # The original real wait remains owned across either timeout.
+                    # An uncertain child keeps this cleanup blocked on failure.
+                    await asyncio.wait_for(wait_process(_lease, child, child_registered), timeout=3)
+            else:
+                await wait_process(_lease, child, child_registered)
+            if conv_id and _active_procs.get(conv_id) is child:
+                _active_procs.pop(conv_id, None)
+        finally:
+            if use_bridge:
+                revoke_run_token(research["run_id"])
+
+    def request_cleanup():
+        try:
+            # Revoke before a potentially slow mandatory wait. Even a revocation
+            # error must wake the already-owned process cleanup.
+            if use_bridge:
+                revoke_run_token(research["run_id"])
+        finally:
+            cleanup_requested.set()
+
+    try:
+        cleanup = _lease.manager.start("cli", stop_and_reap, parent=_lease)
+    except BaseException:
+        if use_bridge:
+            revoke_run_token(research["run_id"])
+        raise
     try:
         spawning = start_process(
             _lease,
@@ -288,22 +332,10 @@ async def _run_claude_stream(
             cwd=str(cwd),
             env=env,
         )
-        try:
-            proc, registered = await spawning.wait()
-        except asyncio.CancelledError:
-            proc, registered = await spawning.wait()
-            try:
-                if proc.returncode is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.terminate()
-                await wait_process(_lease, proc, registered)
-            finally:
-                if use_bridge:
-                    revoke_run_token(research["run_id"])
-            raise
+        proc, registered = await spawning.wait()
     except BaseException:
-        if use_bridge:
-            revoke_run_token(research["run_id"])
+        request_cleanup()
+        await cleanup.wait()
         raise
     log.info(f"Claude PID={proc.pid} skill={skill_name} resume={bool(session_id)}")
 
@@ -417,23 +449,10 @@ async def _run_claude_stream(
             yield call_event
     finally:
         _cancelled_procs.discard(id(proc))
-        try:
-            if proc.returncode is None:
-                try:
-                    proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=3)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        proc.kill()
-                        await asyncio.wait_for(proc.wait(), timeout=3)
-            # returncode/map removal is not a reap witness. The original real wait
-            # stays owned if this HTTP generator is cancelled again while waiting.
-            await wait_process(_lease, proc, registered)
-            if conv_id and _active_procs.get(conv_id) is proc:
-                _active_procs.pop(conv_id, None)
-        finally:
-            if use_bridge:
-                revoke_run_token(research["run_id"])
+        request_cleanup()
+        # HTTP cancellation only detaches this waiter. The independently owned
+        # cleanup keeps the actual launch/wait witness and final grant revocation.
+        await cleanup.wait()
 
 
 async def respond_to_question(conv_id: str, answer: str) -> bool:
