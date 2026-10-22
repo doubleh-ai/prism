@@ -339,9 +339,9 @@ def test_nonlinux_cannot_be_reported_as_actual_linux_collection(tmp_path, monkey
     assert not calls and events[-1] == report
 
 
-@pytest.mark.parametrize("bad_proof", [False, True])
+@pytest.mark.parametrize("bad_proof,pid_reused", [(False, False), (True, False), (False, True)])
 def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_unit(
-    tmp_path, monkeypatch, bad_proof
+    tmp_path, monkeypatch, bad_proof, pid_reused
 ):
     value, _, events, boundaries = engine(tmp_path)
     calls, observations = [], []
@@ -355,6 +355,12 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
 
     monkeypatch.setattr(value, "workspace", workspace)
     monkeypatch.setattr(validation, "startticks", lambda path: 55)
+    # The synthetic PID must be independent of the CI runner's real /proc.
+    processes = tmp_path / "proc"
+    processes.mkdir()
+    if pid_reused:
+        (processes / "222").mkdir()
+    monkeypatch.setattr(validation, "PROC", processes)
 
     def identity():
         observations.append("kernel")
@@ -392,15 +398,17 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
 
     monkeypatch.setattr(value, "show", show)
     report = value.execute()
-    assert report["passed"] is (not bad_proof)
-    assert report["unit_stopped"] is True
+    assert report["passed"] is (not bad_proof and not pid_reused)
+    assert report["unit_stopped"] is (not pid_reused)
     assert report["original_runtime_unchanged"] is True
     assert (value.work / "root-allow.json").exists() is (not bad_proof)
     if bad_proof:
         assert "market_allow_public_http" not in boundaries
         assert report["error_class"] == "proof_rejected"
+    if pid_reused:
+        assert report["error_class"] == "cleanup_failed"
     stops = [argv for argv in calls if argv[:2] == ["/usr/bin/systemctl", "stop"]]
-    assert stops == [["/usr/bin/systemctl", "stop", value.unit]]
+    assert stops == ([] if pid_reused else [["/usr/bin/systemctl", "stop", value.unit]])
     assert value.unit.startswith("prism-market-probe-") and "stock-app.service" not in str(stops)
     assert events[-1] == report
 
