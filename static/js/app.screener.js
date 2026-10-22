@@ -337,7 +337,7 @@ Object.assign(App, {
       var job = data.job;
       this._scanReadFailures = 0;
       this._renderScanJob(job);
-      if (job.status === "queued" || job.status === "running") this._scheduleScanPoll();
+      if (["queued", "running", "cancelling"].indexOf(job.status) >= 0) this._scheduleScanPoll();
       else this._loadRecentScans();
     } catch (e) {
       if (id !== this._scanJobId || sequence !== this._scanSelectionSeq) return;
@@ -351,9 +351,9 @@ Object.assign(App, {
     if (!job) return;
     if (this._scanJobId && this._scanJobId !== job.id) return;
     this._scanJobId = job.id;
-    var active = job.status === "queued" || job.status === "running";
+    var active = ["queued", "running", "cancelling"].indexOf(job.status) >= 0;
     this._setScanBusy(active);
-    var labels = {queued:"等待执行",running:"扫描中",completed:"扫描完成",partial:"部分完成 · 覆盖不完整",failed:"扫描失败",cancelled:"已取消",interrupted:"任务已中断"};
+    var labels = {queued:"等待执行",running:"扫描中",cancelling:"正在停止 · 已有结果保留",completed:"扫描完成",partial:"部分完成 · 覆盖不完整",failed:"扫描失败",cancelled:"已取消",interrupted:"任务已中断"};
     this._setScanStatus(labels[job.status] || job.status, job.status);
     var status = document.getElementById("marketScanStatus");
     if (status) status.textContent = (job.error || (job.indicator_name + " · " + (labels[job.status] || job.status))) +
@@ -385,7 +385,7 @@ Object.assign(App, {
     var el = document.getElementById("marketScanResults");
     if (!el) return;
     if (!matches.length) {
-      var pending = job && (job.status === "queued" || job.status === "running");
+      var pending = job && (["queued", "running", "cancelling"].indexOf(job.status) >= 0);
       var incomplete = job && ['failed','partial','interrupted','cancelled'].indexOf(job.status) >= 0;
       el.innerHTML = '<div class="market-scan-empty">' + (pending ? "正在扫描，命中结果会实时出现在这里" : incomplete ? "当前没有已取得的命中结果；覆盖不完整，不能据此判断全部股票均不满足条件" : "在已有效评估的范围内，当前条件暂无命中结果") + "</div>";
       return;
@@ -440,7 +440,7 @@ Object.assign(App, {
       el.innerHTML = html;
       if (!this._scanJobId) {
         for (var j = 0; j < jobs.length; j++) {
-          if (jobs[j].status === "queued" || jobs[j].status === "running") {
+          if (["queued", "running", "cancelling"].indexOf(jobs[j].status) >= 0) {
             this._scanJobId = jobs[j].id;
             this._renderScanJob(jobs[j]);
             this._scheduleScanPoll(300);

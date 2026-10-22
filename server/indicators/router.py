@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from ..auth import require_auth
 from ..config import RATE_EXPLAIN_PER_MIN
 from ..database import check_rate_limit, get_db
+from ..work_lifecycle import get_manager
 from . import scanner
 from .dsl import DSLError, MissingData, evaluate, is_signal, validate
 from .metadata import enrich_indicator
@@ -539,7 +540,7 @@ async def translate_endpoint(req: TranslateRequest, request: Request):
         return JSONResponse(
             {"error": "请求太频繁，请稍后再试"}, status_code=429, headers={"Retry-After": "60"}
         )
-    out = translate(req.input)
+    out = await get_manager().run_blocking("auxiliary", translate, req.input)
     if not out:
         return JSONResponse({"error": "翻译失败，请换种说法或在 DSL 里手动编辑"}, status_code=422)
     return enrich_indicator(out)

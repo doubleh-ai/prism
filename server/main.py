@@ -2,6 +2,7 @@
 
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -75,6 +76,9 @@ from .research import init_research_db, recover_interrupted_runs
 from .research import router as research_router
 from .vibe import router as vibe_router
 from .watchlist import router as watchlist_router
+from .work_adapters import WorkAdmissionMiddleware
+from .work_lifecycle import KINDS, bind_manager
+from .work_runtime import open_runtime
 
 # ── Logging ──
 LOG_PATH = Path(LOG_FILE)
@@ -115,8 +119,20 @@ def ensure_configured_admin_user() -> None:
 
 ensure_configured_admin_user()
 
+
 # ── FastAPI app ──
-app = FastAPI(title="Prism")
+@asynccontextmanager
+async def lifespan(application):
+    runtime = await open_runtime(producers={kind: kind != "vibe" for kind in KINDS})
+    try:
+        bind_manager(application, runtime.manager)
+        application.state.work_runtime = runtime
+        yield
+    finally:
+        await runtime.aclose()
+
+
+app = FastAPI(title="Prism", lifespan=lifespan)
 
 # Install request-ID + global error handlers early so all routes benefit
 install_request_id_middleware(app)
@@ -227,6 +243,8 @@ app.add_middleware(StaticCacheControlMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(ActivityMiddleware)
+# Observe the entire inner response and Activity's final database writes.
+app.add_middleware(WorkAdmissionMiddleware)
 
 # Static files (proper caching via StaticFiles)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

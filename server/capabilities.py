@@ -14,7 +14,9 @@ import json
 import math
 import re
 import secrets
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -24,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .auth import require_auth
 from .config import CAPABILITY_TOKEN_TTL
 from .database import check_rate_limit, get_db
+from .work_lifecycle import Lease, LifecycleError, current_lease, get_manager
 
 router = APIRouter(prefix="/api")
 Ticker = Annotated[str, Field(pattern=r"^[A-Za-z0-9.\-]{1,16}$")]
@@ -471,8 +474,44 @@ def _owned_conversation(username: str, conv_id: str) -> None:
         raise HTTPException(404, "会话不存在或不可访问")
 
 
-def issue_run_token(username: str, conv_id: str, run_id: str) -> str:
+@dataclass(frozen=True)
+class _RunBinding:
+    parent: Lease
+    username: str
+    conv_id: str
+    expires_at: int
+
+
+_run_bindings: dict[str, _RunBinding] = {}
+_run_binding_lock = threading.RLock()
+_call_finalizers: set[asyncio.Task] = set()
+
+
+def _run_parent(context: dict) -> Lease:
+    with _run_binding_lock:
+        now = int(time.time())
+        for run_id, binding in list(_run_bindings.items()):
+            if binding.expires_at <= now:
+                _run_bindings.pop(run_id, None)
+        binding = _run_bindings.get(context.get("run_id"))
+        if (
+            binding is None
+            or binding.username != context.get("username")
+            or binding.conv_id != context.get("conv_id")
+        ):
+            raise HTTPException(401, "研究授权无效或已过期")
+        return binding.parent
+
+
+def issue_run_token(username: str, conv_id: str, run_id: str, *, parent_lease=None) -> str:
     _owned_conversation(username, conv_id)
+    parent = parent_lease if parent_lease is not None else current_lease()
+    if type(parent) is not Lease or parent.kind != "cli":
+        raise HTTPException(503, "当前研究进程不可用")
+    # A real child admission validates the opaque parent capability against its
+    # manager, including a concurrent fence; serialized booleans cannot grant it.
+    probe = parent.manager.admit("request", parent=parent, persist_required=False)
+    probe.release()
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     with get_db() as db:
@@ -489,16 +528,25 @@ def issue_run_token(username: str, conv_id: str, run_id: str) -> str:
                 now,
             ],
         )
+    with _run_binding_lock:
+        for old_run, binding in list(_run_bindings.items()):
+            if binding.expires_at <= now:
+                _run_bindings.pop(old_run, None)
+        _run_bindings[run_id] = _RunBinding(parent, username, conv_id, now + CAPABILITY_TOKEN_TTL)
     return token
 
 
 def revoke_run_token(run_id: str) -> None:
+    with _run_binding_lock:
+        _run_bindings.pop(run_id, None)
     with get_db() as db:
         db.execute("UPDATE capability_runs SET revoked=1 WHERE run_id=?", [run_id])
 
 
 def recover_interrupted_calls() -> None:
     """Single-worker startup only: old subprocess grants never survive restart."""
+    with _run_binding_lock:
+        _run_bindings.clear()
     with get_db() as db:
         db.execute("UPDATE capability_runs SET revoked=1 WHERE revoked=0")
         db.execute(
@@ -522,13 +570,17 @@ def _authenticate_bridge(request: Request) -> dict:
     digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
     with get_db() as db:
         row = db.execute(
-            "SELECT * FROM capability_runs WHERE token_hash=? AND revoked=0 AND expires_at>?",
-            [digest, int(time.time())],
+            "SELECT * FROM capability_runs WHERE token_hash=?",
+            [digest],
         ).fetchone()
-    if not row:
+    if not row or row["revoked"] or row["expires_at"] <= int(time.time()):
+        if row:
+            with _run_binding_lock:
+                _run_bindings.pop(row["run_id"], None)
         raise HTTPException(401, "研究授权无效或已过期")
     context = dict(row)
     _owned_conversation(context["username"], context["conv_id"])
+    _run_parent(context)
     return context
 
 
@@ -781,7 +833,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         if name == "indicator_translate":
             from .indicators.translator import translate
 
-            result = await asyncio.to_thread(translate, data["input"])
+            result = await get_manager().run_blocking("capability", translate, data["input"])
             if not result:
                 raise ValueError("indicator translation unavailable")
             return {"draft": indicators.enrich_indicator(result)}, target, "已生成指标草案，尚未保存或扫描"
@@ -989,7 +1041,21 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
     raise HTTPException(404)
 
 
+@contextmanager
+def _terminal_db():
+    """The terminal status and replayable response commit together, without await."""
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            yield db
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+
+
 async def dispatch_call(context: dict, request: CallRequest) -> dict:
+    parent = _run_parent(context)
     if request.name in _PAUSED_VIBE_TOOLS:
         from .vibe import require_vibe_execution
 
@@ -1029,101 +1095,160 @@ async def dispatch_call(context: dict, request: CallRequest) -> dict:
     if not tool.read_only and not check_rate_limit(f"cap-start:{context['username']}:{tool.id}", 3, 60):
         raise HTTPException(429, "研究发起过于频繁")
     call_id = secrets.token_hex(12)
-    target = {"view": tool.view}
-    # Do not persist raw prompts or arbitrary user strings in the audit ledger.
-    summary = tool.label + (f" · {args.ticker}" if hasattr(args, "ticker") else "")
-    with get_db() as db:
-        db.execute(
-            "INSERT INTO capability_calls(call_id,run_id,username,conv_id,request_id,capability_id,arguments_hash,status,input_summary,target_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            [
-                call_id,
-                context["run_id"],
-                context["username"],
-                context["conv_id"],
-                request.request_id,
-                tool.id,
-                args_hash,
-                "running",
-                summary,
-                json.dumps(target),
-                int(time.time()),
-            ],
-        )
-        # Snapshots retain reproducible market/indicator conditions, never raw
-        # prompts, follow-up questions or model-authored claim prose in audit.
-        replay_args = {
-            key: value
-            for key, value in args.model_dump().items()
-            if key not in {"prompt", "question", "input", "claims", "relations"}
-        }
-        db.execute(
-            "UPDATE capability_calls SET arguments_json=? WHERE call_id=?",
-            [json.dumps(safe_result(replay_args), ensure_ascii=False, allow_nan=False), call_id],
-        )
-    error = None
     try:
-        value, target, result_summary = await asyncio.wait_for(_execute(tool.id, args, context), timeout=50)
-        value = safe_result(value)
-        if len(json.dumps(value, ensure_ascii=False)) > 120000:
-            value = {"truncated": True, "notice": "完整结果请打开平台记录查看。"}
-        status = "completed"
-        if tool.id == "analysis_start" and value.get("status") == "error":
-            status = "failed"
-            error = {"code": "unavailable", "message": result_summary}
-    except asyncio.CancelledError:
+        with _run_binding_lock:
+            parent = _run_parent(context)
+            lease = parent.manager.admit("capability", parent=parent, persist_required=True)
+    except LifecycleError:
+        raise HTTPException(503, "当前研究进程不可用") from None
+    expected_response = {}
+
+    async def owned_call():
+        target = {"view": tool.view}
+        # Do not persist raw prompts or arbitrary user strings in the audit ledger.
+        summary = tool.label + (f" · {args.ticker}" if hasattr(args, "ticker") else "")
         with get_db() as db:
             db.execute(
-                "UPDATE capability_calls SET status='failed',result_summary='调用已中断',completed_at=? WHERE call_id=?",
-                [int(time.time()), call_id],
+                "INSERT INTO capability_calls(call_id,run_id,username,conv_id,request_id,capability_id,arguments_hash,status,input_summary,target_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    call_id,
+                    context["run_id"],
+                    context["username"],
+                    context["conv_id"],
+                    request.request_id,
+                    tool.id,
+                    args_hash,
+                    "running",
+                    summary,
+                    json.dumps(target),
+                    int(time.time()),
+                ],
+            )
+            # Snapshots retain reproducible market/indicator conditions, never raw
+            # prompts, follow-up questions or model-authored claim prose in audit.
+            replay_args = {
+                key: value
+                for key, value in args.model_dump().items()
+                if key not in {"prompt", "question", "input", "claims", "relations"}
+            }
+            db.execute(
+                "UPDATE capability_calls SET arguments_json=? WHERE call_id=?",
+                [json.dumps(safe_result(replay_args), ensure_ascii=False, allow_nan=False), call_id],
+            )
+        error = None
+        try:
+            value, target, result_summary = await asyncio.wait_for(
+                _execute(tool.id, args, context), timeout=50
+            )
+            value = safe_result(value)
+            if len(json.dumps(value, ensure_ascii=False)) > 120000:
+                value = {"truncated": True, "notice": "完整结果请打开平台记录查看。"}
+            status = "completed"
+            if tool.id == "analysis_start" and value.get("status") == "error":
+                status = "failed"
+                error = {"code": "unavailable", "message": result_summary}
+        except asyncio.CancelledError:
+            with _terminal_db() as db:
+                db.execute(
+                    "UPDATE capability_calls SET status='failed',result_summary='调用已中断',completed_at=? WHERE call_id=?",
+                    [int(time.time()), call_id],
+                )
+                row = db.execute("SELECT * FROM capability_calls WHERE call_id=?", [call_id]).fetchone()
+                response = {
+                    "ok": False,
+                    "call": _public_call(row),
+                    "data": {},
+                    "error": {"code": "unavailable", "message": "调用已中断，请查看已有任务记录"},
+                }
+                db.execute(
+                    "UPDATE capability_calls SET response_json=? WHERE call_id=?",
+                    [json.dumps(response, ensure_ascii=False), call_id],
+                )
+            expected_response["value"] = json.dumps(response, ensure_ascii=False, allow_nan=False)
+            raise
+        except Exception as exc:
+            status = "failed"
+            if isinstance(exc, HTTPException) and exc.status_code == 404:
+                code, result_summary = "not_found", "记录不存在或不可访问"
+            elif isinstance(exc, DataInsufficient):
+                code, result_summary = "data_insufficient", "所需资料或最新指标预热不足，未生成有效计算结果"
+            elif (
+                isinstance(exc, (ValidationError, ValueError, TypeError))
+                or isinstance(exc, HTTPException)
+                and exc.status_code in {400, 422}
+            ):
+                code, result_summary = "invalid_arguments", "参数或指标输入无效"
+            elif isinstance(exc, HTTPException) and exc.status_code == 409:
+                code, result_summary = "conflict", "已有研究任务运行，请先查看已有记录"
+            else:
+                code, result_summary = "unavailable", "本次平台数据或引擎不可用，请稍后重试"
+            value, error = {}, {"code": code, "message": result_summary}
+        with _terminal_db() as db:
+            db.execute(
+                "UPDATE capability_calls SET status=?,result_summary=?,target_json=?,completed_at=? WHERE call_id=?",
+                [status, result_summary, json.dumps(target), int(time.time()), call_id],
             )
             row = db.execute("SELECT * FROM capability_calls WHERE call_id=?", [call_id]).fetchone()
             response = {
-                "ok": False,
+                "ok": status == "completed",
                 "call": _public_call(row),
-                "data": {},
-                "error": {"code": "unavailable", "message": "调用已中断，请查看已有任务记录"},
+                "data": value,
+                "source_kind": tool.source_kind,
+                "evidence_status": "platform_result_not_external_verification",
             }
+            if error:
+                response["error"] = error
             db.execute(
                 "UPDATE capability_calls SET response_json=? WHERE call_id=?",
-                [json.dumps(response, ensure_ascii=False), call_id],
+                [json.dumps(response, ensure_ascii=False, allow_nan=False), call_id],
             )
-        raise
-    except Exception as exc:
-        status = "failed"
-        if isinstance(exc, HTTPException) and exc.status_code == 404:
-            code, result_summary = "not_found", "记录不存在或不可访问"
-        elif isinstance(exc, DataInsufficient):
-            code, result_summary = "data_insufficient", "所需资料或最新指标预热不足，未生成有效计算结果"
-        elif (
-            isinstance(exc, (ValidationError, ValueError, TypeError))
-            or isinstance(exc, HTTPException)
-            and exc.status_code in {400, 422}
+        expected_response["value"] = json.dumps(response, ensure_ascii=False, allow_nan=False)
+        return response
+
+    def verify_terminal():
+        with get_db() as db:
+            row = db.execute(
+                "SELECT status,response_json FROM capability_calls WHERE call_id=? AND run_id=?",
+                [call_id, context["run_id"]],
+            ).fetchone()
+        expected = expected_response.get("value")
+        if (
+            not row
+            or row["status"] not in {"completed", "failed"}
+            or expected is None
+            or json.loads(row["response_json"]) != json.loads(expected)
         ):
-            code, result_summary = "invalid_arguments", "参数或指标输入无效"
-        elif isinstance(exc, HTTPException) and exc.status_code == 409:
-            code, result_summary = "conflict", "已有研究任务运行，请先查看已有记录"
-        else:
-            code, result_summary = "unavailable", "本次平台数据或引擎不可用，请稍后重试"
-        value, error = {}, {"code": code, "message": result_summary}
-    with get_db() as db:
-        db.execute(
-            "UPDATE capability_calls SET status=?,result_summary=?,target_json=?,completed_at=? WHERE call_id=?",
-            [status, result_summary, json.dumps(target), int(time.time()), call_id],
-        )
-        row = db.execute("SELECT * FROM capability_calls WHERE call_id=?", [call_id]).fetchone()
-        response = {
-            "ok": status == "completed",
-            "call": _public_call(row),
-            "data": value,
-            "source_kind": tool.source_kind,
-            "evidence_status": "platform_result_not_external_verification",
-        }
-        if error:
-            response["error"] = error
-        db.execute(
-            "UPDATE capability_calls SET response_json=? WHERE call_id=?",
-            [json.dumps(response, ensure_ascii=False, allow_nan=False), call_id],
-        )
+            raise RuntimeError("capability_terminal_persistence_unconfirmed")
+
+    async def complete():
+        try:
+            await lease.wait_owned()
+            await lease.finish(verify_terminal)
+        finally:
+            lease.release()
+
+    failure, response = None, None
+    with lease:
+        try:
+            response = await owned_call()
+        except BaseException as exc:
+            failure = exc
+            if not expected_response:
+                lease.block("persistence_failed")
+    finalizer = asyncio.create_task(complete())
+    _call_finalizers.add(finalizer)
+
+    def completed(task):
+        _call_finalizers.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    finalizer.add_done_callback(completed)
+    # With no retained descendants finish completes now. A start response remains
+    # immediate while its real business child and this durable parent stay owned.
+    await asyncio.sleep(0)
+    if failure is not None:
+        raise failure
     return response
 
 

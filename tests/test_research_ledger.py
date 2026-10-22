@@ -250,7 +250,7 @@ def test_scope_timestamp_equivalent_timezone_retry_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_scope_capability_uses_token_run_and_rejects_scope_override(test_user):
+async def test_scope_capability_uses_token_run_and_rejects_scope_override(test_user, request):
     from server import capabilities as cap
     from server.database import get_db
 
@@ -258,7 +258,10 @@ async def test_scope_capability_uses_token_run_and_rejects_scope_override(test_u
     with get_db() as db:
         db.execute("INSERT INTO conversations(id,username) VALUES('scope-conv',?)", [user])
     run("scope-run", user=user, conv="scope-conv")
-    token = cap.issue_run_token(user, "scope-conv", "scope-run")
+    parent = cap.get_manager().admit("cli")
+    request.addfinalizer(parent.release)
+    request.addfinalizer(lambda: cap.revoke_run_token("scope-run"))
+    token = cap.issue_run_token(user, "scope-conv", "scope-run", parent_lease=parent)
     context = {"username": user, "conv_id": "scope-conv", "run_id": "scope-run", "token": token}
     response = await cap.dispatch_call(
         context,

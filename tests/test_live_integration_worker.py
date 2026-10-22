@@ -84,11 +84,16 @@ def owned_gateway():
     )
     gateway = worker.CapabilityGateway(loaded, transport, policy, "public-synthetic-owner")
     gateway.run_id = research["run_id"]
+    parent = capabilities.get_manager().admit("cli")
+    loaded["_cli_parent"] = parent
     token = capabilities.issue_run_token(
-        "public-synthetic-owner", "public-synthetic-owner-conv", research["run_id"]
+        "public-synthetic-owner", "public-synthetic-owner-conv", research["run_id"], parent_lease=parent
     )
     gateway.grant(token, "public-synthetic-owner", "public-synthetic-owner-conv", research["run_id"])
-    return gateway, token, loaded
+    yield gateway, token, loaded
+    capabilities.revoke_run_token(research["run_id"])
+    capabilities.revoke_run_token("foreign-run")
+    parent.release()
 
 
 @pytest.mark.parametrize("name", ["indicator_list", "research_read"])
@@ -144,7 +149,10 @@ def test_missing_revoked_foreign_and_wrong_run_grants_cannot_be_relabelled_owned
     with pytest.raises(worker.WorkerError, match="owned_scope_required"):
         gateway.grant("synthetic-token", gateway.owner, gateway.conv_id, "foreign-run")
     foreign = loaded["server.capabilities"].issue_run_token(
-        "public-synthetic-foreign", "public-synthetic-foreign-conv", "foreign-run"
+        "public-synthetic-foreign",
+        "public-synthetic-foreign-conv",
+        "foreign-run",
+        parent_lease=loaded["_cli_parent"],
     )
     for supplied in ("not-issued-token", foreign):
         channel = Channel(request(supplied))
@@ -275,6 +283,16 @@ async def test_actual_runner_builds_two_bounded_cli_calls_and_actual_owned_candi
     async def no_proxy():
         return None
 
+    # Fixed launcher fixtures use an explicit registration adapter. This never
+    # turns a synthetic process into a lifecycle or Linux acceptance witness.
+    from server.services import process_lease
+
+    monkeypatch.setattr(process_lease, "register_process", lambda lease, process: False)
+
+    async def fixture_wait(lease, process, registered):
+        return await process.wait()
+
+    monkeypatch.setattr(runner, "wait_process", fixture_wait)
     monkeypatch.setattr(runner, "get_proxy_config", no_proxy)
     monkeypatch.setattr(worker.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
 

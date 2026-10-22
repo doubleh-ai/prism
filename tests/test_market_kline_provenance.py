@@ -264,7 +264,7 @@ async def test_unavailable_provider_is_explicit_and_does_not_create_cache(runtim
 
 @pytest.mark.parametrize("bar_count", [1, 500])
 async def test_real_protected_http_owned_capability_ledger_and_history_share_metadata(
-    runtime, monkeypatch, bar_count
+    runtime, monkeypatch, bar_count, request
 ):
     limit = 500 if bar_count == 500 else 10
     first = bar(runtime, "2024-01-01", provenance=recorded(runtime))
@@ -283,7 +283,10 @@ async def test_real_protected_http_owned_capability_ledger_and_history_share_met
             db.execute("INSERT INTO conversations(id,username) VALUES(?,?)", [user + "-conv", user])
     owner = runtime.database.create_session("owner")
     other = runtime.database.create_session("other")
-    run = runtime.capabilities.issue_run_token("owner", "owner-conv", "provenance-run")
+    parent = runtime.capabilities.get_manager().admit("cli")
+    request.addfinalizer(parent.release)
+    request.addfinalizer(lambda: runtime.capabilities.revoke_run_token("provenance-run"))
+    run = runtime.capabilities.issue_run_token("owner", "owner-conv", "provenance-run", parent_lease=parent)
     app = FastAPI()
     app.include_router(runtime.router.router)
     app.include_router(runtime.capabilities.router)

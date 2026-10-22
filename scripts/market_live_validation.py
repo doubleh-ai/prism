@@ -64,7 +64,7 @@ NETWORK_DIAGNOSTIC_STAGES = frozenset(
     }
 )
 EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
-PROBE_SHA256 = "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab"
+PROBE_SHA256 = "491551b608ce264350bf3d736e23127c2d02418e0cf01ddcb0cc6c1380f53325"
 OPERATIONS = Path("/var/lib/prism-operations/integration")
 RELEASES = Path("/opt/prism/releases")
 PROC = Path("/proc")

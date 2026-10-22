@@ -60,8 +60,8 @@ RETIREMENT_HELPERS = {
     "retirement_validation.py": "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e",
 }
 MARKET_INTEGRATION_HELPERS = {
-    "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
-    "market_live_validation.py": "298ff2992bc8c3d9a87a22a956af3c8c8d4373269873c1124ab5ccf09ae6b41f",
+    "market_live_probe.py": "491551b608ce264350bf3d736e23127c2d02418e0cf01ddcb0cc6c1380f53325",
+    "market_live_validation.py": "e877a0f6a540c8ddc76c33b812b2f65c5291060450814b0e655eefb8a0d6fc11",
     "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
     "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }

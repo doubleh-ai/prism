@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from server import capabilities as cap
 from server.database import get_db
+from server.work_lifecycle import Manager
 
 
 @pytest.fixture
@@ -19,8 +20,20 @@ def scoped_run(test_user):
         db.execute("INSERT INTO conversations(id,username) VALUES('owned-conv',?)", [user])
         db.execute("INSERT INTO users(username,password_hash) VALUES('other','unused-test-hash')")
         db.execute("INSERT INTO conversations(id,username) VALUES('other-conv','other')")
-    token = cap.issue_run_token(user, "owned-conv", "test-run")
-    return {"username": user, "conv_id": "owned-conv", "run_id": "test-run", "token": token}
+    manager = Manager()
+    parent = manager.admit("cli")
+    token = cap.issue_run_token(user, "owned-conv", "test-run", parent_lease=parent)
+    yield {
+        "username": user,
+        "conv_id": "owned-conv",
+        "run_id": "test-run",
+        "token": token,
+        "parent_lease": parent,
+    }
+    cap.revoke_run_token("test-run")
+    cap.revoke_run_token("next-run")
+    parent.release()
+    manager._pool.shutdown(wait=True, cancel_futures=False)
 
 
 @pytest.fixture
@@ -88,7 +101,9 @@ async def test_bridge_revoke_delete_and_schema_deny(scoped_run, bridge_client):
         assert response.status_code == status
     cap.revoke_run_token(scoped_run["run_id"])
     assert (await bridge_client.get("/api/internal/capabilities/tools")).status_code == 401
-    token = cap.issue_run_token(scoped_run["username"], "owned-conv", "next-run")
+    token = cap.issue_run_token(
+        scoped_run["username"], "owned-conv", "next-run", parent_lease=scoped_run["parent_lease"]
+    )
     with get_db() as db:
         db.execute("UPDATE conversations SET deleted_at=1 WHERE id='owned-conv'")
     assert (

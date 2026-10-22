@@ -348,6 +348,7 @@ async def exercise(modules, transport):
     from server.market.cache import MarketCache
     from server.market.chain import ProviderChain
     from server.market.tencent_provider import TencentProvider
+    from server.work_lifecycle import get_manager
 
     factory = modules["server.market.factory"]
     previous_chain = factory._chain
@@ -368,7 +369,13 @@ async def exercise(modules, transport):
         db.execute("INSERT INTO conversations(id,username) VALUES(?,?)", [cid, owner])
     research = context.build_research_context()
     ledger.create_research_run(owner, cid, "Public credential-free market probe", research)
-    token = caps.issue_run_token(owner, cid, research["run_id"])
+    parent = get_manager().admit("cli", persist_required=False)
+    try:
+        token = caps.issue_run_token(owner, cid, research["run_id"], parent_lease=parent)
+    except BaseException:
+        parent.release()
+        factory._chain = previous_chain
+        raise
     session = auth.create_session(owner)
     httpx = modules["httpx"]
     checks, received = {}, {}
@@ -445,10 +452,13 @@ async def exercise(modules, transport):
                 empty.status_code == 503 and empty.json().get("error") == "no_provider_available"
             )
     finally:
-        caps.revoke_run_token(research["run_id"])
-        with database.get_db() as db:
-            db.execute("DELETE FROM sessions WHERE username=?", [owner])
-        factory._chain = previous_chain
+        try:
+            caps.revoke_run_token(research["run_id"])
+            with database.get_db() as db:
+                db.execute("DELETE FROM sessions WHERE username=?", [owner])
+            factory._chain = previous_chain
+        finally:
+            parent.release()
     kline = received.get("kline") or {}
     missing = [key for key in ("source", "retrieved_at", "data_timestamp") if key not in kline]
     return {

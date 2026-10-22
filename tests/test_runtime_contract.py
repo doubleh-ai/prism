@@ -193,7 +193,7 @@ async def test_analysis_can_save_after_memory_loss_and_remains_owner_scoped(clie
 
 
 async def test_snapshot_replays_exact_kline_without_new_network_call(
-    client, auth_cookies, owners, monkeypatch
+    client, auth_cookies, owners, monkeypatch, request
 ):
     from server.market import factory
     from server.market.models import KLine
@@ -205,6 +205,10 @@ async def test_snapshot_replays_exact_kline_without_new_network_call(
     )
     monkeypatch.setattr(factory, "get_chain", lambda: provider)
     context = {"username": owners["user"], "conv_id": "owned-a", "run_id": "snapshot-run"}
+    parent = cap.get_manager().admit("cli")
+    request.addfinalizer(parent.release)
+    request.addfinalizer(lambda: cap.revoke_run_token("snapshot-run"))
+    cap.issue_run_token(owners["user"], "owned-a", "snapshot-run", parent_lease=parent)
     output = await cap.dispatch_call(
         context,
         cap.CallRequest(
@@ -423,12 +427,15 @@ def test_legacy_orphaned_username_is_reserved_without_deleting_history(owners):
         )
 
 
-def test_database_guards_legacy_delete_and_recreate_paths(owners):
+def test_database_guards_legacy_delete_and_recreate_paths(owners, request):
     import sqlite3
 
     from server import database
 
-    cap.issue_run_token(owners["user"], "owned-a", "legacy-bridge-run")
+    parent = cap.get_manager().admit("cli")
+    request.addfinalizer(parent.release)
+    request.addfinalizer(lambda: cap.revoke_run_token("legacy-bridge-run"))
+    cap.issue_run_token(owners["user"], "owned-a", "legacy-bridge-run", parent_lease=parent)
     with get_db() as db:
         # This is the old program's SQL path, without the new business helper.
         db.execute("DELETE FROM users WHERE username=?", [owners["user"]])
@@ -449,8 +456,11 @@ def test_database_guards_legacy_delete_and_recreate_paths(owners):
     assert database.is_username_retired(owners["user"])
 
 
-def test_restart_revokes_old_bridge_grants_and_preserves_completed_calls(owners):
-    cap.issue_run_token(owners["user"], "owned-a", "old-process-run")
+def test_restart_revokes_old_bridge_grants_and_preserves_completed_calls(owners, request):
+    parent = cap.get_manager().admit("cli")
+    request.addfinalizer(parent.release)
+    request.addfinalizer(lambda: cap.revoke_run_token("old-process-run"))
+    cap.issue_run_token(owners["user"], "owned-a", "old-process-run", parent_lease=parent)
     with get_db() as db:
         for call_id, status in (("inflight", "running"), ("finished", "completed")):
             db.execute(

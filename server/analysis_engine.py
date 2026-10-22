@@ -35,6 +35,8 @@ from .config import (
 )
 from .database import get_db
 from .research_context import build_research_context, build_research_prompt
+from .work_adapters import async_work
+from .work_lifecycle import get_manager
 
 log = logging.getLogger("prism.analysis")
 
@@ -325,6 +327,7 @@ def _merge_astock_stream_state(previous: dict, chunk, initial_state: dict | None
     return merged
 
 
+@async_work("analysis", block_on_error=True)
 async def start_analysis(
     ticker: str,
     name: str = "",
@@ -601,24 +604,37 @@ async def start_analysis(
                         close_graph_run()
             except Exception as exc:
                 log.warning("Analysis %s graph cleanup failed (%s)", aid, type(exc).__name__)
+                raise RuntimeError("analysis_cleanup_unconfirmed") from None
             finally:
                 if acquired:
                     _ENGINE_RUN_LOCK.release()
 
-    loop = asyncio.get_event_loop()
-    future = loop.run_in_executor(None, _run)
+    manager = get_manager()
 
-    def _on_run_done(fut):
-        # _run catches its own exceptions and emits an "error" event, so this
-        # should normally be a no-op. Retrieve the result anyway so an
-        # unexpected crash surfaces in the log instead of as a silent
-        # "Future exception was never retrieved" warning.
-        try:
-            fut.result()
-        except Exception as exc:
-            log.error("Analysis %s executor failed (%s)", aid, type(exc).__name__)
+    async def execute(_lease):
+        await manager.run_blocking("analysis", _run)
 
-    future.add_done_callback(_on_run_done)
+    def persist_terminal(_result):
+        entry = _store[aid]
+        if entry["status"] not in {"done", "error"}:
+            raise RuntimeError("analysis_terminal_state_missing")
+        _persist_analysis(entry)
+        if entry.get("username"):
+            with get_db() as db:
+                saved = db.execute(
+                    "SELECT status,report_json,signal,error FROM analysis_runs WHERE id=? AND username=?",
+                    [aid, entry["username"]],
+                ).fetchone()
+            if (
+                not saved
+                or saved["status"] != entry["status"]
+                or json.loads(saved["report_json"]) != entry.get("report")
+                or saved["signal"] != str(entry.get("signal") or "")
+                or saved["error"] != str(entry.get("error") or "")
+            ):
+                raise RuntimeError("analysis_terminal_persistence_unconfirmed")
+
+    manager.start("analysis", execute, persist=persist_terminal)
     return aid
 
 

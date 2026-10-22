@@ -1,11 +1,10 @@
 """Tencent + Sina direct-HTTP market data provider (from TradingAgents-astock).
 
 Uses Tencent qt.gtimg.cn for real-time quotes (batch, sub-100ms) and
-Sina money.finance.sina.com.cn for daily K-line. Both endpoints are
-confirmed reachable in the prod network (no akshare/baostock dependency).
+Sina money.finance.sina.com.cn for daily K-line. Release acceptance checks
+their actual reachability separately from this provider implementation.
 """
 
-import asyncio
 import json
 import logging
 import re
@@ -13,6 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from ..work_lifecycle import get_manager
 from .clock import market_timestamp
 from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
@@ -92,7 +92,7 @@ class TencentProvider:
 
     async def get_quote(self, ticker: str) -> Quote:
         try:
-            quotes = await asyncio.to_thread(_fetch_tencent_quotes, [ticker], 8)
+            quotes = await get_manager().run_blocking("market", _fetch_tencent_quotes, [ticker], 8)
         except ProviderUnavailable:
             raise
         if ticker not in quotes:
@@ -138,7 +138,7 @@ class TencentProvider:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
             # Run sync urllib in a worker thread so the event loop is free.
-            raw = await asyncio.to_thread(self._fetch_kline_sync, req, 12)
+            raw = await get_manager().run_blocking("market", self._fetch_kline_sync, req, 12)
         except Exception as e:
             raise ProviderUnavailable(f"Sina kline fetch failed: {e}") from e
         try:

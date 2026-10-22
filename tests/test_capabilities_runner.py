@@ -5,6 +5,21 @@ import json
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def mocked_registration_adapter(monkeypatch):
+    """Legacy launcher mocks explicitly replace registration, never product gates."""
+    from server.services import claude_runner as runner_adapter
+    from server.services import process_lease
+
+    monkeypatch.setattr(process_lease, "register_process", lambda lease, process: False)
+
+    async def wait(lease, process, registered):
+        return await process.wait()
+
+    monkeypatch.setattr(runner_adapter, "wait_process", wait)
+
+
 from server import capabilities
 from server.database import get_db
 from server.research_context import build_research_context

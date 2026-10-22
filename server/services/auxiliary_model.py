@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 
 from .. import config
+from ..work_lifecycle import get_manager
+from .process_lease import register_process, start_process, wait_process, wait_process_sync
 
 MAX_OUTPUT_BYTES = 256_000
 
@@ -88,20 +90,32 @@ def run_text(
     with tempfile.TemporaryDirectory(prefix="prism-model-") as directory:
         Path(directory).chmod(0o700)
         cmd, env = _invocation(prompt, directory, output_format, model_id)
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=directory,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise AuxiliaryModelUnavailable("辅助模型暂不可用") from None
-        return _output(proc.stdout, proc.returncode, env["ANTHROPIC_AUTH_TOKEN"])
+        lease = get_manager().admit("auxiliary", persist_required=False)
+        with lease:
+            proc, registered = None, False
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=directory,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                registered = register_process(lease, proc)
+                try:
+                    stdout, _ = proc.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    # Preserve the existing business timeout, including actual reap.
+                    proc.kill()
+                    proc.communicate()
+                    raise
+                return _output(stdout, proc.returncode, env["ANTHROPIC_AUTH_TOKEN"])
+            except (OSError, subprocess.TimeoutExpired):
+                raise AuxiliaryModelUnavailable("辅助模型暂不可用") from None
+            finally:
+                if proc is not None:
+                    wait_process_sync(lease, proc, registered)
 
 
 async def run_text_async(
@@ -110,9 +124,11 @@ async def run_text_async(
     with tempfile.TemporaryDirectory(prefix="prism-model-") as directory:
         Path(directory).chmod(0o700)
         cmd, env = _invocation(prompt, directory, output_format, model_id)
-        proc = None
+        lease = get_manager().admit("auxiliary", persist_required=False)
+        proc, registered = None, False
         try:
-            proc = await asyncio.create_subprocess_exec(
+            spawning = start_process(
+                lease,
                 *cmd,
                 cwd=directory,
                 env=env,
@@ -120,17 +136,26 @@ async def run_text_async(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
+            try:
+                proc, registered = await spawning.wait()
+            except asyncio.CancelledError:
+                proc, registered = await spawning.wait()
+                raise
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             return _output(stdout, proc.returncode, env["ANTHROPIC_AUTH_TOKEN"])
         except (OSError, TimeoutError):
             raise AuxiliaryModelUnavailable("辅助模型暂不可用") from None
         finally:
-            if proc is not None and proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-                except TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
-                    await proc.wait()
+            try:
+                if proc is not None:
+                    if proc.returncode is None:
+                        with contextlib.suppress(ProcessLookupError):
+                            proc.terminate()
+                        try:
+                            await asyncio.wait_for(proc.wait(), timeout=2)
+                        except TimeoutError:
+                            with contextlib.suppress(ProcessLookupError):
+                                proc.kill()
+                    await wait_process(lease, proc, registered)
+            finally:
+                lease.release()

@@ -1,5 +1,6 @@
 """聊天流式端点 — Claude Code JSONL 集成 + 双向交互 + 参考引用"""
 
+import asyncio
 import json
 import logging
 import re
@@ -32,8 +33,10 @@ from .services.claude_runner import (
     run_claude_stream,
 )
 from .source_urls import redact_source_text, source_display_payload
+from .work_lifecycle import LifecycleError, get_manager
 
 log = logging.getLogger("stock-app")
+_chat_finalizers: set[asyncio.Task] = set()
 
 # Claude Code stores project data under ~/.claude/projects/
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -139,23 +142,35 @@ def _content_to_text(value) -> str:
 
 
 async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
-    """Read historical turns asynchronously using the shared provenance parser."""
-    import aiofiles
-
+    """Read historical turns in an owned thread using the provenance parser."""
     jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
-    if not jsonl_path.exists():
-        return []
-    events = []
-    async with aiofiles.open(jsonl_path, encoding="utf-8") as f:
-        async for line in f:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return parse_claude_jsonl_events(events, session_id=session_id)
+
+    def read():
+        if not jsonl_path.exists():
+            return []
+        events = []
+        with jsonl_path.open(encoding="utf-8") as source:
+            for line in source:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return parse_claude_jsonl_events(events, session_id=session_id)
+
+    return await get_manager().run_blocking("cli", read)
 
 
 async def chat_stream(request: Request):
+    manager = get_manager(getattr(request, "scope", None))
+    try:
+        lease = manager.admit("request", persist_required=False)
+    except LifecycleError:
+        return JSONResponse({"error": "服务维护中，请稍后重试；已有任务仍保留"}, status_code=503)
+    with lease:
+        return await _chat_stream(request, lease)
+
+
+async def _chat_stream(request: Request, request_lease):
     """POST /api/chat/stream — Claude Code CLI streaming with SSE + reference citations.
     Returns: ``StreamingResponse`` with the SSE stream, or ``JSONResponse`` for
     early validation/rate-limit errors."""
@@ -223,10 +238,123 @@ async def chat_stream(request: Request):
                 [redact_source_text(question)[:40], conv_id, user],
             )
     research = build_research_context(engine="chat")
-    create_research_run(user, conv_id, redact_source_text(question), research)
+    lease = request_lease.manager.admit("cli", parent=request_lease, persist_required=True)
+    try:
+        create_research_run(user, conv_id, redact_source_text(question), research)
+    except BaseException:
+        lease.block("persistence_failed")
+        lease.release()
+        raise
     research["ledger_available"] = True
     research["status"] = "queued"
     progress = {"text": "", "finished": False}
+
+    def persist_turn(*, error=False, cancelled=False):
+        full_text = progress["text"]
+        report_text, _ = _prepare_chat_report(full_text, skill_name)
+        revision = finalize_research_run(
+            user, research["run_id"], report_text, error=error, cancelled=cancelled
+        )
+        report_status = revision["acceptance_status"]
+        research.update(
+            status=report_status,
+            revision_id=revision["revision_id"],
+            gaps=revision["gaps"],
+            information_cutoff=revision.get("information_cutoff"),
+            cutoff_precision=revision.get("cutoff_precision", "unknown"),
+            requested_period=revision.get("requested_period"),
+        )
+        live_chunks = list(progress.get("chunks", []))
+        collected_refs = progress.get("refs", [])
+        platform_calls = progress.get("calls", {})
+        session_id, project_dir = progress.get("session_id"), progress.get("project_dir")
+        delivery_reports = []
+        # Persist only this turn. Re-importing every JSONL assistant duplicates old research.
+        if conv_id:
+            live_chunks.extend({"t": "platform_call", "call": call} for call in platform_calls.values())
+            payload = json.dumps(
+                source_display_payload(
+                    {
+                        "text": full_text,
+                        "chunks": live_chunks,
+                        "refs": collected_refs,
+                        "research": research,
+                        "history_anchor": history_anchor,
+                        "report_status": report_status,
+                        "report_files": delivery_reports[:5],
+                    }
+                ),
+                ensure_ascii=False,
+            )
+            with get_db() as db:
+                if db.execute(
+                    "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+                    [conv_id, user],
+                ).fetchone():
+                    if session_id and project_dir:
+                        db.execute(
+                            "UPDATE conversations SET session_id=?, project_dir=? WHERE id=? AND username=?",
+                            [session_id, project_dir, conv_id, user],
+                        )
+                    cursor = db.execute(
+                        "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                        [conv_id, "assistant", payload],
+                    )
+                    progress["message_id"] = cursor.lastrowid
+                    progress["message_payload"] = payload
+                else:
+                    raise RuntimeError("chat_conversation_no_longer_owned")
+
+        progress["revision"] = revision
+        progress["finished"] = True
+
+    def verify_terminal():
+        if not progress["finished"]:
+            raise RuntimeError("chat_terminal_persistence_unconfirmed")
+        with get_db() as db:
+            revision = db.execute(
+                "SELECT payload FROM research_revisions WHERE run_id=? AND revision_id=?",
+                [research["run_id"], progress["revision"]["revision_id"]],
+            ).fetchone()
+            if not revision or json.loads(revision["payload"]) != progress["revision"]:
+                raise RuntimeError("chat_revision_persistence_unconfirmed")
+            if conv_id:
+                message = db.execute(
+                    "SELECT content FROM messages WHERE id=? AND conv_id=? AND role='assistant'",
+                    [progress["message_id"], conv_id],
+                ).fetchone()
+                if not message or message["content"] != progress["message_payload"]:
+                    raise RuntimeError("chat_message_persistence_unconfirmed")
+
+    async def complete():
+        try:
+            await lease.wait_owned()
+            await lease.finish(verify_terminal)
+        except BaseException:
+            lease.block("owned_task_cancelled")
+            raise
+        finally:
+            lease.release()
+
+    def save_turn(*, error=False, cancelled=False):
+        progress["persist_attempted"] = True
+        try:
+            # No await/yield between final revision, this turn's assistant message,
+            # and finished=True. A later disconnect cannot append a second turn.
+            persist_turn(error=error, cancelled=cancelled)
+        except BaseException:
+            lease.block("persistence_failed")
+            raise
+        finally:
+            finalizer = asyncio.create_task(complete())
+            _chat_finalizers.add(finalizer)
+
+            def completed(task):
+                _chat_finalizers.discard(task)
+                if not task.cancelled():
+                    task.exception()
+
+            finalizer.add_done_callback(completed)
 
     async def generate():
         session_id = resume_session_id  # May be None for first message
@@ -268,6 +396,13 @@ async def chat_stream(request: Request):
         # Shared skill directories have no provable owner/run binding. Only
         # explicitly registered artifacts may ever appear as report files.
         delivery_reports = []
+        progress.update(
+            chunks=live_chunks,
+            refs=collected_refs,
+            calls=platform_calls,
+            session_id=session_id,
+            project_dir=project_dir,
+        )
 
         yield _emit({"research": research})
         yield _emit({"pulse": "start"})
@@ -282,6 +417,7 @@ async def chat_stream(request: Request):
             conv_id=conv_id,
             extra_skills=extra_skills,
             research_context=research,
+            parent_lease=lease,
         )
         progress["engine"] = engine
         async for ev in engine:
@@ -294,6 +430,7 @@ async def chat_stream(request: Request):
                 if new_sid and cwd:
                     session_id = new_sid
                     project_dir = _cwd_to_project_dir(cwd)
+                    progress.update(session_id=session_id, project_dir=project_dir)
                     log.info(f"[{user}] session={session_id} project={project_dir}")
 
             # Only a successful result associated with this turn's known call is a source.
@@ -442,6 +579,7 @@ async def chat_stream(request: Request):
                 delivery_note += reason + "。"
             delivery_note += "已保留回答与研究过程，可在本对话中发送“继续完成报告”发起后续研究。"
             full_text += delivery_note
+            progress["text"] = full_text
             live_chunks.append({"t": "text", "c": delivery_note})
             yield _emit({"text": delivery_note, "delivery": True})
 
@@ -449,19 +587,10 @@ async def chat_stream(request: Request):
         log.info(f"[{user}] DONE {elapsed:.1f}s len={len(full_text)} refs={len(collected_refs)}")
 
         report_text, _ = _prepare_chat_report(full_text, skill_name)
-        revision = finalize_research_run(
-            user, research["run_id"], report_text, error=bool(stream_error), cancelled=stream_cancelled
-        )
-        progress["finished"] = True
+        progress["text"] = full_text
+        save_turn(error=bool(stream_error), cancelled=stream_cancelled)
+        revision = progress["revision"]
         report_status = revision["acceptance_status"]
-        research.update(
-            status=report_status,
-            revision_id=revision["revision_id"],
-            gaps=revision["gaps"],
-            information_cutoff=revision.get("information_cutoff"),
-            cutoff_precision=revision.get("cutoff_precision", "unknown"),
-            requested_period=revision.get("requested_period"),
-        )
         yield _emit({"research": research})
 
         if conv_id and full_text.strip():
@@ -493,38 +622,6 @@ async def chat_stream(request: Request):
                 )
             except Exception as e:
                 log.warning(f"[{user}] Failed to save chat report snapshot: {e}")
-
-        # Persist only this turn. Re-importing every JSONL assistant duplicates old research.
-        if conv_id:
-            live_chunks.extend({"t": "platform_call", "call": call} for call in platform_calls.values())
-            payload = json.dumps(
-                source_display_payload(
-                    {
-                        "text": full_text,
-                        "chunks": live_chunks,
-                        "refs": collected_refs,
-                        "research": research,
-                        "history_anchor": history_anchor,
-                        "report_status": report_status,
-                        "report_files": delivery_reports[:5],
-                    }
-                ),
-                ensure_ascii=False,
-            )
-            with get_db() as db:
-                if db.execute(
-                    "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
-                    [conv_id, user],
-                ).fetchone():
-                    if session_id and project_dir:
-                        db.execute(
-                            "UPDATE conversations SET session_id=?, project_dir=? WHERE id=? AND username=?",
-                            [session_id, project_dir, conv_id, user],
-                        )
-                    db.execute(
-                        "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                        [conv_id, "assistant", payload],
-                    )
 
         # Auto-extract analysis graph from saved messages
         if conv_id:
@@ -574,15 +671,11 @@ async def chat_stream(request: Request):
                 if engine is not None:
                     await engine.aclose()
             finally:
-                if not progress["finished"]:
-                    try:
-                        finalize_research_run(
-                            user, research["run_id"], progress["text"], error=failed, cancelled=not failed
-                        )
-                    except Exception:
-                        # A deleted/reassigned conversation must not be revived or
-                        # written through just because an engine was still running.
-                        log.warning("Research interrupted; finalization unavailable")
+                try:
+                    if not progress.get("persist_attempted"):
+                        save_turn(error=failed, cancelled=not failed)
+                finally:
+                    lease.release()
 
     return StreamingResponse(tracked_generate(), media_type="text/event-stream")
 

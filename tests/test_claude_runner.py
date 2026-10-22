@@ -5,6 +5,20 @@ import asyncio
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def mocked_registration_adapter(monkeypatch):
+    """Legacy launcher mocks explicitly replace registration, never product gates."""
+    from server.services import claude_runner as runner_adapter
+    from server.services import process_lease
+
+    monkeypatch.setattr(process_lease, "register_process", lambda lease, process: False)
+
+    async def wait(lease, process, registered):
+        return await process.wait()
+
+    monkeypatch.setattr(runner_adapter, "wait_process", wait)
+
+
 @pytest.mark.asyncio
 async def test_claude_stream_idle_timeout_emits_error_and_cleans_process(monkeypatch, tmp_path):
     from server.services import claude_runner
@@ -153,3 +167,64 @@ async def test_missing_process_cancellation_cannot_mark_unrelated_process():
     before = set(runner._cancelled_procs)
     assert await runner.cancel_process("absent-synthetic-conversation") is False
     assert runner._cancelled_procs == before
+
+
+@pytest.mark.asyncio
+async def test_cancel_keeps_process_visible_until_killed_child_is_reaped(monkeypatch):
+    from server.services import claude_runner as runner
+
+    class Process:
+        returncode = None
+        waits = 0
+        killed = False
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            self.waits += 1
+            assert runner._active_procs["cancel-reap"] is self
+            if self.waits == 1:
+                raise TimeoutError
+            assert self.killed
+            self.returncode = -9
+            return -9
+
+    process = Process()
+    monkeypatch.setitem(runner._active_procs, "cancel-reap", process)
+    try:
+        assert await runner.cancel_process("cancel-reap")
+        assert process.waits == 2
+        assert "cancel-reap" not in runner._active_procs
+    finally:
+        runner._active_procs.pop("cancel-reap", None)
+        runner._cancelled_procs.discard(id(process))
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_cancel_remains_visible_and_does_not_report_success(monkeypatch):
+    from server.services import claude_runner as runner
+
+    class Process:
+        returncode = None
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            raise TimeoutError
+
+    process = Process()
+    monkeypatch.setitem(runner._active_procs, "cancel-unconfirmed", process)
+    try:
+        assert not await runner.cancel_process("cancel-unconfirmed")
+        assert runner._active_procs["cancel-unconfirmed"] is process
+    finally:
+        runner._active_procs.pop("cancel-unconfirmed", None)
+        runner._cancelled_procs.discard(id(process))

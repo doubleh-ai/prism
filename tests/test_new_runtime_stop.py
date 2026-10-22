@@ -617,6 +617,7 @@ def test_actual_analysis_executor_and_real_database_survive_wrapper_cancel(
     from server import analysis_engine as engine
     from server import database
     from server.services import auxiliary_model
+    from server.work_lifecycle import Manager, bind_context
 
     ns = worker_functions()
     release = threading.Event()
@@ -655,32 +656,45 @@ def test_actual_analysis_executor_and_real_database_survive_wrapper_cancel(
     monkeypatch.setattr(engine, "ASTOCK_CACHE_TTL_SECONDS", 3600)
     monkeypatch.setattr(engine, "ASTOCK_PROJECT", str(tmp_path / "external-stub"))
     errors = []
+    manager = Manager(max_workers=1)
+    original_start, original_submit = manager.start, manager._pool.submit
+
+    def observed_submit(*args, **kwargs):
+        # Preserve the actual ThreadPoolExecutor future; no fake thread/result.
+        future = original_submit(*args, **kwargs)
+        state["executor_future"] = future
+        return future
+
+    def observed_start(kind, function, *, parent=None, persist=None):
+        handle = original_start(kind, function, parent=parent, persist=persist)
+        if kind == "analysis":
+            state["handle"] = handle
+            # This supervised HTTP waiter may cancel; the real executor and the
+            # business owner remain held by the application lifecycle manager.
+            state["future"] = asyncio.create_task(handle.wait())
+        return handle
+
+    monkeypatch.setattr(manager._pool, "submit", observed_submit)
+    monkeypatch.setattr(manager, "start", observed_start)
 
     async def execute():
         loop = asyncio.get_running_loop()
         state["loop"] = loop
         loop.set_exception_handler(lambda loop, context: errors.append(context.get("exception")))
 
-        def observe(frame, event, arg):
-            if frame.f_code is engine.start_analysis.__code__ and event == "return":
-                future = frame.f_locals.get("future")
-                if isinstance(future, asyncio.Future):
-                    state["future"] = future
-
-        old = sys.getprofile()
-        sys.setprofile(observe)
-        try:
+        with bind_context(manager):
             state["analysis_id"] = await engine.start_analysis(
                 "600519", username=state["owner"], date="2026-10-22", mode="fast", force_refresh=True
             )
-        finally:
-            sys.setprofile(old)
         try:
             for _ in range(2000):
                 if state["before_sha"]:
                     break
                 await asyncio.sleep(0.001)
             assert state["before_sha"] and state["thread"].is_alive()
+            actual_future = state["executor_future"]
+            assert not actual_future.done() and not actual_future.cancelled()
+            assert manager.observe()["pending_cf"] == 1
             with database.get_db() as db:
                 assert (
                     db.execute(
@@ -690,15 +704,30 @@ def test_actual_analysis_executor_and_real_database_survive_wrapper_cancel(
                 )
             if cancel_wrapper:
                 assert state["future"].cancel()
-                await asyncio.sleep(0)
+                with pytest.raises(asyncio.CancelledError):
+                    await state["future"]
+                assert not actual_future.done() and not actual_future.cancelled()
+                assert manager.observe()["pending_cf"] == 1
             state["server_unwound"] = True
             for _ in range(2000):
                 if state["during_sha"]:
                     break
                 await asyncio.sleep(0.001)
             assert state["during_sha"] and state["thread"].is_alive()
+            assert state["executor_future"] is actual_future and not actual_future.done()
+            manager.begin_drain(manager.ticket())
+            assert not await manager.wait_drained(timeout=0.01)
         finally:
             release.set()
+        assert await manager.wait_drained(timeout=3)
+        await state["handle"].wait()
+        if not cancel_wrapper:
+            await state["future"]
+        assert actual_future.done() and not actual_future.cancelled()
+        assert manager.observe()["pending_cf"] == manager.observe()["persist_pending"] == 0
+        # Unlike the old default executor, this real application pool is owned
+        # explicitly. Only draining+empty identity-free test close may join it.
+        manager.close_development()
         await loop.shutdown_default_executor()
 
     try:
@@ -720,13 +749,14 @@ def test_actual_analysis_executor_and_real_database_survive_wrapper_cancel(
         )
         assert state["executor_finished"] and not state["thread"].is_alive()
         if cancel_wrapper:
-            assert state["future"].cancelled() and any(
-                isinstance(error, asyncio.CancelledError) for error in errors
-            )
+            assert state["future"].cancelled()
+            assert state["executor_future"].done() and not state["executor_future"].cancelled()
+            assert not errors  # Expected HTTP cancellation is observed, never an unhandled owner error.
         else:
             assert state["future"].done() and not state["future"].cancelled() and not errors
     finally:
         release.set()
+        manager._pool.shutdown(wait=True, cancel_futures=False)  # Failure-path test cleanup only.
         engine._store.pop(state.get("analysis_id"), None)
         while str(tmp_path / "external-stub") in sys.path:
             sys.path.remove(str(tmp_path / "external-stub"))

@@ -13,6 +13,34 @@ from server import config
 from server.services import auxiliary_model as helper
 
 
+@pytest.fixture(autouse=True)
+def mocked_registration_adapter(monkeypatch):
+    """Explicit adapter for these mock launchers; real child tests are separate."""
+    from server.services import process_lease
+
+    monkeypatch.setattr(process_lease, "register_process", lambda lease, process: False)
+    monkeypatch.setattr(helper, "register_process", lambda lease, process: False)
+    monkeypatch.setattr(helper, "wait_process_sync", lambda lease, process, registered: process.wait())
+
+    async def wait(lease, process, registered):
+        if hasattr(process, "wait"):
+            return await process.wait()
+        return process.returncode
+
+    monkeypatch.setattr(helper, "wait_process", wait)
+
+
+class CompletedMock:
+    def __init__(self, stdout, returncode):
+        self.stdout, self.returncode = stdout, returncode
+
+    def communicate(self, **kwargs):
+        return self.stdout, None
+
+    def wait(self):
+        return self.returncode
+
+
 @pytest.fixture
 def configured(monkeypatch):
     monkeypatch.setattr(config, "DEFAULT_MODEL", "deepseek")
@@ -82,9 +110,9 @@ def test_sync_uses_configured_model_without_tools_or_inherited_credentials(confi
 
     def fake(cmd, **options):
         directories.append(assert_boundary(cmd, options))
-        return SimpleNamespace(stdout=b'{"result":"safe"}', returncode=0)
+        return CompletedMock(stdout=b'{"result":"safe"}', returncode=0)
 
-    monkeypatch.setattr(helper.subprocess, "run", fake)
+    monkeypatch.setattr(helper.subprocess, "Popen", fake)
     for _ in range(2):
         assert helper.run_text("untrusted body", output_format="json") == '{"result":"safe"}'
     assert directories[0] != directories[1] and all(not d.exists() for d in directories)
@@ -96,7 +124,7 @@ def test_unconfigured_model_cannot_start_a_child(configured, monkeypatch, model_
     def forbidden(*args, **kwargs):
         pytest.fail("Unconfigured models must not start the CLI")
 
-    monkeypatch.setattr(helper.subprocess, "run", forbidden)
+    monkeypatch.setattr(helper.subprocess, "Popen", forbidden)
     with pytest.raises(helper.AuxiliaryModelUnavailable, match="尚未配置"):
         helper.run_text("input", model_id=model_id)
 
@@ -108,7 +136,7 @@ def test_failed_or_unbounded_output_is_never_relayed(configured, monkeypatch, re
     monkeypatch.setattr(
         helper.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=returncode, stdout=stdout),
+        lambda *args, **kwargs: CompletedMock(returncode=returncode, stdout=stdout),
     )
     with pytest.raises(helper.AuxiliaryModelUnavailable) as error:
         helper.run_text("input")
@@ -218,12 +246,12 @@ def test_indicator_fallback_uses_the_same_configured_no_tool_boundary(configured
     def fake(cmd, **options):
         assert_boundary(cmd, options)
         calls.append(cmd)
-        return SimpleNamespace(
+        return CompletedMock(
             stdout=json.dumps({"kind": "plot", "name": "Close", "dsl": {"price": "close"}}).encode(),
             returncode=0,
         )
 
-    monkeypatch.setattr(helper.subprocess, "run", fake)
+    monkeypatch.setattr(helper.subprocess, "Popen", fake)
     result = translator.translate("unrecognized custom indicator request")
     assert result["source"] == "llm" and result["dsl"] == {"price": "close"}
     assert len(calls) == 1
