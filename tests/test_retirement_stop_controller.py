@@ -177,6 +177,11 @@ def wire(prepared, monkeypatch, mode=None):
         "base_environment_sha256": remote.RETIREMENT_BASE_ENV_SHA256,
     }
     monkeypatch.setattr(engine, "retirement_baseline", lambda: dict(baseline))
+    monkeypatch.setattr(
+        engine,
+        "live_original_state",
+        lambda: {key: baseline[key] for key in ("production_pid", "runtime_fingerprint")},
+    )
     data = copy.deepcopy(prepared.data)
     data.update(
         action="validate_legacy_stop",
@@ -200,6 +205,7 @@ def wire(prepared, monkeypatch, mode=None):
                 "wrong-nonce": [
                     "/usr/bin/systemctl",
                     "show",
+                    "--all",
                     "--property=" + stop.PROPERTIES,
                     "prism-retirement-probe-" + "f" * 32 + "-int-executor.service",
                 ],
@@ -236,7 +242,7 @@ def wire(prepared, monkeypatch, mode=None):
             descriptor = probe._case(plan, case_id)
             boundary("retirement_stop_start_" + case_id)
             run(
-                ["/usr/bin/systemctl", "show", "--property=" + stop.PROPERTIES, descriptor["unit"]],
+                ["/usr/bin/systemctl", "show", "--all", "--property=" + stop.PROPERTIES, descriptor["unit"]],
                 timeout=10,
             )
             record("synthetic_start_intent", {"case_id": case_id, "nonce": NONCE})
@@ -561,18 +567,26 @@ def test_actual_command_capture_only_fixed_public_metadata(monkeypatch, kind):
         "case": [
             "/usr/bin/systemctl",
             "show",
+            "--all",
             "--property=" + stop.PROPERTIES,
             "prism-retirement-probe-" + NONCE + "-int-executor.service",
         ],
         "observer": [
             "/usr/bin/systemctl",
             "show",
+            "--all",
             "--property=" + stop.OBSERVER_PROPERTIES,
             "prism-retirement-stop-ref-" + NONCE + "-int-executor.service",
         ],
         "version": stop.VERSION_COMMAND,
         "inventory": stop.OBSERVER_INVENTORY,
-        "unknown": ["/usr/bin/systemctl", "show", "--property=" + stop.PROPERTIES, "stock-app.service"],
+        "unknown": [
+            "/usr/bin/systemctl",
+            "show",
+            "--all",
+            "--property=" + stop.PROPERTIES,
+            "stock-app.service",
+        ],
     }[kind]
     calls = []
 
@@ -625,3 +639,199 @@ def test_mac_requires_all_three_literal_pins_and_explicit_attempt_proof(tmp_path
     result, _ = controller.request_for(args)
     assert result["retirement_stop_helpers"] == sources()
     assert result["retirement_stop_attempt"] == ATTEMPT and result["retirement_proof_attempt"] == PROOF
+
+
+def seed_reviewed_prestart(prepared, data, baseline):
+    engine = prepared.engine
+    engine.request = data
+    proof = engine.retirement_signal_proof(baseline, bindings(), probe, validation)
+    directory = engine.record / "legacy-stop" / remote.RETIREMENT_PRESTART_ATTEMPT
+    directory.mkdir(parents=True, mode=0o700)
+    identity = {
+        "commit": existing.COMMIT,
+        "attempt": directory.name,
+        "helpers": {
+            **remote.RETIREMENT_HELPERS,
+            "retirement_stop_validation.py": remote.RETIREMENT_PRESTART_STOP_SHA256,
+        },
+        "baseline": dict(baseline),
+        "signal_proof": proof,
+        "system_python_sha256": remote.RETIREMENT_SYSTEM_PYTHON_SHA256,
+    }
+    engine.write(directory / "identity.json", remote.encoded(identity))
+    summary = summary_value()
+    summary.update(
+        retirement_stop_validation_passed=False,
+        systemctl_stop_end_to_end_proven=False,
+        synthetic_cleanup_verified=True,
+        cases=[],
+        error_code="retirement_stop_systemd_properties_rejected",
+    )
+    chain, lines = "0" * 64, []
+    for sequence, (event, details) in enumerate(
+        (
+            (
+                "public_bundles_verified",
+                {
+                    "bundle_sha256": probe.bundle_identity(),
+                    "wrapper_sha256": validation.wrapper_directory().name,
+                },
+            ),
+            ("retirement_stop_validation_result", summary),
+        ),
+        1,
+    ):
+        line = (
+            remote.encoded(
+                {
+                    "sequence": sequence,
+                    "at": existing.NOW,
+                    "previous_sha256": chain,
+                    "event": event,
+                    "details": details,
+                }
+            )
+            + b"\n"
+        )
+        lines.append(line)
+        chain = remote.digest(line)
+    engine.write(directory / "events.jsonl", b"".join(lines))
+    engine.write(
+        directory / "receipt.json",
+        remote.encoded(
+            {
+                "attempt": directory.name,
+                "signal_proof": proof,
+                "summary": summary,
+                "events": 2,
+                "last_event_sha256": chain,
+                "production_verified": False,
+                "passed": False,
+                "baseline_verified_after": True,
+                "failure_code": "legacy_stop_validation_failed",
+            }
+        ),
+    )
+    return directory
+
+
+def test_only_reviewed_zero_actuation_failure_gets_new_durable_reconciliation(prepared, monkeypatch):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    previous = seed_reviewed_prestart(prepared, data, baseline)
+    before = {path.name: path.read_bytes() for path in previous.iterdir()}
+    assert prepared.engine.execute(data)["legacy_stop"]["passed"] is True
+    assert {path.name: path.read_bytes() for path in previous.iterdir()} == before
+    current = prepared.engine.record / "legacy-stop" / ATTEMPT
+    accepted = json.loads((current / "prestart-reconciliation.json").read_bytes())
+    assert accepted["old_records_unchanged"] is True and len(accepted["records"]) == 1
+    record = accepted["records"][0]
+    assert record["attempt"] == remote.RETIREMENT_PRESTART_ATTEMPT
+    assert record["no_synthetic_actuation"] is True
+    assert record["receipt_sha256"] == remote.digest(before["receipt.json"])
+    assert record["events_sha256"] == remote.digest(before["events.jsonl"])
+    identity = json.loads((current / "identity.json").read_bytes())
+    assert identity["prestart_reconciliations"] == accepted["records"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "start",
+        "extra_event",
+        "chain",
+        "cases",
+        "cleanup",
+        "error",
+        "baseline",
+        "proof",
+        "helper",
+        "after",
+        "other_attempt",
+    ],
+)
+def test_any_unknown_or_actuated_failure_stays_blocked(prepared, monkeypatch, change):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    directory = seed_reviewed_prestart(prepared, data, baseline)
+    identity = json.loads((directory / "identity.json").read_bytes())
+    receipt = json.loads((directory / "receipt.json").read_bytes())
+    lines = (directory / "events.jsonl").read_bytes().splitlines(keepends=True)
+    if change == "start":
+        row = json.loads(lines[0])
+        row.update(event="synthetic_start_intent", details={"case_id": "int-executor", "nonce": NONCE})
+        lines[0] = remote.encoded(row) + b"\n"
+    elif change == "extra_event":
+        lines.insert(1, lines[0])
+    elif change == "chain":
+        receipt["last_event_sha256"] = "f" * 64
+    elif change == "cases":
+        receipt["summary"]["cases"] = [summary_value()["cases"][0]]
+    elif change == "cleanup":
+        receipt["summary"]["synthetic_cleanup_verified"] = False
+    elif change == "error":
+        receipt["summary"]["error_code"] = "retirement_stop_uncertain_dispatch"
+    elif change == "baseline":
+        identity["baseline"]["production_pid"] = 999
+    elif change == "proof":
+        receipt["signal_proof"]["receipt_sha256"] = "f" * 64
+    elif change == "helper":
+        identity["helpers"]["retirement_stop_validation.py"] = remote.RETIREMENT_STOP_HELPERS[
+            "retirement_stop_validation.py"
+        ]
+    elif change == "after":
+        receipt["baseline_verified_after"] = False
+    else:
+        other = directory.with_name("unapproved-prestart-attempt")
+        directory.rename(other)
+        directory = other
+    (directory / "identity.json").write_bytes(remote.encoded(identity))
+    (directory / "receipt.json").write_bytes(remote.encoded(receipt))
+    (directory / "events.jsonl").write_bytes(b"".join(lines))
+    with pytest.raises(remote.ReleaseError, match="^retirement_previous_stop_unreconciled$"):
+        prepared.engine.execute(data)
+    assert not (directory.parent / ATTEMPT).exists()
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+def test_legacy_environment_is_fully_scanned_before_and_after_not_during_fixed_work_gate(
+    prepared, monkeypatch
+):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    calls = []
+
+    def full():
+        calls.append("full_environment_source_runtime")
+        return dict(baseline)
+
+    monkeypatch.setattr(prepared.engine, "retirement_baseline", full)
+    assert prepared.engine.execute(data)["legacy_stop"]["passed"] is True
+    assert calls == ["full_environment_source_runtime", "full_environment_source_runtime"]
+
+
+@pytest.mark.parametrize("drift", ["pid", "runtime", "source"])
+def test_active_gate_still_requires_fresh_runtime_and_complete_production_source(
+    prepared, monkeypatch, drift
+):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    original = prepared.engine.live_original_state
+    phase = {"changed": False}
+
+    def permit(nonce, label):
+        if label == "retirement_stop_dispatch_int-executor":
+            phase["changed"] = True
+        return nonce
+
+    def current():
+        value = original()
+        if phase["changed"]:
+            if drift == "source":
+                raise remote.ReleaseError("live_original_source_changed")
+            value["production_pid" if drift == "pid" else "runtime_fingerprint"] = (
+                999 if drift == "pid" else "f" * 63 + "0"
+            )
+        return value
+
+    prepared.engine.permit = permit
+    monkeypatch.setattr(prepared.engine, "live_original_state", current)
+    with pytest.raises(remote.ReleaseError, match="retirement_original_baseline_changed"):
+        prepared.engine.execute(data)
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)

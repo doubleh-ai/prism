@@ -189,14 +189,17 @@ class StopValidation(base.Validation):
         if unit not in {probe._case(self.plan, case_id)["unit"] for case_id in CASES}:
             reject("host_unit_rejected")
         return _rows(
-            self.run(["/usr/bin/systemctl", "show", "--property=" + PROPERTIES, unit], timeout=10), PROPERTIES
+            self.run(["/usr/bin/systemctl", "show", "--all", "--property=" + PROPERTIES, unit], timeout=10),
+            PROPERTIES,
         )
 
     def observer_show(self, case):
         self.fixed_case(case)
         name = observer_unit(self.plan, case["case_id"])
         return _rows(
-            self.run(["/usr/bin/systemctl", "show", "--property=" + OBSERVER_PROPERTIES, name], timeout=10),
+            self.run(
+                ["/usr/bin/systemctl", "show", "--all", "--property=" + OBSERVER_PROPERTIES, name], timeout=10
+            ),
             OBSERVER_PROPERTIES,
         )
 

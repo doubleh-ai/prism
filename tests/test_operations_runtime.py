@@ -21,4 +21,4 @@ def test_release_observation_real_javascript_behavior():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "operations runtime ok: 8 scenarios" in result.stdout
+    assert "operations runtime ok: 9 scenarios" in result.stdout

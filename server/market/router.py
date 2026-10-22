@@ -1,24 +1,30 @@
 """FastAPI routes for market data — /api/quote, /api/quote/kline,
 /api/fundamentals, /api/search, /api/data-providers.
 
-All endpoints require authentication (the existing middleware
-enforces that for any non-``/api/login`` path). The endpoints are
-GET-only so no CSRF header is required.
+Every endpoint requires a session before any provider call. The endpoints
+are GET-only, so no CSRF header is required.
 """
 
 import logging
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from ..auth import require_auth
 from .factory import get_chain
 from .models import SearchHit
 from .provider import NoProviderAvailable, ProviderNotFound
 
 log = logging.getLogger("stock-app")
 
-router = APIRouter(prefix="/api")
+
+def _require_market_session(request: Request) -> str:
+    # Keep optional=False fixed rather than exposing it as an injectable query.
+    return require_auth(request)
+
+
+router = APIRouter(prefix="/api", dependencies=[Depends(_require_market_session)])
 
 # Tickers: 6 digits (A-share) or HK 5-digit / US alpha-numeric.
 # Loose pattern — providers will reject truly bogus ones with NotFound.
@@ -92,6 +98,8 @@ async def api_kline(
     period: str = "1d",
     limit: int = 120,
 ):
+    from .models import describe_kline
+
     ticker = _validate_ticker(ticker)
     if period not in ("1d", "1w", "1m", "5m", "15m", "30m", "60m"):
         raise HTTPException(400, "invalid period")
@@ -104,7 +112,12 @@ async def api_kline(
             status_code=503,
             content={"error": "no_provider_available", "detail": str(e)},
         )
-    return {"ticker": ticker, "period": period, "kline": [k.model_dump() for k in kls], "stale": stale}
+    return {
+        "ticker": ticker,
+        "period": period,
+        "kline": [k.model_dump(exclude={"provenance"}) for k in kls],
+        **describe_kline(kls, stale=stale),
+    }
 
 
 @router.get("/fundamentals/{ticker}")

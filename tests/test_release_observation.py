@@ -9,6 +9,20 @@ import pytest
 
 from server import operations as ops
 
+NON_PRODUCTION_STAGES = (
+    "finish_stage",
+    "diagnose_build",
+    "quarantine_failed_prepare",
+    "integration_astock",
+    "integration_cli",
+    "integration_live",
+    "integration_market",
+    "validate_legacy_retirement",
+    "validate_legacy_stop",
+    "legacy_drain",
+    "switch_stopped",
+)
+
 
 @pytest.fixture
 def record_path(tmp_path, monkeypatch):
@@ -90,3 +104,50 @@ def test_internal_verification_does_not_certify_closed_public_entry(record_path)
     result = ops.release_observation()
     assert result["status"] == "ok"
     assert not result["record"]["production_verified"]
+
+
+@pytest.mark.parametrize("stage", NON_PRODUCTION_STAGES)
+@pytest.mark.parametrize("status", ["completed", "success"])
+async def test_validation_stages_and_green_ci_never_certify_production(
+    record_path, monkeypatch, stage, status
+):
+    checked_at = int(time.time())
+    record(
+        record_path,
+        stage=stage,
+        status=status,
+        cutover_occurred=False,
+        # Even an inconsistent upstream flag cannot promote a validation phase.
+        production_verified=True,
+        last_completed_stage=stage,
+        updated_at=checked_at,
+        steps=[{"stage": stage, "status": status, "at": checked_at}],
+    )
+    monkeypatch.setattr(ops, "_observation", ops.Observation())
+    monkeypatch.setattr(ops, "OPERATIONS_ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        ops, "release_payload", lambda: {"version": "synthetic-local-build", "deployed_revision": "a" * 40}
+    )
+    monkeypatch.setattr(
+        ops,
+        "_read_github",
+        AsyncMock(
+            return_value=(
+                [
+                    {"kind": "ci", "status": "completed", "conclusion": "success"},
+                    {"kind": "candidate", "status": "completed", "conclusion": "success"},
+                ],
+                [],
+            )
+        ),
+    )
+    value = await ops.operations_payload()
+    projected = value["production"]["record"]
+    assert value["production"]["status"] == "ok"
+    assert projected["stage"] == projected["last_completed_stage"] == stage
+    assert projected["steps"] == [{"stage": stage, "status": status, "at": projected["updated_at"]}]
+    assert projected["production_verified"] is False
+    assert value["runtime"]["production_verified"] is False
+    assert value["github"]["status"] == "ok"
+    assert all(run["conclusion"] == "success" for run in value["github"]["runs"])
+    assert value["delivery"]["can_deploy"] is False and value["delivery"]["can_rollback"] is False

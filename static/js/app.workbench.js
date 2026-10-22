@@ -183,6 +183,7 @@
         var result = snapshot.result || call.result;
         this._capabilitySnapshot = snapshot;
         document.getElementById('capabilityResultTitle').textContent = call.label || '能力调用结果';
+        var provenance = call.capability_id === 'market_kline' && result && this._klineProvenanceHtml ? this._klineProvenanceHtml(result) : '';
         var points = result && (result.bars || result.points || result.matches || result.kline);
         var table = '';
         if (Array.isArray(points) && points.length) {
@@ -191,7 +192,7 @@
         }
         body.innerHTML = '<p class="research-notice">当次查询快照 · '+esc(ChatRender.formatTime(call.created_at))+'<br>平台结果不等于原始事实核验；数据时点以结果内记录为准，缺失时未知。</p>'+
           '<section class="research-section"><h3>实际条件</h3><pre>'+esc(JSON.stringify(params,null,2))+'</pre></section>'+
-          '<section class="research-section"><h3>原结果</h3>'+(result == null ? '<p>此历史调用未保留结果快照。请明确发起新查询；不会以当前数据替代历史结果。</p>' : table || '<pre>'+esc(JSON.stringify(result,null,2))+'</pre>')+'</section>'+
+          '<section class="research-section"><h3>原结果</h3>'+provenance+(result == null ? '<p>此历史调用未保留结果快照。请明确发起新查询；不会以当前数据替代历史结果。</p>' : table || '<pre>'+esc(JSON.stringify(result,null,2))+'</pre>')+'</section>'+
           (call.conv_id ? '<button class="research-action" data-call-conversation="'+escAttr(call.conv_id)+'">返回原会话</button>' : '');
       } catch (error) {
         if (sequence === this._capabilitySnapshotSeq && dialog.open) body.innerHTML = '<div class="workbench-empty">原结果暂时无法读取。请重试；不会重新执行该调用。</div>';

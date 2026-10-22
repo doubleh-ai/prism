@@ -32,6 +32,7 @@ ACTIONS = (
     "integration_astock",
     "integration_cli",
     "integration_live",
+    "integration_market",
     "validate_legacy_retirement",
     "validate_legacy_stop",
     "quiesce",
@@ -56,13 +57,17 @@ RETIREMENT_HELPERS = {
     "retirement_probe.py": "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624",
     "retirement_validation.py": "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e",
 }
+MARKET_INTEGRATION_HELPERS = {
+    "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
+    "market_live_validation.py": "30fdabce0929eaee447ea37e87a28e6b9e267274caaed2fe2b942576cf944d32",
+}
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
-    "retirement_stop_validation.py": "f0dd83ad2f3bc78dbe9018c100661a5ec1cec6b2fa9bee08eef6ec91cb67ff87",
+    "retirement_stop_validation.py": "3b074d93feea5d3d5c4ad5846427c06725498c65eb49471885104d1c1fdb41fa",
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "8d207325efe0169e2ba9a1072f657722b65bd7501f14925104b0f7b79281f12b",
+    "live_integration_validation.py": "95991b9ee669dfd99a2fe40f1fb1306534fae04b1d366a3e1ee6eab0f91a6815",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
@@ -237,6 +242,24 @@ def request_for(args):
         if not args.source_manifest or not isinstance(receipts.get("model_environment"), dict):
             raise ControlError("live_integration_private_bindings_required")
         request.update(live_helpers=helpers, integration_attempt=attempt)
+    if args.action == "integration_market":
+        attempt = getattr(args, "integration_attempt", None)
+        if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
+            raise ControlError("explicit_market_integration_attempt_required")
+        helpers = {}
+        for filename, approved in MARKET_INTEGRATION_HELPERS.items():
+            field = filename.removesuffix(".py").replace("market_live_", "market_") + "_sha256"
+            if getattr(args, field, None) != approved:
+                raise ControlError("approved_market_integration_helpers_required")
+            helpers[filename] = {
+                "sha256": approved,
+                "content": base64.b64encode(trusted_source(filename, approved)).decode(),
+            }
+        if not args.source_manifest or not re.fullmatch(
+            "[0-9a-f]{64}", receipts.get("expected_current_fingerprint", "")
+        ):
+            raise ControlError("market_integration_private_bindings_required")
+        request.update(market_helpers=helpers, integration_attempt=attempt)
     if args.action == "validate_legacy_retirement":
         helpers = {}
         for filename, approved in RETIREMENT_HELPERS.items():
@@ -466,6 +489,8 @@ def main():
         "astock-probe-sha256",
         "cli-probe-sha256",
         "integration-attempt",
+        "market-probe-sha256",
+        "market-validation-sha256",
         "live-validation-sha256",
         "live-worker-sha256",
         "live-transport-sha256",

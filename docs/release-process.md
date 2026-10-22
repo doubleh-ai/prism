@@ -142,9 +142,11 @@ Mac 必须提供两个已批准的公开 helper 的固定摘要；远端再次�
 
 前置证明只从同一 release 的 root 私有控制器记录读取，核完整 identity、候选、原生产源码/运行指纹/旧环境、当前两 helper pin、事件链和最后 summary，并要求七个不同 case 均通过、清理和事后基线复核成功。三个正例与四个预期反例分别核对；反例通过只表示已观察到其限制。缺记录、摘要链变化、旧 pin 或基线漂移均拒绝。三个 helper 由 Mac 与远端双重固定摘要校验后封存 root 0555/0444，root 不导入候选或旧包。
 
-停止意图、身份和单次提交先追加到 `legacy-stop/<attempt>/events.jsonl`，逐条 fsync 并保留序号/摘要链。执行器只允许本次完整随机数下两服务和 observer 的精确启动、show、单次 `stop --no-block`、固定库存查询与版本查询；拒绝 kill、restart、其他 Python 和生产停止。每个受控边界重新取得 Issue #9/STOP 许可并核完整原基线，空 observer 释放也有独立许可。未确认的派发不重试；失败或部分记录保持原样，并阻止新 nonce 自动继续。成功必须有实际退出、递归 cgroup 空和持久结果证据。`systemctl_stop_end_to_end_proven` 只表示合成实验；`production_quiescence_proven`、`all_production_memory_persisted`、`production_verified` 仍为 false，真实任务清点仍必须完成。
+停止意图、身份和单次提交先追加到 `legacy-stop/<attempt>/events.jsonl`，逐条 fsync 并保留序号/摘要链。执行器只允许本次完整随机数下两服务和 observer 的精确启动、show、单次 `stop --no-block`、固定库存查询与版本查询；拒绝 kill、restart、其他 Python 和生产停止。每个受控边界重新取得 Issue #9/STOP 许可，并核完整生产源码、原 PID 和运行指纹，空 observer 释放也有独立许可。完整旧环境在实验开始与结束各扫描一次；活任务只执行另行封存的固定公开依赖，不能在 20 秒工作窗口中反复扫描约 1GB 旧环境，也不延长任务窗口。未确认的派发不重试；失败或部分记录保持原样，并阻止新 nonce 自动继续。成功必须有实际退出、递归 cgroup 空和持久结果证据。`systemctl_stop_end_to_end_proven` 只表示合成实验；`production_quiescence_proven`、`all_production_memory_persisted`、`production_verified` 仍为 false，真实任务清点仍必须完成。
 
 Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth 执行，结束后恢复 site 函数。来源核验只额外接受封存引擎内六个实际存在的 PEP 420 命名空间包：必须具有真正的 NamespaceLoader，唯一搜索目录与 spec 一致，且该目录为无链接、root 锁定的预期路径。混合路径、引擎外目录、任意无文件模块均拒绝。安全结果只增加固定枚举 error_detail，绝不记录原异常文本、模块名称或配置；真实 Linux 通过仍须单独取得新 attempt 的实际回执。
+
+停止实验对合成 case 和 observer 的精确 show 命令使用 `--all`，确保 systemd 返回空值的 `ExecStop`、`ExecStopPost` 等字段；仍逐项要求完整固定字段，缺字段继续拒绝。已知 `prism-20261022-stop-e2e-001` 的原失败不覆盖：仅当原 helper 摘要、完整身份/基线、七项信号证明与摘要链均一致，事件严格只有公开依赖核验及失败 summary 两条、零 case、清理及事后基线均成功、错误精确为字段查询失败时，才允许新控制器在新 attempt 持久保存只读对账摘要后继续。任何启动意图、停止派发、不确定记录或其他失败都不适用，仍阻断新随机数。原文件字节保持不变。
 
 ## 有界真实模型与搜索联调
 
@@ -163,3 +165,5 @@ worker 使用全新 HOME、空合成数据库和私有网络命名空间，只�
 联调使用两个固定公开问题，走候选真实 `/api/chat/stream`、CLI、流式显示协议和研究记录路径，分别核模型完成、原生搜索的上交所官网出处及记录、上海服务端时间、所属 `indicator_list`/`research_read` 工具往返和外部账号 404。原生抓取、行情供应商、研究质量、生产发布始终分项保持 false，不能由模型或搜索成功推导。原模型帧和用户可见响应仅在合成私有目录留存，事件和回执只允许固定安全字段、布尔、计数和摘要，不收任意异常、正文或凭证。
 
 每个 attempt 的事件链、最终结果及失败保留，旧目录存在即拒绝覆盖。停止或失败后，仅处理本次完整随机数命名且 InvocationID、ExecMainPID、startticks 一致的两个合成 unit；未取得自身实例证据时不操作未知实例。只有退出结果及 cgroup 的聚合 `populated=0` 和空进程列表均实际核对后，才算清理完成。操作许可在等待和密钥释放前后持续复核，原生产与既有 staging 服务不停止。
+
+模型联调失败的预检证据只保留固定目标对应的整数 errno（0–4095）、三个固定布尔事实 `broker_preflight_facts`、四个文件访问布尔及公开 peer 数量；必须先通过精确字段与类型检查，才可写入安全回执，不保存地址、正文或任意异常。诊断值如超时、连接拒绝或 false 仍使预检失败；只有每个网络负控实际返回 EPERM/EACCES（1/13）、全部事实与文件访问检查为 true，才可继续允许文件和凭证门禁。记录失败原因不表示放宽网络限制，也不证明已发出请求。

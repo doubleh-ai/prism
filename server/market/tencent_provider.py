@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 from .clock import market_timestamp
-from .models import Fundamentals, KLine, Quote, SearchHit
+from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
 
@@ -147,6 +147,10 @@ class TencentProvider:
             raise ProviderUnavailable(f"Sina kline bad JSON: {e}") from e
         if not bars or not isinstance(bars, list):
             return []
+        # This adapter's K-line endpoint is Sina, unlike its Tencent quote path.
+        provenance = KLineProvenance(
+            source="sina", source_url=url, adapter=self.name, retrieved_at=int(time.time())
+        )
         out: list[KLine] = []
         for b in bars:
             try:
@@ -161,6 +165,7 @@ class TencentProvider:
                         low=float(b["low"]),
                         close=float(b["close"]),
                         volume=float(b["volume"]),
+                        provenance=provenance,
                     )
                 )
             except (KeyError, ValueError):

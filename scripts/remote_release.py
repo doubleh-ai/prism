@@ -46,6 +46,7 @@ ACTIONS = {
     "integration_astock",
     "integration_cli",
     "integration_live",
+    "integration_market",
     "validate_legacy_retirement",
     "validate_legacy_stop",
     "quiesce",
@@ -71,8 +72,44 @@ INTEGRATION_PROBES = {
     "integration_astock": ("astock", "612d7194b63e16b7ffd1e9badaa483da1f09a4a270670df8f950628d968a9184"),
     "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
 }
+MARKET_INTEGRATION_HELPERS = {
+    "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
+    "market_live_validation.py": "30fdabce0929eaee447ea37e87a28e6b9e267274caaed2fe2b942576cf944d32",
+}
+MARKET_WORKER_SHA256 = "aa4b2e250b856ac230d5a74bc18105c1f887a5e5168af1ccd7150176d7ff5970"
+MARKET_BOUNDARIES = {
+    "market_workspace",
+    "market_start",
+    "market_allow_public_http",
+    "market_wait_proof",
+    "market_wait_result",
+}
+MARKET_CHECKS = {
+    "unauthenticated_api_denied",
+    "quote_real_provider",
+    "kline_real_provider",
+    "quote_owned_capability_cache_readback",
+    "kline_owned_capability_cache_readback",
+    "quote_retained_stale_after_injected_failure",
+    "kline_retained_stale_after_injected_failure",
+    "no_cache_failure_explicit_503",
+}
+MARKET_BOOT_CHECKS = {
+    "production_home_denied",
+    "production_proc_denied",
+    "candidate_write_denied",
+    "run_readonly",
+    "production_8088_denied",
+    "vibe_8899_denied",
+    "metadata_denied",
+    "private_ip_denied",
+    "other_public_denied",
+    "synthetic_empty_data",
+    "staging_denied",
+}
+MARKET_UNIT_PROPERTIES = "MainPID,ExecMainPID,InvocationID,ActiveState,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "8d207325efe0169e2ba9a1072f657722b65bd7501f14925104b0f7b79281f12b",
+    "live_integration_validation.py": "95991b9ee669dfd99a2fe40f1fb1306534fae04b1d366a3e1ee6eab0f91a6815",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
@@ -135,9 +172,11 @@ RETIREMENT_HELPERS = {
 }
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
-    "retirement_stop_validation.py": "f0dd83ad2f3bc78dbe9018c100661a5ec1cec6b2fa9bee08eef6ec91cb67ff87",
+    "retirement_stop_validation.py": "3b074d93feea5d3d5c4ad5846427c06725498c65eb49471885104d1c1fdb41fa",
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
+RETIREMENT_PRESTART_ATTEMPT = "prism-20261022-stop-e2e-001"
+RETIREMENT_PRESTART_STOP_SHA256 = "f0dd83ad2f3bc78dbe9018c100661a5ec1cec6b2fa9bee08eef6ec91cb67ff87"
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
 ASTOCK_ERROR_DETAILS = {
     "astock_import_contract_rejected",
@@ -675,6 +714,11 @@ def run_command(args, *, env=None, timeout=120):
             and re.fullmatch(r"prism-live-(?:worker|broker)-[0-9a-f]{12}-[0-9a-f]{32}\.service", args[5])
         )
     )
+    capture = capture or (
+        len(args) == 6
+        and args[:5] == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
+        and re.fullmatch(r"prism-market-probe-[0-9a-f]{12}-[0-9a-f]{32}\.service", args[5])
+    )
     result = subprocess.run(
         args,
         env=env,
@@ -695,26 +739,34 @@ def run_command(args, *, env=None, timeout=120):
         and b"LoadState=not-found" in (result.stdout or b"").splitlines()
     )
     retirement_properties = None
-    if len(args) == 4 and args[:2] == ["/usr/bin/systemctl", "show"]:
-        patterns = (
-            (
-                RETIREMENT_PROPERTIES,
-                r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
-            ),
-            (
-                RETIREMENT_STOP_PROPERTIES,
-                r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
-            ),
-            (
-                RETIREMENT_OBSERVER_PROPERTIES,
-                r"prism-retirement-stop-ref-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
-            ),
-        )
+    if args[:2] == ["/usr/bin/systemctl", "show"]:
+        if len(args) == 4:
+            patterns = (
+                (
+                    RETIREMENT_PROPERTIES,
+                    r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
+                ),
+            )
+            property_argument, unit_argument = args[2], args[3]
+        elif len(args) == 5 and args[2] == "--all":
+            patterns = (
+                (
+                    RETIREMENT_STOP_PROPERTIES,
+                    r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
+                ),
+                (
+                    RETIREMENT_OBSERVER_PROPERTIES,
+                    r"prism-retirement-stop-ref-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
+                ),
+            )
+            property_argument, unit_argument = args[3], args[4]
+        else:
+            patterns, property_argument, unit_argument = (), "", ""
         retirement_properties = next(
             (
                 properties
                 for properties, pattern in patterns
-                if args[2] == "--property=" + properties and re.fullmatch(pattern, args[3])
+                if property_argument == "--property=" + properties and re.fullmatch(pattern, unit_argument)
             ),
             None,
         )
@@ -2767,6 +2819,7 @@ class RemoteRelease:
             "cleanup_error_class",
             "broker_negative_errno",
             "broker_filesystem_checks",
+            "broker_preflight_facts",
             "broker_memory_sealed",
             "provider_peer_count",
             "bootstrap_proof_sha256",
@@ -2812,6 +2865,7 @@ class RemoteRelease:
         requests = value.get("requests")
         errno = value.get("broker_negative_errno")
         filesystem = value.get("broker_filesystem_checks")
+        preflight_facts = value.get("broker_preflight_facts")
         if (
             value.get("source_sha256") != LIVE_SOURCE_PINS
             or any(type(value.get(key)) is not bool for key in flags)
@@ -2837,7 +2891,7 @@ class RemoteRelease:
             or any(requests[key] != 0 for key in ("quote", "kline", "public_fetch"))
             or type(errno) is not dict
             or set(errno) not in (set(), {"production", "vibe", "metadata", "private", "disallowed_public"})
-            or any(type(code) is not int or code not in {1, 13} for code in errno.values())
+            or any(type(code) is not int or not 0 <= code <= 4095 for code in errno.values())
             or type(filesystem) is not dict
             or set(filesystem)
             not in (
@@ -2849,7 +2903,15 @@ class RemoteRelease:
                     "staging_directory_denied",
                 },
             )
-            or any(flag is not True for flag in filesystem.values())
+            or any(type(flag) is not bool for flag in filesystem.values())
+            or type(preflight_facts) is not dict
+            or set(preflight_facts)
+            not in (set(), {"public_dns_pinned", "upstream_tls_verified", "broker_memory_sealed"})
+            or any(type(flag) is not bool for flag in preflight_facts.values())
+            or (
+                bool(preflight_facts)
+                and value["broker_memory_sealed"] != preflight_facts["broker_memory_sealed"]
+            )
         ):
             raise ReleaseError("live_safe_record_rejected")
         for name, maximum in (("provider_peer_count", 16), ("official_source_count", 16)):
@@ -2887,6 +2949,10 @@ class RemoteRelease:
             or requests["messages"] < 2
             or not errno
             or not filesystem
+            or not preflight_facts
+            or any(code not in {1, 13} for code in errno.values())
+            or any(flag is not True for flag in filesystem.values())
+            or any(flag is not True for flag in preflight_facts.values())
             or value["provider_peer_count"] < 1
             or value["official_source_count"] < 1
             or headers
@@ -3099,6 +3165,644 @@ class RemoteRelease:
                     }
                 ),
             )
+
+    def market_helper_sources(self):
+        supplied = self.request.get("market_helpers")
+        if type(supplied) is not dict or set(supplied) != set(MARKET_INTEGRATION_HELPERS):
+            raise ReleaseError("approved_market_integration_helpers_required")
+        contents = {}
+        for name, approved in MARKET_INTEGRATION_HELPERS.items():
+            item = supplied[name]
+            if (
+                type(item) is not dict
+                or set(item) != {"sha256", "content"}
+                or item["sha256"] != approved
+                or type(item["content"]) is not str
+                or len(item["content"]) > 180000
+            ):
+                raise ReleaseError("approved_market_integration_helpers_required")
+            try:
+                raw = base64.b64decode(item["content"], validate=True)
+            except (ValueError, TypeError):
+                raise ReleaseError("approved_market_integration_helpers_required") from None
+            if not 0 < len(raw) <= 131072 or digest(raw) != approved:
+                raise ReleaseError("approved_market_integration_helpers_required")
+            contents[name] = raw
+        return contents
+
+    def market_sealed_sources(self, directory):
+        self.checked(directory)
+        if set(path.name for path in directory.iterdir()) != set(MARKET_INTEGRATION_HELPERS):
+            raise ReleaseError("market_helper_source_rejected")
+        for parent in (directory, *directory.parents):
+            if parent == self.root.parent:
+                break
+            info = parent.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_mode & 0o022
+                or self.root == Path("/")
+                and info.st_uid != 0
+            ):
+                raise ReleaseError("market_helper_source_rejected")
+        contents = {}
+        for name, approved in MARKET_INTEGRATION_HELPERS.items():
+            path = self.checked(directory / name)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o444
+                    or info.st_size > 131072
+                    or self.root == Path("/")
+                    and info.st_uid != 0
+                ):
+                    raise ReleaseError("market_helper_source_rejected")
+                raw = stream.read(131073)
+                if (
+                    self.cli_identity(info) != self.cli_identity(os.fstat(stream.fileno()))
+                    or self.cli_identity(info) != self.cli_identity(path.lstat())
+                    or digest(raw) != approved
+                ):
+                    raise ReleaseError("market_helper_source_rejected")
+            contents[name] = raw
+        return contents
+
+    @contextmanager
+    def market_module(self, contents):
+        directory = self.checked(
+            self.root / "opt/prism/validation/market" / digest(encoded(MARKET_INTEGRATION_HELPERS))
+        )
+        if not directory.exists():
+            self.boundary("market_install_helpers")
+            self.public_directory(directory.parent.parent)
+            self.public_directory(directory.parent)
+            directory.mkdir(mode=0o700)
+            for name, raw in contents.items():
+                self.write(directory / name, raw, 0o444)
+            directory.chmod(0o555)
+        sealed = self.market_sealed_sources(directory)
+        module = types.ModuleType("reviewed_market_live_validation")
+        module.__file__ = str(directory / "market_live_validation.py")
+        exec(compile(sealed["market_live_validation.py"], module.__file__, "exec"), module.__dict__)
+        if (
+            MARKET_INTEGRATION_HELPERS["market_live_probe.py"] != module.PROBE_SHA256
+            or module.WORKER_SHA256 != MARKET_WORKER_SHA256
+            or module.CHECKS != MARKET_CHECKS
+            or module.BOOT_CHECKS != MARKET_BOOT_CHECKS
+            or {"qt.gtimg.cn", "money.finance.sina.com.cn"} != module.HOSTS
+        ):
+            raise ReleaseError("market_helper_source_rejected")
+        yield module
+
+    def market_original_state(self):
+        runtime = self.runtime()
+        receipts = self.request.get("receipts", {})
+        if runtime["working_directory"] != str(self.production) or runtime["fingerprint"] != receipts.get(
+            "expected_current_fingerprint"
+        ):
+            raise ReleaseError("market_original_runtime_changed")
+        source_sha = self.source_inventory(self.request.get("source_manifest", {}), self.production)
+        if source_sha != receipts.get("expected_source_manifest_sha256"):
+            raise ReleaseError("market_original_source_changed")
+        pid = self.process_id(SERVICE)
+        if type(pid) is not int or pid <= 1:
+            raise ReleaseError("market_original_runtime_changed")
+        return {
+            "production_pid": pid,
+            "runtime_fingerprint": runtime["fingerprint"],
+            "source_manifest_sha256": source_sha,
+        }
+
+    def market_safe_record(self, value, attempt, module, baseline):
+        def rejected():
+            raise ReleaseError("market_safe_record_rejected")
+
+        def integer(item, minimum=0):
+            return type(item) is int and item >= minimum
+
+        def digest_or_reject(item):
+            if type(item) is not str or not DIGEST.fullmatch(item):
+                rejected()
+
+        if (
+            type(value) is not dict
+            or value.get("candidate") != self.request["commit"]
+            or value.get("release_id") != attempt
+        ):
+            rejected()
+        if set(value) == {"stage", "candidate", "release_id", "at"}:
+            if (
+                value["stage"] not in {"workspace", "start", "allow_public_http"}
+                or not integer(value["at"])
+                or not 0 <= self.now() - value["at"] <= 300
+            ):
+                rejected()
+            return json.loads(encoded(value))
+        fixed = {
+            "schema": 1,
+            "probe": "credential_free_market_linux",
+            "scope": "market_public_https_only",
+            "production_verified": False,
+            "research_quality_verified": False,
+            "live_model_verified": False,
+            "native_search_verified": False,
+            "native_fetch_verified": False,
+        }
+        required = {
+            *fixed,
+            "candidate",
+            "release_id",
+            "started_at",
+            "finished_at",
+            "passed",
+            "actual_linux_collection",
+            "original_runtime_unchanged",
+            "market_provider_verified",
+            "error_class",
+            "unit_stopped",
+        }
+        optional = {
+            "identity",
+            "bootstrap_sha256",
+            "os_denial_controls",
+            "worker_result_sha256",
+            "worker_result",
+        }
+        if (
+            not required <= set(value) <= required | optional
+            or any(
+                type(value.get(key)) is not type(item) or value[key] != item for key, item in fixed.items()
+            )
+            or any(
+                type(value[key]) is not bool
+                for key in (
+                    "passed",
+                    "actual_linux_collection",
+                    "original_runtime_unchanged",
+                    "market_provider_verified",
+                    "unit_stopped",
+                )
+            )
+            or not integer(value["started_at"])
+            or not integer(value["finished_at"])
+            or not value["started_at"] <= value["finished_at"] <= self.now()
+            or not 0 <= self.now() - value["started_at"] <= 300
+            or value["error_class"] not in module.ERRORS | {None}
+        ):
+            rejected()
+        for name in ("bootstrap_sha256", "worker_result_sha256"):
+            if name in value:
+                digest_or_reject(value[name])
+        if "os_denial_controls" in value:
+            checks = value["os_denial_controls"]
+            if (
+                type(checks) is not dict
+                or set(checks) != MARKET_BOOT_CHECKS
+                or any(type(item) is not bool for item in checks.values())
+            ):
+                rejected()
+        if "identity" in value:
+            identity = value["identity"]
+            if (
+                type(identity) is not dict
+                or set(identity)
+                != {
+                    "pid",
+                    "startticks",
+                    "invocation",
+                    "uids",
+                    "host_network_namespace",
+                    "network_namespace_inode",
+                    "private_readonly_run",
+                }
+                or any(
+                    not integer(identity[key], 1) for key in ("pid", "startticks", "network_namespace_inode")
+                )
+                or type(identity["invocation"]) is not str
+                or not re.fullmatch("[0-9a-f]{32}", identity["invocation"])
+                or type(identity["uids"]) is not list
+                or len(identity["uids"]) != 4
+                or any(not integer(item, 1) for item in identity["uids"])
+                or len(set(identity["uids"])) != 1
+                or identity["host_network_namespace"] is not True
+                or identity["private_readonly_run"] is not True
+            ):
+                rejected()
+        worker = value.get("worker_result")
+        if worker is not None:
+            keys = {
+                "schema",
+                "binding",
+                "checked_at",
+                "passed",
+                "market_provider_verified",
+                "production_verified",
+                "research_quality_verified",
+                "live_model_verified",
+                "native_search_verified",
+                "native_fetch_verified",
+                "error_class",
+                "checks",
+                "request_counts",
+                "https",
+                "cached_result_sha256",
+                "kline_provenance_missing",
+                "kline_adapter_is_tencent_actual_endpoint_is_sina",
+                "failure_injection_disclosed",
+                "fetched_at_is_not_trade_date",
+            }
+            if type(worker) is not dict or set(worker) != keys:
+                rejected()
+            binding = worker["binding"]
+            if (
+                type(binding) is not dict
+                or set(binding)
+                != {
+                    "candidate",
+                    "release_id",
+                    "production_pid",
+                    "pid",
+                    "nonce",
+                    "issued_at",
+                    "probe_sha256",
+                    "worker_sha256",
+                }
+                or binding["candidate"] != self.request["commit"]
+                or binding["release_id"] != attempt
+                or type(binding["production_pid"]) is not int
+                or binding["production_pid"] != baseline["production_pid"]
+                or not integer(binding["pid"], 2)
+                or not integer(binding["issued_at"])
+                or type(binding["nonce"]) is not str
+                or not re.fullmatch("[0-9a-f]{32}", binding["nonce"])
+                or binding["probe_sha256"] != MARKET_INTEGRATION_HELPERS["market_live_probe.py"]
+                or binding["worker_sha256"] != MARKET_WORKER_SHA256
+                or type(worker["schema"]) is not int
+                or worker["schema"] != 1
+                or not integer(worker["checked_at"])
+                or not binding["issued_at"] <= worker["checked_at"] <= value["finished_at"]
+                or any(
+                    worker[name] is not False
+                    for name in (
+                        "production_verified",
+                        "research_quality_verified",
+                        "live_model_verified",
+                        "native_search_verified",
+                        "native_fetch_verified",
+                    )
+                )
+                or any(type(worker[name]) is not bool for name in ("passed", "market_provider_verified"))
+                or worker["error_class"] not in {None, "worker_failed", "market_acceptance_incomplete"}
+                or type(worker["checks"]) is not dict
+                or set(worker["checks"]) != MARKET_CHECKS
+                or any(type(item) is not bool for item in worker["checks"].values())
+                or type(worker["request_counts"]) is not dict
+                or set(worker["request_counts"]) != {"quote", "kline"}
+                or any(type(item) is not int or item != 1 for item in worker["request_counts"].values())
+                or type(worker["kline_provenance_missing"]) is not list
+                or any(
+                    type(item) is not str or item not in {"source", "retrieved_at", "data_timestamp"}
+                    for item in worker["kline_provenance_missing"]
+                )
+            ):
+                rejected()
+            for name in ("https", "cached_result_sha256"):
+                if type(worker[name]) is not dict or not set(worker[name]) <= {"quote", "kline"}:
+                    rejected()
+            for details in worker["https"].values():
+                if (
+                    type(details) is not dict
+                    or set(details)
+                    != {"https_verified", "redirect_followed", "response_sha256", "response_bytes"}
+                    or details["https_verified"] is not True
+                    or details["redirect_followed"] is not False
+                    or not integer(details["response_bytes"], 1)
+                    or details["response_bytes"] > 524288
+                ):
+                    rejected()
+                digest_or_reject(details["response_sha256"])
+            for item in worker["cached_result_sha256"].values():
+                digest_or_reject(item)
+            if any(
+                worker[name] is not True
+                for name in (
+                    "kline_adapter_is_tencent_actual_endpoint_is_sina",
+                    "failure_injection_disclosed",
+                    "fetched_at_is_not_trade_date",
+                )
+            ):
+                rejected()
+            provider_verified = (
+                worker["checks"]["quote_real_provider"] and worker["checks"]["kline_real_provider"]
+            )
+            accepted = (
+                all(worker["checks"].values())
+                and not worker["kline_provenance_missing"]
+                and set(worker["https"]) == {"quote", "kline"}
+                and set(worker["cached_result_sha256"]) == {"quote", "kline"}
+            )
+            if (
+                worker["market_provider_verified"] != provider_verified
+                or worker["passed"] != accepted
+                or value["market_provider_verified"] != provider_verified
+            ):
+                rejected()
+        elif value["market_provider_verified"] is not False:
+            rejected()
+        if value["passed"] and (
+            worker is None
+            or worker["passed"] is not True
+            or set(value) != required | optional
+            or any(
+                value[name] is not True
+                for name in ("actual_linux_collection", "original_runtime_unchanged", "unit_stopped")
+            )
+            or not all(value["os_denial_controls"].values())
+            or value["error_class"] is not None
+        ):
+            rejected()
+        if not value["passed"] and value["error_class"] is None:
+            rejected()
+        return json.loads(encoded(value))
+
+    def integration_market(self):
+        self.verify_tree()
+        contents = self.market_helper_sources()
+        attempt = self.request.get("integration_attempt")
+        if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
+            raise ReleaseError("explicit_market_integration_attempt_required")
+        baseline = self.market_original_state()
+        work = self.checked(self.operations / "integration" / attempt / "market")
+        directory = self.checked(self.record / ("integration-market-" + attempt))
+        if work.exists() or directory.exists():
+            raise ReleaseError("market_integration_attempt_already_exists")
+        self.boundary("market_attempt")
+        directory.mkdir(mode=0o700)
+        descriptor = os.open(
+            directory / "events.jsonl",
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        os.fchmod(descriptor, 0o600)
+        summary, count, chain, cancelled, error_code = None, 0, digest(b""), None, None
+        original_after, candidate_after = False, False
+        launch, stopped, inventory_unit, inventory_clear = None, False, None, False
+        try:
+            for parent in (directory, self.record):
+                fd = os.open(
+                    self.checked(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                )
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            with self.market_module(contents) as module:
+                bindings = {
+                    "schema": 1,
+                    "release_id": attempt,
+                    "candidate": self.request["commit"],
+                    "production_pid": baseline["production_pid"],
+                    "probe_source": {
+                        "sha256": MARKET_INTEGRATION_HELPERS["market_live_probe.py"],
+                        "content": base64.b64encode(contents["market_live_probe.py"]).decode(),
+                    },
+                }
+
+                def record(value):
+                    nonlocal summary, count, chain
+                    safe = self.market_safe_record(value, attempt, module, baseline)
+                    if summary is not None or count >= 16:
+                        raise ReleaseError("market_event_order_rejected")
+                    entry = encoded({"sequence": count + 1, "previous_sha256": chain, "event": safe}) + b"\n"
+                    if len(entry) > 16384:
+                        raise ReleaseError("market_safe_record_rejected")
+                    view = memoryview(entry)
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise ReleaseError("market_event_write_failed")
+                        view = view[written:]
+                    os.fsync(descriptor)
+                    count, chain = count + 1, digest(entry)
+                    if "finished_at" in safe:
+                        summary = safe
+
+                def boundary(label):
+                    nonlocal cancelled
+                    if label not in MARKET_BOUNDARIES:
+                        raise module.ValidationError("supervision_failed")
+                    try:
+                        self.boundary(label)
+                        if self.market_original_state() != baseline:
+                            raise ReleaseError("market_original_runtime_changed")
+                        if label == "market_allow_public_http":
+                            self.verify_tree()
+                    except Exception as error:
+                        code = failure_code(error)
+                        if code in {
+                            "operator_stop",
+                            "fresh_operator_permit_required",
+                            "permit_timeout",
+                            "controller_disconnected",
+                        }:
+                            cancelled = code
+                            raise module.ValidationError("operator_stop") from None
+                        raise module.ValidationError("supervision_failed") from None
+
+                def run(argv, *, timeout):
+                    nonlocal launch, stopped, inventory_unit, inventory_clear
+                    if (
+                        type(argv) is not list
+                        or not argv
+                        or any(type(item) is not str or "\0" in item for item in argv)
+                        or type(timeout) not in {int, float}
+                        or not 0 < timeout <= 15
+                    ):
+                        raise ReleaseError("market_command_rejected")
+                    allowed = False
+                    if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
+                        allowed = (
+                            len(argv) == 6
+                            and argv[:5]
+                            == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
+                            and re.fullmatch(
+                                "prism-market-probe-"
+                                + self.request["commit"][:12]
+                                + "-[0-9a-f]{32}\\.service",
+                                argv[5],
+                            )
+                            and inventory_unit in {None, argv[5]}
+                            and launch is None
+                        )
+                        if allowed:
+                            inventory_unit = argv[5]
+                    elif argv[:1] == ["/usr/bin/systemd-run"] and launch is None:
+                        try:
+                            config = json.loads(argv[-1])
+                            fixed = {
+                                "candidate": self.request["commit"],
+                                "release_id": attempt,
+                                "production_pid": baseline["production_pid"],
+                                "work": str(work),
+                                "probe_sha256": MARKET_INTEGRATION_HELPERS["market_live_probe.py"],
+                                "worker_sha256": MARKET_WORKER_SHA256,
+                            }
+                            if (
+                                type(config) is not dict
+                                or set(config) != {*fixed, "nonce", "issued_at", "pins", "negative_public"}
+                                or any(
+                                    type(config.get(key)) is not type(item) or config[key] != item
+                                    for key, item in fixed.items()
+                                )
+                                or type(config["nonce"]) is not str
+                                or not re.fullmatch("[0-9a-f]{32}", config["nonce"])
+                                or type(config["issued_at"]) is not int
+                                or not 0 <= self.now() - config["issued_at"] <= 65
+                                or type(config["pins"]) is not dict
+                                or set(config["pins"]) != module.HOSTS
+                                or any(
+                                    type(values) is not list or len(values) != 1 or type(values[0]) is not str
+                                    for values in config["pins"].values()
+                                )
+                            ):
+                                raise ValueError
+                            pins, negative = module.network_policy(
+                                resolve=lambda host, *_args, **_kwargs: [
+                                    (None, None, None, None, (config["pins"][host][0], 443))
+                                ]
+                            )
+                            if pins != config["pins"] or negative != config["negative_public"]:
+                                raise ValueError
+                            expected = object.__new__(module.Validation)
+                            expected.request, expected.work, expected.candidate = bindings, work, self.release
+                            expected.nonce, expected.issued = config["nonce"], config["issued_at"]
+                            expected.pins, expected.negative = pins, negative
+                            expected.unit = (
+                                "prism-market-probe-"
+                                + self.request["commit"][:12]
+                                + "-"
+                                + expected.nonce
+                                + ".service"
+                            )
+                            allowed = (
+                                argv == expected.command()
+                                and inventory_clear
+                                and expected.unit == inventory_unit
+                            )
+                            if allowed:
+                                launch = expected.unit
+                        except (ValueError, TypeError, KeyError, module.ValidationError):
+                            allowed = False
+                    elif (
+                        argv
+                        == [
+                            "/usr/bin/systemctl",
+                            "show",
+                            "--property=MainPID,InvocationID,WorkingDirectory",
+                            SERVICE,
+                        ]
+                        or launch is not None
+                        and argv == ["/usr/bin/systemctl", "stop", launch]
+                        or launch is not None
+                        and argv
+                        == [
+                            "/usr/bin/systemctl",
+                            "show",
+                            "--property=" + MARKET_UNIT_PROPERTIES,
+                            launch,
+                        ]
+                    ):
+                        allowed = True
+                    if not allowed:
+                        raise ReleaseError("market_command_rejected")
+                    # Cleanup of this nonce remains available after STOP; no new work.
+                    if argv[:2] != ["/usr/bin/systemctl", "stop"]:
+                        self.stop()
+                    output = self.run(argv, timeout=timeout)
+                    if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
+                        inventory_clear = type(output) is bytes and not output.strip()
+                    if argv[:2] == ["/usr/bin/systemctl", "stop"]:
+                        stopped = True
+                    return output
+
+                returned = self.market_safe_record(
+                    module.run_validation(bindings, boundary=boundary, run=run, record=record),
+                    attempt,
+                    module,
+                    baseline,
+                )
+                if summary != returned:
+                    raise ReleaseError("market_durable_result_required")
+                if returned["passed"] and (launch is None or not stopped):
+                    raise ReleaseError("market_cleanup_not_observed")
+                self.boundary("market_reconcile")
+                original_after = self.market_original_state() == baseline
+                self.verify_tree()
+                candidate_after = True
+                self.action_report = {
+                    "attempt": attempt,
+                    "summary": returned,
+                    "events": count,
+                    "last_event_sha256": chain,
+                    "market_provider_verified": returned["market_provider_verified"],
+                    "passed": returned["passed"],
+                    "production_verified": False,
+                }
+                if cancelled:
+                    raise ReleaseError(cancelled)
+                if not original_after:
+                    raise ReleaseError("market_original_runtime_changed")
+                if returned["passed"] is not True:
+                    raise ReleaseError("market_acceptance_incomplete")
+        except Exception as error:
+            error_code = failure_code(error)
+            raise
+        finally:
+            os.close(descriptor)
+            try:
+                original_after = self.market_original_state() == baseline
+            except Exception:
+                original_after = False
+            try:
+                self.verify_tree()
+                candidate_after = True
+            except Exception:
+                candidate_after = False
+            reconciliation_error = error_code is None and (not original_after or not candidate_after)
+            if reconciliation_error:
+                error_code = "market_final_reconciliation_failed"
+            receipt = {
+                "schema": 1,
+                "attempt": attempt,
+                "candidate": self.request["commit"],
+                "helper_sha256": dict(MARKET_INTEGRATION_HELPERS),
+                "summary": summary,
+                "events": count,
+                "last_event_sha256": chain,
+                "original_runtime_unchanged": original_after,
+                "candidate_unchanged": candidate_after,
+                "passed": error_code is None
+                and summary is not None
+                and summary["passed"] is True
+                and original_after
+                and candidate_after,
+                "error_class": error_code,
+                "production_verified": False,
+            }
+            self.write(directory / "receipt.json", encoded(receipt))
+            for parent in (directory, self.record):
+                fd = os.open(
+                    self.checked(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                )
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            if reconciliation_error:
+                raise ReleaseError(error_code)
 
     def integration_identity(self, unit, production_pid, uid):
         pid = self.process_id(unit)
@@ -4268,6 +4972,126 @@ class RemoteRelease:
                 raise ReleaseError("retirement_stop_safe_event_rejected")
         return value
 
+    def retirement_reconcile_prestart(self, baseline, bindings, probe, validation, stop, proof):
+        """Reconcile only the reviewed pre-actuation property-query failure."""
+        parent = self.checked(self.record / "legacy-stop")
+        reconciled = []
+        if not parent.exists():
+            return reconciled
+        for previous in parent.iterdir():
+            try:
+                receipt, receipt_sha = self.retirement_private_record(previous / "receipt.json")
+                if (
+                    type(receipt) is dict
+                    and receipt.get("passed") is True
+                    and receipt.get("baseline_verified_after") is True
+                    and type(receipt.get("summary")) is dict
+                    and receipt["summary"].get("synthetic_cleanup_verified") is True
+                ):
+                    continue
+                if previous.name != RETIREMENT_PRESTART_ATTEMPT:
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
+                identity, identity_sha = self.retirement_private_record(previous / "identity.json")
+                expected_identity = {
+                    "commit": self.request["commit"],
+                    "attempt": previous.name,
+                    "helpers": {
+                        **RETIREMENT_HELPERS,
+                        "retirement_stop_validation.py": RETIREMENT_PRESTART_STOP_SHA256,
+                    },
+                    "baseline": baseline,
+                    "signal_proof": proof,
+                    "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
+                }
+                keys = {
+                    "attempt",
+                    "signal_proof",
+                    "summary",
+                    "events",
+                    "last_event_sha256",
+                    "production_verified",
+                    "passed",
+                    "baseline_verified_after",
+                    "failure_code",
+                }
+                if (
+                    identity != expected_identity
+                    or type(receipt) is not dict
+                    or set(receipt) != keys
+                    or receipt["attempt"] != previous.name
+                    or receipt["signal_proof"] != proof
+                    or receipt["passed"] is not False
+                    or receipt["baseline_verified_after"] is not True
+                    or receipt["production_verified"] is not False
+                    or receipt["failure_code"] != "legacy_stop_validation_failed"
+                    or type(receipt["events"]) is not int
+                    or receipt["events"] != 2
+                ):
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
+                summary = self.retirement_stop_summary(receipt["summary"], bindings, probe, validation, stop)
+                if (
+                    summary["retirement_stop_validation_passed"] is not False
+                    or summary["systemctl_stop_end_to_end_proven"] is not False
+                    or summary["synthetic_cleanup_verified"] is not True
+                    or summary["cases"] != []
+                    or summary.get("error_code") != "retirement_stop_systemd_properties_rejected"
+                ):
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
+                raw, events_sha = self.retirement_private_record(
+                    previous / "events.jsonl", limit=32768, json_value=False
+                )
+                lines, chain = raw.splitlines(keepends=True), "0" * 64
+                if len(lines) != 2:
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
+                for sequence, (line, event) in enumerate(
+                    zip(lines, ("public_bundles_verified", "retirement_stop_validation_result"), strict=True),
+                    1,
+                ):
+                    row = json.loads(line)
+                    if (
+                        type(row) is not dict
+                        or set(row) != {"sequence", "at", "previous_sha256", "event", "details"}
+                        or type(row["sequence"]) is not int
+                        or row["sequence"] != sequence
+                        or type(row["at"]) is not int
+                        or row["at"] <= 0
+                        or row["event"] != event
+                        or row["previous_sha256"] != chain
+                        or not line.endswith(b"\n")
+                    ):
+                        raise ReleaseError("retirement_previous_stop_unreconciled")
+                    details = self.retirement_stop_event(
+                        event, row["details"], bindings, probe, validation, stop
+                    )
+                    expected = (
+                        {
+                            "bundle_sha256": probe.bundle_identity(),
+                            "wrapper_sha256": validation.wrapper_directory().name,
+                        }
+                        if sequence == 1
+                        else summary
+                    )
+                    if details != expected:
+                        raise ReleaseError("retirement_previous_stop_unreconciled")
+                    chain = digest(line)
+                if chain != receipt["last_event_sha256"]:
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
+                reconciled.append(
+                    {
+                        "attempt": previous.name,
+                        "identity_sha256": identity_sha,
+                        "receipt_sha256": receipt_sha,
+                        "events_sha256": events_sha,
+                        "last_event_sha256": chain,
+                        "no_synthetic_actuation": True,
+                        "baseline_verified_after": True,
+                        "reason": "retirement_stop_systemd_properties_rejected",
+                    }
+                )
+            except Exception:
+                raise ReleaseError("retirement_previous_stop_unreconciled") from None
+        return reconciled
+
     def validate_legacy_stop(self):
         self.verify_tree()
         attempt = self.request.get("retirement_stop_attempt")
@@ -4277,6 +5101,19 @@ class RemoteRelease:
             raise ReleaseError("retirement_system_python_binding_required")
         contents = self.retirement_sources(stop=True)
         baseline = self.retirement_baseline()
+
+        def active_baseline():
+            # No legacy environment is executed: the fixture uses separately
+            # verified public bundles. Scan its full legacy origin before and
+            # after the experiment, not inside the fixed 20-second work gate.
+            try:
+                current = self.live_original_state()  # Full production source + runtime.
+            except ReleaseError:
+                raise ReleaseError("retirement_original_baseline_changed") from None
+            expected = {key: baseline[key] for key in ("production_pid", "runtime_fingerprint")}
+            if current != expected:
+                raise ReleaseError("retirement_original_baseline_changed")
+
         bindings = {
             "commit": self.request["commit"],
             "release_id": self.request["release_id"],
@@ -4285,23 +5122,14 @@ class RemoteRelease:
         directory = self.checked(self.record / "legacy-stop" / attempt)
         if directory.exists():
             raise ReleaseError("retirement_stop_attempt_already_exists")
-        # A failed/partial stop is not permission for a new nonce or uncertain retry.
-        parent = directory.parent
-        if parent.exists():
-            for previous in parent.iterdir():
-                prior, _ = self.retirement_private_record(previous / "receipt.json")
-                if (
-                    prior.get("passed") is not True
-                    or prior.get("baseline_verified_after") is not True
-                    or prior.get("summary", {}).get("synthetic_cleanup_verified") is not True
-                ):
-                    raise ReleaseError("retirement_previous_stop_unreconciled")
         helper_root = self.install_retirement_helpers(contents, stop=True)
         with self.retirement_modules(helper_root, stop=True) as (probe, validation, stop):
             proof = self.retirement_signal_proof(baseline, bindings, probe, validation)
+            reconciled = self.retirement_reconcile_prestart(
+                baseline, bindings, probe, validation, stop, proof
+            )
             self.boundary("retirement_stop_attempt")
-            if self.retirement_baseline() != baseline:
-                raise ReleaseError("retirement_original_baseline_changed")
+            active_baseline()
             directory.mkdir(parents=True, mode=0o700)
             self.write(
                 directory / "identity.json",
@@ -4313,9 +5141,23 @@ class RemoteRelease:
                         "baseline": baseline,
                         "signal_proof": proof,
                         "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
+                        "prestart_reconciliations": reconciled,
                     }
                 ),
             )
+            if reconciled:
+                self.write(
+                    directory / "prestart-reconciliation.json",
+                    encoded(
+                        {
+                            "schema": 1,
+                            "candidate": self.request["commit"],
+                            "release_id": self.request["release_id"],
+                            "records": reconciled,
+                            "old_records_unchanged": True,
+                        }
+                    ),
+                )
             fd = os.open(
                 self.checked(directory / "events.jsonl"),
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -4362,8 +5204,7 @@ class RemoteRelease:
                         }:
                             cancelled = str(error)
                         raise
-                    if self.retirement_baseline() != baseline:
-                        raise ReleaseError("retirement_original_baseline_changed")
+                    active_baseline()
 
                 def record(event, value):
                     nonlocal count, chain, recorded
@@ -4461,15 +5302,15 @@ class RemoteRelease:
                         return self.run(argv, timeout=timeout)
                     if argv == ["/usr/bin/systemctl", "show", "--property=" + validation.PROPERTIES, SERVICE]:
                         return self.run(argv, timeout=timeout)
-                    if len(argv) == 4 and argv[:2] == ["/usr/bin/systemctl", "show"]:
+                    if len(argv) == 5 and argv[:3] == ["/usr/bin/systemctl", "show", "--all"]:
                         match = re.fullmatch(
                             r"prism-retirement-(probe|stop-ref)-([0-9a-f]{32})-(int-executor|int-post)\.service",
-                            argv[3],
+                            argv[4],
                         )
                         if match:
                             bind_nonce(match[2])
                             properties = stop.PROPERTIES if match[1] == "probe" else stop.OBSERVER_PROPERTIES
-                            if argv[2] == "--property=" + properties:
+                            if argv[3] == "--property=" + properties:
                                 return self.run(argv, timeout=timeout)
                     if plan is not None:
                         for case_id in stop.CASES:
@@ -4514,8 +5355,7 @@ class RemoteRelease:
                                     }:
                                         cancelled = str(error)
                                     raise
-                                if self.retirement_baseline() != baseline:
-                                    raise ReleaseError("retirement_original_baseline_changed")
+                                active_baseline()
                                 observer_consumed.add(case_id)
                                 return self.run(argv, timeout=timeout)
                     raise ReleaseError("retirement_stop_command_rejected")
@@ -5527,7 +6367,10 @@ class RemoteRelease:
                     result["diagnostics"] = self.action_report
                 elif request["action"] == "finish_stage":
                     result["stage_cleanup"] = self.action_report
-                elif request["action"] in INTEGRATION_PROBES or request["action"] == "integration_live":
+                elif request["action"] in INTEGRATION_PROBES or request["action"] in {
+                    "integration_live",
+                    "integration_market",
+                }:
                     result["integration"] = self.action_report
                 elif request["action"] == "validate_legacy_retirement":
                     result["legacy_retirement"] = self.action_report

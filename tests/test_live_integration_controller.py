@@ -473,6 +473,9 @@ def safe_summary(data):
         "cleanup_error_class": None,
         "broker_negative_errno": dict.fromkeys([*helper.NEGATIVE_TARGETS, "disallowed_public"], 13),
         "broker_filesystem_checks": dict.fromkeys(helper.BROKER_FILESYSTEM_CHECKS, True),
+        "broker_preflight_facts": dict.fromkeys(
+            ("public_dns_pinned", "upstream_tls_verified", "broker_memory_sealed"), True
+        ),
         "broker_memory_sealed": True,
         "provider_peer_count": 1,
         "bootstrap_proof_sha256": "c" * 64,
@@ -611,3 +614,42 @@ def test_actual_runner_captures_only_fixed_live_dns_and_two_exact_unit_inventori
     assert calls[0][1]["stdout"] == (remote.subprocess.PIPE if captured else remote.subprocess.DEVNULL)
     assert calls[0][1]["stderr"] == remote.subprocess.DEVNULL
     assert remote.LIVE_RESOLVE_CODE == helper.RESOLVE_CODE
+
+
+@pytest.mark.parametrize("code", [0, 11, 110, 111, 4095])
+def test_safe_failed_preflight_keeps_bounded_evidence_but_cannot_pass(prepared, code):
+    fixture, data = prepared
+    value = safe_summary(data)
+    value.update(passed=False, error_class="broker_preflight_rejected", stage="preflight")
+    value["broker_negative_errno"]["production"] = code
+    value["broker_preflight_facts"]["upstream_tls_verified"] = False
+    value["broker_filesystem_checks"]["config_write_denied"] = False
+    actual = fixture.engine.live_safe_record(value, ATTEMPT)
+    assert actual["broker_negative_errno"]["production"] == code
+    assert actual["broker_preflight_facts"]["upstream_tls_verified"] is False
+    value.update(passed=True, error_class=None, stage="complete")
+    with pytest.raises(remote.ReleaseError, match="live_safe_record_rejected"):
+        fixture.engine.live_safe_record(value, ATTEMPT)
+
+
+@pytest.mark.parametrize(
+    "change", ["negative", "overflow", "boolean", "raw_fact", "extra_target", "extra_fact"]
+)
+def test_safe_preflight_failure_never_persists_arbitrary_diagnostics(prepared, change):
+    fixture, data = prepared
+    value = safe_summary(data)
+    value.update(passed=False, error_class="broker_preflight_rejected", stage="preflight")
+    if change == "negative":
+        value["broker_negative_errno"]["production"] = -1
+    elif change == "overflow":
+        value["broker_negative_errno"]["production"] = 4096
+    elif change == "boolean":
+        value["broker_negative_errno"]["production"] = True
+    elif change == "raw_fact":
+        value["broker_preflight_facts"]["upstream_tls_verified"] = SYNTHETIC
+    elif change == "extra_target":
+        value["broker_negative_errno"][SYNTHETIC] = 13
+    else:
+        value["broker_preflight_facts"][SYNTHETIC] = True
+    with pytest.raises(remote.ReleaseError, match="live_safe_record_rejected"):
+        fixture.engine.live_safe_record(value, ATTEMPT)

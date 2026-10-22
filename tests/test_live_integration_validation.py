@@ -881,3 +881,43 @@ def test_live_attempt_cannot_overflow_linux_unix_socket_path():
     value["release_id"] += "a"
     with pytest.raises(supervisor.ValidationError, match="request_rejected"):
         supervisor.validate_request(value)
+
+
+@pytest.mark.parametrize("code", [0, 11, 110, 111, 4095])
+def test_typed_denial_failure_diagnostics_retained_without_allow_or_key(validation, code):
+    value = preflight(validation)
+    value["negative_errno"]["production"] = code
+    value["facts"]["upstream_tls_verified"] = False
+    value["filesystem_checks"]["config_write_denied"] = False
+    with pytest.raises(supervisor.ValidationError, match="broker_preflight_rejected"):
+        validation.preflight(value, ["1.1.1.1"])
+    assert validation.report["broker_negative_errno"]["production"] == code
+    assert validation.report["broker_preflight_facts"]["upstream_tls_verified"] is False
+    assert validation.report["broker_filesystem_checks"]["config_write_denied"] is False
+    assert validation.report["provider_peer_count"] == 1
+    assert validation.key_attempted is False and not (validation.work / "root-allow.json").exists()
+    value["negative_errno"]["production"] = 13
+    assert validation.report["broker_negative_errno"]["production"] == code
+
+
+@pytest.mark.parametrize("change", ["negative", "overflow", "bool_errno", "text", "extra_target", "raw_fact"])
+def test_malformed_preflight_cannot_enter_diagnostic_journal(validation, change):
+    value = preflight(validation)
+    if change == "negative":
+        value["negative_errno"]["production"] = -1
+    elif change == "overflow":
+        value["negative_errno"]["production"] = 4096
+    elif change == "bool_errno":
+        value["negative_errno"]["production"] = True
+    elif change == "text":
+        value["negative_errno"]["production"] = "arbitrary upstream detail"
+    elif change == "extra_target":
+        value["negative_errno"]["raw_address"] = 13
+    else:
+        value["facts"]["upstream_tls_verified"] = "arbitrary detail"
+    with pytest.raises(supervisor.ValidationError, match="broker_preflight_rejected"):
+        validation.preflight(value, ["1.1.1.1"])
+    assert validation.report["broker_negative_errno"] == {}
+    assert validation.report["broker_preflight_facts"] == {}
+    assert validation.report["broker_filesystem_checks"] == {}
+    assert validation.key_attempted is False

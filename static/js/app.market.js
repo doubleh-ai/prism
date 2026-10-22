@@ -498,6 +498,41 @@ Object.assign(App, {
     if (!timestamp) return '行情时间未知';
     return label + '：' + new Date(timestamp * 1000).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'}) + ' 北京时间';
   },
+  _klineProvenanceHtml: function(data) {
+    data = data || {};
+    function validTime(value) { return typeof value === 'number' && Number.isFinite(value) && value > 0 && !isNaN(new Date(value * 1000).getTime()); }
+    function dateLabel(value, dateOnly) {
+      if (!validTime(value)) return '未记录';
+      var date = new Date(value * 1000);
+      return (dateOnly ? date.toLocaleDateString('zh-CN', {timeZone:'Asia/Shanghai'}) : date.toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'})) + ' 北京时间';
+    }
+    var source = data.source === 'sina' ? '新浪财经' : '原始数据源未确认';
+    var sourceHtml = esc(source);
+    if (data.source === 'sina' && data.source_url) {
+      try {
+        var url = new URL(data.source_url);
+        if (url.protocol === 'https:' && url.hostname === 'money.finance.sina.com.cn' && !url.username && !url.password && !url.port && url.pathname === '/quotes_service/api/json_v2.php/CN_MarketData.getKLineData') {
+          sourceHtml = '<a href="' + escAttr(url.href) + '" target="_blank" rel="noopener noreferrer">' + esc(source) + ' ↗</a>';
+        }
+      } catch (error) {}
+    }
+    var lastDate = data.data_timestamp;
+    // Older saved results can establish a bar date, never acquisition time/source.
+    if (!validTime(lastDate)) {
+      var bars = data.bars || data.kline || [];
+      lastDate = bars.reduce(function(latest, bar) { return validTime(bar.timestamp) ? Math.max(latest || 0, bar.timestamp) : latest; }, null);
+    }
+    var channels = {tencent:'平台直连', akshare:'AkShare', baostock:'BaoStock'};
+    var channel = Object.prototype.hasOwnProperty.call(channels, data.adapter) ? channels[data.adapter] : '';
+    var cache = data.stale === true ? '已过期，使用备用记录' : data.stale === false ? '有效期内' : '未记录';
+    return '<div class="market-kline-provenance"><div class="market-kline-facts">' +
+      '<p><span>数据来源</span>' + sourceHtml + '</p>' +
+      (channel ? '<p><span>获取渠道</span>' + esc(channel) + '</p>' : '') +
+      '<p><span>最后数据日期</span>' + esc(dateLabel(lastDate, true)) + '</p>' +
+      '<p><span>采集时间</span>' + esc(dateLabel(data.retrieved_at, false)) + '</p>' +
+      '<p><span>缓存状态</span>' + esc(cache) + '</p></div>' +
+      '<p class="market-kline-note">数据日期为最后一根记录所含的日期，不代表采集时间；尚未确认当日收盘或周、月数据的完整性。缓存状态不代表行情新鲜度。</p></div>';
+  },
   _renderKline: async function(ticker, period, limit) {
     if (ticker !== this._currentTicker) return;
     var sequence = this._klineRequestSeq = (this._klineRequestSeq || 0) + 1;
@@ -540,6 +575,9 @@ Object.assign(App, {
     var kline = data.kline || [];
     if (!kline.length) { if (emptyEl) emptyEl.textContent = '暂无 K 线数据'; return; }
     if (emptyEl) emptyEl.remove();
+    var provenanceDiv = document.createElement('div');
+    provenanceDiv.innerHTML = this._klineProvenanceHtml(data);
+    wrap.appendChild(provenanceDiv);
     var chartDiv = document.createElement('div');
     chartDiv.id = 'marketKlineChart';
     wrap.appendChild(chartDiv);

@@ -417,3 +417,26 @@ def test_clean_zero_without_durable_post_marker_does_not_pass(tmp_path, monkeypa
     )
     with pytest.raises(base.RetirementValidationError, match="durable_markers_unverified"):
         obj.case(case)
+
+
+@pytest.mark.parametrize("observer", [False, True])
+def test_show_all_preserves_required_empty_systemd_properties(observer):
+    value = controller()
+    case = probe._case(value.plan, "int-executor")
+    properties = stop.OBSERVER_PROPERTIES if observer else stop.PROPERTIES
+    rows = dict.fromkeys(properties.split(","), "")
+    rows["LoadState"] = "not-found"
+
+    def runner(argv, *, timeout):
+        assert argv[:3] == ["/usr/bin/systemctl", "show", "--all"]
+        assert argv[3] == "--property=" + properties and timeout == 10
+        return "".join(key + "=" + item + "\n" for key, item in rows.items()).encode()
+
+    value.run = runner
+    actual = value.observer_show(case) if observer else value.show(case["unit"])
+    assert set(actual) == set(properties.split(","))
+    if not observer:
+        assert actual["ExecStop"] == actual["ExecStopPost"] == ""
+        rows.pop("ExecStop")
+        with pytest.raises(base.RetirementValidationError, match="systemd_properties_rejected"):
+            value.show(case["unit"])

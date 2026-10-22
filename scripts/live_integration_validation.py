@@ -507,6 +507,7 @@ class Validation:
             "cleanup_error_class": None,
             "broker_negative_errno": {},
             "broker_filesystem_checks": {},
+            "broker_preflight_facts": {},
             "broker_memory_sealed": False,
             "provider_peer_count": 0,
             "bootstrap_proof_sha256": None,
@@ -907,6 +908,15 @@ class Validation:
         return proof, sha
 
     def preflight(self, value, pins):
+        # Only typed, bounded diagnostics survive a failed gate. Never retain
+        # raw IPC, host addresses, provider text or arbitrary exception detail.
+        self.report.update(
+            broker_negative_errno={},
+            broker_filesystem_checks={},
+            broker_preflight_facts={},
+            broker_memory_sealed=False,
+            provider_peer_count=0,
+        )
         expected = {
             "schema",
             "kind",
@@ -917,34 +927,42 @@ class Validation:
             "filesystem_checks",
         }
         if (
-            set(value) != expected
+            type(value) is not dict
+            or set(value) != expected
             or type(value.get("schema")) is not int
             or value["schema"] != 1
             or value.get("kind") != "preflight"
             or value.get("binding") != self.binding
-            or not isinstance(value.get("facts"), dict)
+            or type(value.get("facts")) is not dict
             or set(value["facts"]) != {"public_dns_pinned", "upstream_tls_verified", "broker_memory_sealed"}
-            or any(flag is not True for flag in value["facts"].values())
-            or not isinstance(value.get("filesystem_checks"), dict)
+            or any(type(flag) is not bool for flag in value["facts"].values())
+            or type(value.get("filesystem_checks")) is not dict
             or set(value["filesystem_checks"]) != BROKER_FILESYSTEM_CHECKS
-            or any(flag is not True for flag in value["filesystem_checks"].values())
-            or not isinstance(value.get("negative_errno"), dict)
+            or any(type(flag) is not bool for flag in value["filesystem_checks"].values())
+            or type(value.get("negative_errno")) is not dict
             or set(value["negative_errno"]) != {*NEGATIVE_TARGETS, "disallowed_public"}
             or any(
-                type(number) is not int or number not in {1, 13}
+                type(number) is not int or not 0 <= number <= 4095
                 for number in value["negative_errno"].values()
             )
-            or not isinstance(value.get("positive_peers"), list)
-            or not value["positive_peers"]
+            or type(value.get("positive_peers")) is not list
             or len(value["positive_peers"]) > 16
-            or any(not isinstance(item, str) or item not in pins for item in value["positive_peers"])
+            or any(type(item) is not str or item not in pins for item in value["positive_peers"])
             or len(value["positive_peers"]) != len(set(value["positive_peers"]))
         ):
             raise ValidationError("broker_preflight_rejected")
-        self.report["broker_negative_errno"] = value["negative_errno"]
-        self.report["broker_filesystem_checks"] = value["filesystem_checks"]
-        self.report["broker_memory_sealed"] = True
+        self.report["broker_negative_errno"] = dict(value["negative_errno"])
+        self.report["broker_filesystem_checks"] = dict(value["filesystem_checks"])
+        self.report["broker_preflight_facts"] = dict(value["facts"])
+        self.report["broker_memory_sealed"] = value["facts"]["broker_memory_sealed"]
         self.report["provider_peer_count"] = len(set(value["positive_peers"]))
+        if (
+            any(flag is not True for flag in value["facts"].values())
+            or any(flag is not True for flag in value["filesystem_checks"].values())
+            or any(number not in {1, 13} for number in value["negative_errno"].values())
+            or not value["positive_peers"]
+        ):
+            raise ValidationError("broker_preflight_rejected")
 
     def allow(self):
         self.stage("allow")

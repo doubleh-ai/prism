@@ -1,7 +1,6 @@
-"""Dormant patch on a disposable router; frozen runtime files stay unchanged."""
+"""Actual market router on a disposable source copy; isolated sessions only."""
 
 import hashlib
-import subprocess
 import types
 from pathlib import Path
 
@@ -13,21 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def patched_router(tmp_path):
+def runtime_router(tmp_path):
     source = ROOT / "server/market/router.py"
     before = hashlib.sha256(source.read_bytes()).hexdigest()
     destination = tmp_path / "server/market/router.py"
     destination.parent.mkdir(parents=True)
     destination.write_bytes(source.read_bytes())
-    result = subprocess.run(
-        ["/usr/bin/patch", "--batch", "--forward", "-s", "-p1"],
-        cwd=tmp_path,
-        input=(ROOT / "scripts/patches/market-auth-candidate.patch").read_bytes(),
-        capture_output=True,
-        timeout=5,
-    )
-    assert result.returncode == 0
-    module = types.ModuleType("server.market._auth_patch_candidate")
+    module = types.ModuleType("server.market._auth_runtime_copy")
     module.__file__, module.__package__ = str(destination), "server.market"
     exec(compile(destination.read_bytes(), str(destination), "exec"), module.__dict__)
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
@@ -71,13 +62,13 @@ def session(state):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", URLS)
 @pytest.mark.parametrize("state", ["anonymous", "invalid", "revoked", "expired", "disabled"])
-async def test_all_market_routes_reject_before_any_provider_io(patched_router, monkeypatch, url, state):
+async def test_all_market_routes_reject_before_any_provider_io(runtime_router, monkeypatch, url, state):
     def forbidden():
         pytest.fail("unauthenticated request reached the provider factory")
 
-    monkeypatch.setattr(patched_router, "get_chain", forbidden)
+    monkeypatch.setattr(runtime_router, "get_chain", forbidden)
     app = FastAPI()
-    app.include_router(patched_router.router)
+    app.include_router(runtime_router.router)
     cookies = session(state)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
         client.cookies.update(cookies)
@@ -86,7 +77,7 @@ async def test_all_market_routes_reject_before_any_provider_io(patched_router, m
 
 
 @pytest.mark.asyncio
-async def test_valid_session_retains_the_existing_quote_contract(patched_router, monkeypatch):
+async def test_valid_session_retains_the_existing_quote_contract(runtime_router, monkeypatch):
     calls = []
 
     class Chain:
@@ -95,9 +86,9 @@ async def test_valid_session_retains_the_existing_quote_contract(patched_router,
             value = {"ticker": ticker, "source": "synthetic-provider", "price": 1.0}
             return types.SimpleNamespace(model_dump=lambda: value), False
 
-    monkeypatch.setattr(patched_router, "get_chain", lambda: Chain())
+    monkeypatch.setattr(runtime_router, "get_chain", lambda: Chain())
     app = FastAPI()
-    app.include_router(patched_router.router)
+    app.include_router(runtime_router.router)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
         client.cookies.update(session("valid"))
         response = await client.get("/api/quote/600519")

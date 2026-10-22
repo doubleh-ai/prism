@@ -1,0 +1,759 @@
+--- a/scripts/release_controller.py
++++ b/scripts/release_controller.py
+@@ -33,4 +33,5 @@
+     "integration_cli",
+     "integration_live",
++    "integration_market",
+     "validate_legacy_retirement",
+     "validate_legacy_stop",
+@@ -56,4 +57,8 @@
+     "retirement_probe.py": "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624",
+     "retirement_validation.py": "8331a6713244e8be8983fd0e6639492435fcf3a11552890c45997d440d41586e",
++}
++MARKET_INTEGRATION_HELPERS = {
++    "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
++    "market_live_validation.py": "30fdabce0929eaee447ea37e87a28e6b9e267274caaed2fe2b942576cf944d32",
+ }
+ RETIREMENT_STOP_HELPERS = {
+@@ -238,4 +243,22 @@
+             raise ControlError("live_integration_private_bindings_required")
+         request.update(live_helpers=helpers, integration_attempt=attempt)
++    if args.action == "integration_market":
++        attempt = getattr(args, "integration_attempt", None)
++        if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
++            raise ControlError("explicit_market_integration_attempt_required")
++        helpers = {}
++        for filename, approved in MARKET_INTEGRATION_HELPERS.items():
++            field = filename.removesuffix(".py").replace("market_live_", "market_") + "_sha256"
++            if getattr(args, field, None) != approved:
++                raise ControlError("approved_market_integration_helpers_required")
++            helpers[filename] = {
++                "sha256": approved,
++                "content": base64.b64encode(trusted_source(filename, approved)).decode(),
++            }
++        if not args.source_manifest or not re.fullmatch(
++            "[0-9a-f]{64}", receipts.get("expected_current_fingerprint", "")
++        ):
++            raise ControlError("market_integration_private_bindings_required")
++        request.update(market_helpers=helpers, integration_attempt=attempt)
+     if args.action == "validate_legacy_retirement":
+         helpers = {}
+@@ -467,4 +490,6 @@
+         "cli-probe-sha256",
+         "integration-attempt",
++        "market-probe-sha256",
++        "market-validation-sha256",
+         "live-validation-sha256",
+         "live-worker-sha256",
+--- a/scripts/remote_release.py
++++ b/scripts/remote_release.py
+@@ -47,4 +47,5 @@
+     "integration_cli",
+     "integration_live",
++    "integration_market",
+     "validate_legacy_retirement",
+     "validate_legacy_stop",
+@@ -72,4 +73,40 @@
+     "integration_cli": ("cli-protocol", "bf5726fc01cad92eeb1d6aeff768e46a98fc5ad91c823988cff4e04f357c3789"),
+ }
++MARKET_INTEGRATION_HELPERS = {
++    "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
++    "market_live_validation.py": "30fdabce0929eaee447ea37e87a28e6b9e267274caaed2fe2b942576cf944d32",
++}
++MARKET_WORKER_SHA256 = "aa4b2e250b856ac230d5a74bc18105c1f887a5e5168af1ccd7150176d7ff5970"
++MARKET_BOUNDARIES = {
++    "market_workspace",
++    "market_start",
++    "market_allow_public_http",
++    "market_wait_proof",
++    "market_wait_result",
++}
++MARKET_CHECKS = {
++    "unauthenticated_api_denied",
++    "quote_real_provider",
++    "kline_real_provider",
++    "quote_owned_capability_cache_readback",
++    "kline_owned_capability_cache_readback",
++    "quote_retained_stale_after_injected_failure",
++    "kline_retained_stale_after_injected_failure",
++    "no_cache_failure_explicit_503",
++}
++MARKET_BOOT_CHECKS = {
++    "production_home_denied",
++    "production_proc_denied",
++    "candidate_write_denied",
++    "run_readonly",
++    "production_8088_denied",
++    "vibe_8899_denied",
++    "metadata_denied",
++    "private_ip_denied",
++    "other_public_denied",
++    "synthetic_empty_data",
++    "staging_denied",
++}
++MARKET_UNIT_PROPERTIES = "MainPID,ExecMainPID,InvocationID,ActiveState,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE"
+ LIVE_INTEGRATION_HELPERS = {
+     "live_integration_validation.py": "95991b9ee669dfd99a2fe40f1fb1306534fae04b1d366a3e1ee6eab0f91a6815",
+@@ -675,4 +712,9 @@
+             and re.fullmatch(r"prism-live-(?:worker|broker)-[0-9a-f]{12}-[0-9a-f]{32}\.service", args[5])
+         )
++    )
++    capture = capture or (
++        len(args) == 6
++        and args[:5] == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
++        and re.fullmatch(r"prism-market-probe-[0-9a-f]{12}-[0-9a-f]{32}\.service", args[5])
+     )
+     result = subprocess.run(
+@@ -3101,4 +3143,642 @@
+             )
+ 
++    def market_helper_sources(self):
++        supplied = self.request.get("market_helpers")
++        if type(supplied) is not dict or set(supplied) != set(MARKET_INTEGRATION_HELPERS):
++            raise ReleaseError("approved_market_integration_helpers_required")
++        contents = {}
++        for name, approved in MARKET_INTEGRATION_HELPERS.items():
++            item = supplied[name]
++            if (
++                type(item) is not dict
++                or set(item) != {"sha256", "content"}
++                or item["sha256"] != approved
++                or type(item["content"]) is not str
++                or len(item["content"]) > 180000
++            ):
++                raise ReleaseError("approved_market_integration_helpers_required")
++            try:
++                raw = base64.b64decode(item["content"], validate=True)
++            except (ValueError, TypeError):
++                raise ReleaseError("approved_market_integration_helpers_required") from None
++            if not 0 < len(raw) <= 131072 or digest(raw) != approved:
++                raise ReleaseError("approved_market_integration_helpers_required")
++            contents[name] = raw
++        return contents
++
++    def market_sealed_sources(self, directory):
++        self.checked(directory)
++        if set(path.name for path in directory.iterdir()) != set(MARKET_INTEGRATION_HELPERS):
++            raise ReleaseError("market_helper_source_rejected")
++        for parent in (directory, *directory.parents):
++            if parent == self.root.parent:
++                break
++            info = parent.lstat()
++            if (
++                not stat.S_ISDIR(info.st_mode)
++                or info.st_mode & 0o022
++                or self.root == Path("/")
++                and info.st_uid != 0
++            ):
++                raise ReleaseError("market_helper_source_rejected")
++        contents = {}
++        for name, approved in MARKET_INTEGRATION_HELPERS.items():
++            path = self.checked(directory / name)
++            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
++            with os.fdopen(descriptor, "rb") as stream:
++                info = os.fstat(stream.fileno())
++                if (
++                    not stat.S_ISREG(info.st_mode)
++                    or info.st_nlink != 1
++                    or stat.S_IMODE(info.st_mode) != 0o444
++                    or info.st_size > 131072
++                    or self.root == Path("/")
++                    and info.st_uid != 0
++                ):
++                    raise ReleaseError("market_helper_source_rejected")
++                raw = stream.read(131073)
++                if (
++                    self.cli_identity(info) != self.cli_identity(os.fstat(stream.fileno()))
++                    or self.cli_identity(info) != self.cli_identity(path.lstat())
++                    or digest(raw) != approved
++                ):
++                    raise ReleaseError("market_helper_source_rejected")
++            contents[name] = raw
++        return contents
++
++    @contextmanager
++    def market_module(self, contents):
++        directory = self.checked(
++            self.root / "opt/prism/validation/market" / digest(encoded(MARKET_INTEGRATION_HELPERS))
++        )
++        if not directory.exists():
++            self.boundary("market_install_helpers")
++            self.public_directory(directory.parent.parent)
++            self.public_directory(directory.parent)
++            directory.mkdir(mode=0o700)
++            for name, raw in contents.items():
++                self.write(directory / name, raw, 0o444)
++            directory.chmod(0o555)
++        sealed = self.market_sealed_sources(directory)
++        module = types.ModuleType("reviewed_market_live_validation")
++        module.__file__ = str(directory / "market_live_validation.py")
++        exec(compile(sealed["market_live_validation.py"], module.__file__, "exec"), module.__dict__)
++        if (
++            MARKET_INTEGRATION_HELPERS["market_live_probe.py"] != module.PROBE_SHA256
++            or module.WORKER_SHA256 != MARKET_WORKER_SHA256
++            or module.CHECKS != MARKET_CHECKS
++            or module.BOOT_CHECKS != MARKET_BOOT_CHECKS
++            or {"qt.gtimg.cn", "money.finance.sina.com.cn"} != module.HOSTS
++        ):
++            raise ReleaseError("market_helper_source_rejected")
++        yield module
++
++    def market_original_state(self):
++        runtime = self.runtime()
++        receipts = self.request.get("receipts", {})
++        if runtime["working_directory"] != str(self.production) or runtime["fingerprint"] != receipts.get(
++            "expected_current_fingerprint"
++        ):
++            raise ReleaseError("market_original_runtime_changed")
++        source_sha = self.source_inventory(self.request.get("source_manifest", {}), self.production)
++        if source_sha != receipts.get("expected_source_manifest_sha256"):
++            raise ReleaseError("market_original_source_changed")
++        pid = self.process_id(SERVICE)
++        if type(pid) is not int or pid <= 1:
++            raise ReleaseError("market_original_runtime_changed")
++        return {
++            "production_pid": pid,
++            "runtime_fingerprint": runtime["fingerprint"],
++            "source_manifest_sha256": source_sha,
++        }
++
++    def market_safe_record(self, value, attempt, module, baseline):
++        def rejected():
++            raise ReleaseError("market_safe_record_rejected")
++
++        def integer(item, minimum=0):
++            return type(item) is int and item >= minimum
++
++        def digest_or_reject(item):
++            if type(item) is not str or not DIGEST.fullmatch(item):
++                rejected()
++
++        if (
++            type(value) is not dict
++            or value.get("candidate") != self.request["commit"]
++            or value.get("release_id") != attempt
++        ):
++            rejected()
++        if set(value) == {"stage", "candidate", "release_id", "at"}:
++            if (
++                value["stage"] not in {"workspace", "start", "allow_public_http"}
++                or not integer(value["at"])
++                or not 0 <= self.now() - value["at"] <= 300
++            ):
++                rejected()
++            return json.loads(encoded(value))
++        fixed = {
++            "schema": 1,
++            "probe": "credential_free_market_linux",
++            "scope": "market_public_https_only",
++            "production_verified": False,
++            "research_quality_verified": False,
++            "live_model_verified": False,
++            "native_search_verified": False,
++            "native_fetch_verified": False,
++        }
++        required = {
++            *fixed,
++            "candidate",
++            "release_id",
++            "started_at",
++            "finished_at",
++            "passed",
++            "actual_linux_collection",
++            "original_runtime_unchanged",
++            "market_provider_verified",
++            "error_class",
++            "unit_stopped",
++        }
++        optional = {
++            "identity",
++            "bootstrap_sha256",
++            "os_denial_controls",
++            "worker_result_sha256",
++            "worker_result",
++        }
++        if (
++            not required <= set(value) <= required | optional
++            or any(
++                type(value.get(key)) is not type(item) or value[key] != item for key, item in fixed.items()
++            )
++            or any(
++                type(value[key]) is not bool
++                for key in (
++                    "passed",
++                    "actual_linux_collection",
++                    "original_runtime_unchanged",
++                    "market_provider_verified",
++                    "unit_stopped",
++                )
++            )
++            or not integer(value["started_at"])
++            or not integer(value["finished_at"])
++            or not value["started_at"] <= value["finished_at"] <= self.now()
++            or not 0 <= self.now() - value["started_at"] <= 300
++            or value["error_class"] not in module.ERRORS | {None}
++        ):
++            rejected()
++        for name in ("bootstrap_sha256", "worker_result_sha256"):
++            if name in value:
++                digest_or_reject(value[name])
++        if "os_denial_controls" in value:
++            checks = value["os_denial_controls"]
++            if (
++                type(checks) is not dict
++                or set(checks) != MARKET_BOOT_CHECKS
++                or any(type(item) is not bool for item in checks.values())
++            ):
++                rejected()
++        if "identity" in value:
++            identity = value["identity"]
++            if (
++                type(identity) is not dict
++                or set(identity)
++                != {
++                    "pid",
++                    "startticks",
++                    "invocation",
++                    "uids",
++                    "host_network_namespace",
++                    "network_namespace_inode",
++                    "private_readonly_run",
++                }
++                or any(
++                    not integer(identity[key], 1) for key in ("pid", "startticks", "network_namespace_inode")
++                )
++                or type(identity["invocation"]) is not str
++                or not re.fullmatch("[0-9a-f]{32}", identity["invocation"])
++                or type(identity["uids"]) is not list
++                or len(identity["uids"]) != 4
++                or any(not integer(item, 1) for item in identity["uids"])
++                or len(set(identity["uids"])) != 1
++                or identity["host_network_namespace"] is not True
++                or identity["private_readonly_run"] is not True
++            ):
++                rejected()
++        worker = value.get("worker_result")
++        if worker is not None:
++            keys = {
++                "schema",
++                "binding",
++                "checked_at",
++                "passed",
++                "market_provider_verified",
++                "production_verified",
++                "research_quality_verified",
++                "live_model_verified",
++                "native_search_verified",
++                "native_fetch_verified",
++                "error_class",
++                "checks",
++                "request_counts",
++                "https",
++                "cached_result_sha256",
++                "kline_provenance_missing",
++                "kline_adapter_is_tencent_actual_endpoint_is_sina",
++                "failure_injection_disclosed",
++                "fetched_at_is_not_trade_date",
++            }
++            if type(worker) is not dict or set(worker) != keys:
++                rejected()
++            binding = worker["binding"]
++            if (
++                type(binding) is not dict
++                or set(binding)
++                != {
++                    "candidate",
++                    "release_id",
++                    "production_pid",
++                    "pid",
++                    "nonce",
++                    "issued_at",
++                    "probe_sha256",
++                    "worker_sha256",
++                }
++                or binding["candidate"] != self.request["commit"]
++                or binding["release_id"] != attempt
++                or type(binding["production_pid"]) is not int
++                or binding["production_pid"] != baseline["production_pid"]
++                or not integer(binding["pid"], 2)
++                or not integer(binding["issued_at"])
++                or type(binding["nonce"]) is not str
++                or not re.fullmatch("[0-9a-f]{32}", binding["nonce"])
++                or binding["probe_sha256"] != MARKET_INTEGRATION_HELPERS["market_live_probe.py"]
++                or binding["worker_sha256"] != MARKET_WORKER_SHA256
++                or type(worker["schema"]) is not int
++                or worker["schema"] != 1
++                or not integer(worker["checked_at"])
++                or not binding["issued_at"] <= worker["checked_at"] <= value["finished_at"]
++                or any(
++                    worker[name] is not False
++                    for name in (
++                        "production_verified",
++                        "research_quality_verified",
++                        "live_model_verified",
++                        "native_search_verified",
++                        "native_fetch_verified",
++                    )
++                )
++                or any(type(worker[name]) is not bool for name in ("passed", "market_provider_verified"))
++                or worker["error_class"] not in {None, "worker_failed", "market_acceptance_incomplete"}
++                or type(worker["checks"]) is not dict
++                or set(worker["checks"]) != MARKET_CHECKS
++                or any(type(item) is not bool for item in worker["checks"].values())
++                or type(worker["request_counts"]) is not dict
++                or set(worker["request_counts"]) != {"quote", "kline"}
++                or any(type(item) is not int or item != 1 for item in worker["request_counts"].values())
++                or type(worker["kline_provenance_missing"]) is not list
++                or any(
++                    type(item) is not str or item not in {"source", "retrieved_at", "data_timestamp"}
++                    for item in worker["kline_provenance_missing"]
++                )
++            ):
++                rejected()
++            for name in ("https", "cached_result_sha256"):
++                if type(worker[name]) is not dict or not set(worker[name]) <= {"quote", "kline"}:
++                    rejected()
++            for details in worker["https"].values():
++                if (
++                    type(details) is not dict
++                    or set(details)
++                    != {"https_verified", "redirect_followed", "response_sha256", "response_bytes"}
++                    or details["https_verified"] is not True
++                    or details["redirect_followed"] is not False
++                    or not integer(details["response_bytes"], 1)
++                    or details["response_bytes"] > 524288
++                ):
++                    rejected()
++                digest_or_reject(details["response_sha256"])
++            for item in worker["cached_result_sha256"].values():
++                digest_or_reject(item)
++            if any(
++                worker[name] is not True
++                for name in (
++                    "kline_adapter_is_tencent_actual_endpoint_is_sina",
++                    "failure_injection_disclosed",
++                    "fetched_at_is_not_trade_date",
++                )
++            ):
++                rejected()
++            provider_verified = (
++                worker["checks"]["quote_real_provider"] and worker["checks"]["kline_real_provider"]
++            )
++            accepted = (
++                all(worker["checks"].values())
++                and not worker["kline_provenance_missing"]
++                and set(worker["https"]) == {"quote", "kline"}
++                and set(worker["cached_result_sha256"]) == {"quote", "kline"}
++            )
++            if (
++                worker["market_provider_verified"] != provider_verified
++                or worker["passed"] != accepted
++                or value["market_provider_verified"] != provider_verified
++            ):
++                rejected()
++        elif value["market_provider_verified"] is not False:
++            rejected()
++        if value["passed"] and (
++            worker is None
++            or worker["passed"] is not True
++            or set(value) != required | optional
++            or any(
++                value[name] is not True
++                for name in ("actual_linux_collection", "original_runtime_unchanged", "unit_stopped")
++            )
++            or not all(value["os_denial_controls"].values())
++            or value["error_class"] is not None
++        ):
++            rejected()
++        if not value["passed"] and value["error_class"] is None:
++            rejected()
++        return json.loads(encoded(value))
++
++    def integration_market(self):
++        self.verify_tree()
++        contents = self.market_helper_sources()
++        attempt = self.request.get("integration_attempt")
++        if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
++            raise ReleaseError("explicit_market_integration_attempt_required")
++        baseline = self.market_original_state()
++        work = self.checked(self.operations / "integration" / attempt / "market")
++        directory = self.checked(self.record / ("integration-market-" + attempt))
++        if work.exists() or directory.exists():
++            raise ReleaseError("market_integration_attempt_already_exists")
++        self.boundary("market_attempt")
++        directory.mkdir(mode=0o700)
++        descriptor = os.open(
++            directory / "events.jsonl",
++            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
++            0o600,
++        )
++        os.fchmod(descriptor, 0o600)
++        summary, count, chain, cancelled, error_code = None, 0, digest(b""), None, None
++        original_after, candidate_after = False, False
++        launch, stopped, inventory_unit, inventory_clear = None, False, None, False
++        try:
++            for parent in (directory, self.record):
++                fd = os.open(
++                    self.checked(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
++                )
++                try:
++                    os.fsync(fd)
++                finally:
++                    os.close(fd)
++            with self.market_module(contents) as module:
++                bindings = {
++                    "schema": 1,
++                    "release_id": attempt,
++                    "candidate": self.request["commit"],
++                    "production_pid": baseline["production_pid"],
++                    "probe_source": {
++                        "sha256": MARKET_INTEGRATION_HELPERS["market_live_probe.py"],
++                        "content": base64.b64encode(contents["market_live_probe.py"]).decode(),
++                    },
++                }
++
++                def record(value):
++                    nonlocal summary, count, chain
++                    safe = self.market_safe_record(value, attempt, module, baseline)
++                    if summary is not None or count >= 16:
++                        raise ReleaseError("market_event_order_rejected")
++                    entry = encoded({"sequence": count + 1, "previous_sha256": chain, "event": safe}) + b"\n"
++                    if len(entry) > 16384:
++                        raise ReleaseError("market_safe_record_rejected")
++                    view = memoryview(entry)
++                    while view:
++                        written = os.write(descriptor, view)
++                        if written <= 0:
++                            raise ReleaseError("market_event_write_failed")
++                        view = view[written:]
++                    os.fsync(descriptor)
++                    count, chain = count + 1, digest(entry)
++                    if "finished_at" in safe:
++                        summary = safe
++
++                def boundary(label):
++                    nonlocal cancelled
++                    if label not in MARKET_BOUNDARIES:
++                        raise module.ValidationError("supervision_failed")
++                    try:
++                        self.boundary(label)
++                        if self.market_original_state() != baseline:
++                            raise ReleaseError("market_original_runtime_changed")
++                        if label == "market_allow_public_http":
++                            self.verify_tree()
++                    except Exception as error:
++                        code = failure_code(error)
++                        if code in {
++                            "operator_stop",
++                            "fresh_operator_permit_required",
++                            "permit_timeout",
++                            "controller_disconnected",
++                        }:
++                            cancelled = code
++                            raise module.ValidationError("operator_stop") from None
++                        raise module.ValidationError("supervision_failed") from None
++
++                def run(argv, *, timeout):
++                    nonlocal launch, stopped, inventory_unit, inventory_clear
++                    if (
++                        type(argv) is not list
++                        or not argv
++                        or any(type(item) is not str or "\0" in item for item in argv)
++                        or type(timeout) not in {int, float}
++                        or not 0 < timeout <= 15
++                    ):
++                        raise ReleaseError("market_command_rejected")
++                    allowed = False
++                    if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
++                        allowed = (
++                            len(argv) == 6
++                            and argv[:5]
++                            == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
++                            and re.fullmatch(
++                                "prism-market-probe-"
++                                + self.request["commit"][:12]
++                                + "-[0-9a-f]{32}\\.service",
++                                argv[5],
++                            )
++                            and inventory_unit in {None, argv[5]}
++                            and launch is None
++                        )
++                        if allowed:
++                            inventory_unit = argv[5]
++                    elif argv[:1] == ["/usr/bin/systemd-run"] and launch is None:
++                        try:
++                            config = json.loads(argv[-1])
++                            fixed = {
++                                "candidate": self.request["commit"],
++                                "release_id": attempt,
++                                "production_pid": baseline["production_pid"],
++                                "work": str(work),
++                                "probe_sha256": MARKET_INTEGRATION_HELPERS["market_live_probe.py"],
++                                "worker_sha256": MARKET_WORKER_SHA256,
++                            }
++                            if (
++                                type(config) is not dict
++                                or set(config) != {*fixed, "nonce", "issued_at", "pins", "negative_public"}
++                                or any(
++                                    type(config.get(key)) is not type(item) or config[key] != item
++                                    for key, item in fixed.items()
++                                )
++                                or type(config["nonce"]) is not str
++                                or not re.fullmatch("[0-9a-f]{32}", config["nonce"])
++                                or type(config["issued_at"]) is not int
++                                or not 0 <= self.now() - config["issued_at"] <= 65
++                                or type(config["pins"]) is not dict
++                                or set(config["pins"]) != module.HOSTS
++                                or any(
++                                    type(values) is not list or len(values) != 1 or type(values[0]) is not str
++                                    for values in config["pins"].values()
++                                )
++                            ):
++                                raise ValueError
++                            pins, negative = module.network_policy(
++                                resolve=lambda host, *_args, **_kwargs: [
++                                    (None, None, None, None, (config["pins"][host][0], 443))
++                                ]
++                            )
++                            if pins != config["pins"] or negative != config["negative_public"]:
++                                raise ValueError
++                            expected = object.__new__(module.Validation)
++                            expected.request, expected.work, expected.candidate = bindings, work, self.release
++                            expected.nonce, expected.issued = config["nonce"], config["issued_at"]
++                            expected.pins, expected.negative = pins, negative
++                            expected.unit = (
++                                "prism-market-probe-"
++                                + self.request["commit"][:12]
++                                + "-"
++                                + expected.nonce
++                                + ".service"
++                            )
++                            allowed = (
++                                argv == expected.command()
++                                and inventory_clear
++                                and expected.unit == inventory_unit
++                            )
++                            if allowed:
++                                launch = expected.unit
++                        except (ValueError, TypeError, KeyError, module.ValidationError):
++                            allowed = False
++                    elif (
++                        argv
++                        == [
++                            "/usr/bin/systemctl",
++                            "show",
++                            "--property=MainPID,InvocationID,WorkingDirectory",
++                            SERVICE,
++                        ]
++                        or launch is not None
++                        and argv == ["/usr/bin/systemctl", "stop", launch]
++                        or launch is not None
++                        and argv
++                        == [
++                            "/usr/bin/systemctl",
++                            "show",
++                            "--property=" + MARKET_UNIT_PROPERTIES,
++                            launch,
++                        ]
++                    ):
++                        allowed = True
++                    if not allowed:
++                        raise ReleaseError("market_command_rejected")
++                    # Cleanup of this nonce remains available after STOP; no new work.
++                    if argv[:2] != ["/usr/bin/systemctl", "stop"]:
++                        self.stop()
++                    output = self.run(argv, timeout=timeout)
++                    if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
++                        inventory_clear = type(output) is bytes and not output.strip()
++                    if argv[:2] == ["/usr/bin/systemctl", "stop"]:
++                        stopped = True
++                    return output
++
++                returned = self.market_safe_record(
++                    module.run_validation(bindings, boundary=boundary, run=run, record=record),
++                    attempt,
++                    module,
++                    baseline,
++                )
++                if summary != returned:
++                    raise ReleaseError("market_durable_result_required")
++                if returned["passed"] and (launch is None or not stopped):
++                    raise ReleaseError("market_cleanup_not_observed")
++                self.boundary("market_reconcile")
++                original_after = self.market_original_state() == baseline
++                self.verify_tree()
++                candidate_after = True
++                self.action_report = {
++                    "attempt": attempt,
++                    "summary": returned,
++                    "events": count,
++                    "last_event_sha256": chain,
++                    "market_provider_verified": returned["market_provider_verified"],
++                    "passed": returned["passed"],
++                    "production_verified": False,
++                }
++                if cancelled:
++                    raise ReleaseError(cancelled)
++                if not original_after:
++                    raise ReleaseError("market_original_runtime_changed")
++                if returned["passed"] is not True:
++                    raise ReleaseError("market_acceptance_incomplete")
++        except Exception as error:
++            error_code = failure_code(error)
++            raise
++        finally:
++            os.close(descriptor)
++            try:
++                original_after = self.market_original_state() == baseline
++            except Exception:
++                original_after = False
++            try:
++                self.verify_tree()
++                candidate_after = True
++            except Exception:
++                candidate_after = False
++            reconciliation_error = error_code is None and (not original_after or not candidate_after)
++            if reconciliation_error:
++                error_code = "market_final_reconciliation_failed"
++            receipt = {
++                "schema": 1,
++                "attempt": attempt,
++                "candidate": self.request["commit"],
++                "helper_sha256": dict(MARKET_INTEGRATION_HELPERS),
++                "summary": summary,
++                "events": count,
++                "last_event_sha256": chain,
++                "original_runtime_unchanged": original_after,
++                "candidate_unchanged": candidate_after,
++                "passed": error_code is None
++                and summary is not None
++                and summary["passed"] is True
++                and original_after
++                and candidate_after,
++                "error_class": error_code,
++                "production_verified": False,
++            }
++            self.write(directory / "receipt.json", encoded(receipt))
++            for parent in (directory, self.record):
++                fd = os.open(
++                    self.checked(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
++                )
++                try:
++                    os.fsync(fd)
++                finally:
++                    os.close(fd)
++            if reconciliation_error:
++                raise ReleaseError(error_code)
++
+     def integration_identity(self, unit, production_pid, uid):
+         pid = self.process_id(unit)
+@@ -5528,5 +6208,8 @@
+                 elif request["action"] == "finish_stage":
+                     result["stage_cleanup"] = self.action_report
+-                elif request["action"] in INTEGRATION_PROBES or request["action"] == "integration_live":
++                elif request["action"] in INTEGRATION_PROBES or request["action"] in {
++                    "integration_live",
++                    "integration_market",
++                }:
+                     result["integration"] = self.action_report
+                 elif request["action"] == "validate_legacy_retirement":

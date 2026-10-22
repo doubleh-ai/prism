@@ -741,6 +741,8 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         elif name == "market_fundamentals":
             value, stale = await chain.get_fundamentals(data["ticker"])
         else:
+            from .market.models import describe_kline
+
             bars, stale = await chain.get_kline(**data)
             if not bars:
                 raise RuntimeError("kline unavailable")
@@ -748,11 +750,11 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
                 {
                     "ticker": data["ticker"],
                     "period": data["period"],
-                    "bars": [b.model_dump() for b in bars],
-                    "stale": stale,
+                    "bars": [b.model_dump(exclude={"provenance"}) for b in bars],
+                    **describe_kline(bars, stale=stale),
                 },
                 target,
-                f"取得 {len(bars)} 根 K 线" + ("（备用过期数据）" if stale else ""),
+                f"取得 {len(bars)} 根 K 线" + ("（使用已过期缓存）" if stale else ""),
             )
         return (
             {"value": value.model_dump(), "stale": stale},

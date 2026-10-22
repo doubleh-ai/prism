@@ -9,10 +9,11 @@ exists either, raises :class:`NoProviderAvailable`.
 
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from .cache import MarketCache
-from .models import Fundamentals, KLine, Quote, SearchHit
+from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
 from .provider import (
     MarketDataProvider,
     NoProviderAvailable,
@@ -149,7 +150,13 @@ class ProviderChain:
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
         async def _invoke(p):
             kls = await p.get_kline(ticker, period=period, limit=limit)
+            # Only a completed provider call establishes acquisition time. Cache
+            # reads below never stamp now or infer origin from a cache/provider key.
+            completed_at = int(time.time())
             normalized = [KLine(**k.model_dump()) for k in kls]
+            for bar in normalized:
+                if bar.provenance is None:
+                    bar.provenance = KLineProvenance(adapter=p.name, retrieved_at=completed_at)
             return resample_kline(normalized, period, limit)
 
         # Custom path — bypass _with_failover's list handling
