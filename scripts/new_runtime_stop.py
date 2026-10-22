@@ -65,7 +65,7 @@ EMPTY_EXEC_ARRAY = {"type": "a(sasbttttuii)", "data": []}
 OBSERVER_PROPERTIES = (
     "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,"
     "ExecMainCode,ExecMainStatus,Result,Transient,DynamicUser,RemainAfterExit,"
-    "Wants,PartOf,BindsTo,PropagatesStopTo"
+    "Wants,PartOf,BindsTo,PropagatesStopTo,Job"
 )
 REQUEST_KEYS = {
     "commit",
@@ -98,6 +98,7 @@ ERRORS = {
     "marker_rejected",
     "census_rejected",
     "stop_policy_rejected",
+    "job_property_rejected",
     "stop_rejected",
     "stop_already_consumed",
     "result_rejected",
@@ -556,6 +557,65 @@ def command(plan, worker):
     ]
 
 
+def validate_job(value, printed=None):
+    if (
+        type(value) is not dict
+        or set(value) != {"type", "data"}
+        or value["type"] != "(uo)"
+        or type(value["data"]) is not list
+        or len(value["data"]) != 2
+        or type(value["data"][0]) is not int
+        or not 0 <= value["data"][0] < 2**32
+        or type(value["data"][1]) is not str
+    ):
+        reject("job_property_rejected")
+    number, path = value["data"]
+    if path != ("/" if number == 0 else "/org/freedesktop/systemd1/job/" + str(number)):
+        reject("job_property_rejected")
+    if printed is not None and (type(printed) is not str or printed not in {"", str(number)}):
+        reject("job_property_rejected")
+    return value
+
+
+def job_command(unit):
+    if type(unit) is not str or not re.fullmatch(
+        "prism-new-runtime-stop-[0-9a-f]{32}-(?:candidate|recovery)(?:-ref)?\\.service", unit
+    ):
+        reject("unit_rejected")
+    component = "".join(
+        character if character.isascii() and character.isalnum() else "_" + format(ord(character), "02x")
+        for character in unit
+    )
+    return [
+        "/usr/bin/busctl",
+        "--system",
+        "--json=short",
+        "get-property",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1/unit/" + component,
+        "org.freedesktop.systemd1.Unit",
+        "Job",
+    ]
+
+
+def typed_job(run, unit, printed):
+    raw = run(job_command(unit), timeout=10)
+    if type(raw) is not bytes or len(raw) > 4096:
+        reject("job_property_rejected")
+
+    def pairs(rows):
+        value = dict(rows)
+        if len(value) != len(rows):
+            raise ValueError("duplicate_key")
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs)
+    except (ValueError, UnicodeError):
+        reject("job_property_rejected")
+    return validate_job(value, printed)
+
+
 def exec_array_commands(unit):
     if type(unit) is not str or not re.fullmatch(
         r"prism-new-runtime-stop-[0-9a-f]{32}-(?:candidate|recovery)\.service", unit
@@ -630,7 +690,7 @@ def observer_command(plan):
     ]
 
 
-def show(run, unit, *, observer=False, evidence=None):
+def show(run, unit, *, observer=False, evidence=None, jobs=None):
     names = OBSERVER_PROPERTIES if observer else PROPERTIES
     raw = run(["/usr/bin/systemctl", "show", "--all", "--property=" + names, unit], timeout=10)
     if type(raw) is not bytes or len(raw) > 32768:
@@ -644,6 +704,11 @@ def show(run, unit, *, observer=False, evidence=None):
     result = dict(rows)
     if len(rows) != len(result) or set(result) != set(names.split(",")):
         reject("unit_rejected")
+    if result["LoadState"] == "loaded":
+        job = typed_job(run, unit, result["Job"])
+        if jobs is not None:
+            jobs[unit] = job
+        result["Job"] = str(job["data"][0])
     if not observer and result["LoadState"] == "loaded":
         observed = empty_exec_arrays(run, unit)
         if evidence is not None:
@@ -1080,6 +1145,7 @@ class Validation:
         self.abort_written = False
         self.http_start_consumed = False
         self.exec_arrays = {}
+        self.jobs = {}
 
     def event(self, event, details):
         if self.fd is None or self.events >= 64:
@@ -1105,6 +1171,10 @@ class Validation:
             reject("unit_rejected")
         valid = argv == INVENTORY and not self.started
         if self.started and argv in exec_array_commands(plan["unit"]):
+            valid = True
+        if (self.started and argv == job_command(plan["unit"])) or (
+            self.observer_started and argv == job_command(plan["observer"])
+        ):
             valid = True
         for unit, is_observer in ((plan["unit"], False), (plan["observer"], True)):
             if argv == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend", unit]:
@@ -1190,7 +1260,7 @@ class Validation:
         return value
 
     def observer_state(self):
-        state = show(self.run, self.plan["observer"], observer=True)
+        state = show(self.run, self.plan["observer"], observer=True, jobs=self.jobs)
         group = CGROUP / ("system.slice/" + self.plan["observer"])
         if (
             state["LoadState"] != "loaded"
@@ -1204,6 +1274,7 @@ class Validation:
             or any(state[k] for k in ("PartOf", "BindsTo", "PropagatesStopTo"))
             or state["DynamicUser"] != "yes"
             or state["RemainAfterExit"] != "yes"
+            or state["Job"] != "0"
             or state["Transient"] != "yes"
             or not re.fullmatch("[0-9a-f]{32}", state["InvocationID"])
             or state["ControlGroup"] not in {"", "/system.slice/" + self.plan["observer"]}
@@ -1216,10 +1287,11 @@ class Validation:
             "control_group": "/system.slice/" + self.plan["observer"],
             "empty": True,
             "state": state,
+            "job": self.jobs[self.plan["observer"]],
         }
 
-    def own_state(self, *, waiting=False):
-        state = show(self.run, self.plan["unit"], evidence=self.exec_arrays)
+    def own_state(self, *, waiting=False, allow_pending=False):
+        state = show(self.run, self.plan["unit"], evidence=self.exec_arrays, jobs=self.jobs)
         if any(state[k] != v for k, v in {**POLICY, **EXTRA_POLICY}.items()):
             reject("stop_policy_rejected")
         if self.own is not None and (
@@ -1228,6 +1300,8 @@ class Validation:
             or state["MainPID"] not in {"0", str(self.own["pid"])}
         ):
             reject("unit_rejected")
+        if not waiting and not allow_pending and state["Job"] != "0":
+            reject("stop_rejected")
         if waiting and (
             state["ActiveState"] != "deactivating"
             or state["SubState"] != "stop-sigterm"
@@ -1285,16 +1359,27 @@ class Validation:
         self.run(["/usr/bin/systemctl", "stop", "--no-block", self.plan["observer"]], timeout=10)
 
         def gone():
-            state = show(self.run, self.plan["observer"], observer=True)
+            state = show(self.run, self.plan["observer"], observer=True, jobs=self.jobs)
             if state["LoadState"] == "not-found":
                 return state
             if state["InvocationID"] != self.observer["invocation_id"]:
                 reject("cleanup_unconfirmed")
-            return state if state["MainPID"] == "0" and state["ActiveState"] == "inactive" else None
+            return (
+                state
+                if state["MainPID"] == "0" and state["ActiveState"] == "inactive" and state["Job"] == "0"
+                else None
+            )
 
         state = self.poll(gone)
         group = group_evidence({"control_group": "/system.slice/" + self.plan["observer"]})
-        self.event("observer_released", {"state": state, "cgroup": group})
+        self.event(
+            "observer_released",
+            {
+                "state": state,
+                "cgroup": group,
+                "job": None if state["LoadState"] == "not-found" else self.jobs[self.plan["observer"]],
+            },
+        )
 
     def execute(self):
         if sys.platform != "linux" or os.geteuid() != 0:
@@ -1371,6 +1456,7 @@ class Validation:
                 reject("kernel_rejected")
             self.event("policy_verified", state)
             self.event("exec_arrays_verified", self.exec_arrays)
+            self.event("typed_job_verified", self.jobs[self.plan["unit"]])
             self.event(
                 "kernel_bootstrap",
                 {
@@ -1420,6 +1506,7 @@ class Validation:
                 "stop_waiting",
                 {
                     "job": int(state["Job"]),
+                    "typed_job": self.jobs[self.plan["unit"]],
                     "pid": self.own["pid"],
                     "invocation_id": self.own["invocation_id"],
                     "active_state": state["ActiveState"],
@@ -1434,7 +1521,7 @@ class Validation:
             after = self.census_marker("after")
 
             def exited():
-                state = self.own_state()
+                state = self.own_state(allow_pending=True)
                 return state if state["MainPID"] == "0" and state["Job"] == "0" else None
 
             state = self.poll(exited, seconds=12)
@@ -1489,6 +1576,7 @@ class Validation:
                     "invocation_id": self.own["invocation_id"],
                     "exit_code": 1,
                     "exit_status": 0,
+                    "job": self.jobs[self.plan["unit"]],
                     "result": "success",
                     "exit_at_us": exit_us,
                     "cgroup": group,
@@ -1566,6 +1654,7 @@ SUCCESS_EVENTS = (
     "start_intent",
     "policy_verified",
     "exec_arrays_verified",
+    "typed_job_verified",
     "kernel_bootstrap",
     "canaries_verified",
     "census_before",
@@ -1762,7 +1851,7 @@ def empty_evidence(value):
 def observer_evidence(value, plan):
     if (
         type(value) is not dict
-        or set(value) != {"invocation_id", "exec_main_pid", "control_group", "empty", "state"}
+        or set(value) != {"invocation_id", "exec_main_pid", "control_group", "empty", "state", "job"}
         or type(value["invocation_id"]) is not str
         or not re.fullmatch("[0-9a-f]{32}", value["invocation_id"])
         or not positive(value["exec_main_pid"])
@@ -1770,6 +1859,7 @@ def observer_evidence(value, plan):
         or value["empty"] is not True
     ):
         reject("record_rejected")
+    exact(validate_job(value["job"]), {"type": "(uo)", "data": [0, "/"]})
     state = value["state"]
     if (
         type(state) is not dict
@@ -1787,6 +1877,7 @@ def observer_evidence(value, plan):
         or state["ExecMainStatus"] != "0"
         or state["Result"] != "success"
         or state["RemainAfterExit"] != "yes"
+        or state["Job"] != "0"
         or state["Wants"].split() != [plan["unit"]]
         or state["ControlGroup"] not in {"", value["control_group"]}
         or any(state[k] for k in ("PartOf", "BindsTo", "PropagatesStopTo"))
@@ -1905,6 +1996,7 @@ def replay(identity, raw, receipt, request):
     exact(bootstrap["bootstrap_sha256"], digest(encoded(expected_bootstrap)))
     policy_evidence(details["policy_verified"], plan, own, phase="before")
     exact(details["exec_arrays_verified"], {key: EMPTY_EXEC_ARRAY for key in ("ExecStop", "ExecStopPost")})
+    exact(validate_job(details["typed_job_verified"]), {"type": "(uo)", "data": [0, "/"]})
     validate_canaries(details["canaries_verified"], plan, pid)
     census = [
         validate_census(details["census_" + phase], plan, pid, phase)
@@ -1944,6 +2036,7 @@ def replay(identity, raw, receipt, request):
         waiting,
         {
             "job": waiting["job"],
+            "typed_job": validate_job(waiting.get("typed_job"), str(waiting["job"])),
             "pid": pid,
             "invocation_id": own["invocation_id"],
             "active_state": "deactivating",
@@ -1979,6 +2072,7 @@ def replay(identity, raw, receipt, request):
     if not positive(exited.get("exit_at_us")) or exited["exit_at_us"] < after["at_us"]:
         reject("record_rejected")
     policy_evidence(exited.get("state"), plan, own, phase="after")
+    exact(validate_job(exited.get("job")), {"type": "(uo)", "data": [0, "/"]})
     empty_evidence(exited.get("cgroup"))
     exact(
         exited,
@@ -1987,6 +2081,7 @@ def replay(identity, raw, receipt, request):
             "invocation_id": own["invocation_id"],
             "exit_code": 1,
             "exit_status": 0,
+            "job": exited["job"],
             "result": "success",
             "exit_at_us": exited["exit_at_us"],
             "cgroup": exited["cgroup"],
@@ -1997,7 +2092,7 @@ def replay(identity, raw, receipt, request):
         reject("record_rejected")
     exact(details["observer_release_intent"], observer)
     released = details["observer_released"]
-    if set(released) != {"state", "cgroup"}:
+    if set(released) != {"state", "cgroup", "job"}:
         reject("record_rejected")
     empty_evidence(released["cgroup"])
     state = released["state"]
@@ -2010,9 +2105,14 @@ def replay(identity, raw, receipt, request):
             state["InvocationID"] == observer["invocation_id"]
             and state["MainPID"] == "0"
             and state["ActiveState"] == "inactive"
+            and state["Job"] == "0"
         )
     ):
         reject("record_rejected")
+    if state["LoadState"] == "not-found":
+        exact(released["job"], None)
+    else:
+        exact(validate_job(released["job"]), {"type": "(uo)", "data": [0, "/"]})
     exact(details["sources_reverified"], sources)
     summary = details["completed"]
     if not positive(summary.get("completed_at_us")) or summary["completed_at_us"] < exited["exit_at_us"]:
@@ -2091,6 +2191,8 @@ def read_accepted(request, *, role, candidate, archive_sha256, environment_sha25
     allowed = [
         INVENTORY,
         *exec_array_commands(plan["unit"]),
+        job_command(plan["unit"]),
+        job_command(plan["observer"]),
         *(
             ["/usr/bin/systemctl", "show", "--all", "--property=" + names, unit]
             for names, unit in ((PROPERTIES, plan["unit"]), (OBSERVER_PROPERTIES, plan["observer"]))
@@ -2120,6 +2222,7 @@ def read_accepted(request, *, role, candidate, archive_sha256, environment_sha25
         if state["LoadState"] != "not-found" and (
             state["MainPID"] != "0"
             or state["ActiveState"] != "inactive"
+            or state["Job"] != "0"
             or invocation is not None
             and state["InvocationID"] != invocation
         ):

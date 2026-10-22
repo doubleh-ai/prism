@@ -41,7 +41,9 @@ PROPERTIES = (
     + ","
     + ",".join((*(key for key in POLICY if key not in {"ExecStop", "ExecStopPost"}), "Job"))
 )
-OBSERVER_PROPERTIES = base.PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit"
+OBSERVER_PROPERTIES = (
+    base.PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit,Job"
+)
 # Actual reviewed Ubuntu busctl JSON: both properties returned this typed empty
 # array. systemctl omits these custom-formatted arrays even with --all.
 EMPTY_EXEC_ARRAY = {"type": "a(sasbttttuii)", "data": []}
@@ -151,6 +153,65 @@ def _job(value):
     return base._number(value)
 
 
+def validate_job(value, printed=None):
+    if (
+        type(value) is not dict
+        or set(value) != {"type", "data"}
+        or value["type"] != "(uo)"
+        or type(value["data"]) is not list
+        or len(value["data"]) != 2
+        or type(value["data"][0]) is not int
+        or not 0 <= value["data"][0] < 2**32
+        or type(value["data"][1]) is not str
+    ):
+        reject("job_property_rejected")
+    number, path = value["data"]
+    if path != ("/" if number == 0 else "/org/freedesktop/systemd1/job/" + str(number)):
+        reject("job_property_rejected")
+    if printed is not None and (type(printed) is not str or printed not in {"", str(number)}):
+        reject("job_property_rejected")
+    return value
+
+
+def job_command(unit):
+    if type(unit) is not str or not re.fullmatch(
+        "prism-retirement-(?:probe|stop-ref)-[0-9a-f]{32}-(?:int-executor|int-post)\\.service", unit
+    ):
+        reject("unit_rejected")
+    component = "".join(
+        character if character.isascii() and character.isalnum() else "_" + format(ord(character), "02x")
+        for character in unit
+    )
+    return [
+        "/usr/bin/busctl",
+        "--system",
+        "--json=short",
+        "get-property",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1/unit/" + component,
+        "org.freedesktop.systemd1.Unit",
+        "Job",
+    ]
+
+
+def typed_job(run, unit, printed):
+    raw = run(job_command(unit), timeout=10)
+    if type(raw) is not bytes or len(raw) > 4096:
+        reject("job_property_rejected")
+
+    def pairs(rows):
+        value = dict(rows)
+        if len(value) != len(rows):
+            raise ValueError("duplicate_key")
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs)
+    except (ValueError, UnicodeError):
+        reject("job_property_rejected")
+    return validate_job(value, printed)
+
+
 def exec_array_commands(unit):
     if type(unit) is not str or not re.fullmatch(
         r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post)\.service", unit
@@ -218,6 +279,7 @@ class StopValidation(base.Validation):
         self.observer_stop_consumed = set()
         self.case_identities = {}
         self.exec_arrays = {}
+        self.jobs = {}
 
     def unit_missing(self, unit):
         allowed = {probe._case(self.plan, case_id)["unit"] for case_id in CASES}
@@ -263,17 +325,22 @@ class StopValidation(base.Validation):
         observed = empty_exec_arrays(self.run, unit)
         case_id = next(case_id for case_id in CASES if probe._case(self.plan, case_id)["unit"] == unit)
         self.exec_arrays[case_id] = observed
-        return {**state, **{key: "" for key in observed}}
+        self.jobs[unit] = typed_job(self.run, unit, state["Job"])
+        return {**state, **{key: "" for key in observed}, "Job": str(self.jobs[unit]["data"][0])}
 
     def observer_show(self, case):
         self.fixed_case(case)
         name = observer_unit(self.plan, case["case_id"])
-        return _rows(
+        state = _rows(
             self.run(
                 ["/usr/bin/systemctl", "show", "--all", "--property=" + OBSERVER_PROPERTIES, name], timeout=10
             ),
             OBSERVER_PROPERTIES,
         )
+        if state["LoadState"] == "loaded":
+            self.jobs[name] = typed_job(self.run, name, state["Job"])
+            state["Job"] = str(self.jobs[name]["data"][0])
+        return state
 
     def python_identity(self):
         raw, info = base.read_data(Path("/usr/bin/python3.12"), trusted=True)
@@ -311,6 +378,7 @@ class StopValidation(base.Validation):
             or any(state[name] for name in ("PartOf", "BindsTo", "PropagatesStopTo"))
             or state["DynamicUser"] != "yes"
             or state["RemainAfterExit"] != "yes"
+            or state["Job"] != "0"
             or not re.fullmatch(r"[0-9a-f]{32}", state["InvocationID"])
             or not self.observer_empty(case, state)
         ):
@@ -422,6 +490,7 @@ class StopValidation(base.Validation):
             return state["LoadState"] == "not-found" or (
                 state["ActiveState"] == "inactive"
                 and state["MainPID"] == "0"
+                and state["Job"] == "0"
                 and self.observer_empty(case, state)
             )
 

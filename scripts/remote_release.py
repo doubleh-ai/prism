@@ -172,7 +172,7 @@ RETIREMENT_HELPERS = {
 }
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
-    "retirement_stop_validation.py": "d864de5273af26c045a496d10117d52932333b71d1a139f665611eaa69b5addc",
+    "retirement_stop_validation.py": "5ef57f46e21327105d233987a85f7a70e9ea6efc7f90b22e075466062ecc7034",
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 RETIREMENT_PRESTART_ATTEMPT = "prism-20261022-stop-e2e-001"
@@ -187,6 +187,21 @@ RETIREMENT_PRESTART_REVIEWED = {
         "prestart_reconciliation_attempts": (RETIREMENT_PRESTART_ATTEMPT,),
     },
 }
+RETIREMENT_RETAINED_START = {
+    "commit": "f0897e84cdc0fa31871eeee90ed2e2511cc72a13",
+    "release_id": "prism-20261022-main-f0897e84",
+    "attempt": "prism-20261022-stop-e2e-003",
+    "nonce": "4aec30715bde22080e9bc04430644de4",
+    "case_id": "int-executor",
+    "invocation_id": "35f8c14c6c8540be8d54f1c72870c961",
+    "exec_main_pid": 1587380,
+    "helper_sha256": "d864de5273af26c045a496d10117d52932333b71d1a139f665611eaa69b5addc",
+    "identity_sha256": "fe397a434884158deea7a2621e5274b4f8a2d5953d5f96b3b40d9985927996fb",
+    "receipt_sha256": "068a9145c87d0331aaff39e5d400a18145857e38e8d0504072d453cf52873999",
+    "events_sha256": "8d34615ca08b4d198b79adb90249d6d1a7ccab819dacabfc88d77f0e2a9cbd59",
+    "argv_sha256": "06b7ea1aad40d13c89bb9c54793ef30f77c8d5aa4b5ecfa3b53af65fa16d78a6",
+}
+RETIREMENT_RETAINED_PROPERTIES = "LoadState,ActiveState,SubState,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus,Result,InvocationID,ControlGroup,Job,Transient,ExecMainExitTimestampMonotonic"
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
 ASTOCK_ERROR_DETAILS = {
     "astock_import_contract_rejected",
@@ -243,7 +258,7 @@ RETIREMENT_STOP_PROPERTIES = (
     + ",KillSignal,KillMode,SendSIGKILL,SendSIGHUP,TimeoutStopUSec,Restart,WatchdogUSec,RuntimeMaxUSec,NRestarts,RemainAfterExit,Job"
 )
 RETIREMENT_OBSERVER_PROPERTIES = (
-    RETIREMENT_PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit"
+    RETIREMENT_PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit,Job"
 )
 RETIREMENT_PYTHON_VERSION_COMMAND = [
     "/usr/bin/python3.12",
@@ -740,6 +755,28 @@ def run_command(args, *, env=None, timeout=120):
             args[5],
         )
     )
+    capture = capture or (
+        len(args) == 8
+        and args[:5]
+        == ["/usr/bin/busctl", "--system", "--json=short", "get-property", "org.freedesktop.systemd1"]
+        and args[6:] == ["org.freedesktop.systemd1.Unit", "Job"]
+        and re.fullmatch(
+            r"/org/freedesktop/systemd1/unit/prism_2d(?:retirement_2d(?:probe|stop_2dref)_2d[0-9a-f]{32}_2dint_2d(?:executor|post)|new_2druntime_2dstop_2d[0-9a-f]{32}_2d(?:candidate|recovery)(?:_2dref)?)_2eservice",
+            args[5],
+        )
+    )
+    capture = capture or args == [
+        "/usr/bin/busctl",
+        "--system",
+        "--json=short",
+        "get-property",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1/unit/prism_2dretirement_2dprobe_2d"
+        + RETIREMENT_RETAINED_START["nonce"]
+        + "_2dint_2dexecutor_2eservice",
+        "org.freedesktop.systemd1.Service",
+        "ExecStart",
+    ]
     result = subprocess.run(
         args,
         env=env,
@@ -5008,10 +5045,228 @@ class RemoteRelease:
                 raise ReleaseError("retirement_stop_safe_event_rejected")
         return value
 
+    def retirement_retained_start_state(self, bindings, probe, validation, stop):
+        """Only read the exact reviewed exited invocation; never stop or unload it."""
+        reviewed = RETIREMENT_RETAINED_START
+        plan = probe.descriptor(bindings, nonce=reviewed["nonce"])
+        case = probe._case(plan, reviewed["case_id"])
+        unit = case["unit"]
+        command = [
+            "/usr/bin/systemctl",
+            "show",
+            "--all",
+            "--property=" + RETIREMENT_RETAINED_PROPERTIES,
+            unit,
+        ]
+        before = stop._rows(self.run(command, timeout=10), RETIREMENT_RETAINED_PROPERTIES)
+        expected = {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "exited",
+            "MainPID": "0",
+            "ExecMainPID": str(reviewed["exec_main_pid"]),
+            "ExecMainCode": "1",
+            "ExecMainStatus": "0",
+            "Result": "success",
+            "InvocationID": reviewed["invocation_id"],
+            "ControlGroup": "",
+            "Transient": "yes",
+        }
+        if any(before[key] != value for key, value in expected.items()):
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        job = stop.typed_job(self.run, unit, before["Job"])
+        if job != {"type": "(uo)", "data": [0, "/"]}:
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        start_command = stop.exec_array_commands(unit)[0]
+        start_command[-1] = "ExecStart"
+        raw = self.run(start_command, timeout=10)
+        if type(raw) is not bytes or len(raw) > 16384:
+            raise ReleaseError("retirement_retained_start_unreconciled")
+
+        def pairs(rows):
+            value = dict(rows)
+            if len(value) != len(rows):
+                raise ValueError("duplicate_key")
+            return value
+
+        start = json.loads(raw, object_pairs_hook=pairs)
+        launch = validation.launch_command(plan, reviewed["case_id"])
+        argv = launch[launch.index("--") + 1 :]
+        if digest(encoded(argv)) != reviewed["argv_sha256"]:
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        if (
+            type(start) is not dict
+            or set(start) != {"type", "data"}
+            or start["type"] != "a(sasbttttuii)"
+            or type(start["data"]) is not list
+            or len(start["data"]) != 1
+        ):
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        row = start["data"][0]
+        if (
+            type(row) is not list
+            or len(row) != 10
+            or row[0] != argv[0]
+            or row[1] != argv
+            or row[2] is not False
+            or any(type(number) is not int or not 0 < number < 2**64 for number in row[3:7])
+            or any(type(number) is not int for number in row[7:])
+            or not (row[3] <= row[5] and row[4] <= row[6])
+            or row[7:] != [reviewed["exec_main_pid"], 1, 0]
+            or before["ExecMainExitTimestampMonotonic"] != str(row[6])
+        ):
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        observer = stop.observer_unit(plan, reviewed["case_id"])
+        missing = self.run(["/usr/bin/systemctl", "show", "--property=LoadState", observer], timeout=10)
+        if stop._rows(missing, "LoadState") != {"LoadState": "not-found"}:
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        cgroot = self.checked(self.root / "sys/fs/cgroup")
+        if not self.checked(cgroot / "cgroup.controllers").is_file():
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        for name in (unit, observer):
+            group = self.checked(cgroot / "system.slice" / name)
+            if group.exists():
+                raise ReleaseError("retirement_retained_start_unreconciled")
+        after = stop._rows(self.run(command, timeout=10), RETIREMENT_RETAINED_PROPERTIES)
+        if before != after:
+            raise ReleaseError("retirement_retained_start_unreconciled")
+        return {
+            "unit": unit,
+            "invocation_id": reviewed["invocation_id"],
+            "exec_main_pid": reviewed["exec_main_pid"],
+            "typed_job": job,
+            "state_sha256": digest(encoded(before)),
+            "exec_start_argv_sha256": digest(encoded(argv)),
+            "case_cgroup_absent": True,
+            "observer_not_found": True,
+            "observer_cgroup_absent": True,
+            "no_signal_or_cleanup_authorized": True,
+        }
+
+    def retirement_reconcile_retained_start(
+        self, previous, baseline, bindings, probe, validation, stop, proof, prestart
+    ):
+        """Independently reconcile one pinned started failure, never call it passed."""
+        reviewed = RETIREMENT_RETAINED_START
+        try:
+            if previous.name != reviewed["attempt"] or [item["attempt"] for item in prestart] != list(
+                RETIREMENT_PRESTART_REVIEWED
+            ):
+                raise ReleaseError("retirement_retained_start_unreconciled")
+            identity, identity_sha = self.retirement_private_record(previous / "identity.json")
+            receipt, receipt_sha = self.retirement_private_record(previous / "receipt.json")
+            raw, events_sha = self.retirement_private_record(
+                previous / "events.jsonl", limit=32768, json_value=False
+            )
+            if any(
+                actual != reviewed[key]
+                for key, actual in (
+                    ("identity_sha256", identity_sha),
+                    ("receipt_sha256", receipt_sha),
+                    ("events_sha256", events_sha),
+                )
+            ):
+                raise ReleaseError("retirement_retained_start_unreconciled")
+            if identity != {
+                "commit": self.request["commit"],
+                "attempt": previous.name,
+                "helpers": {**RETIREMENT_HELPERS, "retirement_stop_validation.py": reviewed["helper_sha256"]},
+                "baseline": baseline,
+                "signal_proof": proof,
+                "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
+                "prestart_reconciliations": prestart,
+            }:
+                raise ReleaseError("retirement_retained_start_unreconciled")
+            summary = self.retirement_stop_summary(receipt.get("summary"), bindings, probe, validation, stop)
+            if (
+                set(receipt)
+                != {
+                    "attempt",
+                    "signal_proof",
+                    "summary",
+                    "events",
+                    "last_event_sha256",
+                    "production_verified",
+                    "passed",
+                    "baseline_verified_after",
+                    "failure_code",
+                }
+                or receipt["attempt"] != previous.name
+                or receipt["signal_proof"] != proof
+                or receipt["events"] != 3
+                or type(receipt["events"]) is not int
+                or receipt["production_verified"] is not False
+                or receipt["passed"] is not False
+                or receipt["baseline_verified_after"] is not True
+                or receipt["failure_code"] != "legacy_stop_validation_failed"
+                or summary["cases"] != []
+                or summary["synthetic_cleanup_verified"] is not False
+                or summary["retirement_stop_validation_passed"] is not False
+                or summary["systemctl_stop_end_to_end_proven"] is not False
+                or summary.get("error_code") != "retirement_systemd_number_rejected"
+            ):
+                raise ReleaseError("retirement_retained_start_unreconciled")
+            expected = (
+                (
+                    "public_bundles_verified",
+                    {
+                        "bundle_sha256": probe.bundle_identity(),
+                        "wrapper_sha256": validation.wrapper_directory().name,
+                    },
+                ),
+                ("synthetic_start_intent", {"case_id": reviewed["case_id"], "nonce": reviewed["nonce"]}),
+                ("retirement_stop_validation_result", summary),
+            )
+            lines, chain = raw.splitlines(keepends=True), "0" * 64
+            if len(lines) != 3:
+                raise ReleaseError("retirement_retained_start_unreconciled")
+            for sequence, (line, (event, details)) in enumerate(zip(lines, expected, strict=True), 1):
+                row = json.loads(line)
+                if (
+                    type(row) is not dict
+                    or set(row) != {"sequence", "at", "previous_sha256", "event", "details"}
+                    or type(row["sequence"]) is not int
+                    or row["sequence"] != sequence
+                    or type(row["at"]) is not int
+                    or row["at"] <= 0
+                    or row["previous_sha256"] != chain
+                    or row["event"] != event
+                    or encoded(row["details"]) != encoded(details)
+                    or not line.endswith(b"\n")
+                ):
+                    raise ReleaseError("retirement_retained_start_unreconciled")
+                chain = digest(line)
+            if chain != receipt["last_event_sha256"]:
+                raise ReleaseError("retirement_retained_start_unreconciled")
+            observed = self.retirement_retained_start_state(bindings, probe, validation, stop)
+            return {
+                "schema": 1,
+                "attempt": previous.name,
+                "identity_sha256": identity_sha,
+                "receipt_sha256": receipt_sha,
+                "events_sha256": events_sha,
+                "last_event_sha256": chain,
+                "observation": observed,
+                "failed_record_retained": True,
+                "previous_passed": False,
+                "previous_cleanup_verified": False,
+                "no_stop_intent_in_complete_chain": True,
+                "baseline_verified_after": True,
+            }
+        except Exception:
+            raise ReleaseError("retirement_retained_start_unreconciled") from None
+
     def retirement_reconcile_prestart(self, baseline, bindings, probe, validation, stop, proof):
         """Reconcile only the reviewed pre-actuation property-query failure."""
         parent = self.checked(self.record / "legacy-stop")
         reconciled = []
+        self._retirement_retained_start_reconciliation = None
+        known = RETIREMENT_RETAINED_START
+        if (
+            all(bindings[key] == known[key] for key in ("commit", "release_id"))
+            and not self.checked(parent / known["attempt"]).is_dir()
+        ):
+            raise ReleaseError("retirement_previous_stop_unreconciled")
         if not parent.exists():
             return reconciled
         # The second reviewed record contains the first reconciliation. Replay
@@ -5020,6 +5275,11 @@ class RemoteRelease:
         for previous in sorted(parent.iterdir(), key=lambda path: path.name):
             try:
                 receipt, receipt_sha = self.retirement_private_record(previous / "receipt.json")
+                if previous.name == RETIREMENT_RETAINED_START["attempt"]:
+                    self._retirement_retained_start_reconciliation = self.retirement_reconcile_retained_start(
+                        previous, baseline, bindings, probe, validation, stop, proof, reconciled
+                    )
+                    continue
                 if (
                     type(receipt) is dict
                     and receipt.get("passed") is True
@@ -5155,6 +5415,7 @@ class RemoteRelease:
             raise ReleaseError("retirement_system_python_binding_required")
         contents = self.retirement_sources(stop=True)
         baseline = self.retirement_baseline()
+        retained = None
 
         def active_baseline():
             # No legacy environment is executed: the fixture uses separately
@@ -5167,6 +5428,12 @@ class RemoteRelease:
             expected = {key: baseline[key] for key in ("production_pid", "runtime_fingerprint")}
             if current != expected:
                 raise ReleaseError("retirement_original_baseline_changed")
+            if (
+                retained is not None
+                and self.retirement_retained_start_state(bindings, probe, validation, stop)
+                != retained["observation"]
+            ):
+                raise ReleaseError("retirement_retained_start_unreconciled")
 
         bindings = {
             "commit": self.request["commit"],
@@ -5182,6 +5449,7 @@ class RemoteRelease:
             reconciled = self.retirement_reconcile_prestart(
                 baseline, bindings, probe, validation, stop, proof
             )
+            retained = self._retirement_retained_start_reconciliation
             self.boundary("retirement_stop_attempt")
             active_baseline()
             directory.mkdir(parents=True, mode=0o700)
@@ -5196,6 +5464,7 @@ class RemoteRelease:
                         "signal_proof": proof,
                         "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
                         "prestart_reconciliations": reconciled,
+                        **({"retained_start_reconciliation": retained} if retained is not None else {}),
                     }
                 ),
             )
@@ -5212,6 +5481,8 @@ class RemoteRelease:
                         }
                     ),
                 )
+            if retained is not None:
+                self.write(directory / "retained-start-reconciliation.json", encoded(retained))
             fd = os.open(
                 self.checked(directory / "events.jsonl"),
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -5405,8 +5676,11 @@ class RemoteRelease:
                             unit = probe._case(plan, case_id)["unit"]
                             observer = stop.observer_unit(plan, case_id)
                             if (
-                                argv in stop.exec_array_commands(unit)
+                                argv in [*stop.exec_array_commands(unit), stop.job_command(unit)]
                                 and events.get("launch_dispatched") is True
+                            ) or (
+                                argv == stop.job_command(observer)
+                                and events.get("observer_dispatched") is True
                             ):
                                 return self.run(argv, timeout=timeout)
                             if argv == ["/usr/bin/systemctl", "stop", "--no-block", unit]:

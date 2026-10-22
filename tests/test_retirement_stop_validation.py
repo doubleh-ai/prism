@@ -434,7 +434,9 @@ def test_show_requires_actual_typed_arrays_instead_of_omitted_systemctl_structs(
     def runner(argv, *, timeout):
         calls.append(argv)
         if argv[0] == "/usr/bin/busctl":
-            return json.dumps(stop.EMPTY_EXEC_ARRAY).encode()
+            return json.dumps(
+                {"type": "(uo)", "data": [0, "/"]} if argv[-1] == "Job" else stop.EMPTY_EXEC_ARRAY
+            ).encode()
         assert argv[:3] == ["/usr/bin/systemctl", "show", "--all"]
         assert argv[3] == "--property=" + properties and timeout == 10
         return "".join(key + "=" + item + "\n" for key, item in rows.items()).encode()
@@ -442,9 +444,12 @@ def test_show_requires_actual_typed_arrays_instead_of_omitted_systemctl_structs(
     value.run = runner
     actual = value.observer_show(case) if observer else value.show(case["unit"])
     assert set(actual) == set(properties.split(",")) | (set() if observer else {"ExecStop", "ExecStopPost"})
+    assert actual["Job"] == "0"
     if not observer:
         assert actual["ExecStop"] == actual["ExecStopPost"] == ""
-        assert len(calls) == 3 and calls[1:] == stop.exec_array_commands(case["unit"])
+        assert len(calls) == 4 and calls[1:] == stop.exec_array_commands(case["unit"]) + [
+            stop.job_command(case["unit"])
+        ]
         rows.pop("KillSignal")
         with pytest.raises(base.RetirementValidationError, match="systemd_properties_rejected"):
             value.show(case["unit"])
@@ -495,3 +500,60 @@ def test_bus_property_query_cannot_target_production_or_another_case():
     ):
         with pytest.raises(base.RetirementValidationError):
             stop.exec_array_commands(unit)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"type": "uo", "data": [0, "/"]},
+        {"type": "(uo)", "data": []},
+        {"type": "(uo)", "data": [False, "/"]},
+        {"type": "(uo)", "data": [-1, "/"]},
+        {"type": "(uo)", "data": [2**32, "/"]},
+        {"type": "(uo)", "data": ["0", "/"]},
+        {"type": "(uo)", "data": [0, "/org/freedesktop/systemd1/job/0"]},
+        {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/8"]},
+        {"type": "(uo)", "data": [7, "/"]},
+        {"type": "(uo)", "data": [0, "/"], "extra": True},
+    ],
+)
+def test_typed_job_rejects_bad_uint32_paths_and_shapes(value):
+    with pytest.raises(base.RetirementValidationError, match="job_property_rejected"):
+        stop.validate_job(value)
+
+
+@pytest.mark.parametrize("printed", ["", "0"])
+def test_empty_printed_job_is_zero_only_after_actual_typed_read(printed):
+    calls = []
+    unit = "prism-retirement-probe-" + NONCE + "-int-executor.service"
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv == stop.job_command(unit) and timeout == 10
+        return b'{"type":"(uo)","data":[0,"/"]}'
+
+    assert stop.typed_job(run, unit, printed) == {"type": "(uo)", "data": [0, "/"]}
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "raw", [b"", b"not json", b'{"type":"(uo)","data":[7,"/org/freedesktop/systemd1/job/7"],"data":[0,"/"]}']
+)
+def test_missing_or_duplicate_typed_job_is_not_empty_job(raw):
+    with pytest.raises(base.RetirementValidationError, match="job_property_rejected"):
+        stop.typed_job(
+            lambda *args, **kwargs: raw, "prism-retirement-probe-" + NONCE + "-int-executor.service", ""
+        )
+
+
+def test_nonempty_show_job_must_match_actual_typed_value():
+    with pytest.raises(base.RetirementValidationError, match="job_property_rejected"):
+        stop.typed_job(
+            lambda *args, **kwargs: b'{"type":"(uo)","data":[0,"/"]}',
+            "prism-retirement-probe-" + NONCE + "-int-executor.service",
+            "7",
+        )
+    actual = {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/7"]}
+    assert stop.validate_job(actual, "7") == actual
+    assert stop.validate_job(actual, "") == actual

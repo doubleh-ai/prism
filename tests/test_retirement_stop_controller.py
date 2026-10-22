@@ -1086,3 +1086,364 @@ def test_prestart_loadstate_notfound_capture_never_synthesizes_missing_fields(mo
     else:
         assert remote.run_command(argv, timeout=10) == b"LoadState=not-found\n"
     assert calls[0]["stdout"] == remote.subprocess.PIPE
+
+
+def seed_retained_start(prepared, data, baseline, monkeypatch):
+    second = approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch)
+    first = second.parent / remote.RETIREMENT_PRESTART_ATTEMPT
+    prior = []
+    for path in (first, second):
+        receipt = json.loads((path / "receipt.json").read_bytes())
+        prior.append(
+            {
+                "attempt": path.name,
+                "identity_sha256": remote.digest((path / "identity.json").read_bytes()),
+                "receipt_sha256": remote.digest((path / "receipt.json").read_bytes()),
+                "events_sha256": remote.digest((path / "events.jsonl").read_bytes()),
+                "last_event_sha256": receipt["last_event_sha256"],
+                "no_synthetic_actuation": True,
+                "baseline_verified_after": True,
+                "reason": "retirement_stop_systemd_properties_rejected",
+            }
+        )
+    approved = copy.deepcopy(remote.RETIREMENT_RETAINED_START)
+    path = seed_reviewed_prestart(
+        prepared, data, baseline, attempt=approved["attempt"], helper_sha=approved["helper_sha256"]
+    )
+    identity = json.loads((path / "identity.json").read_bytes())
+    identity["prestart_reconciliations"] = prior
+    (path / "identity.json").write_bytes(remote.encoded(identity))
+    receipt = json.loads((path / "receipt.json").read_bytes())
+    receipt["summary"].update(
+        error_code="retirement_systemd_number_rejected", synthetic_cleanup_verified=False
+    )
+    first_event = json.loads((path / "events.jsonl").read_bytes().splitlines()[0])
+    rows = [
+        ("public_bundles_verified", first_event["details"]),
+        ("synthetic_start_intent", {"case_id": approved["case_id"], "nonce": approved["nonce"]}),
+        ("retirement_stop_validation_result", receipt["summary"]),
+    ]
+    lines, tail = [], "0" * 64
+    for sequence, (event, details) in enumerate(rows, 1):
+        line = (
+            remote.encoded(
+                {
+                    "sequence": sequence,
+                    "at": existing.NOW,
+                    "previous_sha256": tail,
+                    "event": event,
+                    "details": details,
+                }
+            )
+            + b"\n"
+        )
+        lines.append(line)
+        tail = remote.digest(line)
+    (path / "events.jsonl").write_bytes(b"".join(lines))
+    receipt.update(events=3, last_event_sha256=tail)
+    (path / "receipt.json").write_bytes(remote.encoded(receipt))
+    for name in ("identity", "receipt", "events"):
+        approved[name + "_sha256"] = remote.digest(
+            (path / (name + (".jsonl" if name == "events" else ".json"))).read_bytes()
+        )
+    plan = probe.descriptor(bindings(), nonce=approved["nonce"])
+    unit = probe._case(plan, approved["case_id"])["unit"]
+    launch = validation.launch_command(plan, approved["case_id"])
+    argv = launch[launch.index("--") + 1 :]
+    approved["argv_sha256"] = remote.digest(remote.encoded(argv))
+    monkeypatch.setattr(remote, "RETIREMENT_RETAINED_START", approved)
+    state = {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "exited",
+        "MainPID": "0",
+        "ExecMainPID": str(approved["exec_main_pid"]),
+        "ExecMainCode": "1",
+        "ExecMainStatus": "0",
+        "Result": "success",
+        "InvocationID": approved["invocation_id"],
+        "ControlGroup": "",
+        "Job": "",
+        "Transient": "yes",
+        "ExecMainExitTimestampMonotonic": "4",
+    }
+    facts = {
+        "state": state,
+        "job": {"type": "(uo)", "data": [0, "/"]},
+        "start": {
+            "type": "a(sasbttttuii)",
+            "data": [[argv[0], argv, False, 1, 2, 3, 4, approved["exec_main_pid"], 1, 0]],
+        },
+        "observer": "not-found",
+        "show_reads": 0,
+        "drift": False,
+    }
+    cgroot = prepared.engine.root / "sys/fs/cgroup"
+    cgroot.mkdir(parents=True)
+    (cgroot / "cgroup.controllers").write_text("cpu memory\n")
+    original = prepared.engine.run
+
+    def run(command, *, timeout):
+        if command == [
+            "/usr/bin/systemctl",
+            "show",
+            "--all",
+            "--property=" + remote.RETIREMENT_RETAINED_PROPERTIES,
+            unit,
+        ]:
+            facts["show_reads"] += 1
+            observed = dict(facts["state"])
+            if facts["drift"] and facts["show_reads"] % 2 == 0:
+                observed["InvocationID"] = "f" * 32
+            return "".join(k + "=" + v + "\n" for k, v in observed.items()).encode()
+        if command == stop.job_command(unit):
+            return remote.encoded(facts["job"])
+        start = stop.exec_array_commands(unit)[0]
+        start[-1] = "ExecStart"
+        if command == start:
+            return remote.encoded(facts["start"])
+        if command == [
+            "/usr/bin/systemctl",
+            "show",
+            "--property=LoadState",
+            stop.observer_unit(plan, approved["case_id"]),
+        ]:
+            return ("LoadState=" + facts["observer"] + "\n").encode()
+        return original(command, timeout=timeout)
+
+    monkeypatch.setattr(prepared.engine, "run", run)
+    return path, plan, facts
+
+
+def test_exact_started_failure_is_only_readonly_reconciled_and_retained(prepared, monkeypatch):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    path, plan, facts = seed_retained_start(prepared, data, baseline, monkeypatch)
+    before = {file.name: file.read_bytes() for file in path.iterdir()}
+    assert prepared.engine.execute(data)["legacy_stop"]["passed"] is True
+    assert {file.name: file.read_bytes() for file in path.iterdir()} == before
+    record = json.loads((path.parent / ATTEMPT / "retained-start-reconciliation.json").read_bytes())
+    assert record["previous_passed"] is record["previous_cleanup_verified"] is False
+    assert record["failed_record_retained"] is record["no_stop_intent_in_complete_chain"] is True
+    assert record["observation"]["typed_job"] == {"type": "(uo)", "data": [0, "/"]}
+    assert facts["show_reads"] > 2
+    retained = probe._case(plan, "int-executor")["unit"]
+    assert not any(
+        argv[:2]
+        in (
+            ["/usr/bin/systemctl", "stop"],
+            ["/usr/bin/systemctl", "kill"],
+            ["/usr/bin/systemctl", "reset-failed"],
+        )
+        and retained in argv
+        for argv, _ in prepared.commands
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "job",
+        "job-path",
+        "show-conflict",
+        "invocation",
+        "pid",
+        "main",
+        "exit",
+        "state",
+        "case-cgroup",
+        "observer-cgroup",
+        "observer",
+        "argv",
+        "argv-pin",
+        "exec-shape",
+        "show-drift",
+        "passed",
+        "stop-intent",
+        "chain",
+        "prestart-reference",
+    ],
+)
+def test_started_failure_reconciliation_blocks_every_unknown_or_active_state(prepared, monkeypatch, change):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    path, plan, facts = seed_retained_start(prepared, data, baseline, monkeypatch)
+    if change == "job":
+        facts["job"] = {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/7"]}
+    elif change == "job-path":
+        facts["job"]["data"][1] = "/org/freedesktop/systemd1/job/0"
+    elif change == "show-conflict":
+        facts["state"]["Job"] = "7"
+    elif change == "invocation":
+        facts["state"]["InvocationID"] = "f" * 32
+    elif change == "pid":
+        facts["state"]["ExecMainPID"] = "123"
+    elif change == "main":
+        facts["state"]["MainPID"] = "123"
+    elif change == "exit":
+        facts["state"]["ExecMainStatus"] = "1"
+    elif change == "state":
+        facts["state"]["SubState"] = "running"
+    elif change in {"case-cgroup", "observer-cgroup"}:
+        unit = (
+            probe._case(plan, "int-executor")["unit"]
+            if change == "case-cgroup"
+            else stop.observer_unit(plan, "int-executor")
+        )
+        (prepared.engine.root / "sys/fs/cgroup/system.slice" / unit).mkdir(parents=True)
+    elif change == "observer":
+        facts["observer"] = "loaded"
+    elif change == "argv":
+        facts["start"]["data"][0][1][-1] = "changed-public-fixture"
+    elif change == "argv-pin":
+        monkeypatch.setitem(remote.RETIREMENT_RETAINED_START, "argv_sha256", "f" * 64)
+    elif change == "exec-shape":
+        facts["start"]["type"] = "as"
+    elif change == "show-drift":
+        facts["drift"] = True
+    else:
+        if change == "prestart-reference":
+            value = json.loads((path / "identity.json").read_bytes())
+            value["prestart_reconciliations"][0]["receipt_sha256"] = "f" * 64
+            (path / "identity.json").write_bytes(remote.encoded(value))
+        elif change == "passed":
+            value = json.loads((path / "receipt.json").read_bytes())
+            value["passed"] = True
+            value["summary"]["synthetic_cleanup_verified"] = True
+            (path / "receipt.json").write_bytes(remote.encoded(value))
+        else:
+            lines = (path / "events.jsonl").read_bytes().splitlines(keepends=True)
+            row = json.loads(lines[1])
+            row["event" if change == "stop-intent" else "previous_sha256"] = (
+                "synthetic_stop_intent" if change == "stop-intent" else "f" * 64
+            )
+            lines[1] = remote.encoded(row) + b"\n"
+            (path / "events.jsonl").write_bytes(b"".join(lines))
+        # Exercise semantics too, beyond the fixed immutable digest check.
+        for name in ("identity", "receipt", "events"):
+            monkeypatch.setitem(
+                remote.RETIREMENT_RETAINED_START,
+                name + "_sha256",
+                remote.digest((path / (name + (".jsonl" if name == "events" else ".json"))).read_bytes()),
+            )
+    before = {file.name: file.read_bytes() for file in path.iterdir()}
+    with pytest.raises(remote.ReleaseError, match="retirement_previous_stop_unreconciled"):
+        prepared.engine.execute(data)
+    assert {file.name: file.read_bytes() for file in path.iterdir()} == before
+    assert not (path.parent / ATTEMPT).exists()
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "old-main",
+        "old-observer",
+        "new-main",
+        "new-observer",
+        "production",
+        "other-interface",
+        "other-property",
+        "extra",
+    ],
+)
+def test_job_stdout_capture_is_finite_unit_property_and_real_pipe(monkeypatch, kind):
+    unit = "prism-retirement-probe-" + NONCE + "-int-executor.service"
+    if kind == "old-observer":
+        unit = "prism-retirement-stop-ref-" + NONCE + "-int-post.service"
+    argv = stop.job_command(unit)
+    if kind.startswith("new"):
+        argv[5] = (
+            "/org/freedesktop/systemd1/unit/prism_2dnew_2druntime_2dstop_2d"
+            + NONCE
+            + "_2drecovery"
+            + ("_2dref" if kind == "new-observer" else "")
+            + "_2eservice"
+        )
+    if kind == "production":
+        argv[5] = "/org/freedesktop/systemd1/unit/stock_2dapp_2eservice"
+    if kind == "other-interface":
+        argv[6] = "org.freedesktop.systemd1.Service"
+    if kind == "other-property":
+        argv[7] = "Environment"
+    if kind == "extra":
+        argv.append("extra")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(
+            returncode=0, stdout=b"typed" if kwargs["stdout"] == remote.subprocess.PIPE else None
+        )
+
+    monkeypatch.setattr(remote.subprocess, "run", run)
+    expected = kind in {"old-main", "old-observer", "new-main", "new-observer"}
+    assert remote.run_command(argv) == (b"typed" if expected else b"")
+    assert calls[0]["stdout"] == (remote.subprocess.PIPE if expected else remote.subprocess.DEVNULL)
+
+
+@pytest.mark.parametrize("change", ["identity.json", "receipt.json", "events.jsonl"])
+def test_retained_started_failure_requires_exact_reviewed_immutable_bytes(prepared, monkeypatch, change):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    path, _, _ = seed_retained_start(prepared, data, baseline, monkeypatch)
+    with (path / change).open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(remote.ReleaseError, match="retirement_previous_stop_unreconciled"):
+        prepared.engine.execute(data)
+    assert not (path.parent / ATTEMPT).exists()
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+@pytest.mark.parametrize("change", ["exact", "other-nonce", "production", "other-property"])
+def test_retained_execstart_capture_is_only_one_fixed_readonly_public_command(monkeypatch, change):
+    value = probe.descriptor(bindings(), nonce=remote.RETIREMENT_RETAINED_START["nonce"])
+    unit = probe._case(value, "int-executor")["unit"]
+    argv = stop.exec_array_commands(unit)[0]
+    argv[-1] = "ExecStart"
+    if change == "other-nonce":
+        argv[5] = argv[5].replace(remote.RETIREMENT_RETAINED_START["nonce"], NONCE)
+    if change == "production":
+        argv[5] = "/org/freedesktop/systemd1/unit/stock_2dapp_2eservice"
+    if change == "other-property":
+        argv[7] = "Environment"
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(
+            returncode=0, stdout=b"public" if kwargs["stdout"] == remote.subprocess.PIPE else None
+        )
+
+    monkeypatch.setattr(remote.subprocess, "run", run)
+    assert remote.run_command(argv) == (b"public" if change == "exact" else b"")
+    assert calls[0]["stdout"] == (remote.subprocess.PIPE if change == "exact" else remote.subprocess.DEVNULL)
+
+
+def test_retained_invocation_is_rechecked_at_each_new_actuation_boundary(prepared, monkeypatch):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    path, _, facts = seed_retained_start(prepared, data, baseline, monkeypatch)
+
+    def permit(nonce, label):
+        if label == "retirement_stop_dispatch_int-executor":
+            facts["state"]["InvocationID"] = "f" * 32
+        return nonce
+
+    prepared.engine.permit = permit
+    with pytest.raises(remote.ReleaseError, match="retirement_retained_start_unreconciled"):
+        prepared.engine.execute(data)
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+    assert json.loads((path / "receipt.json").read_bytes())["passed"] is False
+
+
+@pytest.mark.parametrize("old_parent", [False, True])
+def test_known_reviewed_release_cannot_lose_started_failure_and_resume_from_empty_inventory(
+    prepared, monkeypatch, old_parent
+):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    if old_parent:
+        approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch)
+    approved = copy.deepcopy(remote.RETIREMENT_RETAINED_START)
+    approved.update(commit=existing.COMMIT, release_id=existing.RELEASE)
+    monkeypatch.setattr(remote, "RETIREMENT_RETAINED_START", approved)
+    with pytest.raises(remote.ReleaseError, match="retirement_previous_stop_unreconciled"):
+        prepared.engine.execute(data)
+    assert not (prepared.engine.record / "legacy-stop" / ATTEMPT).exists()
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)

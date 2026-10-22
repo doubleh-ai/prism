@@ -148,6 +148,7 @@ def observer_value(plan):
         DynamicUser="yes",
         RemainAfterExit="yes",
         Wants=plan["unit"],
+        Job="0",
     )
     return {
         "invocation_id": "2" * 32,
@@ -155,6 +156,7 @@ def observer_value(plan):
         "control_group": "/system.slice/" + plan["observer"],
         "empty": True,
         "state": value,
+        "job": {"type": "(uo)", "data": [0, "/"]},
     }
 
 
@@ -284,6 +286,7 @@ def artifacts(plan, monkeypatch):
         "exec_arrays_verified": {
             key: copy.deepcopy(stop.EMPTY_EXEC_ARRAY) for key in ("ExecStop", "ExecStopPost")
         },
+        "typed_job_verified": {"type": "(uo)", "data": [0, "/"]},
         "kernel_bootstrap": {
             "identity": own,
             "bootstrap": boot,
@@ -297,6 +300,7 @@ def artifacts(plan, monkeypatch):
         "census_during": during,
         "stop_waiting": {
             "job": 8,
+            "typed_job": {"type": "(uo)", "data": [8, "/org/freedesktop/systemd1/job/8"]},
             "pid": 90001,
             "invocation_id": "1" * 32,
             "active_state": "deactivating",
@@ -311,6 +315,7 @@ def artifacts(plan, monkeypatch):
             "invocation_id": "1" * 32,
             "exit_code": 1,
             "exit_status": 0,
+            "job": {"type": "(uo)", "data": [0, "/"]},
             "result": "success",
             "exit_at_us": 600,
             "cgroup": empty,
@@ -320,6 +325,7 @@ def artifacts(plan, monkeypatch):
         "observer_released": {
             "state": dict.fromkeys(stop.OBSERVER_PROPERTIES.split(","), "") | {"LoadState": "not-found"},
             "cgroup": empty,
+            "job": None,
         },
         "sources_reverified": sources,
         "completed": summary,
@@ -425,7 +431,9 @@ def test_show_requires_all_empty_properties(plan):
     def run(argv, *, timeout):
         calls.append(argv)
         if argv[0] == "/usr/bin/busctl":
-            return stop.encoded(stop.EMPTY_EXEC_ARRAY)
+            return stop.encoded(
+                {"type": "(uo)", "data": [0, "/"]} if argv[-1] == "Job" else stop.EMPTY_EXEC_ARRAY
+            )
         return b"".join(
             (k + "=" + v + "\n").encode() for k, v in state.items() if k in stop.PROPERTIES.split(",")
         )
@@ -1004,3 +1012,90 @@ def test_new_runtime_replay_needs_durable_typed_proof(plan, monkeypatch):
     raw, receipt = chain(identity, details)
     with pytest.raises(stop.StopError):
         stop.replay(identity, raw, receipt, plan["request"])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"type": "uo", "data": [0, "/"]},
+        {"type": "(uo)", "data": []},
+        {"type": "(uo)", "data": [False, "/"]},
+        {"type": "(uo)", "data": [-1, "/"]},
+        {"type": "(uo)", "data": [2**32, "/"]},
+        {"type": "(uo)", "data": ["0", "/"]},
+        {"type": "(uo)", "data": [0, "/org/freedesktop/systemd1/job/0"]},
+        {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/8"]},
+        {"type": "(uo)", "data": [7, "/"]},
+        {"type": "(uo)", "data": [0, "/"], "extra": True},
+    ],
+)
+def test_typed_job_rejects_bad_uint32_paths_and_shapes(value):
+    with pytest.raises(stop.StopError, match="job_property_rejected"):
+        stop.validate_job(value)
+
+
+@pytest.mark.parametrize("printed", ["", "0"])
+def test_empty_printed_job_is_zero_only_after_actual_typed_read(plan, printed):
+    calls = []
+    unit = plan["unit"]
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv == stop.job_command(unit) and timeout == 10
+        return b'{"type":"(uo)","data":[0,"/"]}'
+
+    assert stop.typed_job(run, unit, printed) == {"type": "(uo)", "data": [0, "/"]}
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "raw", [b"", b"not json", b'{"type":"(uo)","data":[7,"/org/freedesktop/systemd1/job/7"],"data":[0,"/"]}']
+)
+def test_missing_or_duplicate_typed_job_is_not_empty_job(plan, raw):
+    with pytest.raises(stop.StopError, match="job_property_rejected"):
+        stop.typed_job(lambda *args, **kwargs: raw, plan["unit"], "")
+
+
+def test_nonempty_show_job_must_match_actual_typed_value(plan):
+    with pytest.raises(stop.StopError, match="job_property_rejected"):
+        stop.typed_job(lambda *args, **kwargs: b'{"type":"(uo)","data":[0,"/"]}', plan["unit"], "7")
+    actual = {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/7"]}
+    assert stop.validate_job(actual, "7") == actual
+    assert stop.validate_job(actual, "") == actual
+
+
+@pytest.mark.parametrize("proof", ["before", "waiting", "after", "observer", "observer-release"])
+def test_rehashed_typed_job_proofs_cannot_hide_pending_manager_work(plan, monkeypatch, proof):
+    identity, details = artifacts(plan, monkeypatch)
+    bad = {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/7"]}
+    if proof == "before":
+        details["typed_job_verified"] = bad
+    elif proof == "waiting":
+        details["stop_waiting"]["typed_job"] = {"type": "(uo)", "data": [0, "/"]}
+    elif proof == "after":
+        details["exit_observed"]["job"] = bad
+    elif proof == "observer":
+        details["observer_ready"]["job"] = bad
+    else:
+        details["observer_released"]["job"] = bad
+    raw, receipt = chain(identity, details)
+    with pytest.raises(stop.StopError):
+        stop.replay(identity, raw, receipt, plan["request"])
+
+
+def test_pending_stop_job_is_polled_until_manager_finishes_not_prematurely_failed(plan, monkeypatch):
+    operation = stop.Validation(
+        plan["request"],
+        boundary=lambda *args: None,
+        run=lambda *args, **kwargs: None,
+        record=stop.OPERATIONS / plan["request"]["release_id"],
+    )
+    state = policy_state(plan, kernel_value(plan), after=True)
+    state["Job"] = "7"
+    monkeypatch.setattr(stop, "show", lambda *args, **kwargs: state)
+    assert operation.own_state(allow_pending=True) == state
+    with pytest.raises(stop.StopError, match="stop_rejected"):
+        operation.own_state()
+    state["Job"] = "0"
+    assert operation.own_state() == state
