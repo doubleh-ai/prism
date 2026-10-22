@@ -172,11 +172,20 @@ RETIREMENT_HELPERS = {
 }
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
-    "retirement_stop_validation.py": "3b074d93feea5d3d5c4ad5846427c06725498c65eb49471885104d1c1fdb41fa",
+    "retirement_stop_validation.py": "d864de5273af26c045a496d10117d52932333b71d1a139f665611eaa69b5addc",
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 RETIREMENT_PRESTART_ATTEMPT = "prism-20261022-stop-e2e-001"
 RETIREMENT_PRESTART_STOP_SHA256 = "f0dd83ad2f3bc78dbe9018c100661a5ec1cec6b2fa9bee08eef6ec91cb67ff87"
+RETIREMENT_PRESTART_REVIEWED = {
+    RETIREMENT_PRESTART_ATTEMPT: {"helper_sha256": RETIREMENT_PRESTART_STOP_SHA256},
+    "prism-20261022-stop-e2e-002": {
+        "helper_sha256": "3b074d93feea5d3d5c4ad5846427c06725498c65eb49471885104d1c1fdb41fa",
+        "receipt_sha256": "4d40e1aa368bdbbb682a6fcd29de39d4fba125e7514901b7d731467cadc273a1",
+        "events_sha256": "1e6f4629f625e5a812ea7d210995379c3052671564fe180e3fcec97efb567ea4",
+        "identity_sha256": "604cc660df068813ec45cba9df6d244b5d41512e7c74800d3657fa28b107b016",
+    },
+}
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
 ASTOCK_ERROR_DETAILS = {
     "astock_import_contract_rejected",
@@ -230,7 +239,7 @@ RETIREMENT_CASE_IDS = {
 RETIREMENT_PROPERTIES = "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,ExecMainCode,ExecMainStatus,ExecMainExitTimestampMonotonic,Result,Transient"
 RETIREMENT_STOP_PROPERTIES = (
     RETIREMENT_PROPERTIES
-    + ",KillSignal,KillMode,SendSIGKILL,SendSIGHUP,TimeoutStopUSec,Restart,ExecStop,ExecStopPost,WatchdogUSec,RuntimeMaxUSec,NRestarts,RemainAfterExit,Job"
+    + ",KillSignal,KillMode,SendSIGKILL,SendSIGHUP,TimeoutStopUSec,Restart,WatchdogUSec,RuntimeMaxUSec,NRestarts,RemainAfterExit,Job"
 )
 RETIREMENT_OBSERVER_PROPERTIES = (
     RETIREMENT_PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit"
@@ -719,6 +728,17 @@ def run_command(args, *, env=None, timeout=120):
         and args[:5] == ["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend"]
         and re.fullmatch(r"prism-market-probe-[0-9a-f]{12}-[0-9a-f]{32}\.service", args[5])
     )
+    capture = capture or (
+        len(args) == 8
+        and args[:5]
+        == ["/usr/bin/busctl", "--system", "--json=short", "get-property", "org.freedesktop.systemd1"]
+        and args[6] == "org.freedesktop.systemd1.Service"
+        and args[7] in {"ExecStop", "ExecStopPost"}
+        and re.fullmatch(
+            r"/org/freedesktop/systemd1/unit/prism_2d(?:retirement_2dprobe_2d[0-9a-f]{32}_2dint_2d(?:executor|post)|new_2druntime_2dstop_2d[0-9a-f]{32}_2d(?:candidate|recovery))_2eservice",
+            args[5],
+        )
+    )
     result = subprocess.run(
         args,
         env=env,
@@ -744,7 +764,11 @@ def run_command(args, *, env=None, timeout=120):
             patterns = (
                 (
                     RETIREMENT_PROPERTIES,
-                    r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)\.service",
+                    r"prism-retirement-(?:probe-[0-9a-f]{32}-(?:int-executor|int-post|int-nested|int-async|int-daemon|int-child|term-control)|stop-ref-[0-9a-f]{32}-(?:int-executor|int-post))\.service",
+                ),
+                (
+                    "LoadState",
+                    r"prism-retirement-(?:probe|stop-ref)-[0-9a-f]{32}-(?:int-executor|int-post)\.service",
                 ),
             )
             property_argument, unit_argument = args[2], args[3]
@@ -4906,6 +4930,17 @@ class RemoteRelease:
     def retirement_stop_event(self, event, value, bindings, probe, validation, stop):
         if event == "retirement_stop_validation_result":
             return self.retirement_stop_summary(value, bindings, probe, validation, stop)
+        if event == "synthetic_stop_exec_arrays_observed":
+            if (
+                type(value) is not dict
+                or set(value) != {"case_id", "properties"}
+                or value["case_id"] not in stop.CASES
+                or stop.EMPTY_EXEC_ARRAY is None
+                or encoded(value["properties"])
+                != encoded({key: stop.EMPTY_EXEC_ARRAY for key in ("ExecStop", "ExecStopPost")})
+            ):
+                raise ReleaseError("retirement_stop_safe_event_rejected")
+            return value
         if event in {
             "bundle_copy_intent",
             "public_bundles_verified",
@@ -4989,7 +5024,8 @@ class RemoteRelease:
                     and receipt["summary"].get("synthetic_cleanup_verified") is True
                 ):
                     continue
-                if previous.name != RETIREMENT_PRESTART_ATTEMPT:
+                reviewed = RETIREMENT_PRESTART_REVIEWED.get(previous.name)
+                if reviewed is None:
                     raise ReleaseError("retirement_previous_stop_unreconciled")
                 identity, identity_sha = self.retirement_private_record(previous / "identity.json")
                 expected_identity = {
@@ -4997,7 +5033,7 @@ class RemoteRelease:
                     "attempt": previous.name,
                     "helpers": {
                         **RETIREMENT_HELPERS,
-                        "retirement_stop_validation.py": RETIREMENT_PRESTART_STOP_SHA256,
+                        "retirement_stop_validation.py": reviewed["helper_sha256"],
                     },
                     "baseline": baseline,
                     "signal_proof": proof,
@@ -5040,6 +5076,15 @@ class RemoteRelease:
                 raw, events_sha = self.retirement_private_record(
                     previous / "events.jsonl", limit=32768, json_value=False
                 )
+                if any(
+                    reviewed.get(key, actual) != actual
+                    for key, actual in (
+                        ("receipt_sha256", receipt_sha),
+                        ("identity_sha256", identity_sha),
+                        ("events_sha256", events_sha),
+                    )
+                ):
+                    raise ReleaseError("retirement_previous_stop_unreconciled")
                 lines, chain = raw.splitlines(keepends=True), "0" * 64
                 if len(lines) != 2:
                     raise ReleaseError("retirement_previous_stop_unreconciled")
@@ -5222,10 +5267,15 @@ class RemoteRelease:
                         elif event == "synthetic_stop_actual_isolation":
                             if "synthetic_start_intent" not in events or value["pid"] <= 1:
                                 raise ReleaseError("retirement_stop_event_order_rejected")
+                        elif event == "synthetic_stop_exec_arrays_observed":
+                            if "synthetic_stop_actual_isolation" not in events:
+                                raise ReleaseError("retirement_stop_event_order_rejected")
                         elif event in {"synthetic_stop_intent", "synthetic_stop_committed"}:
                             live = events.get("synthetic_stop_actual_isolation", {})
                             if value["invocation_id"] != live.get("invocation"):
                                 raise ReleaseError("retirement_stop_event_identity_rejected")
+                            if "synthetic_stop_exec_arrays_observed" not in events:
+                                raise ReleaseError("retirement_stop_durable_exec_arrays_required")
                             if event == "synthetic_stop_intent" and any(
                                 value[k] != live.get(k) for k in ("pid", "start_ticks")
                             ):
@@ -5302,6 +5352,18 @@ class RemoteRelease:
                         return self.run(argv, timeout=timeout)
                     if argv == ["/usr/bin/systemctl", "show", "--property=" + validation.PROPERTIES, SERVICE]:
                         return self.run(argv, timeout=timeout)
+                    if (
+                        len(argv) == 4
+                        and argv[:2] == ["/usr/bin/systemctl", "show"]
+                        and argv[2] in {"--property=" + validation.PROPERTIES, "--property=LoadState"}
+                    ):
+                        match = re.fullmatch(
+                            r"prism-retirement-(probe|stop-ref)-([0-9a-f]{32})-(int-executor|int-post)\.service",
+                            argv[3],
+                        )
+                        if match:
+                            bind_nonce(match[2])
+                            return self.run(argv, timeout=timeout)
                     if len(argv) == 5 and argv[:3] == ["/usr/bin/systemctl", "show", "--all"]:
                         match = re.fullmatch(
                             r"prism-retirement-(probe|stop-ref)-([0-9a-f]{32})-(int-executor|int-post)\.service",
@@ -5333,6 +5395,11 @@ class RemoteRelease:
                                 return self.run(argv, timeout=timeout)
                             unit = probe._case(plan, case_id)["unit"]
                             observer = stop.observer_unit(plan, case_id)
+                            if (
+                                argv in stop.exec_array_commands(unit)
+                                and events.get("launch_dispatched") is True
+                            ):
+                                return self.run(argv, timeout=timeout)
                             if argv == ["/usr/bin/systemctl", "stop", "--no-block", unit]:
                                 if "synthetic_stop_committed" not in events or case_id in consumed:
                                     raise ReleaseError("retirement_stop_command_already_consumed")

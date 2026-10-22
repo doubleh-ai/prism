@@ -242,7 +242,7 @@ def wire(prepared, monkeypatch, mode=None):
             descriptor = probe._case(plan, case_id)
             boundary("retirement_stop_start_" + case_id)
             run(
-                ["/usr/bin/systemctl", "show", "--all", "--property=" + stop.PROPERTIES, descriptor["unit"]],
+                ["/usr/bin/systemctl", "show", "--property=LoadState", descriptor["unit"]],
                 timeout=10,
             )
             record("synthetic_start_intent", {"case_id": case_id, "nonce": NONCE})
@@ -260,6 +260,16 @@ def wire(prepared, monkeypatch, mode=None):
                     "actual_kernel_verified": True,
                 },
             )
+            for argv in stop.exec_array_commands(descriptor["unit"]):
+                run(argv, timeout=10)
+            if mode != "missing-exec-proof":
+                record(
+                    "synthetic_stop_exec_arrays_observed",
+                    {
+                        "case_id": case_id,
+                        "properties": {key: stop.EMPTY_EXEC_ARRAY for key in ("ExecStop", "ExecStopPost")},
+                    },
+                )
             boundary("retirement_stop_observer_" + case_id)
             record("synthetic_observer_start_intent", {"case_id": case_id})
             run(stop.observer_command(plan, case_id), timeout=15)
@@ -641,18 +651,18 @@ def test_mac_requires_all_three_literal_pins_and_explicit_attempt_proof(tmp_path
     assert result["retirement_stop_attempt"] == ATTEMPT and result["retirement_proof_attempt"] == PROOF
 
 
-def seed_reviewed_prestart(prepared, data, baseline):
+def seed_reviewed_prestart(prepared, data, baseline, *, attempt=None, helper_sha=None):
     engine = prepared.engine
     engine.request = data
     proof = engine.retirement_signal_proof(baseline, bindings(), probe, validation)
-    directory = engine.record / "legacy-stop" / remote.RETIREMENT_PRESTART_ATTEMPT
+    directory = engine.record / "legacy-stop" / (attempt or remote.RETIREMENT_PRESTART_ATTEMPT)
     directory.mkdir(parents=True, mode=0o700)
     identity = {
         "commit": existing.COMMIT,
         "attempt": directory.name,
         "helpers": {
             **remote.RETIREMENT_HELPERS,
-            "retirement_stop_validation.py": remote.RETIREMENT_PRESTART_STOP_SHA256,
+            "retirement_stop_validation.py": helper_sha or remote.RETIREMENT_PRESTART_STOP_SHA256,
         },
         "baseline": dict(baseline),
         "signal_proof": proof,
@@ -835,3 +845,134 @@ def test_active_gate_still_requires_fresh_runtime_and_complete_production_source
     with pytest.raises(remote.ReleaseError, match="retirement_original_baseline_changed"):
         prepared.engine.execute(data)
     assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["own-exec", "own-post", "new-runtime", "production", "other-property", "other-method", "extra-argument"],
+)
+def test_busctl_capture_is_exact_finite_and_returns_actual_stdout(monkeypatch, kind):
+    unit = "prism-retirement-probe-" + NONCE + "-int-executor.service"
+    argv = stop.exec_array_commands(unit)[0]
+    expected = kind in {"own-exec", "own-post", "new-runtime"}
+    if kind == "own-post":
+        argv[-1] = "ExecStopPost"
+    if kind == "new-runtime":
+        argv[5] = (
+            "/org/freedesktop/systemd1/unit/prism_2dnew_2druntime_2dstop_2d"
+            + NONCE
+            + "_2dcandidate_2eservice"
+        )
+    if kind == "production":
+        argv[5] = "/org/freedesktop/systemd1/unit/stock_2dapp_2eservice"
+    if kind == "other-property":
+        argv[-1] = "Environment"
+    if kind == "other-method":
+        argv[3] = "call"
+    if kind == "extra-argument":
+        argv.append("extra")
+    calls = []
+    raw = remote.encoded(stop.EMPTY_EXEC_ARRAY) + b"\n"
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return types.SimpleNamespace(
+            returncode=0, stdout=raw if kwargs["stdout"] == remote.subprocess.PIPE else None
+        )
+
+    monkeypatch.setattr(remote.subprocess, "run", run)
+    assert remote.run_command(argv, timeout=10) == (raw if expected else b"")
+    assert calls[0][1]["stdout"] == (remote.subprocess.PIPE if expected else remote.subprocess.DEVNULL)
+
+
+def test_new_stop_requires_durable_typed_arrays_before_any_stop_intent(prepared, monkeypatch):
+    data, _, _, _ = wire(prepared, monkeypatch, mode="missing-exec-proof")
+    with pytest.raises(remote.ReleaseError, match="retirement_stop_durable_exec_arrays_required"):
+        prepared.engine.execute(data)
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+def approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch):
+    attempt = "prism-20261022-stop-e2e-002"
+    approved = copy.deepcopy(remote.RETIREMENT_PRESTART_REVIEWED)
+    path = seed_reviewed_prestart(
+        prepared, data, baseline, attempt=attempt, helper_sha=approved[attempt]["helper_sha256"]
+    )
+    for name in ("identity", "events", "receipt"):
+        approved[attempt][name + "_sha256"] = remote.digest(
+            (path / (name + (".jsonl" if name == "events" else ".json"))).read_bytes()
+        )
+    monkeypatch.setattr(remote, "RETIREMENT_PRESTART_REVIEWED", approved)
+    return path
+
+
+def test_two_exact_reviewed_no_actuation_failures_are_reconciled_read_only(prepared, monkeypatch):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    first = seed_reviewed_prestart(prepared, data, baseline)
+    second = approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch)
+    original = {
+        str(path): {file.name: file.read_bytes() for file in path.iterdir()} for path in (first, second)
+    }
+    assert prepared.engine.execute(data)["legacy_stop"]["passed"] is True
+    for path in (first, second):
+        assert {file.name: file.read_bytes() for file in path.iterdir()} == original[str(path)]
+    accepted = json.loads(
+        (prepared.engine.record / "legacy-stop" / ATTEMPT / "prestart-reconciliation.json").read_bytes()
+    )
+    assert {row["attempt"] for row in accepted["records"]} == {first.name, second.name}
+    assert all(row["no_synthetic_actuation"] is True for row in accepted["records"])
+
+
+@pytest.mark.parametrize("file", ["identity.json", "receipt.json", "events.jsonl"])
+def test_second_prestart_requires_exact_pinned_private_bytes_even_if_schema_valid(
+    prepared, monkeypatch, file
+):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    path = approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch)
+    # Harmless whitespace is still a change to the reviewed immutable bytes.
+    with (path / file).open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(remote.ReleaseError, match="retirement_previous_stop_unreconciled"):
+        prepared.engine.execute(data)
+    assert not (path.parent / ATTEMPT).exists()
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+def test_arbitrary_same_name_second_failure_is_not_the_reviewed_actual_receipt(prepared, monkeypatch):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    attempt = "prism-20261022-stop-e2e-002"
+    seed_reviewed_prestart(
+        prepared,
+        data,
+        baseline,
+        attempt=attempt,
+        helper_sha=remote.RETIREMENT_PRESTART_REVIEWED[attempt]["helper_sha256"],
+    )
+    with pytest.raises(remote.ReleaseError, match="retirement_previous_stop_unreconciled"):
+        prepared.engine.execute(data)
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "prism-retirement-probe-" + NONCE + "-int-executor.service",
+        "prism-retirement-stop-ref-" + NONCE + "-int-post.service",
+        "stock-app.service",
+    ],
+)
+def test_prestart_loadstate_notfound_capture_never_synthesizes_missing_fields(monkeypatch, unit):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(returncode=4, stdout=b"LoadState=not-found\n")
+
+    monkeypatch.setattr(remote.subprocess, "run", run)
+    argv = ["/usr/bin/systemctl", "show", "--property=LoadState", unit]
+    if unit == "stock-app.service":
+        with pytest.raises(remote.ReleaseError, match="command_failed"):
+            remote.run_command(argv, timeout=10)
+    else:
+        assert remote.run_command(argv, timeout=10) == b"LoadState=not-found\n"
+    assert calls[0]["stdout"] == remote.subprocess.PIPE

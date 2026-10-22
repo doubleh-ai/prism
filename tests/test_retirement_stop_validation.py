@@ -1,6 +1,7 @@
 """Mac/offline contracts only. These mocks never constitute Linux stop evidence."""
 
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -195,6 +196,8 @@ def case_harness(tmp_path, monkeypatch, case_id, *, delivery_error=False, deny_d
     monkeypatch.setattr(obj, "_ready", lambda _: live)
     monkeypatch.setattr(obj, "live", lambda _: live)
     monkeypatch.setattr(obj, "policy", lambda *a, **k: {})
+    obj.exec_arrays[case_id] = {key: stop.EMPTY_EXEC_ARRAY for key in ("ExecStop", "ExecStopPost")}
+    monkeypatch.setattr(obj, "unit_missing", lambda _: True)
     monkeypatch.setattr(obj, "show", lambda _: {"LoadState": "not-found"})
     monkeypatch.setattr(obj, "observer_show", lambda _: {"LoadState": "not-found"})
     monkeypatch.setattr(obj, "observer_ready", lambda _: "f" * 32)
@@ -304,7 +307,7 @@ def test_no_direct_signals_or_production_stop_code_path_exists():
 
 def test_preexisting_synthetic_unit_is_never_treated_as_our_attempt(tmp_path, monkeypatch):
     obj, case, actions = case_harness(tmp_path, monkeypatch, "int-executor")
-    monkeypatch.setattr(obj, "show", lambda _: {"LoadState": "loaded"})
+    monkeypatch.setattr(obj, "unit_missing", lambda _: False)
     with pytest.raises(base.RetirementValidationError, match="unit_already_exists"):
         obj.case(case)
     assert obj.active_case is None
@@ -420,23 +423,75 @@ def test_clean_zero_without_durable_post_marker_does_not_pass(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("observer", [False, True])
-def test_show_all_preserves_required_empty_systemd_properties(observer):
+def test_show_requires_actual_typed_arrays_instead_of_omitted_systemctl_structs(observer):
     value = controller()
     case = probe._case(value.plan, "int-executor")
     properties = stop.OBSERVER_PROPERTIES if observer else stop.PROPERTIES
     rows = dict.fromkeys(properties.split(","), "")
-    rows["LoadState"] = "not-found"
+    rows["LoadState"] = "loaded"
+    calls = []
 
     def runner(argv, *, timeout):
+        calls.append(argv)
+        if argv[0] == "/usr/bin/busctl":
+            return json.dumps(stop.EMPTY_EXEC_ARRAY).encode()
         assert argv[:3] == ["/usr/bin/systemctl", "show", "--all"]
         assert argv[3] == "--property=" + properties and timeout == 10
         return "".join(key + "=" + item + "\n" for key, item in rows.items()).encode()
 
     value.run = runner
     actual = value.observer_show(case) if observer else value.show(case["unit"])
-    assert set(actual) == set(properties.split(","))
+    assert set(actual) == set(properties.split(",")) | (set() if observer else {"ExecStop", "ExecStopPost"})
     if not observer:
         assert actual["ExecStop"] == actual["ExecStopPost"] == ""
-        rows.pop("ExecStop")
+        assert len(calls) == 3 and calls[1:] == stop.exec_array_commands(case["unit"])
+        rows.pop("KillSignal")
         with pytest.raises(base.RetirementValidationError, match="systemd_properties_rejected"):
             value.show(case["unit"])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{}",
+        b'{"type":"a(sasbttttuii)","data":[[]]}',
+        b'{"type":"as","data":[]}',
+        b'{"type":"a(sasbttttuii)","data":[["public-command"]]}',
+        b'{"type":"a(sasbttttuii)","data":[],"extra":true}',
+        b'{"type":"a(sasbttttuii)","data":[1],"data":[]}',
+        b"not json",
+    ],
+)
+def test_typed_exec_arrays_require_actual_exact_empty_data(raw):
+    obj = controller()
+    case = probe._case(obj.plan, "int-executor")
+    with pytest.raises(base.RetirementValidationError, match="exec_array_rejected"):
+        stop.empty_exec_arrays(lambda *args, **kwargs: raw, case["unit"])
+
+
+def test_prestart_notfound_uses_only_loadstate_without_asking_inexistent_bus_object():
+    obj = controller()
+    case = probe._case(obj.plan, "int-executor")
+    calls = []
+    rows = {"LoadState": "not-found"}
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv == ["/usr/bin/systemctl", "show", "--property=LoadState", case["unit"]]
+        return "".join(k + "=" + v + "\n" for k, v in rows.items()).encode()
+
+    obj.run = run
+    assert obj.unit_missing(case["unit"]) is True and len(calls) == 1
+    rows.pop("LoadState")
+    with pytest.raises(base.RetirementValidationError, match="systemd_properties_rejected"):
+        obj.unit_missing(case["unit"])
+
+
+def test_bus_property_query_cannot_target_production_or_another_case():
+    for unit in (
+        "stock-app.service",
+        "vibe-trading.service",
+        "prism-retirement-probe-" + NONCE + "-int-child.service",
+    ):
+        with pytest.raises(base.RetirementValidationError):
+            stop.exec_array_commands(unit)

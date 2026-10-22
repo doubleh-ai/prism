@@ -1,4 +1,4 @@
-"""Offline controller wiring on disposable patched scripts; no real acceptance.
+"""Offline controller wiring on disposable shipped scripts; no real acceptance.
 
 The fixture's systemd, kernel results and upstream summaries are synthetic. Public
 helpers stay byte-pinned; no SSH, production, DNS, HTTP, model or account creation.
@@ -10,7 +10,6 @@ import io
 import json
 import os
 import stat
-import subprocess
 import types
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,7 +18,6 @@ import pytest
 import test_release_controller as existing
 
 ROOT = Path(__file__).resolve().parents[1]
-PATCH = ROOT / "scripts/patches/market-controller-candidate.patch"
 ATTEMPT = "synthetic-market-20261022"
 NOW, COMMIT = existing.NOW, existing.COMMIT
 
@@ -39,40 +37,9 @@ def modules(tmp_path):
         raw = (ROOT / "scripts" / name).read_bytes()
         before[name] = raw
         (scripts / name).write_bytes(raw)
-    # Also runs after promotion: reverse only our own patch in a temporary copy.
-    if "MARKET_INTEGRATION_HELPERS" in (scripts / "remote_release.py").read_text():
-        result = subprocess.run(
-            ["/usr/bin/patch", "--batch", "--reverse", "-s", "-p1"],
-            cwd=destination,
-            input=PATCH.read_bytes(),
-            capture_output=True,
-            timeout=5,
-        )
-        assert result.returncode == 0
-    result = subprocess.run(
-        [
-            "/usr/bin/git",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "apply",
-            "--check",
-            str(PATCH),
-        ],
-        cwd=destination,
-        capture_output=True,
-        timeout=5,
-    )
-    assert result.returncode == 0, result.stderr.decode()
-    result = subprocess.run(
-        ["/usr/bin/patch", "--batch", "--forward", "-s", "-p1"],
-        cwd=destination,
-        input=PATCH.read_bytes(),
-        capture_output=True,
-        timeout=5,
-    )
-    assert result.returncode == 0, result.stdout.decode()
+    # This wiring is now shipped. Exercise the exact copied scripts rather than
+    # reversing an archived candidate patch, which would erase later controls.
+    assert "MARKET_INTEGRATION_HELPERS" in (scripts / "remote_release.py").read_text()
     loaded = []
     for name in ("remote_release", "release_controller"):
         module = types.ModuleType("_market_candidate_" + name)

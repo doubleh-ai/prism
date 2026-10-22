@@ -8,6 +8,7 @@ can receive stop. No kill, restart, or reset-failed path exists here.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -35,8 +36,15 @@ POLICY = {
     "NRestarts": "0",
     "RemainAfterExit": "yes",
 }
-PROPERTIES = base.PROPERTIES + "," + ",".join((*POLICY, "Job"))
+PROPERTIES = (
+    base.PROPERTIES
+    + ","
+    + ",".join((*(key for key in POLICY if key not in {"ExecStop", "ExecStopPost"}), "Job"))
+)
 OBSERVER_PROPERTIES = base.PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit"
+# Actual reviewed Ubuntu busctl JSON: both properties returned this typed empty
+# array. systemctl omits these custom-formatted arrays even with --all.
+EMPTY_EXEC_ARRAY = {"type": "a(sasbttttuii)", "data": []}
 VERSION_COMMAND = [
     "/usr/bin/python3.12",
     "-I",
@@ -143,6 +151,52 @@ def _job(value):
     return base._number(value)
 
 
+def exec_array_commands(unit):
+    if type(unit) is not str or not re.fullmatch(
+        r"prism-retirement-probe-[0-9a-f]{32}-(?:int-executor|int-post)\.service", unit
+    ):
+        reject("host_unit_rejected")
+    component = "".join(
+        character if character.isascii() and character.isalnum() else "_" + format(ord(character), "02x")
+        for character in unit
+    )
+    return [
+        [
+            "/usr/bin/busctl",
+            "--system",
+            "--json=short",
+            "get-property",
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1/unit/" + component,
+            "org.freedesktop.systemd1.Service",
+            key,
+        ]
+        for key in ("ExecStop", "ExecStopPost")
+    ]
+
+
+def empty_exec_arrays(run, unit):
+    def pairs(rows):
+        value = dict(rows)
+        if len(value) != len(rows):
+            raise ValueError("duplicate_key")
+        return value
+
+    observed = {}
+    for command in exec_array_commands(unit):
+        raw = run(command, timeout=10)
+        if type(raw) is not bytes or len(raw) > 4096 or EMPTY_EXEC_ARRAY is None:
+            reject("exec_array_rejected")
+        try:
+            value = json.loads(raw, object_pairs_hook=pairs)
+        except (ValueError, UnicodeError):
+            reject("exec_array_rejected")
+        if probe.encoded(value) != probe.encoded(EMPTY_EXEC_ARRAY):
+            reject("exec_array_rejected")
+        observed[command[-1]] = value
+    return observed
+
+
 class StopValidation(base.Validation):
     def __init__(
         self,
@@ -163,6 +217,18 @@ class StopValidation(base.Validation):
         self.observers = {}
         self.observer_stop_consumed = set()
         self.case_identities = {}
+        self.exec_arrays = {}
+
+    def unit_missing(self, unit):
+        allowed = {probe._case(self.plan, case_id)["unit"] for case_id in CASES}
+        allowed.update(observer_unit(self.plan, case_id) for case_id in CASES)
+        if unit not in allowed:
+            reject("host_unit_rejected")
+        state = _rows(
+            self.run(["/usr/bin/systemctl", "show", "--property=LoadState", unit], timeout=10),
+            "LoadState",
+        )
+        return state["LoadState"] == "not-found"
 
     def no_existing_observers(self):
         raw = self.run(OBSERVER_INVENTORY, timeout=10)
@@ -188,10 +254,16 @@ class StopValidation(base.Validation):
             return super().show(unit)
         if unit not in {probe._case(self.plan, case_id)["unit"] for case_id in CASES}:
             reject("host_unit_rejected")
-        return _rows(
+        state = _rows(
             self.run(["/usr/bin/systemctl", "show", "--all", "--property=" + PROPERTIES, unit], timeout=10),
             PROPERTIES,
         )
+        if state["LoadState"] != "loaded":
+            reject("actual_policy_rejected")
+        observed = empty_exec_arrays(self.run, unit)
+        case_id = next(case_id for case_id in CASES if probe._case(self.plan, case_id)["unit"] == unit)
+        self.exec_arrays[case_id] = observed
+        return {**state, **{key: "" for key in observed}}
 
     def observer_show(self, case):
         self.fixed_case(case)
@@ -368,7 +440,7 @@ class StopValidation(base.Validation):
         paths = (runtime, Path(case["runtime_directory"]), Path(case["managed_runtime_alias"]))
         if any(path.exists() or path.is_symlink() for path in paths):
             reject("runtime_already_exists")
-        if self.show(case["unit"])["LoadState"] != "not-found":
+        if not self.unit_missing(case["unit"]):
             reject("unit_already_exists")
         self.record("synthetic_start_intent", {"case_id": case_id, "nonce": self.plan["nonce"]})
         self.start_intents[case_id] = int(self.monotonic() * 1_000_000)
@@ -379,6 +451,10 @@ class StopValidation(base.Validation):
         self.policy(case)
         self.record(
             "synthetic_stop_actual_isolation", {"case_id": case_id, **live, "actual_kernel_verified": True}
+        )
+        self.record(
+            "synthetic_stop_exec_arrays_observed",
+            {"case_id": case_id, "properties": self.exec_arrays[case_id]},
         )
         base._request_fixture(case, live["uid"], live["pid"])
 
@@ -393,7 +469,7 @@ class StopValidation(base.Validation):
         before = self.poll(ready, 5)
         self.boundary("retirement_stop_observer_" + case_id)
         self.check_production()
-        if self.observer_show(case)["LoadState"] != "not-found":
+        if not self.unit_missing(observer_unit(self.plan, case_id)):
             reject("observer_already_exists")
         self.record("synthetic_observer_start_intent", {"case_id": case_id})
         self.run(observer_command(self.plan, case_id), timeout=15)
