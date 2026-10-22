@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -25,6 +26,9 @@ from .database import get_db, init_db
 from .market.router import router as market_router
 from .release import APP_VERSION, release_payload
 from .reports import get_saved_report, list_saved_reports, list_saved_reports_for_conv
+from .work_adapters import WorkAdmissionMiddleware
+from .work_lifecycle import KINDS, bind_manager
+from .work_runtime import open_runtime
 
 MESSAGE = "恢复模式，暂不支持新研究"
 MODE = "limited_read_only_recovery"
@@ -74,7 +78,20 @@ def stored_message(content):
 
 
 init_db()
-app = FastAPI(title="Prism 有限恢复服务", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@asynccontextmanager
+async def lifespan(application):
+    runtime = await open_runtime(producers={kind: kind in {"request", "market"} for kind in KINDS})
+    try:
+        bind_manager(application, runtime.manager)
+        application.state.work_runtime = runtime
+        yield
+    finally:
+        await runtime.aclose()
+
+
+app = FastAPI(title="Prism 有限恢复服务", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 
 class RecoveryBoundary(BaseHTTPMiddleware):
@@ -116,6 +133,7 @@ class RecoveryBoundary(BaseHTTPMiddleware):
 
 
 app.add_middleware(RecoveryBoundary)
+app.add_middleware(WorkAdmissionMiddleware)
 
 
 def readiness_payload():
