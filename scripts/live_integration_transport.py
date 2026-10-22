@@ -79,10 +79,79 @@ KERNEL_KEYS = {
     "worker_startticks",
     "broker_startticks",
 }
+UPSTREAM_PHASES = frozenset(
+    {
+        "not_started",
+        "environment",
+        "dns_resolve",
+        "dns_validate",
+        "tcp_socket",
+        "tcp_connect",
+        "tls_context",
+        "tls_handshake",
+        "peer",
+        "connected",
+    }
+)
+TRANSPORT_ERROR_CODES = frozenset(
+    {
+        "approved_source_required",
+        "binding_rejected",
+        "bridge_cleanup_failed",
+        "bridge_deadline",
+        "bridge_response_limit",
+        "broker_authorization_rejected",
+        "broker_cleanup_failed",
+        "broker_deadline",
+        "broker_key_rejected",
+        "broker_key_unavailable",
+        "broker_not_authorized",
+        "dedicated_uid_required",
+        "fixed_workdir_required",
+        "http_body_rejected",
+        "http_deadline",
+        "http_framing_rejected",
+        "http_headers_rejected",
+        "http_request_rejected",
+        "json_rejected",
+        "kernel_identity_rejected",
+        "loopback_request_rejected",
+        "policy_source_rejected",
+        "private_record_rejected",
+        "provider_header_rejected",
+        "provider_request_rejected",
+        "provider_tools_rejected",
+        "response_limit",
+        "root_allow_rejected",
+        "root_gatekeeper_unavailable",
+        "root_locked_source_required",
+        "synthetic_auth_required",
+        "total_request_limit",
+        "transport_error",
+        "unix_directory_rejected",
+        "unix_peer_rejected",
+        "unix_peer_required",
+        "unix_socket_rejected",
+        "upstream_deadline",
+        "upstream_dns_rejected",
+        "upstream_environment_rejected",
+        "upstream_peer_rejected",
+        "upstream_response_rejected",
+        "upstream_tls_rejected",
+    }
+)
 
 
 class TransportError(RuntimeError):
     """Only fixed categories; never attach provider bodies, headers or secrets."""
+
+    def __init__(self, code="transport_error"):
+        self._code = code if type(code) is str and code in TRANSPORT_ERROR_CODES else "transport_error"
+        super().__init__(self._code)
+
+    @property
+    def code(self):
+        return self._code
 
 
 def canonical(value):
@@ -470,8 +539,28 @@ class PinnedUpstream:
 
     def __init__(self, policy):
         self.policy = policy
+        self._phase = "not_started"
+        self._resolved_peers = ()
+        self._selected_peer = None
+
+    @property
+    def phase(self):
+        """The last attempted boundary, not a claim that it passed."""
+        return self._phase
+
+    @property
+    def resolved_peers(self):
+        """Validated peers from this attempt; for private in-memory comparison."""
+        return self._resolved_peers
+
+    @property
+    def selected_peer(self):
+        return self._selected_peer
 
     def connect(self, deadline):
+        self._resolved_peers = ()
+        self._selected_peer = None
+        self._phase = "environment"
         if any(
             name.upper()
             in {
@@ -491,26 +580,36 @@ class PinnedUpstream:
             raise TransportError("upstream_environment_rejected")
         if time.monotonic() >= deadline:
             raise TransportError("upstream_deadline")
+        self._phase = "dns_resolve"
         answers = socket.getaddrinfo(HOST, 443, type=socket.SOCK_STREAM)
+        self._phase = "dns_validate"
         try:
             pins = self.policy.public_peers(HOST, [row[4][0] for row in answers])
         except self.policy.PolicyError:
             raise TransportError("upstream_dns_rejected") from None
+        self._resolved_peers = pins
         if time.monotonic() >= deadline:
             raise TransportError("upstream_deadline")
         pin = sorted(pins, key=lambda item: ":" in item)[0]
+        self._selected_peer = pin
+        self._phase = "tcp_socket"
         channel = socket.socket(socket.AF_INET6 if ":" in pin else socket.AF_INET, socket.SOCK_STREAM)
         try:
+            self._phase = "tcp_connect"
             channel.settimeout(max(0.01, min(25, deadline - time.monotonic())))
             channel.connect((pin, 443))
+            self._phase = "tls_context"
             context = ssl.create_default_context()
             if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
                 raise TransportError("upstream_tls_rejected")
             context.minimum_version = ssl.TLSVersion.TLSv1_2
+            self._phase = "tls_handshake"
             secured = context.wrap_socket(channel, server_hostname=HOST)
+            self._phase = "peer"
             if secured.getpeername()[0] != pin:
                 secured.close()
                 raise TransportError("upstream_peer_rejected")
+            self._phase = "connected"
             return secured
         except BaseException:
             channel.close()

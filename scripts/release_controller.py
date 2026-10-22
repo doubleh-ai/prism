@@ -71,9 +71,9 @@ RETIREMENT_STOP_HELPERS = {
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "a5dbd65258475ca4107d2f3ce98b814057f231633622b5b1caaf663d9c76e2af",
+    "live_integration_validation.py": "160d7b7fa07badda4ce200d90beeb35c22eeaafe5b1fed9be783af78b8ed7f22",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
-    "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
+    "live_integration_transport.py": "cb84a80b2a5a14300fdb74deef06e06df96441a66ea11b72f29c9d0884ea9f55",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
     "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
     "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",

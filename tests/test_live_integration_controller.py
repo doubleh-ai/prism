@@ -524,8 +524,130 @@ def safe_summary(data):
         "blocked_provider_header_names": [],
         "official_source_count": 1,
         "broker_summary_sha256": "e" * 64,
+        "broker_failure_diagnostic": None,
+        "broker_failure_diagnostic_sha256": None,
+        "broker_failure_diagnostic_rejected": False,
         "requests": {"messages": 2, "count_tokens": 0, "quote": 0, "kline": 0, "public_fetch": 0},
     }
+
+
+def failed_broker_summary(data):
+    value = safe_summary(data)
+    value.update(
+        passed=False,
+        error_class="ipc_rejected",
+        stage="preflight",
+        broker_failure_diagnostic_sha256="a" * 64,
+        broker_failure_diagnostic={
+            "stage": "upstream_tcp_connect",
+            "error_class": "permission_denied",
+            "error_code": None,
+            "errno": 1,
+            "tls_verify_code": None,
+            "checked_at": NOW,
+            "dns_peer_count": 1,
+            "dns_snapshot_matches_parent": False,
+            "selected_peer_in_parent": False,
+        },
+    )
+    return value
+
+
+def test_safe_failed_broker_journal_keeps_only_exact_bounded_diagnostics(prepared):
+    fixture, data = prepared
+    value = failed_broker_summary(data)
+    result = fixture.engine.live_safe_record(value, ATTEMPT)
+    assert result["broker_failure_diagnostic"] == value["broker_failure_diagnostic"]
+    assert result["broker_failure_diagnostic_sha256"] == "a" * 64
+    assert result["passed"] is False and result["error_class"] == "ipc_rejected"
+    assert remote.BROKER_DIAGNOSTIC_STAGES == helper.BROKER_DIAGNOSTIC_STAGES
+    assert remote.BROKER_DIAGNOSTIC_ERROR_CLASSES == helper.BROKER_DIAGNOSTIC_ERROR_CLASSES
+    assert remote.BROKER_DIAGNOSTIC_TRANSPORT_CODES == helper.BROKER_DIAGNOSTIC_TRANSPORT_CODES
+    assert remote.BROKER_DIAGNOSTIC_BOOTSTRAP_CODES == helper.BROKER_DIAGNOSTIC_BOOTSTRAP_CODES
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "raw",
+        "stage",
+        "class",
+        "code",
+        "bool_errno",
+        "large_errno",
+        "negative_errno",
+        "dns_count",
+        "dns_flag",
+        "zero_dns",
+        "unknown_field",
+        "timestamp",
+        "sha",
+        "missing_sha",
+        "missing_data",
+        "rejected_type",
+        "passed_with_data",
+        "passed_with_rejected",
+    ],
+)
+def test_safe_journal_rejects_unbounded_diagnostics_and_never_promotes_failure(prepared, change):
+    fixture, data = prepared
+    value = failed_broker_summary(data)
+    diagnostic = value["broker_failure_diagnostic"]
+    if change == "raw":
+        value["broker_raw_exception"] = SYNTHETIC
+    elif change == "stage":
+        diagnostic["stage"] = SYNTHETIC
+    elif change == "class":
+        diagnostic["error_class"] = SYNTHETIC
+    elif change == "code":
+        diagnostic.update(error_class="transport_error", error_code=SYNTHETIC)
+    elif change == "bool_errno":
+        diagnostic["errno"] = True
+    elif change == "large_errno":
+        diagnostic["errno"] = 4096
+    elif change == "negative_errno":
+        diagnostic["errno"] = -2
+    elif change == "dns_count":
+        diagnostic["dns_peer_count"] = 33
+    elif change == "dns_flag":
+        diagnostic["dns_snapshot_matches_parent"] = 1
+    elif change == "zero_dns":
+        diagnostic["dns_peer_count"] = 0
+    elif change == "unknown_field":
+        diagnostic["host"] = "1.2.3.4"
+    elif change == "timestamp":
+        diagnostic["checked_at"] = NOW - 1
+    elif change == "sha":
+        value["broker_failure_diagnostic_sha256"] = SYNTHETIC
+    elif change == "missing_sha":
+        value["broker_failure_diagnostic_sha256"] = None
+    elif change == "missing_data":
+        value["broker_failure_diagnostic"] = None
+    elif change == "rejected_type":
+        value["broker_failure_diagnostic_rejected"] = 0
+    elif change == "passed_with_data":
+        value.update(passed=True, error_class=None, stage="complete")
+    elif change == "passed_with_rejected":
+        value.update(
+            passed=True,
+            error_class=None,
+            stage="complete",
+            broker_failure_diagnostic=None,
+            broker_failure_diagnostic_sha256=None,
+            broker_failure_diagnostic_rejected=True,
+        )
+    with pytest.raises(remote.ReleaseError, match="live_safe_record_rejected"):
+        fixture.engine.live_safe_record(value, ATTEMPT)
+
+
+def test_invalid_private_diagnostic_flag_is_safe_failure_not_silent_success(prepared):
+    fixture, data = prepared
+    value = safe_summary(data)
+    value.update(
+        passed=False, error_class="ipc_rejected", stage="preflight", broker_failure_diagnostic_rejected=True
+    )
+    actual = fixture.engine.live_safe_record(value, ATTEMPT)
+    assert actual["broker_failure_diagnostic_rejected"] is True and actual["passed"] is False
 
 
 @pytest.mark.parametrize(

@@ -77,9 +77,162 @@ NETWORK_DIAGNOSTIC_STAGES = frozenset(
 )
 EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
 RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
+BROKER_DIAGNOSTIC_STAGES = frozenset(
+    {
+        "filesystem",
+        "preflight_finish_receive",
+        "upstream_peer",
+        "memory",
+        "upstream_dns_resolve",
+        "launch_validate",
+        "startup",
+        "upstream_connected",
+        "identity",
+        "upstream_dns_validate",
+        "upstream_tls_handshake",
+        "upstream_tcp_connect",
+        "upstream_environment",
+        "preflight_allow_receive",
+        "source",
+        "permit",
+        "broker_construct",
+        "launch_receive",
+        "hello",
+        "upstream_not_started",
+        "preflight_send",
+        "upstream_tls_context",
+        "upstream_preflight",
+        "credential_connect",
+        "preflight_canary",
+        "upstream_tcp_socket",
+    }
+)
+BROKER_DIAGNOSTIC_ERROR_CLASSES = frozenset(
+    {
+        "tls_certificate_error",
+        "dns_error",
+        "unexpected_error",
+        "permission_denied",
+        "os_error",
+        "bootstrap_error",
+        "transport_error",
+        "tls_error",
+    }
+)
+BROKER_DIAGNOSTIC_TRANSPORT_CODES = frozenset(
+    {
+        "broker_key_rejected",
+        "broker_not_authorized",
+        "binding_rejected",
+        "http_headers_rejected",
+        "response_limit",
+        "unix_socket_rejected",
+        "broker_cleanup_failed",
+        "synthetic_auth_required",
+        "bridge_deadline",
+        "total_request_limit",
+        "dedicated_uid_required",
+        "root_gatekeeper_unavailable",
+        "root_locked_source_required",
+        "http_deadline",
+        "broker_key_unavailable",
+        "broker_deadline",
+        "loopback_request_rejected",
+        "bridge_cleanup_failed",
+        "root_allow_rejected",
+        "http_framing_rejected",
+        "unix_peer_required",
+        "http_request_rejected",
+        "provider_header_rejected",
+        "unix_peer_rejected",
+        "bridge_response_limit",
+        "fixed_workdir_required",
+        "approved_source_required",
+        "policy_source_rejected",
+        "transport_error",
+        "upstream_peer_rejected",
+        "upstream_deadline",
+        "upstream_dns_rejected",
+        "upstream_tls_rejected",
+        "unix_directory_rejected",
+        "upstream_response_rejected",
+        "provider_request_rejected",
+        "private_record_rejected",
+        "broker_authorization_rejected",
+        "upstream_environment_rejected",
+        "json_rejected",
+        "http_body_rejected",
+        "kernel_identity_rejected",
+        "provider_tools_rejected",
+    }
+)
+BROKER_DIAGNOSTIC_BOOTSTRAP_CODES = frozenset(
+    {
+        "broker_identity_rejected",
+        "provider_peer_rejected",
+        "ipc_rejected",
+        "network_canary_rejected",
+        "network_permit_rejected",
+        "broker_memory_unsealed",
+        "source_rejected",
+        "broker_filesystem_rejected",
+    }
+)
+
+
+def valid_broker_diagnostic_fields(value):
+    if (
+        type(value) is not dict
+        or set(value)
+        != {
+            "stage",
+            "error_class",
+            "error_code",
+            "errno",
+            "tls_verify_code",
+            "checked_at",
+            "dns_peer_count",
+            "dns_snapshot_matches_parent",
+            "selected_peer_in_parent",
+        }
+        or type(value["stage"]) is not str
+        or value["stage"] not in BROKER_DIAGNOSTIC_STAGES
+        or type(value["error_class"]) is not str
+        or value["error_class"] not in BROKER_DIAGNOSTIC_ERROR_CLASSES
+        or any(
+            value[key] is not None and (type(value[key]) is not int or not 0 <= value[key] <= 4095)
+            for key in ("errno", "tls_verify_code")
+        )
+        or type(value["checked_at"]) is not int
+        or value["checked_at"] <= 0
+        or type(value["dns_peer_count"]) is not int
+        or not 0 <= value["dns_peer_count"] <= 32
+        or any(
+            value[key] is not None and type(value[key]) is not bool
+            for key in ("dns_snapshot_matches_parent", "selected_peer_in_parent")
+        )
+    ):
+        return False
+    if (
+        value["dns_peer_count"] == 0
+        and (value["dns_snapshot_matches_parent"] is not None or value["selected_peer_in_parent"] is not None)
+        or value["dns_peer_count"] > 0
+        and type(value["dns_snapshot_matches_parent"]) is not bool
+        or value["tls_verify_code"] is not None
+        and value["error_class"] != "tls_certificate_error"
+    ):
+        return False
+    code = value["error_code"]
+    if value["error_class"] == "transport_error":
+        return type(code) is str and code in BROKER_DIAGNOSTIC_TRANSPORT_CODES
+    if value["error_class"] == "bootstrap_error":
+        return type(code) is str and code in BROKER_DIAGNOSTIC_BOOTSTRAP_CODES
+    return code is None
+
+
 SOURCE_PINS = {
     "worker": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
-    "transport": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
+    "transport": "cb84a80b2a5a14300fdb74deef06e06df96441a66ea11b72f29c9d0884ea9f55",
     "policy": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
 }
 BOOT_CHECKS = {
@@ -199,11 +352,74 @@ def network_permit(work,binding,config,expected_sha=None):
 # requested over this one root-owned, peer-verified UDS after the root permit.
 BROKER_BOOTSTRAP = (
     r"""
-import contextlib, ctypes, errno, hashlib, importlib.util, ipaddress, json, os, resource, socket, stat, struct, sys, time
+import contextlib, ctypes, errno, hashlib, importlib.util, ipaddress, json, os, re, resource, socket, ssl, stat, struct, sys, time
 from pathlib import Path
 """
     + NETWORK_PERMIT_READER
     + r"""
+
+_diagnostic_context = None
+_diagnostic_broker = None
+_diagnostic_binding = None
+_diagnostic_stage = "startup"
+_diagnostic_enabled = True
+_DIAGNOSTIC_STAGES = frozenset({'filesystem', 'preflight_finish_receive', 'upstream_peer', 'memory', 'upstream_dns_resolve', 'launch_validate', 'startup', 'upstream_connected', 'identity', 'upstream_dns_validate', 'upstream_tls_handshake', 'upstream_tcp_connect', 'upstream_environment', 'preflight_allow_receive', 'source', 'permit', 'broker_construct', 'launch_receive', 'hello', 'upstream_not_started', 'preflight_send', 'upstream_tls_context', 'upstream_preflight', 'credential_connect', 'preflight_canary', 'upstream_tcp_socket'})
+_DIAGNOSTIC_TRANSPORT_CODES = frozenset({'broker_key_rejected', 'broker_not_authorized', 'binding_rejected', 'http_headers_rejected', 'response_limit', 'unix_socket_rejected', 'broker_cleanup_failed', 'synthetic_auth_required', 'bridge_deadline', 'total_request_limit', 'dedicated_uid_required', 'root_gatekeeper_unavailable', 'root_locked_source_required', 'http_deadline', 'broker_key_unavailable', 'broker_deadline', 'loopback_request_rejected', 'bridge_cleanup_failed', 'root_allow_rejected', 'http_framing_rejected', 'unix_peer_required', 'http_request_rejected', 'provider_header_rejected', 'unix_peer_rejected', 'bridge_response_limit', 'fixed_workdir_required', 'approved_source_required', 'policy_source_rejected', 'transport_error', 'upstream_peer_rejected', 'upstream_deadline', 'upstream_dns_rejected', 'upstream_tls_rejected', 'unix_directory_rejected', 'upstream_response_rejected', 'provider_request_rejected', 'private_record_rejected', 'broker_authorization_rejected', 'upstream_environment_rejected', 'json_rejected', 'http_body_rejected', 'kernel_identity_rejected', 'provider_tools_rejected'})
+_DIAGNOSTIC_BOOTSTRAP_CODES = frozenset({'broker_identity_rejected', 'provider_peer_rejected', 'ipc_rejected', 'network_canary_rejected', 'network_permit_rejected', 'broker_memory_unsealed', 'source_rejected', 'broker_filesystem_rejected'})
+
+def mark(stage):
+    global _diagnostic_stage
+    if stage not in _DIAGNOSTIC_STAGES:raise RuntimeError("ipc_rejected")
+    _diagnostic_stage=stage
+
+def failure_diagnostic(error):
+    # Diagnostic persistence never creates an allow file or returns success.
+    if not _diagnostic_enabled or type(_diagnostic_context) is not dict:return
+    config=_diagnostic_context;work=Path(config["work"])
+    if work.name!='live' or work.parent.parent!=Path('/var/lib/prism-operations/integration') or not re.fullmatch('[a-z0-9][a-z0-9-]{7,39}',work.parent.name) or os.getuid()!=config['broker_uid'] or os.getuid()==0:return
+    stage=_diagnostic_stage;upstream=getattr(_diagnostic_broker,'upstream',None)
+    if stage=='upstream_preflight':
+        observed=getattr(upstream,'phase','not_started')
+        stage='upstream_'+observed if type(observed) is str and 'upstream_'+observed in _DIAGNOSTIC_STAGES else 'upstream_not_started'
+    code=getattr(error,'code',None)
+    if isinstance(error,PermissionError):category='permission_denied';code=None
+    elif isinstance(error,socket.gaierror):category='dns_error';code=None
+    elif isinstance(error,ssl.SSLCertVerificationError):category='tls_certificate_error';code=None
+    elif isinstance(error,ssl.SSLError):category='tls_error';code=None
+    elif isinstance(error,OSError):category='os_error';code=None
+    elif type(code) is str and code in _DIAGNOSTIC_TRANSPORT_CODES:category='transport_error'
+    elif type(error) is RuntimeError and len(error.args)==1 and type(error.args[0]) is str and error.args[0] in _DIAGNOSTIC_BOOTSTRAP_CODES:category='bootstrap_error';code=error.args[0]
+    else:category='unexpected_error';code=None
+    number=getattr(error,'errno',None)
+    if type(number) is not int or not 0<=number<=4095:number=None
+    verify=getattr(error,'verify_code',None)
+    if type(verify) is not int or not 0<=verify<=4095:verify=None
+    peers=getattr(upstream,'resolved_peers',None);selected=getattr(upstream,'selected_peer',None)
+    parent=_diagnostic_binding.get('provider_pins') if type(_diagnostic_binding) is dict else None
+    count=0;matches=chosen=None
+    if type(peers) is tuple and 0<len(peers)<=32 and type(parent) is list:
+        count=len(peers);matches=set(peers)==set(parent)
+    if count > 0 and type(selected) is str and type(parent) is list:chosen=selected in parent
+    binding={name:config[name] for name in ('candidate','nonce','broker_uid','root_pid','issued_at','transport_sha256','bootstrap_sha256','network_gate_sha256','preflight_only')}
+    binding['broker_pid']=os.getpid()
+    value={'schema':1,'kind':'broker_preflight_failure','binding':binding,'diagnostic':{'stage':stage,'error_class':category,'error_code':code,'errno':number,'tls_verify_code':verify,'checked_at':int(time.time()),'dns_peer_count':count,'dns_snapshot_matches_parent':matches,'selected_peer_in_parent':chosen}}
+    raw=json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+    if len(raw)>16384:return
+    target=work/'broker/preflight-failure.json'
+    descriptor=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+    with os.fdopen(descriptor,'wb') as stream:
+        os.fchmod(stream.fileno(),0o600);stream.write(raw);stream.flush();os.fsync(stream.fileno())
+    directory=os.open(target.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+
+@contextlib.contextmanager
+def diagnostic_before_channel_close():
+    # This guard exits before the channel: EOF must not outrun fsync.
+    try:yield
+    except Exception as error:
+        with contextlib.suppress(Exception):failure_diagnostic(error)
+        raise
 
 def packed(value):
     raw=json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode()
@@ -248,28 +464,36 @@ def seal_memory():
     if call(4,0,0,0,0)!=0 or call(3,0,0,0,0)!=0 or resource.getrlimit(resource.RLIMIT_CORE)!=(0,0): raise RuntimeError("broker_memory_unsealed")
     return True
 def main():
-    config=json.loads(sys.argv[1]); work=Path(config["work"])
+    global _diagnostic_context,_diagnostic_broker,_diagnostic_binding,_diagnostic_enabled
+    config=json.loads(sys.argv[1]); work=Path(config["work"]);_diagnostic_context=config
+    mark('identity')
     if sys.platform!="linux" or os.getuid()!=config["broker_uid"] or os.getuid()==0 or not sys.flags.isolated or not sys.flags.no_site or not sys.flags.dont_write_bytecode: raise RuntimeError("broker_identity_rejected")
-    memory_sealed=seal_memory()
+    mark('memory');memory_sealed=seal_memory()
+    mark('filesystem')
     filesystem={"production_home_denied":denied_open("/home/ubuntu/stock-analyzer/.env"),"production_proc_denied":denied_open("/proc/"+str(config["production_pid"])+"/environ"),"config_write_denied":denied_open("/home/ubuntu/stock-analyzer/.env",write=True),"staging_directory_denied":denied_open("/var/lib/prism-operations/staging")}
     if any(value is not True for value in filesystem.values()): raise RuntimeError("broker_filesystem_rejected")
+    mark('source')
     source=work/"transport.py"; raw=root_source(source,config["transport_sha256"])
     module=importlib.util.module_from_spec(importlib.util.spec_from_loader("_prism_live_transport",loader=None));module.__file__=str(source)
     exec(compile(raw,str(source),"exec"),module.__dict__)
     path=work/"credential.sock";info=path.lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=0 or info.st_gid!=config["broker_gid"] or stat.S_IMODE(info.st_mode)!=0o660: raise RuntimeError("ipc_rejected")
-    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as channel:
-        channel.settimeout(25);channel.connect(str(path))
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as channel, diagnostic_before_channel_close():
+        mark('credential_connect');channel.settimeout(25);channel.connect(str(path))
         pid,uid,gid=struct.unpack("3i",channel.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
         if (pid,uid)!=(config["root_pid"],0): raise RuntimeError("ipc_rejected")
+        mark('hello')
         channel.sendall(packed({"schema":1,"kind":"hello","candidate":config['candidate'],"nonce":config["nonce"],"pid":os.getpid(),"startticks":self_ticks(),"bootstrap_sha256":config['bootstrap_sha256'],"transport_sha256":config['transport_sha256']}))
-        launch=receive(channel)
+        mark('launch_receive');launch=receive(channel)
+        _diagnostic_binding=launch
+        mark('launch_validate')
         if set(launch)!={"schema","kind","binding","negative_targets","provider_pins","network_permit_sha256"} or launch["schema"]!=1 or launch["kind"]!="binding": raise RuntimeError("ipc_rejected")
         binding=launch["binding"]
         if binding["broker_pid"]!=os.getpid() or binding["nonce"]!=config["nonce"]: raise RuntimeError("ipc_rejected")
         config['network_pins']=launch['provider_pins']
-        network_permit(work,binding,config,launch['network_permit_sha256'])
-        broker=module.Broker(work,binding); observed=set();original=broker.upstream.connect
+        mark('permit');network_permit(work,binding,config,launch['network_permit_sha256'])
+        mark('broker_construct');broker=module.Broker(work,binding);_diagnostic_broker=broker
+        observed=set();original=broker.upstream.connect
         def connect(deadline):
             secured=original(deadline);peer=secured.getpeername()[0]
             if peer not in launch["provider_pins"]:
@@ -277,26 +501,30 @@ def main():
             observed.add(peer);return secured
         broker.upstream.connect=connect
         def gatekeeper(identity,facts):
-            negative={}
+            global _diagnostic_enabled
+            mark('preflight_canary');negative={}
             for name,target in launch["negative_targets"].items():
                 with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:
                     probe.settimeout(0.5);negative[name]=probe.connect_ex(tuple(target))
             negative.update(extra_network_denials(launch["provider_pins"][0]))
+            mark('preflight_send')
             channel.sendall(packed({"schema":1,"kind":"preflight","binding":identity,"facts":{**facts,"broker_memory_sealed":memory_sealed},"negative_errno":negative,"positive_peers":sorted(observed),"filesystem_checks":filesystem}))
-            reply=receive(channel)
+            mark('preflight_allow_receive');reply=receive(channel)
             if reply!={"schema":1,"kind":"allowed","nonce":config["nonce"]}: raise RuntimeError("ipc_rejected")
+            if not config['preflight_only']:_diagnostic_enabled=False
         def key_provider():
             channel.sendall(packed({"schema":1,"kind":"key","binding":binding}))
             reply=receive(channel)
             if set(reply)!={"schema","kind","key"} or reply["schema"]!=1 or reply["kind"]!="key" or type(reply["key"]) is not str: raise RuntimeError("ipc_rejected")
             return reply["key"]
         if config['preflight_only']:
-            facts=broker.upstream.preflight(min(broker.deadline,time.monotonic()+25))
+            mark('upstream_preflight');facts=broker.upstream.preflight(min(broker.deadline,time.monotonic()+25))
             gatekeeper(binding,facts)
+            mark('preflight_finish_receive')
             if receive(channel)!={'schema':1,'kind':'preflight-finish','nonce':config['nonce']}:raise RuntimeError('ipc_rejected')
             return
         with module.serve_broker(broker,config["bridge_gid"]):
-            broker.authorize(gatekeeper=gatekeeper,key_provider=key_provider)
+            mark('upstream_preflight');broker.authorize(gatekeeper=gatekeeper,key_provider=key_provider)
             channel.sendall(packed({"schema":1,"kind":"authorized","binding":binding}))
             channel.settimeout(max(0.1,config["issued_at"]+178-time.time()))
             if receive(channel)!={"schema":1,"kind":"finish","nonce":config["nonce"]}: raise RuntimeError("ipc_rejected")
@@ -304,7 +532,8 @@ def main():
             if receive(channel)!={'schema':1,'kind':'result-ack','nonce':config['nonce']}:raise RuntimeError('ipc_rejected')
 try:
     main()
-except Exception:
+except Exception as error:
+    with contextlib.suppress(Exception):failure_diagnostic(error)
     raise SystemExit(1)
 """
 )
@@ -705,6 +934,9 @@ class Validation:
             "blocked_provider_header_names": [],
             "official_source_count": 0,
             "broker_summary_sha256": None,
+            "broker_failure_diagnostic": None,
+            "broker_failure_diagnostic_sha256": None,
+            "broker_failure_diagnostic_rejected": False,
             "preflight_only": preflight_only,
             "network_gate_verified": False,
             "network_gate_verified_before_cleanup": False,
@@ -1495,6 +1727,51 @@ class Validation:
             self.network_diagnostic(error)
             raise ValidationError("network_gate_rejected") from None
 
+    def capture_broker_diagnostic(self):
+        if not self.workspace_created or "broker" not in self.accounts:
+            return
+        path = self.work / "broker/preflight-failure.json"
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        except Exception:
+            self.report["broker_failure_diagnostic_rejected"] = True
+            return
+        try:
+            value, digest = read_private(path, self.accounts["broker"].pw_uid)
+            binding = {
+                "candidate": self.request["candidate"],
+                "nonce": self.nonce,
+                "broker_uid": self.accounts["broker"].pw_uid,
+                "root_pid": os.getpid(),
+                "issued_at": self.issued,
+                "transport_sha256": SOURCE_PINS["transport"],
+                "bootstrap_sha256": BROKER_BOOTSTRAP_SHA256,
+                "network_gate_sha256": NETWORK_GATE_SHA256,
+                "preflight_only": self.preflight_only,
+                "broker_pid": self.pids["broker"],
+            }
+            if (
+                set(value) != {"schema", "kind", "binding", "diagnostic"}
+                or type(value["schema"]) is not int
+                or value["schema"] != 1
+                or value["kind"] != "broker_preflight_failure"
+                or type(value["binding"]) is not dict
+                or set(value["binding"]) != set(binding)
+                or any(
+                    type(value["binding"][key]) is not type(item) or value["binding"][key] != item
+                    for key, item in binding.items()
+                )
+                or not valid_broker_diagnostic_fields(value["diagnostic"])
+                or not self.issued <= value["diagnostic"]["checked_at"] <= time.time() <= self.issued + 185
+            ):
+                raise ValidationError("broker_preflight_rejected")
+            self.report["broker_failure_diagnostic"] = value["diagnostic"]
+            self.report["broker_failure_diagnostic_sha256"] = digest
+        except Exception:
+            self.report["broker_failure_diagnostic_rejected"] = True
+
     def preflight(self, value, pins):
         # Only typed, bounded diagnostics survive a failed gate. Never retain
         # raw IPC, host addresses, provider text or arbitrary exception detail.
@@ -2107,6 +2384,7 @@ class Validation:
                 detail if isinstance(detail, str) and detail in SAFE_ERRORS else "supervision_failed"
             )
         finally:
+            self.capture_broker_diagnostic()
             # Closing the IPC channel can release the broker naturally. Keep
             # it until the active stop witness and exact-unit cleanup finish.
             self.cleanup()

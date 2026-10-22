@@ -1,13 +1,16 @@
-"""Offline byte/protocol fixtures. No real key, kernel attestation or paid I/O."""
+"""Offline fixtures plus opt-in native denial canaries; no real key or paid I/O."""
 
+import ast
 import contextlib
 import hashlib
 import io
 import json
+import os
 import socket
 import ssl
 import stat
 import struct
+import sys
 import types
 from pathlib import Path
 
@@ -426,6 +429,7 @@ def test_immutable_permit_requires_all_pid_uid_namespace_source_and_canary_bindi
 
 
 def test_dns_pin_and_tls_sni_are_actual_connection_inputs(monkeypatch, clean_upstream_environment):
+    # The connection inputs are inspected through fake DNS/socket/TLS boundaries.
     raw = Channel()
     used = []
     context = types.SimpleNamespace(
@@ -440,9 +444,13 @@ def test_dns_pin_and_tls_sni_are_actual_connection_inputs(monkeypatch, clean_ups
     )
     monkeypatch.setattr(transport.socket, "socket", lambda *args: raw)
     monkeypatch.setattr(transport.ssl, "create_default_context", lambda: context)
-    secured = transport.PinnedUpstream(policy).connect(transport.time.monotonic() + 2)
+    upstream = transport.PinnedUpstream(policy)
+    secured = upstream.connect(transport.time.monotonic() + 2)
     assert secured is raw and raw.connected == [("8.8.8.8", 443)] and used == ["api.deepseek.com"]
     assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+    assert upstream.phase == "connected"
+    assert upstream.resolved_peers == ("8.8.8.8",)
+    assert upstream.selected_peer == "8.8.8.8"
 
 
 def test_mixed_private_dns_answer_is_rejected_before_dial(monkeypatch, clean_upstream_environment):
@@ -454,8 +462,203 @@ def test_mixed_private_dns_answer_is_rejected_before_dial(monkeypatch, clean_ups
     monkeypatch.setattr(
         transport.socket, "socket", lambda *args: pytest.fail("private/mixed DNS must not dial")
     )
-    with pytest.raises(transport.TransportError, match="upstream_dns_rejected"):
-        transport.PinnedUpstream(policy).connect(transport.time.monotonic() + 2)
+    upstream = transport.PinnedUpstream(policy)
+    with pytest.raises(transport.TransportError, match="upstream_dns_rejected") as caught:
+        upstream.connect(transport.time.monotonic() + 2)
+    assert caught.value.code == "upstream_dns_rejected"
+    assert upstream.phase == "dns_validate"
+    assert upstream.resolved_peers == () and upstream.selected_peer is None
+
+
+def test_transport_codes_cover_only_fixed_source_categories():
+    tree = ast.parse(Path(transport.__file__).read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "TransportError"
+    ]
+    assert calls and all(len(node.args) == 1 and isinstance(node.args[0], ast.Constant) for node in calls)
+    codes = {node.args[0].value for node in calls}
+    assert transport.TRANSPORT_ERROR_CODES == codes | {"transport_error"}
+    assert len(transport.TRANSPORT_ERROR_CODES) == 43
+    for code in transport.TRANSPORT_ERROR_CODES:
+        error = transport.TransportError(code)
+        assert error.code == code and error.args == (code,)
+        with pytest.raises(AttributeError):
+            error.code = "unknown"
+
+
+@pytest.mark.parametrize("value", ["private-unrecognized-text", None, 4, [], {"private": "text"}])
+def test_unknown_transport_error_does_not_retain_input(value):
+    error = transport.TransportError(value)
+    assert error.code == "transport_error"
+    assert error.args == ("transport_error",)
+    assert error.__dict__ == {"_code": "transport_error"}
+
+
+def test_upstream_diagnostics_are_initially_empty_and_read_only():
+    upstream = transport.PinnedUpstream(policy)
+    assert upstream.phase == "not_started"
+    assert upstream.resolved_peers == () and upstream.selected_peer is None
+    assert transport.UPSTREAM_PHASES == {
+        "not_started",
+        "environment",
+        "dns_resolve",
+        "dns_validate",
+        "tcp_socket",
+        "tcp_connect",
+        "tls_context",
+        "tls_handshake",
+        "peer",
+        "connected",
+    }
+    for name, value in [("phase", "connected"), ("resolved_peers", ()), ("selected_peer", "x")]:
+        with pytest.raises(AttributeError):
+            setattr(upstream, name, value)
+
+
+@pytest.mark.parametrize(
+    "failed_phase",
+    ["dns_resolve", "tcp_socket", "tcp_connect", "tls_context", "tls_handshake", "peer"],
+)
+def test_fake_boundaries_keep_native_error_and_phase_without_retry(
+    monkeypatch, clean_upstream_environment, failed_phase
+):
+    """Offline failures prove attribution only, not real DNS/TCP/TLS success."""
+    upstream = transport.PinnedUpstream(policy)
+    failure = PermissionError(13, "synthetic local refusal")
+    calls = []
+    raw = Channel()
+
+    def step(phase, value):
+        calls.append(phase)
+        assert upstream.phase == phase
+        if phase == failed_phase:
+            raise failure
+        return value
+
+    monkeypatch.setattr(
+        transport.socket,
+        "getaddrinfo",
+        lambda *a, **kw: step("dns_resolve", [(2, 1, 6, "", ("1.1.1.1", 443))]),
+    )
+    monkeypatch.setattr(transport.socket, "socket", lambda *a: step("tcp_socket", raw))
+    raw.connect = lambda target: step("tcp_connect", raw.connected.append(target))
+    raw.getpeername = lambda: step("peer", ("1.1.1.1", 443))
+    context = types.SimpleNamespace(
+        verify_mode=ssl.CERT_REQUIRED,
+        check_hostname=True,
+        wrap_socket=lambda *a, **kw: step("tls_handshake", raw),
+    )
+    monkeypatch.setattr(transport.ssl, "create_default_context", lambda: step("tls_context", context))
+    with pytest.raises(PermissionError) as caught:
+        upstream.connect(transport.time.monotonic() + 2)
+    assert caught.value is failure and caught.value.errno == 13
+    assert upstream.phase == failed_phase and calls.count(failed_phase) == 1
+    assert upstream.resolved_peers == (() if failed_phase == "dns_resolve" else ("1.1.1.1",))
+    assert upstream.selected_peer == (None if failed_phase == "dns_resolve" else "1.1.1.1")
+    if failed_phase not in {"dns_resolve", "tcp_socket"}:
+        assert raw.closed
+
+
+def test_dns_facts_are_original_single_lookup_and_reset_on_new_attempt(
+    monkeypatch, clean_upstream_environment
+):
+    upstream = transport.PinnedUpstream(policy)
+    answers = ["2606:4700:4700::1111", "8.8.8.8", "1.1.1.1", "8.8.8.8"]
+    dns_calls = []
+    peer_calls = []
+
+    def resolve(*args, **kwargs):
+        dns_calls.append((args, kwargs))
+        return [(2, 1, 6, "", (peer, 443)) for peer in answers]
+
+    def validate(host, peers):
+        peer_calls.append((host, peers))
+        return policy.public_peers(host, peers)
+
+    upstream.policy = types.SimpleNamespace(public_peers=validate, PolicyError=policy.PolicyError)
+    monkeypatch.setattr(transport.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(transport.socket, "socket", lambda *a: Channel())
+    context = types.SimpleNamespace(
+        verify_mode=ssl.CERT_REQUIRED,
+        check_hostname=True,
+        wrap_socket=lambda channel, **kw: channel,
+    )
+    monkeypatch.setattr(transport.ssl, "create_default_context", lambda: context)
+    upstream.connect(transport.time.monotonic() + 2)
+    assert len(dns_calls) == len(peer_calls) == 1
+    assert peer_calls == [(transport.HOST, answers)]
+    assert upstream.resolved_peers == ("1.1.1.1", "2606:4700:4700::1111", "8.8.8.8")
+    assert upstream.selected_peer == "1.1.1.1"
+    monkeypatch.setenv("HTTPS_PROXY", "public-synthetic-proxy")
+    with pytest.raises(transport.TransportError) as caught:
+        upstream.connect(transport.time.monotonic() + 2)
+    assert caught.value.code == "upstream_environment_rejected"
+    assert len(dns_calls) == len(peer_calls) == 1
+    assert upstream.phase == "environment"
+    assert upstream.resolved_peers == () and upstream.selected_peer is None
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or os.environ.get("PRISM_TEST_KERNEL_DENIALS") != "1",
+    reason="requires reviewed Mac sandbox runner; flag alone does not prove denial",
+)
+def test_native_denied_socket_records_actual_boundary(monkeypatch, clean_upstream_environment):
+    """Only DNS is a fixture; the socket syscall must be denied by the kernel."""
+    upstream = transport.PinnedUpstream(policy)
+    native_socket = socket.socket
+    attempted = []
+
+    class NativeSocket(native_socket):
+        def __init__(self, *args):
+            attempted.append(("tcp_socket", upstream.phase))
+            super().__init__(*args)
+
+        def connect(self, address):
+            attempted.append(("tcp_connect", upstream.phase))
+            return super().connect(address)
+
+    monkeypatch.setattr(transport.socket, "getaddrinfo", lambda *a, **kw: [(2, 1, 6, "", ("1.1.1.1", 443))])
+    monkeypatch.setattr(transport.socket, "socket", NativeSocket)
+    monkeypatch.setattr(
+        transport.ssl, "create_default_context", lambda: pytest.fail("kernel must deny before TLS")
+    )
+    with pytest.raises(PermissionError) as caught:
+        upstream.connect(transport.time.monotonic() + 2)
+    assert caught.value.errno in {1, 13}
+    assert attempted[-1] == (upstream.phase, upstream.phase)
+    assert upstream.phase in {"tcp_socket", "tcp_connect"}
+    assert len(attempted) <= 2 and len(set(attempted)) == len(attempted)
+    assert upstream.resolved_peers == ("1.1.1.1",) and upstream.selected_peer == "1.1.1.1"
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or os.environ.get("PRISM_TEST_KERNEL_DENIALS") != "1",
+    reason="requires reviewed public-file denial fixture, not credential access",
+)
+def test_native_denied_public_file_records_tls_context_phase(monkeypatch, clean_upstream_environment):
+    """Earlier stages are fake; actual file denial proves attribution, not TLS."""
+    path = Path(os.environ["PRISM_TEST_DENIED_PUBLIC_FILE"])
+    assert path.is_absolute() and path.name == "denied-public-fixture.txt"
+    upstream = transport.PinnedUpstream(policy)
+    raw = Channel()
+    attempted = []
+
+    def denied_context():
+        attempted.append(upstream.phase)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        os.close(descriptor)
+        pytest.fail("reviewed sandbox must actually deny the public fixture")
+
+    monkeypatch.setattr(transport.socket, "getaddrinfo", lambda *a, **kw: [(2, 1, 6, "", ("1.1.1.1", 443))])
+    monkeypatch.setattr(transport.socket, "socket", lambda *a: raw)
+    monkeypatch.setattr(transport.ssl, "create_default_context", denied_context)
+    with pytest.raises(PermissionError) as caught:
+        upstream.connect(transport.time.monotonic() + 2)
+    assert caught.value.errno in {1, 13}
+    assert upstream.phase == "tls_context" and attempted == ["tls_context"]
+    assert raw.closed
 
 
 @pytest.mark.parametrize(

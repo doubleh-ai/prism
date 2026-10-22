@@ -228,9 +228,9 @@ MARKET_BOOT_CHECKS = {
 }
 MARKET_UNIT_PROPERTIES = "MainPID,ExecMainPID,InvocationID,ActiveState,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "a5dbd65258475ca4107d2f3ce98b814057f231633622b5b1caaf663d9c76e2af",
+    "live_integration_validation.py": "160d7b7fa07badda4ce200d90beeb35c22eeaafe5b1fed9be783af78b8ed7f22",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
-    "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
+    "live_integration_transport.py": "cb84a80b2a5a14300fdb74deef06e06df96441a66ea11b72f29c9d0884ea9f55",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
     "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
     "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
@@ -287,6 +287,159 @@ LIVE_ERRORS = {
     "operator_stop",
     "network_gate_rejected",
 }
+BROKER_DIAGNOSTIC_STAGES = frozenset(
+    {
+        "filesystem",
+        "preflight_finish_receive",
+        "upstream_peer",
+        "memory",
+        "upstream_dns_resolve",
+        "launch_validate",
+        "startup",
+        "upstream_connected",
+        "identity",
+        "upstream_dns_validate",
+        "upstream_tls_handshake",
+        "upstream_tcp_connect",
+        "upstream_environment",
+        "preflight_allow_receive",
+        "source",
+        "permit",
+        "broker_construct",
+        "launch_receive",
+        "hello",
+        "upstream_not_started",
+        "preflight_send",
+        "upstream_tls_context",
+        "upstream_preflight",
+        "credential_connect",
+        "preflight_canary",
+        "upstream_tcp_socket",
+    }
+)
+BROKER_DIAGNOSTIC_ERROR_CLASSES = frozenset(
+    {
+        "tls_certificate_error",
+        "dns_error",
+        "unexpected_error",
+        "permission_denied",
+        "os_error",
+        "bootstrap_error",
+        "transport_error",
+        "tls_error",
+    }
+)
+BROKER_DIAGNOSTIC_TRANSPORT_CODES = frozenset(
+    {
+        "broker_key_rejected",
+        "broker_not_authorized",
+        "binding_rejected",
+        "http_headers_rejected",
+        "response_limit",
+        "unix_socket_rejected",
+        "broker_cleanup_failed",
+        "synthetic_auth_required",
+        "bridge_deadline",
+        "total_request_limit",
+        "dedicated_uid_required",
+        "root_gatekeeper_unavailable",
+        "root_locked_source_required",
+        "http_deadline",
+        "broker_key_unavailable",
+        "broker_deadline",
+        "loopback_request_rejected",
+        "bridge_cleanup_failed",
+        "root_allow_rejected",
+        "http_framing_rejected",
+        "unix_peer_required",
+        "http_request_rejected",
+        "provider_header_rejected",
+        "unix_peer_rejected",
+        "bridge_response_limit",
+        "fixed_workdir_required",
+        "approved_source_required",
+        "policy_source_rejected",
+        "transport_error",
+        "upstream_peer_rejected",
+        "upstream_deadline",
+        "upstream_dns_rejected",
+        "upstream_tls_rejected",
+        "unix_directory_rejected",
+        "upstream_response_rejected",
+        "provider_request_rejected",
+        "private_record_rejected",
+        "broker_authorization_rejected",
+        "upstream_environment_rejected",
+        "json_rejected",
+        "http_body_rejected",
+        "kernel_identity_rejected",
+        "provider_tools_rejected",
+    }
+)
+BROKER_DIAGNOSTIC_BOOTSTRAP_CODES = frozenset(
+    {
+        "broker_identity_rejected",
+        "provider_peer_rejected",
+        "ipc_rejected",
+        "network_canary_rejected",
+        "network_permit_rejected",
+        "broker_memory_unsealed",
+        "source_rejected",
+        "broker_filesystem_rejected",
+    }
+)
+
+
+def valid_broker_diagnostic_fields(value):
+    if (
+        type(value) is not dict
+        or set(value)
+        != {
+            "stage",
+            "error_class",
+            "error_code",
+            "errno",
+            "tls_verify_code",
+            "checked_at",
+            "dns_peer_count",
+            "dns_snapshot_matches_parent",
+            "selected_peer_in_parent",
+        }
+        or type(value["stage"]) is not str
+        or value["stage"] not in BROKER_DIAGNOSTIC_STAGES
+        or type(value["error_class"]) is not str
+        or value["error_class"] not in BROKER_DIAGNOSTIC_ERROR_CLASSES
+        or any(
+            value[key] is not None and (type(value[key]) is not int or not 0 <= value[key] <= 4095)
+            for key in ("errno", "tls_verify_code")
+        )
+        or type(value["checked_at"]) is not int
+        or value["checked_at"] <= 0
+        or type(value["dns_peer_count"]) is not int
+        or not 0 <= value["dns_peer_count"] <= 32
+        or any(
+            value[key] is not None and type(value[key]) is not bool
+            for key in ("dns_snapshot_matches_parent", "selected_peer_in_parent")
+        )
+    ):
+        return False
+    if (
+        value["dns_peer_count"] == 0
+        and (value["dns_snapshot_matches_parent"] is not None or value["selected_peer_in_parent"] is not None)
+        or value["dns_peer_count"] > 0
+        and type(value["dns_snapshot_matches_parent"]) is not bool
+        or value["tls_verify_code"] is not None
+        and value["error_class"] != "tls_certificate_error"
+    ):
+        return False
+    code = value["error_code"]
+    if value["error_class"] == "transport_error":
+        return type(code) is str and code in BROKER_DIAGNOSTIC_TRANSPORT_CODES
+    if value["error_class"] == "bootstrap_error":
+        return type(code) is str and code in BROKER_DIAGNOSTIC_BOOTSTRAP_CODES
+    return code is None
+
+
 LIVE_SOURCE_PINS = {
     name.removeprefix("live_integration_").removesuffix(".py"): value
     for name, value in LIVE_INTEGRATION_HELPERS.items()
@@ -2816,6 +2969,10 @@ class RemoteRelease:
             module.SOURCE_PINS != LIVE_SOURCE_PINS
             or module.SAFE_ERRORS != LIVE_ERRORS
             or module.RESOLVE_CODE != LIVE_RESOLVE_CODE
+            or module.BROKER_DIAGNOSTIC_STAGES != BROKER_DIAGNOSTIC_STAGES
+            or module.BROKER_DIAGNOSTIC_TRANSPORT_CODES != BROKER_DIAGNOSTIC_TRANSPORT_CODES
+            or module.BROKER_DIAGNOSTIC_ERROR_CLASSES != BROKER_DIAGNOSTIC_ERROR_CLASSES
+            or module.BROKER_DIAGNOSTIC_BOOTSTRAP_CODES != BROKER_DIAGNOSTIC_BOOTSTRAP_CODES
             or LIVE_INTEGRATION_HELPERS["cgroup_network_gate.py"] != module.NETWORK_GATE_SHA256
             or LIVE_INTEGRATION_HELPERS["systemd_unit_reference.py"] != module.UNIT_REFERENCE_SHA256
             or module.UNIT_REFERENCE_ERRORS != UNIT_REFERENCE_ERRORS
@@ -3190,6 +3347,9 @@ class RemoteRelease:
             "blocked_provider_header_names",
             "official_source_count",
             "broker_summary_sha256",
+            "broker_failure_diagnostic",
+            "broker_failure_diagnostic_sha256",
+            "broker_failure_diagnostic_rejected",
             "requests",
             "preflight_only",
             "network_gate_verified",
@@ -3236,6 +3396,25 @@ class RemoteRelease:
             "key_acquisition_attempted",
         }
         if not valid_network_cleanup_record(value):
+            raise ReleaseError("live_safe_record_rejected")
+        diagnostic = value.get("broker_failure_diagnostic")
+        diagnostic_sha = value.get("broker_failure_diagnostic_sha256")
+        rejected = value.get("broker_failure_diagnostic_rejected")
+        if (
+            type(rejected) is not bool
+            or (diagnostic is None) != (diagnostic_sha is None)
+            or diagnostic is not None
+            and (
+                not valid_broker_diagnostic_fields(diagnostic)
+                or type(value["started_at"]) is not int
+                or type(value["finished_at"]) is not int
+                or type(diagnostic_sha) is not str
+                or not DIGEST.fullmatch(diagnostic_sha)
+                or not value["started_at"] <= diagnostic["checked_at"] <= value["finished_at"]
+            )
+            or value["passed"]
+            and (diagnostic is not None or rejected)
+        ):
             raise ReleaseError("live_safe_record_rejected")
         requests = value.get("requests")
         errno = value.get("broker_negative_errno")

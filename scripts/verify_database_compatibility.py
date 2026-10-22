@@ -238,7 +238,7 @@ def export_source(checkout, commit, target):
     }
 
 
-def sandbox_policy(area, image, port, operator_home, workspace):
+def sandbox_policy(area, image, port, operator_home, workspace, *, source_mount):
     def q(value):
         return json.dumps(str(value))
 
@@ -267,6 +267,7 @@ def sandbox_policy(area, image, port, operator_home, workspace):
         + " ".join("(subpath " + q(path) + ")" for path in denied)
         + f" (literal {q(operator_home / '.claude.json')}))\n"
         + outside_reads(operator_home / "Backups")
+        + outside_reads(source_mount)
         + outside_reads(image)
     )
 
@@ -401,7 +402,7 @@ def stop(process):
         os.killpg(process.pid, signal.SIGKILL)
 
 
-def run_phase(label, area, image, app, configuration, workspace, identities):
+def run_phase(label, area, image, app, configuration, workspace, identities, *, source_mount):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -414,7 +415,7 @@ def run_phase(label, area, image, app, configuration, workspace, identities):
         "source_write_probe": str(app / "server" / ("recovery.py" if label == "recovery" else "main.py")),
     }
     policy = area / (label + ".sb")
-    policy.write_text(sandbox_policy(area, image, port, Path.home(), workspace))
+    policy.write_text(sandbox_policy(area, image, port, Path.home(), workspace, source_mount=source_mount))
     process, checks, diagnostic = None, {}, {}
     expected_module = digest(app / "server" / ("recovery.py" if label == "recovery" else "main.py"))
     try:
@@ -798,7 +799,14 @@ def main():
         ):
             result["stage"] = label
             stages[label] = run_phase(
-                label, area, mount, app, configuration, args.new_source.resolve().parent, identities
+                label,
+                area,
+                mount,
+                app,
+                configuration,
+                args.new_source.resolve().parent,
+                identities,
+                source_mount=source_mount,
             )
             result["phase_checkpoints"][label] = seal_stopped_database(database)
             stages[label]["database_checkpointed"] = all(result["phase_checkpoints"][label].values())

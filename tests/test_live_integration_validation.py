@@ -617,6 +617,146 @@ def test_unsafe_exception_text_is_never_recorded_and_no_key_called(validation, m
     assert not validation.test_calls
 
 
+def private_broker_diagnostic(validation):
+    return {
+        "schema": 1,
+        "kind": "broker_preflight_failure",
+        "binding": {
+            "candidate": validation.request["candidate"],
+            "nonce": validation.nonce,
+            "broker_uid": os.getuid(),
+            "root_pid": os.getpid(),
+            "issued_at": validation.issued,
+            "transport_sha256": supervisor.SOURCE_PINS["transport"],
+            "bootstrap_sha256": supervisor.BROKER_BOOTSTRAP_SHA256,
+            "network_gate_sha256": supervisor.NETWORK_GATE_SHA256,
+            "preflight_only": validation.preflight_only,
+            "broker_pid": validation.pids["broker"],
+        },
+        "diagnostic": {
+            "stage": "upstream_tcp_connect",
+            "error_class": "permission_denied",
+            "error_code": None,
+            "errno": 1,
+            "tls_verify_code": None,
+            "checked_at": validation.issued,
+            "dns_peer_count": 1,
+            "dns_snapshot_matches_parent": False,
+            "selected_peer_in_parent": False,
+        },
+    }
+
+
+def write_private_broker_diagnostic(validation, value):
+    validation.workspace_created = True
+    validation.accounts["broker"] = account("prism-integration-broker", os.getuid())
+    target = validation.work / "broker/preflight-failure.json"
+    target.parent.mkdir(parents=True, mode=0o700)
+    target.write_bytes(supervisor.encoded(value))
+    target.chmod(0o600)
+    return target
+
+
+def test_root_collects_only_typed_private_failure_without_authorizing_or_changing_cleanup(validation):
+    value = private_broker_diagnostic(validation)
+    target = write_private_broker_diagnostic(validation, value)
+    validation.report.update(passed=False, error_class="ipc_rejected", units_stopped=False)
+    validation.key_provider = lambda: pytest.fail("Diagnostics must never acquire a key")
+    validation.capture_broker_diagnostic()
+    assert validation.report["broker_failure_diagnostic"] == value["diagnostic"]
+    assert (
+        validation.report["broker_failure_diagnostic_sha256"]
+        == hashlib.sha256(target.read_bytes()).hexdigest()
+    )
+    assert validation.report["broker_failure_diagnostic_rejected"] is False
+    assert validation.report["error_class"] == "ipc_rejected" and not validation.report["passed"]
+    assert validation.report["units_stopped"] is False and not validation.test_calls
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "mode",
+        "hardlink",
+        "symlink",
+        "raw",
+        "binding",
+        "binding_bool",
+        "schema_bool",
+        "errno_bool",
+        "errno_large",
+        "dns_count_bool",
+        "dns_count_large",
+        "dns_raw",
+        "dns_inconsistent",
+        "unknown_stage",
+        "unknown_code",
+        "extra_field",
+        "stale",
+        "future",
+        "certificate_code",
+    ],
+)
+def test_untrusted_diagnostic_is_rejected_without_overwriting_original_failure(validation, change):
+    value = private_broker_diagnostic(validation)
+    if change == "raw":
+        value["raw_exception"] = "PUBLIC_DIAGNOSTIC_SECRET"
+    elif change == "binding":
+        value["binding"]["nonce"] = "f" * 32
+    elif change == "binding_bool":
+        value["binding"]["preflight_only"] = 0
+    elif change == "schema_bool":
+        value["schema"] = True
+    elif change == "errno_bool":
+        value["diagnostic"]["errno"] = True
+    elif change == "errno_large":
+        value["diagnostic"]["errno"] = 4096
+    elif change == "dns_count_bool":
+        value["diagnostic"]["dns_peer_count"] = True
+    elif change == "dns_count_large":
+        value["diagnostic"]["dns_peer_count"] = 33
+    elif change == "dns_raw":
+        value["diagnostic"]["selected_peer_in_parent"] = "1.2.3.4"
+    elif change == "dns_inconsistent":
+        value["diagnostic"]["dns_peer_count"] = 0
+    elif change == "unknown_stage":
+        value["diagnostic"]["stage"] = "PUBLIC_DIAGNOSTIC_SECRET"
+    elif change == "unknown_code":
+        value["diagnostic"].update(error_class="transport_error", error_code="PUBLIC_DIAGNOSTIC_SECRET")
+    elif change == "extra_field":
+        value["diagnostic"]["raw_exception"] = "PUBLIC_DIAGNOSTIC_SECRET"
+    elif change == "stale":
+        value["diagnostic"]["checked_at"] -= 1
+    elif change == "future":
+        value["diagnostic"]["checked_at"] += 1000
+    elif change == "certificate_code":
+        value["diagnostic"]["tls_verify_code"] = 18
+    target = write_private_broker_diagnostic(validation, value)
+    if change == "mode":
+        target.chmod(0o644)
+    elif change == "hardlink":
+        os.link(target, target.with_name("diagnostic-second-link"))
+    elif change == "symlink":
+        witness = target.with_name("public-actual-file")
+        target.rename(witness)
+        target.symlink_to(witness)
+    validation.report.update(passed=False, error_class="ipc_rejected", units_stopped=False)
+    validation.capture_broker_diagnostic()
+    assert validation.report["broker_failure_diagnostic"] is None
+    assert validation.report["broker_failure_diagnostic_sha256"] is None
+    assert validation.report["broker_failure_diagnostic_rejected"] is True
+    assert validation.report["error_class"] == "ipc_rejected" and validation.report["units_stopped"] is False
+    assert "PUBLIC_DIAGNOSTIC_SECRET" not in json.dumps(validation.report)
+
+
+def test_absent_diagnostic_remains_unknown_not_rejected_or_success(validation):
+    validation.workspace_created = True
+    validation.capture_broker_diagnostic()
+    assert validation.report["broker_failure_diagnostic"] is None
+    assert validation.report["broker_failure_diagnostic_rejected"] is False
+    assert validation.report["passed"] is False and validation.test_calls == []
+
+
 def test_private_run_mount_label_alone_is_not_evidence(tmp_path, monkeypatch):
     process = tmp_path / "proc/321"
     process.mkdir(parents=True)

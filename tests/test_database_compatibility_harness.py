@@ -2,7 +2,11 @@
 
 import ast
 import importlib.util
+import json
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -139,7 +143,12 @@ def test_process_environment_has_no_model_credentials_or_global_recovery(tmp_pat
 def test_bootstrap_and_policy_keep_live_tasks_and_external_writes_disabled(tmp_path):
     ast.parse(harness.BOOTSTRAP)
     text = harness.sandbox_policy(
-        tmp_path / "acceptance", tmp_path, 12345, Path("/operator"), Path("/workspace")
+        tmp_path / "acceptance",
+        tmp_path,
+        12345,
+        Path("/operator"),
+        Path("/workspace"),
+        source_mount=tmp_path / "source-mounted",
     )
     assert "(deny network*)" in text
     assert text.count("localhost:12345") == 2
@@ -165,6 +174,7 @@ def test_actual_macos_policy_parser_accepts_synthetic_only_policy(tmp_path):
             12345,
             Path("/synthetic-operator"),
             Path("/synthetic-workspace"),
+            source_mount=tmp_path / "source-mounted",
         )
     )
     result = subprocess.run(
@@ -404,3 +414,97 @@ def test_failed_execution_writes_receipt_and_detaches_before_nonzero_exit(tmp_pa
     summary = json.loads(capsys.readouterr().out)
     assert summary["receipt"] == str(reports[0]) and summary["mac_compatibility_verified"] is False
     assert "synthetic-not-a-credential" not in reports[0].read_text()
+
+
+def test_source_mount_is_required_and_forwarded_from_the_trusted_parent():
+    with pytest.raises(TypeError, match="source_mount"):
+        harness.sandbox_policy(Path("/area"), Path("/image"), 12345, Path("/operator"), Path("/workspace"))
+    parsed = ast.parse(PATH.read_text())
+    calls = [node for node in ast.walk(parsed) if isinstance(node, ast.Call)]
+    for name in ("run_phase", "sandbox_policy"):
+        trusted_calls = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == name]
+        assert trusted_calls
+        assert all(
+            any(
+                keyword.arg == "source_mount"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "source_mount"
+                for keyword in node.keywords
+            )
+            for node in trusted_calls
+        )
+    assert (
+        "'source_backup_reads_denied':blocked(lambda:os.open(c['backup_probe'],os.O_RDONLY))"
+        in harness.BOOTSTRAP
+    )
+    assert "if not all(checks.values()):raise RuntimeError('isolation_probe_failed')" in harness.BOOTSTRAP
+
+
+@pytest.mark.skipif(not Path("/usr/bin/sandbox-exec").is_file(), reason="Native macOS sandbox required")
+def test_native_ops_output_root_denies_whole_source_mount_and_preserves_acceptance_reads(tmp_path):
+    """All files are synthetic; no Keychain, encrypted image or real backup is used."""
+    operator = tmp_path / "synthetic-operator"
+    output = operator / "Library/Application Support/Prism-Release/compat-executor-synthetic"
+    run = output / "fresh-run"
+    source_mount, mount = run / "source-mounted", run / "acceptance-mounted"
+    area, workspace = mount / "acceptance", operator / "workspace"
+    denied = {
+        "source_database_denied": source_mount / "recovery-databases/synthetic-db",
+        "source_archive_denied": source_mount / "production.tar.gz",
+        "source_extra_sibling_denied": source_mount / "other/source-canary.txt",
+        "original_backups_denied": operator / "Backups/Prism/synthetic-canary.txt",
+        "workspace_denied": workspace / "server/main.py",
+    }
+    allowed = {
+        "acceptance_database_readable": area / "data/chat.db",
+        "new_source_readable": area / "new-app/server/main.py",
+        "recovery_source_readable": area / "recovery-app/server/recovery.py",
+    }
+    for path in (*denied.values(), *allowed.values()):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text("synthetic-canary-only")
+    assert not source_mount.is_relative_to(operator / "Backups")
+    policy = area / "synthetic.sb"
+    policy.write_text(
+        harness.sandbox_policy(area, mount, 12345, operator, workspace, source_mount=source_mount)
+    )
+    child = r"""
+import errno,json,os,sys
+from pathlib import Path
+c=json.loads(sys.stdin.readline())
+def denied(path):
+ try:
+  fd=os.open(path,os.O_RDONLY)
+ except OSError as error:
+  return error.errno in (errno.EPERM,errno.EACCES)
+ else:
+  os.close(fd)
+  return False
+checks={name:denied(path) for name,path in c['denied'].items()}
+checks.update({name:Path(path).read_text()=='synthetic-canary-only' for name,path in c['allowed'].items()})
+print(json.dumps(checks,sort_keys=True))
+raise SystemExit(0 if all(checks.values()) else 3)
+"""
+    result = subprocess.run(
+        ["/usr/bin/sandbox-exec", "-f", str(policy), sys.executable, "-I", "-B", "-c", child],
+        input=json.dumps(
+            {
+                "denied": {k: str(v) for k, v in denied.items()},
+                "allowed": {k: str(v) for k, v in allowed.items()},
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=15,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(operator), "LANG": "en_US.UTF-8"},
+    )
+    if result.returncode == 71 and result.stderr == b"sandbox-exec: sandbox_apply: Operation not permitted\n":
+        if os.environ.get("PRISM_REQUIRE_NATIVE_SANDBOX") == "1":
+            pytest.fail("native_sandbox_application_denied_by_outer_sandbox")
+        pytest.skip("Outer sandbox prevents native policy application; no native acceptance claimed")
+    assert result.returncode == 0, {
+        "native_process_succeeded": result.returncode == 0,
+        "stderr_empty": result.stderr == b"",
+    }
+    checks = json.loads(result.stdout)
+    assert set(checks) == set(denied) | set(allowed)
+    assert all(value is True for value in checks.values())
