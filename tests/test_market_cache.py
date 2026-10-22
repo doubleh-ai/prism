@@ -55,12 +55,11 @@ def test_value_types_preserved():
     assert c.get("nest")[0] == {"a": {"b": 1}}
 
 
-def test_set_cleans_up_expired_rows():
-    """set() must drop expired rows before writing, so the table
-    doesn't grow unbounded under repeated writes of fresh + expired keys."""
+def test_set_cleans_up_rows_beyond_stale_retention():
+    """Cleanup is bounded without erasing the stale-fallback window."""
     from server.database import get_db
 
-    c = MarketCache()
+    c = MarketCache(max_stale_seconds=0)
     # Seed: one fresh, one already-expired
     c.set("fresh", {"v": 1}, ttl=60)
     c.set("old", {"v": 2}, ttl=1)

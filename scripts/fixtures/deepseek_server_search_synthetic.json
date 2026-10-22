@@ -1,0 +1,32 @@
+{
+  "authenticity": "synthetic_official_schema_not_captured_deepseek",
+  "scope": "URL and title metadata only; no fetched article or publication evidence",
+  "sources": [
+    "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool"
+  ],
+  "call": {
+    "type": "server_tool_use",
+    "id": "srvtoolu_synthetic_one",
+    "name": "web_search",
+    "input": {"query": "public synthetic disclosure"}
+  },
+  "result": {
+    "type": "web_search_tool_result",
+    "tool_use_id": "srvtoolu_synthetic_one",
+    "content": [
+      {
+        "type": "web_search_result",
+        "url": "https://example.test/synthetic-disclosure",
+        "title": "Synthetic disclosure fixture",
+        "encrypted_content": "SYNTHETIC_OPAQUE_NOT_ARTICLE_CONTENT",
+        "page_age": "October 20, 2026"
+      }
+    ]
+  },
+  "http_200_error_result": {
+    "type": "web_search_tool_result",
+    "tool_use_id": "srvtoolu_synthetic_one",
+    "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}
+  }
+}

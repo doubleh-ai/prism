@@ -112,7 +112,10 @@ async def login(request: Request):
         raise HTTPException(422, validation_error_message(e))
     username = req.username.strip()
     password = req.password
-    if not check_rate_limit(f"login:{request.client.host}", RATE_LOGIN_PER_MIN, 60):
+    # Unix-domain ASGI transports have no remote address. Keep one shared,
+    # bounded bucket for that transport; never trust a forwarded address header.
+    client_host = request.client.host if request.client is not None else "local-unix-socket"
+    if not check_rate_limit(f"login:{client_host}", RATE_LOGIN_PER_MIN, 60):
         Event.auth(username, "rate_limited").warn()
         record_activity(
             username=username,

@@ -97,32 +97,26 @@ class TestHTMLSanitizer:
 
 # ── Server-side: filename XSS in 404 page ──
 class TestServerXSS:
-    def test_filename_escaped_in_404(self):
-        """The 404 page must escape the filename — no reflected XSS."""
+    async def test_filename_escaped_in_404(self, client, auth_cookies):
+        """Missing filenames are never interpolated into application HTML."""
+        from server.database import get_db
 
-        # Simulate a malicious filename — quoted HTML would otherwise inject markup
-        _evil = "<script>alert(1)</script>.html"
-        # We don't have a live app here; just assert the constant path is escaped
-        # by reading main.py and confirming html.escape is used in the 404 branch.
-        main_src = Path(__file__).resolve().parent.parent / "server" / "main.py"
-        text = main_src.read_text(encoding="utf-8")
-        # Must have a html.escape call in the report 404 block
-        assert "html.escape(filename)" in text
-        # And the literal string '<pre>{filename}</pre>' (unescaped) must NOT exist
-        assert "<pre>{filename}</pre>" not in text
+        with get_db() as db:
+            db.execute("INSERT INTO conversations(id,username) VALUES('xss-conv','testuser')")
+        response = await client.get(
+            "/api/reports/xss-conv/%3Cscript%3Eevil%3C%2Fscript%3E.html", cookies=auth_cookies
+        )
+        assert response.status_code in {400, 404}
+        assert "<script>" not in response.text
 
-    def test_path_traversal_uses_resolve(self):
-        """api_view_report must use Path.resolve() + relative_to() check."""
-        main_src = Path(__file__).resolve().parent.parent / "server" / "main.py"
-        text = main_src.read_text(encoding="utf-8")
-        # The new traversal defense should resolve the canonical path and
-        # verify it stays within the reports dir. We accept either the
-        # canonical `file_path.resolve()` form or the inline
-        # `(reports_dir / filename).resolve()` form.
-        assert ".resolve()" in text
-        assert "file_path.relative_to(reports_dir)" in text
-        # And the substring `..` check must still be present as a first-line defense
-        assert '".." in filename' in text
+    async def test_path_traversal_uses_resolve(self, client, auth_cookies):
+        """Traversal cannot retrieve an unregistered file outside owned storage."""
+        from server.database import get_db
+
+        with get_db() as db:
+            db.execute("INSERT INTO conversations(id,username) VALUES('path-conv','testuser')")
+        response = await client.get("/api/reports/path-conv/%2E%2E%2Fsecret.html", cookies=auth_cookies)
+        assert response.status_code in {400, 404}
 
 
 # ── Security headers middleware ──
@@ -152,11 +146,9 @@ class TestIframeSandbox:
         m = re.search(r'<iframe[^>]*id="reportFrame"[^>]*>', text)
         assert m is not None, "reportFrame iframe not found"
         attrs = m.group(0)
-        # allow-scripts is needed for skill-generated HTML reports to render
-        # allow-same-origin is needed for auth cookies (reports require login)
-        # Defense-in-depth: only /api/reports/* paths are exempt from X-Frame-Options
-        assert "allow-scripts" in attrs
-        assert "allow-same-origin" in attrs
+        # Initial authenticated loading does not require granting the generated
+        # document the application's origin. Response CSP also covers new windows.
+        assert "allow-same-origin" not in attrs
         assert "sandbox" in attrs
 
 

@@ -5,8 +5,12 @@ Object.assign(App, {
   _activeVibePlan: null,
   _vibePollTimers: {},
   _vibeEngine: null,
+  _vibeExecutionNotice: 'Vibe 新研究与追问暂不可用：隔离执行环境尚待验收。可查看本账号已保存的历史。',
 
   _initVibe: function() {
+    document.querySelectorAll('#sidebarVibe textarea, #sidebarVibe select, #sidebarVibe .analysis-run-btn').forEach(function(control) { control.disabled = true; control.title = App._vibeExecutionNotice; });
+    var runButton = document.querySelector('#sidebarVibe .analysis-run-btn');
+    if (runButton) runButton.textContent = '新研究暂不可用';
     var shell = document.getElementById('appShell');
     if (shell) shell.classList.remove('collapsed');
     this._loadVibePlans();
@@ -21,31 +25,17 @@ Object.assign(App, {
   },
 
   _loadVibeEngine: async function() {
-    var response = await this.api('/api/vibe/engine');
-    if (response.ok) this._vibeEngine = await response.json();
+    try { var response = await this.api('/api/vibe/engine');
+      if (response.ok) this._vibeEngine = await response.json();
+      else this._vibeEngine = {status:'unavailable'};
+    } catch (error) { this._vibeEngine = {status:'unavailable'}; }
     if (!this._activeVibePlanId) this._renderVibeEmpty();
   },
 
   _renderVibeEmpty: function() {
     var inner = document.getElementById('vibePanelInner');
     if (!inner) return;
-    var engine = this._vibeEngine || {};
-    var meta = engine.engine || {name: 'HKUDS/Vibe-Trading', version: '0.1.11', revision: 'd456025'};
-    var online = engine.status === 'healthy';
-    inner.innerHTML = '<div class="vibe-home">' +
-      '<div class="vibe-home-head">' +
-        '<span>OFFICIAL RESEARCH ENGINE</span>' +
-        '<h2>从一句市场直觉，走到可核验的完整研究</h2>' +
-        '<p>研究会先澄清范围，再调用行情、财务、新闻与公开证据工具。最终结论会保留反方观点、失效条件和数据缺口。</p>' +
-        '<div class="vibe-engine-line"><i class="' + (online ? 'online' : '') + '"></i><b>' + esc(meta.name || 'HKUDS/Vibe-Trading') + '</b><span>v' + esc(meta.version || '') + ' · ' + esc(meta.revision || '') + '</span><em>' + (online ? '引擎在线' : (engine.status === 'unavailable' ? '引擎暂不可用' : '正在检查')) + '</em></div>' +
-      '</div>' +
-      '<div class="vibe-home-grid">' +
-        '<button onclick="App._vibeUseExample(\'存储产业帮我分析一下：先区分存储芯片、企业数据存储和储能，再找 A 股真正的卡点与证据。\')"><b>存储产业</b><span>先消歧，再比较三条产业链</span></button>' +
-        '<button onclick="App._vibeUseExample(\'AI 数据中心液冷供应链，上游冷板、泵、温控设备谁被忽略？请核验订单和竞争格局。\')"><b>AI 液冷</b><span>从需求到瓶颈逐层验证</span></button>' +
-        '<button onclick="App._vibeUseExample(\'人形机器人执行器与灵巧手有哪些尚未被充分定价的上游卡点？请同时给出反方证据。\')"><b>人形机器人</b><span>候选、反证与失效条件</span></button>' +
-      '</div>' +
-      '<div class="vibe-depth-notes"><span><b>聚焦研究</b> 更快回答一个关键问题</span><span><b>深度研究</b> 多工具交叉核验</span><span><b>多 Agent</b> 专业角色并行审查</span></div>' +
-    '</div>';
+    inner.innerHTML = '<div class="vibe-home"><div class="vibe-home-head"><span>VIBE HISTORY</span><h2>查看已保存的主题研究</h2><p>'+esc(this._vibeExecutionNotice)+'</p><div class="research-notice">历史中的研究状态是最后一次保存的状态；本版不会连接旧引擎补取内容或自动恢复任务，也不代表旧任务已停止。</div></div></div>';
   },
 
   _vibeUseExample: function(text) {
@@ -55,48 +45,24 @@ Object.assign(App, {
   },
 
   _runVibePlan: async function() {
-    var promptEl = document.getElementById('vibePrompt');
-    var prompt = promptEl ? promptEl.value.trim() : '';
-    if (!prompt) {
-      this._toast('先输入一个研究问题');
-      return;
-    }
-    var inner = document.getElementById('vibePanelInner');
-    if (inner) inner.innerHTML = '<div class="vibe-requesting"><i></i><b>正在创建正式研究任务</b><span>记录会立即出现在历史中</span></div>';
-    var payload = {
-      prompt: prompt,
-      market: (document.getElementById('vibeMarket') || {}).value || 'A股',
-      horizon: (document.getElementById('vibeHorizon') || {}).value || 'swing',
-      risk_level: (document.getElementById('vibeRisk') || {}).value || 'balanced',
-      research_depth: (document.getElementById('vibeDepth') || {}).value || 'deep',
-      agent: true
-    };
-    var response = await this.api('/api/vibe/plan', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) {
-      if (inner) inner.innerHTML = '<div class="market-empty-state">研究任务创建失败，请稍后重试</div>';
-      return;
-    }
-    var plan = (await response.json()).plan;
-    this._activeVibePlanId = plan.id;
-    this._upsertVibePlan(plan);
-    this._renderVibeHistory();
-    this._renderVibePlan(plan);
-    this._pollVibePlan(plan.id);
+    this._toast(this._vibeExecutionNotice);
   },
 
   _loadVibePlans: async function() {
+    var sequence = this._vibeListSeq = (this._vibeListSeq || 0) + 1;
     var side = document.getElementById('vibeHistoryList');
     if (side) side.innerHTML = '<div class="reports-lib-empty">加载中...</div>';
-    var response = await this.api('/api/vibe/plans?limit=30');
+    var response;
+    try { response = await this.api('/api/vibe/plans?limit=30'); }
+    catch (error) { response = {ok:false}; }
+    if (sequence !== this._vibeListSeq) return;
     if (!response.ok) {
       if (side) side.innerHTML = '<div class="reports-lib-empty">加载失败</div>';
       return;
     }
-    this._vibePlans = (await response.json()).plans || [];
+    var plans = (await response.json()).plans || [];
+    if (sequence !== this._vibeListSeq) return;
+    plans.forEach(this._upsertVibePlan.bind(this));
     this._renderVibeHistory();
     for (var i = 0; i < this._vibePlans.length; i++) {
       if (this._vibeIsActive(this._vibePlans[i])) this._pollVibePlan(this._vibePlans[i].id);
@@ -116,7 +82,7 @@ Object.assign(App, {
     side.innerHTML = this._vibePlans.map(function(plan) {
       var active = plan.id === self._activeVibePlanId ? ' active' : '';
       var running = self._vibeIsActive(plan);
-      var state = running ? (plan.status === 'queued' ? '排队' : '研究中') : ({failed:'失败', cancelled:'已停止', complete:'完成'})[plan.status] || '';
+      var state = running ? (plan.status === 'queued' ? '原记录：排队' : plan.status === 'cancelling' ? '停止待确认' : '原记录：研究中') : ({failed:'失败', cancelled:'已停止', interrupted:'已中断', complete:'完成'})[plan.status] || '状态未知';
       var sub = [plan.market, self._vibeHorizonLabel(plan.horizon), plan.depth_label].filter(Boolean).join(' · ');
       return '<div class="vibe-side-item' + active + (running ? ' running' : '') + '" onclick="App._openVibePlan(\'' + escAttr(plan.id) + '\')">' +
         '<div class="vibe-side-main"><b>' + esc(plan.title || plan.prompt || 'Vibe 研究') + '</b><span>' + esc(sub) + '</span></div>' +
@@ -127,17 +93,26 @@ Object.assign(App, {
   },
 
   _openVibePlan: async function(id) {
+    var sequence = this._vibeSelectionSeq = (this._vibeSelectionSeq || 0) + 1;
     this._activeVibePlanId = id;
+    this._activeVibePlan = null;
     this._closeMobileSidebar();
     var found = this._vibePlans.find(function(plan) { return plan.id === id; });
     if (found) this._renderVibePlan(found);
-    var response = await this.api('/api/vibe/plans/' + encodeURIComponent(id));
+    else { var inner = document.getElementById('vibePanelInner'); if (inner) inner.innerHTML = '<div class="market-empty-state">正在读取研究记录…</div>'; }
+    var response;
+    try { response = await this.api('/api/vibe/plans/' + encodeURIComponent(id)); }
+    catch (error) { response = {ok:false}; }
+    if (sequence !== this._vibeSelectionSeq || id !== this._activeVibePlanId) return;
     if (response.ok) {
       var plan = (await response.json()).plan;
+      if (sequence !== this._vibeSelectionSeq || id !== this._activeVibePlanId) return;
       this._upsertVibePlan(plan);
       this._renderVibePlan(plan);
       if (this._vibeIsActive(plan)) this._pollVibePlan(plan.id);
-    }
+    } else if (response.status !== 403 && response.status !== 404) {
+      this._toast('历史记录暂时无法读取，请稍后重试；不会自动连接旧引擎。');
+    } else { this._toast('研究记录不存在或无权限'); }
     this._renderVibeHistory();
   },
 
@@ -145,6 +120,7 @@ Object.assign(App, {
     if (!plan || !plan.id) return;
     for (var i = 0; i < this._vibePlans.length; i++) {
       if (this._vibePlans[i].id === plan.id) {
+        if (Number(this._vibePlans[i].updated_at) > Number(plan.updated_at)) return;
         this._vibePlans[i] = plan;
         return;
       }
@@ -153,42 +129,8 @@ Object.assign(App, {
   },
 
   _pollVibePlan: function(id) {
-    var self = this;
-    if (!id || this._vibePollTimers[id]) return;
-    var state = {tries:0, timer:null, busy:false, failures:0};
-    this._vibePollTimers[id] = state;
-    var schedule = function() {
-      if (self._vibePollTimers[id] !== state) return;
-      var delay = state.failures ? Math.min(30000, 2000 * Math.pow(2, Math.min(state.failures - 1, 4))) : document.hidden ? 10000 : (state.tries < 15 ? 2000 : 5000);
-      state.timer = setTimeout(tick, delay);
-    };
-    var tick = async function() {
-      if (self._vibePollTimers[id] !== state || state.busy) return;
-      state.busy = true;
-      state.tries += 1;
-      try {
-        var response = await self.api('/api/vibe/plans/' + encodeURIComponent(id));
-        if (!response.ok) {
-          if (response.status === 404 || state.tries > 500) self._stopVibePolling(id);
-          else schedule();
-          return;
-        }
-        var plan = (await response.json()).plan;
-        state.failures = 0;
-        self._upsertVibePlan(plan);
-        if (self._activeVibePlanId === id) self._renderVibePlan(plan);
-        self._renderVibeHistory();
-        if (!self._vibeIsActive(plan) || state.tries > 500) self._stopVibePolling(id);
-        else schedule();
-      } catch (error) {
-        state.failures += 1;
-        if (state.failures === 1 && self._toast) self._toast('研究进度连接中断，正在自动重试；后台任务不会重复启动');
-        schedule();
-      } finally {
-        state.busy = false;
-      }
-    };
-    tick();
+    // History is local only in this release; do not imply a live sidecar monitor.
+    this._stopVibePolling(id);
   },
 
   _stopVibePolling: function(id) {
@@ -200,8 +142,10 @@ Object.assign(App, {
 
   _cancelVibePlan: async function() {
     var plan = this._activeVibePlan || {};
-    if (!plan.id) return;
-    var response = await this.api('/api/vibe/plans/' + encodeURIComponent(plan.id) + '/cancel', {method:'POST'});
+    if (!plan.id || plan.id !== this._activeVibePlanId) return;
+    var response;
+    try { response = await this.api('/api/vibe/plans/' + encodeURIComponent(plan.id) + '/cancel', {method:'POST'}); }
+    catch (error) { response = {ok:false}; }
     if (!response.ok) {
       this._toast('停止失败，请稍后再试');
       return;
@@ -209,8 +153,9 @@ Object.assign(App, {
     var updated = (await response.json()).plan;
     this._stopVibePolling(plan.id);
     this._upsertVibePlan(updated);
-    this._renderVibePlan(updated);
+    if (plan.id === this._activeVibePlanId) this._renderVibePlan(updated);
     this._renderVibeHistory();
+    if (this._vibeIsActive(updated)) this._pollVibePlan(plan.id);
   },
 
   _deleteVibePlan: async function(id) {
@@ -232,6 +177,7 @@ Object.assign(App, {
   },
 
   _renderVibePlan: function(plan) {
+    if (!plan || plan.id !== this._activeVibePlanId) return;
     var inner = document.getElementById('vibePanelInner');
     if (!inner) return;
     var active = this._vibeIsActive(plan);
@@ -240,7 +186,7 @@ Object.assign(App, {
     var quality = plan.quality || {};
     var report = plan.report_markdown || '';
     var actions = active
-      ? '<button class="danger" onclick="App._cancelVibePlan()">停止研究</button>'
+      ? '<button class="danger" onclick="App._cancelVibePlan()">'+(plan.status === 'cancelling' ? '再次请求停止' : '停止研究')+'</button>'
       : (report ? '<button onclick="App._vibeToChat()">转到对话</button>' + ((plan.candidates || []).length ? '<button onclick="App._vibeAddAll()">候选入自选</button>' : '') : '');
     var stateClass = plan.status === 'complete' ? 'ok' : (plan.status === 'failed' ? 'error' : (active ? 'running' : 'muted'));
     var body = report ? this._vibeReportHtml(plan) : this._vibeResearchStateHtml(plan);
@@ -248,12 +194,12 @@ Object.assign(App, {
     inner.innerHTML = '<div class="vibe-workbench">' +
       '<header class="vibe-plan-head">' +
         '<div class="vibe-plan-copy"><div class="vibe-kicker">OFFICIAL VIBE RESEARCH</div><h2>' + esc(plan.title || 'Vibe 深度研究') + '</h2><p>' + esc(plan.prompt || '') + '</p>' +
-          '<div class="vibe-engine-line"><i class="online"></i><b>' + esc(engine.name || 'HKUDS/Vibe-Trading') + '</b><span>v' + esc(engine.version || '') + ' · ' + esc(engine.revision || '') + '</span><em class="' + stateClass + '">' + esc(plan.stage_label || plan.status || '') + '</em></div>' +
+          '<div class="vibe-engine-line"><i></i><b>' + esc(engine.name || 'HKUDS/Vibe-Trading') + '</b><span>v' + esc(engine.version || '') + ' · ' + esc(engine.revision || '') + '</span><em class="' + stateClass + '">' + esc(plan.stage_label || plan.status || '') + '</em></div>' +
           '<div class="vibe-tags">' + tags + '</div>' +
         '</div>' +
         '<div class="vibe-head-actions">' + actions + '</div>' +
       '</header>' +
-      (active ? '<div class="vibe-progress"><span style="width:' + Math.max(2, Math.min(100, Number(plan.progress || 0))) + '%"></span></div>' : '') +
+      '<div class="research-notice">'+esc(this._vibeExecutionNotice)+' 当前仅显示已保存记录；不代表旧任务仍在执行或已经停止。</div>' +
       '<div class="vibe-workbench-grid">' +
         '<aside class="vibe-research-rail">' + this._vibeRunMetricsHtml(plan, quality) + this._vibeActivityHtml(plan.activity || []) + this._vibeCandidateRailHtml(plan.candidates || []) + '</aside>' +
         '<main class="vibe-report-area">' + body + '</main>' +
@@ -355,8 +301,9 @@ Object.assign(App, {
   _vibeResearchStateHtml: function(plan) {
     var failed = plan.status === 'failed';
     var cancelled = plan.status === 'cancelled';
-    var title = failed ? '研究没有生成最终报告' : (cancelled ? '研究已停止' : '官方引擎正在研究');
-    var note = failed ? (plan.agent_summary || '请稍后重新运行，Prism 不会用规则候选冒充正式报告。') : (cancelled ? '已经保留此前的工具活动，可以从新任务重新开始。' : '最终报告完成前，这里只显示真实进度，不提前展示未经核验的候选结论。');
+    var interrupted = plan.status === 'interrupted';
+    var title = failed ? '研究没有生成最终报告' : interrupted ? '研究已中断' : (cancelled ? '研究已停止' : plan.status === 'cancelling' ? '等待引擎确认停止' : '尚未保存完整报告');
+    var note = failed ? (plan.agent_summary || '请核对已保存过程与错误，再决定是否创建新研究。') : interrupted ? '无法恢复原执行上下文，已保留现有过程。查看记录不会重复启动研究。' : (cancelled ? '已经保留此前的工具活动；本版暂停新研究。' : '这里只展示已保存的过程，不恢复监控，也不推定旧引擎已停止。');
     return '<div class="vibe-live-state ' + (failed ? 'failed' : '') + '"><i></i><h3>' + esc(title) + '</h3><p>' + esc(note) + '</p><strong>' + esc(plan.stage_label || '') + '</strong></div>';
   },
 
@@ -369,37 +316,50 @@ Object.assign(App, {
       '<section class="vibe-report-quality"><div><span>来源边界</span><b>' + esc(quality.grade || '来源待核验') + '</b></div>' +
       '<p>' + (warnings.length ? warnings.map(function(item) { return esc(item); }).join(' · ') : '工具调用、正文来源与失败项已记录。') + '</p></section>' +
       '<article class="vibe-report-markdown">' + this._renderVibeMarkdown(plan.report_markdown || '') + '</article>' +
+      (plan.report_markdown ? '<button class="vibe-save-version" onclick="App._saveVibeVersion()">保存原始报告版本</button>' : '') +
       this._vibeFollowupsHtml(followups) +
-      (this._vibeIsActive(plan) ? '' : '<section class="vibe-followup-compose"><label for="vibeFollowupInput">继续追问这份研究</label><textarea id="vibeFollowupInput" rows="3" placeholder="例如：只保留存储芯片方向，重新核验江波龙和佰维存储的财务数字与来源。"></textarea><button onclick="App._submitVibeFollowup()">发送追问</button></section>');
+      '<section class="vibe-followup-compose"><p>'+esc(this._vibeExecutionNotice)+'</p><button disabled>追问暂不可用</button></section>';
   },
 
   _vibeFollowupsHtml: function(followups) {
     if (!followups.length) return '';
     return '<section class="vibe-followups"><h3>上下文追问</h3>' + followups.map(function(item, index) {
-      var answer = item.answer_markdown ? App._renderVibeMarkdown(item.answer_markdown) : '<div class="vibe-followup-wait">' + (item.status === 'failed' ? esc(item.error || '追问失败') : '正在研究这个追问...') + '</div>';
-      return '<div class="vibe-followup-turn"><div class="vibe-followup-q"><span>' + (index + 1) + '</span><b>' + esc(item.question || '') + '</b></div><div class="vibe-followup-a">' + ChatRender.renderResearch(item.research) + answer + '</div></div>';
+      var answer = item.answer_markdown ? App._renderVibeMarkdown(item.answer_markdown) : '<div class="vibe-followup-wait">' + (item.status === 'failed' ? esc(item.error || '追问失败') : '该追问尚未保存答案；当前不恢复旧引擎监控。') + '</div>';
+      var save = item.id && item.status === 'complete' && item.answer_markdown ? '<button class="vibe-save-version" onclick="App._saveVibeFollowup(' + index + ')">保存此追问版本</button>' : '';
+      return '<div class="vibe-followup-turn"><div class="vibe-followup-q"><span>' + (index + 1) + '</span><b>' + esc(item.question || '') + '</b></div><div class="vibe-followup-a">' + ChatRender.renderResearch(item.research) + answer + save + '</div></div>';
     }).join('') + '</section>';
   },
 
+  _saveVibeFollowup: function(index) {
+    var turn = ((this._activeVibePlan || {}).followups || [])[index];
+    if (turn) return this._saveVibeVersion(turn.id);
+  },
+
+  _saveVibeVersion: async function(turnId) {
+    var plan = this._activeVibePlan || {}, planId = this._activeVibePlanId;
+    if (!planId || plan.id !== planId || this._vibeSaveBusy) return;
+    var turn = turnId ? (plan.followups || []).find(function(item) { return item.id === turnId; }) : null;
+    if (turnId ? !turn || turn.status !== 'complete' || !turn.answer_markdown : !plan.report_markdown) return;
+    this._vibeSaveBusy = true;
+    var selection = this._vibeSelectionSeq;
+    try {
+      var response = await this.api('/api/vibe/plans/' + encodeURIComponent(planId) + '/save-report', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(turnId ? {turn_id:turnId} : {})
+      });
+      if (!response.ok) throw new Error('save unavailable');
+      var data = await response.json();
+      if (planId !== this._activeVibePlanId || selection !== this._vibeSelectionSeq) return;
+      if (!data.ok || !data.report || !data.report.id) throw new Error('missing saved version');
+      this._toast('此版本已保存，原始研究时间保持不变');
+      this.switchMode('reports');
+      await this._openSavedReport(data.report.id);
+    } catch (error) {
+      if (planId === this._activeVibePlanId && selection === this._vibeSelectionSeq) this._toast('保存失败，报告仍保留在原研究记录中');
+    } finally { this._vibeSaveBusy = false; }
+  },
+
   _submitVibeFollowup: async function() {
-    var plan = this._activeVibePlan || {};
-    var input = document.getElementById('vibeFollowupInput');
-    var question = input ? input.value.trim() : '';
-    if (!plan.id || !question) return;
-    if (input) input.disabled = true;
-    var response = await this.api('/api/vibe/plans/' + encodeURIComponent(plan.id) + '/follow-up', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question:question})
-    });
-    if (!response.ok) {
-      if (input) input.disabled = false;
-      this._toast('追问发送失败');
-      return;
-    }
-    var updated = (await response.json()).plan;
-    this._upsertVibePlan(updated);
-    this._renderVibePlan(updated);
-    this._renderVibeHistory();
-    this._pollVibePlan(updated.id);
+    this._toast(this._vibeExecutionNotice);
   },
 
   _renderVibeMarkdown: function(text) {
@@ -423,18 +383,17 @@ Object.assign(App, {
     return ({intraday:'日内', swing:'波段', position:'中线', long:'长期'})[horizon] || horizon;
   },
 
-  _vibeAddWatch: function(ticker, name) {
-    this._loadWatchlist();
-    var didAdd = this._addToWatchlist(ticker, name);
+  _vibeAddWatch: async function(ticker, name) {
+    var didAdd = await this._addToWatchlist(ticker, name);
+    if (didAdd === null) return;
     var code = this._normalizeTicker ? this._normalizeTicker(ticker) : ticker;
     this._toast((didAdd ? '已加入自选：' : '已在自选：') + code);
   },
 
-  _vibeAddAll: function() {
+  _vibeAddAll: async function() {
     var list = (this._activeVibePlan || {}).candidates || [];
-    this._loadWatchlist();
     var added = 0;
-    for (var i = 0; i < list.length; i++) if (this._addToWatchlist(list[i].ticker, list[i].name)) added++;
+    for (var i = 0; i < list.length; i++) { var saved = await this._addToWatchlist(list[i].ticker, list[i].name); if (saved === null) return; if (saved) added++; }
     this._toast(added ? ('候选池已加入自选：新增 ' + added + ' 只') : '候选池已全部在自选中');
   },
 

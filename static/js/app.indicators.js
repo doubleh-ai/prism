@@ -509,9 +509,11 @@ Object.assign(App, {
 
   _evalIndicator: async function(id, ticker, params) {
     try {
+      var sequence = this._indicatorEvalSeq = (this._indicatorEvalSeq || 0) + 1;
       var period = this._currentPeriod || "1d";
       var payload = {ticker: ticker, period: period, params: params || {}};
-      if (ticker === this._currentTicker && Array.isArray(this._lastKline) && this._lastKline.length) {
+      var identity = this._klineIdentity;
+      if (ticker === this._currentTicker && identity && identity.ticker === ticker && identity.period === period && Array.isArray(this._lastKline) && this._lastKline.length) {
         payload.kline = this._lastKline.slice(-200).map(function(k) {
           return {
             timestamp: k.timestamp || k.ts || k.t,
@@ -528,8 +530,10 @@ Object.assign(App, {
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
+      if (sequence !== this._indicatorEvalSeq || ticker !== this._currentTicker || period !== this._currentPeriod) return null;
       if (!r.ok) { var e = await r.json().catch(function() { return {}; }); this._toast(e.error || "计算失败"); return null; }
-      return await r.json();
+      var data = await r.json();
+      return sequence === this._indicatorEvalSeq && ticker === this._currentTicker && period === this._currentPeriod ? data : null;
     } catch (e) { return null; }
   },
 

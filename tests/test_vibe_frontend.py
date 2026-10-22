@@ -13,11 +13,11 @@ def test_official_vibe_workbench_static_contract():
     assert "vibePanel" in template
     assert 'id="vibeDepth"' in template
     assert "开始正式研究" in template
-    assert "app.vibe.js?v=79" in template
+    assert "app.vibe.js?v=83" in template
     assert '#appShell[data-mode="vibe"]' in css
     assert "/api/vibe/plan" in js
     assert "/api/vibe/engine" in js
-    assert "research_depth" in js
+    assert "_vibeExecutionNotice" in js
     assert "HKUDS/Vibe-Trading" in js
     assert "_vibeActivityHtml" in js
     assert "_vibeActivityIssueGroups" in js
@@ -27,7 +27,7 @@ def test_official_vibe_workbench_static_contract():
     assert "已完成 " in js
     assert "report_markdown" in js
     assert "_renderVibeMarkdown" in js
-    assert "/follow-up" in js
+    assert "追问暂不可用" in js
     assert "/cancel" in js
     assert "_deleteVibePlan" in js
     assert "vibe-side-del" in js

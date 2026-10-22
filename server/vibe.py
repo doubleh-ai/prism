@@ -26,19 +26,22 @@ from .vibe_engine import (
     VibeEngineError,
     engine_cancel,
     engine_create_session,
-    engine_delete_session,
     engine_events,
     engine_get_messages,
-    engine_health,
     engine_send_message,
+    redact_engine_text,
+    safe_engine_event,
+    safe_engine_payload,
 )
 
 router = APIRouter(prefix="/api/vibe")
 log = logging.getLogger("prism.vibe")
 
 _ENGINE_NAME = "HKUDS/Vibe-Trading"
+_EXECUTION_NOTICE = "Vibe 新研究与追问暂不可用：隔离执行环境尚待验收。可查看本账号已保存的历史。"
 _ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 _TASKS: dict[str, asyncio.Task] = {}
+_CANCEL_INFLIGHT: set[str] = set()
 _A_SHARE_CODE_RE = re.compile(r"^[036]\d{5}(?:\.(?:SH|SZ|SS))?$", re.I)
 _URL_RE = re.compile(r"https?://[^\s)>\]]+", re.I)
 
@@ -70,6 +73,24 @@ _SAFE_ARGUMENT_KEYS = {
 }
 
 
+def require_vibe_execution() -> None:
+    """Fail closed until a separately isolated sidecar is accepted in a future release.
+
+    This is a release policy, deliberately not an environment-variable switch.
+    The legacy sidecar can execute generated code and shares a cross-user index.
+    """
+    raise HTTPException(503, _EXECUTION_NOTICE)
+
+
+def execution_status() -> dict[str, Any]:
+    return {
+        "status": "execution_unavailable",
+        "execution_available": False,
+        "history_available": True,
+        "detail": _EXECUTION_NOTICE,
+    }
+
+
 def _now() -> int:
     return int(time.time())
 
@@ -79,7 +100,7 @@ def _structured_text(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value.replace("[object Object]", "")
+        return redact_engine_text(value.replace("[object Object]", ""))
     if isinstance(value, (int, float, bool)):
         return str(value)
     if isinstance(value, list):
@@ -284,9 +305,20 @@ def _row_to_plan(row: Any) -> dict[str, Any]:
         plan = {}
     if not isinstance(plan, dict):
         plan = {}
+    plan = safe_engine_payload(plan)
+    # Older stored plans may contain raw provider failure bodies. Classify them
+    # on read without rewriting the saved report or migrating historical data.
+    if plan.get("status") == "failed":
+        plan["stage_label"] = "研究引擎未能完成任务"
+    for item in plan.get("activity") or []:
+        if isinstance(item, dict) and item.get("status") in {"error", "failed", "warning"}:
+            for key in ("detail", "summary", "result"):
+                if key in item:
+                    item[key] = "工具或引擎未返回可用结果，已保留数据缺口"
     plan["id"] = row["id"]
     plan["created_at"] = row["created_at"]
-    plan.setdefault("status", "complete")
+    # Missing/corrupt historical metadata is not evidence that execution finished.
+    plan.setdefault("status", "unknown")
     plan.setdefault("engine", _engine_meta())
     plan.setdefault("activity", [])
     plan.setdefault("followups", [])
@@ -440,6 +472,7 @@ def _begin_attempt(plan: dict[str, Any], attempt_id: str) -> None:
 
 
 def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, Any], event_id: str) -> None:
+    data = safe_engine_event(event_type, data)
     attempt_id = str(plan.get("engine_attempt_id") or "")
     event_attempt = str(data.get("attempt_id") or data.get("linked_attempt_id") or "")
     if event_attempt and attempt_id and event_attempt != attempt_id:
@@ -502,7 +535,7 @@ def _apply_engine_event(plan: dict[str, Any], event_type: str, data: dict[str, A
         )
         status = "error" if failed_payload else ("warning" if degraded_payload else "complete")
         result_summary = _tool_result_summary(tool, preview, status)
-        result_detail = _clean_text(preview, 800)
+        result_detail = _clean_text(preview, 800) if status == "complete" else result_summary
         activity = list(plan.get("activity") or [])
         running = [
             item
@@ -747,6 +780,7 @@ def _quality_after_report(plan: dict[str, Any], report: str) -> dict[str, Any]:
 
 
 async def _answer_for_attempt(session_id: str, attempt_id: str, retries: int = 15) -> str:
+    require_vibe_execution()
     retries = max(1, retries)
     for index in range(retries):
         messages = await engine_get_messages(session_id, limit=100)
@@ -840,6 +874,7 @@ def _mark_failed(plan: dict[str, Any], message: str) -> None:
 
 
 async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt_id: str) -> None:
+    require_vibe_execution()
     plan = _load_vibe_plan(plan_id, username)
     if not plan or plan.get("status") not in _ACTIVE_STATUSES:
         return
@@ -851,7 +886,6 @@ async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt
         return
 
     terminal_type = ""
-    terminal_data: dict[str, Any] = {}
     async for event_type, data, event_id in engine_events(session_id):
         plan = _load_vibe_plan(plan_id, username)
         if not plan or plan.get("status") not in _ACTIVE_STATUSES:
@@ -863,7 +897,6 @@ async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt
         _update_vibe_plan(username, plan_id, plan)
         if event_type in {"attempt.completed", "attempt.failed", "attempt.cancelled"}:
             terminal_type = event_type
-            terminal_data = data
             break
 
     plan = _load_vibe_plan(plan_id, username)
@@ -875,8 +908,10 @@ async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt
             _finish_with_report(plan, answer, attempt_id)
         else:
             _mark_failed(plan, "引擎已结束，但没有找到最终报告")
-    elif terminal_type in {"attempt.failed", "attempt.cancelled"}:
-        _mark_failed(plan, terminal_data.get("error") or terminal_data.get("summary") or "官方引擎任务未完成")
+    elif terminal_type == "attempt.cancelled":
+        _finish_cancelled(plan)
+    elif terminal_type == "attempt.failed":
+        _mark_failed(plan, "研究引擎未能完成任务")
     else:
         answer = await _answer_for_attempt(session_id, attempt_id)
         if answer:
@@ -887,6 +922,7 @@ async def _monitor_attempt(plan_id: str, username: str, session_id: str, attempt
 
 
 async def _run_official_research(plan_id: str, username: str, resume: bool = False) -> None:
+    require_vibe_execution()
     plan = _load_vibe_plan(plan_id, username)
     if not plan or plan.get("status") not in _ACTIVE_STATUSES:
         return
@@ -965,15 +1001,16 @@ async def _run_official_research(plan_id: str, username: str, resume: bool = Fal
         await _monitor_attempt(plan_id, username, session_id, attempt_id)
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
-        log.warning("official vibe research failed plan=%s: %s", plan_id, exc)
+    except Exception:
+        log.warning("official vibe research failed plan=%s", plan_id)
         plan = _load_vibe_plan(plan_id, username)
         if plan and plan.get("status") in _ACTIVE_STATUSES:
-            _mark_failed(plan, f"官方引擎调用失败：{exc}")
+            _mark_failed(plan, "研究引擎调用失败，请稍后重试")
             _update_vibe_plan(username, plan_id, plan)
 
 
 def _start_task(plan_id: str, username: str, resume: bool = False, force_after: bool = False) -> None:
+    require_vibe_execution()
     existing = _TASKS.get(plan_id)
     if existing and not existing.done():
         if not force_after:
@@ -1000,26 +1037,57 @@ def _start_task(plan_id: str, username: str, resume: bool = False, force_after: 
 
 
 def _ensure_task(plan: dict[str, Any], username: str) -> None:
+    require_vibe_execution()
     if plan.get("status") not in _ACTIVE_STATUSES:
         return
-    resume = bool(plan.get("engine_session_id") and plan.get("engine_attempt_id"))
-    _start_task(str(plan.get("id")), username, resume=resume)
+    existing = _TASKS.get(str(plan.get("id")))
+    if existing and not existing.done():
+        return
+    if plan.get("engine_session_id") and plan.get("engine_attempt_id"):
+        _start_task(str(plan["id"]), username, resume=True)
+        return
+    # A GET must never resend a model request after an uncertain process loss.
+    plan.update(
+        status="interrupted",
+        stage="interrupted",
+        stage_label="原任务已中断",
+        agent_summary="原执行进程已结束，无法确认引擎 attempt；未自动重新发起研究。",
+    )
+    _update_vibe_plan(username, str(plan["id"]), plan)
+
+
+def get_owned_plan(username: str, plan_id: str, *, recover: bool = True) -> dict:
+    plan = _load_vibe_plan(plan_id, username)
+    if not plan:
+        raise HTTPException(404, "plan not found")
+    # History reads never resume, poll, or reconcile the shared legacy sidecar.
+    # Keep the persisted status unchanged: absence of monitoring is not cancellation.
+    plan.pop("_username", None)
+    return plan
+
+
+def list_owned_plans(username: str, limit: int = 30) -> list[dict]:
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id,plan_json,created_at FROM vibe_plans WHERE username=? ORDER BY created_at DESC LIMIT ?",
+            [username, max(1, min(100, limit))],
+        ).fetchall()
+    plans = [_row_to_plan(row) for row in rows]
+    for plan in plans:
+        plan.pop("_username", None)
+    return plans
 
 
 @router.get("/engine")
 async def get_vibe_engine(request: Request):
     require_auth(request)
-    try:
-        health = await engine_health()
-        status = "healthy" if health.get("status") == "healthy" else str(health.get("status") or "unknown")
-        return {"engine": _engine_meta(), "status": status}
-    except VibeEngineError as exc:
-        return {"engine": _engine_meta(), "status": "unavailable", "detail": str(exc)}
+    return {"engine": _engine_meta(), **execution_status()}
 
 
 @router.post("/plan")
 async def create_vibe_plan(request: Request):
     username = require_auth(request)
+    require_vibe_execution()
     try:
         body = await request.json()
         req = VibePlanRequest(**(body or {}))
@@ -1035,29 +1103,12 @@ async def create_vibe_plan(request: Request):
 
 @router.get("/plans")
 async def list_vibe_plans(request: Request, limit: int = 30):
-    username = require_auth(request)
-    if limit < 1 or limit > 100:
-        limit = 30
-    with get_db() as db:
-        rows = db.execute(
-            "SELECT id, plan_json, created_at FROM vibe_plans WHERE username=? ORDER BY created_at DESC LIMIT ?",
-            [username, limit],
-        ).fetchall()
-    plans = [_row_to_plan(row) for row in rows]
-    for plan in plans:
-        _ensure_task(plan, username)
-    return {"plans": plans}
+    return {"plans": list_owned_plans(require_auth(request), limit)}
 
 
 @router.get("/plans/{plan_id}")
 async def get_vibe_plan(plan_id: str, request: Request):
-    username = require_auth(request)
-    plan = _load_vibe_plan(plan_id, username)
-    if not plan:
-        raise HTTPException(404, "plan not found")
-    plan.pop("_username", None)
-    _ensure_task(plan, username)
-    return {"plan": plan}
+    return {"plan": get_owned_plan(require_auth(request), plan_id)}
 
 
 @router.post("/plans/{plan_id}/follow-up")
@@ -1068,10 +1119,16 @@ async def follow_up_vibe_plan(plan_id: str, request: Request):
         req = VibeFollowUpRequest(**(body or {}))
     except Exception as exc:
         raise HTTPException(422, validation_error_message(exc))
+    return {"plan": start_owned_followup(username, plan_id, req.question)}
+
+
+def start_owned_followup(username: str, plan_id: str, question: str) -> dict:
+    req = VibeFollowUpRequest(question=question)
     plan = _load_vibe_plan(plan_id, username)
     if not plan:
         raise HTTPException(404, "plan not found")
-    if plan.get("status") in _ACTIVE_STATUSES:
+    require_vibe_execution()
+    if plan.get("status") in _ACTIVE_STATUSES or plan_id in _CANCEL_INFLIGHT:
         raise HTTPException(409, "research is already running")
     if not plan.get("engine_session_id") or not plan.get("report_markdown"):
         raise HTTPException(409, "complete the first official research report before following up")
@@ -1116,27 +1173,15 @@ async def follow_up_vibe_plan(plan_id: str, request: Request):
     _update_vibe_plan(username, plan_id, plan)
     _start_task(plan_id, username, force_after=True)
     plan.pop("_username", None)
-    return {"plan": plan}
+    return plan
 
 
 @router.post("/plans/{plan_id}/cancel")
 async def cancel_vibe_plan(plan_id: str, request: Request):
-    username = require_auth(request)
-    plan = _load_vibe_plan(plan_id, username)
-    if not plan:
-        raise HTTPException(404, "plan not found")
-    if plan.get("status") not in _ACTIVE_STATUSES:
-        plan.pop("_username", None)
-        return {"plan": plan, "cancelled": False}
-    session_id = str(plan.get("engine_session_id") or "")
-    if session_id:
-        try:
-            await engine_cancel(session_id)
-        except VibeEngineError as exc:
-            log.warning("failed to cancel official vibe session %s: %s", session_id, exc)
-    task = _TASKS.pop(plan_id, None)
-    if task and not task.done():
-        task.cancel()
+    return await cancel_owned_plan(require_auth(request), plan_id)
+
+
+def _finish_cancelled(plan: dict) -> None:
     plan.update(
         status="cancelled",
         engine_status="cancelled",
@@ -1148,18 +1193,77 @@ async def cancel_vibe_plan(plan_id: str, request: Request):
     for item in plan.get("followups") or []:
         if item.get("status") in {"queued", "running"}:
             item.update(status="cancelled", completed_at=_now())
+
+
+async def cancel_owned_plan(username: str, plan_id: str) -> dict:
+    plan = get_owned_plan(username, plan_id, recover=False)
+    if plan.get("status") not in _ACTIVE_STATUSES:
+        return {"plan": plan, "cancelled": False, "cancel_requested": False}
+    session_id = str(plan.get("engine_session_id") or "")
+    if not session_id:
+        task = _TASKS.pop(plan_id, None)
+        if not task or task.done():
+            return {
+                "plan": plan,
+                "cancelled": False,
+                "cancel_requested": False,
+                "detail": "未保留可取消的引擎会话，无法确认旧任务已停止；历史状态保持不变。",
+            }
+        task.cancel()
+        _finish_cancelled(plan)
+        requested, confirmed = True, True
+    else:
+        requested, confirmed = False, False
+        # Prevent a follow-up from starting while the cancellation response for
+        # this exact attempt is still in flight.
+        plan.update(status="cancelling")
+        _update_vibe_plan(username, plan_id, plan)
+        _CANCEL_INFLIGHT.add(plan_id)
+        try:
+            response = await engine_cancel(session_id)
+            requested = True
+            confirmed = isinstance(response, dict) and (
+                response.get("cancelled") is True or response.get("status") == "cancelled"
+            )
+        except VibeEngineError:
+            # Preserve monitoring and the exact attempt while cancellation is unknown.
+            pass
+        finally:
+            _CANCEL_INFLIGHT.discard(plan_id)
+        latest = get_owned_plan(username, plan_id, recover=False)
+        if latest.get("status") not in _ACTIVE_STATUSES:
+            _update_vibe_plan(username, plan_id, latest)
+            return {
+                "plan": latest,
+                "cancelled": latest.get("status") == "cancelled",
+                "cancel_requested": requested,
+            }
+        plan = latest
+        if confirmed:
+            task = _TASKS.pop(plan_id, None)
+            if task and not task.done():
+                task.cancel()
+            _finish_cancelled(plan)
+        else:
+            plan.update(
+                status="cancelling",
+                stage="cancelling",
+                stage_label="正在核实停止状态",
+                agent_summary="已请求引擎停止，等待确认。"
+                if requested
+                else "取消请求未确认；保留原记录，不自动恢复监控。",
+            )
     _append_activity(
         plan,
         {
             "kind": "system",
-            "label": "研究已由用户停止",
-            "status": "cancelled",
-            "summary": "已向官方引擎发送取消请求",
+            "label": "研究已停止" if confirmed else "请求停止研究",
+            "status": "cancelled" if confirmed else "cancelling",
+            "summary": "引擎确认停止" if confirmed else "未确认停止，不视为已取消",
         },
     )
     _update_vibe_plan(username, plan_id, plan)
-    plan.pop("_username", None)
-    return {"plan": plan, "cancelled": True}
+    return {"plan": plan, "cancelled": confirmed, "cancel_requested": requested}
 
 
 @router.delete("/plans/{plan_id}")
@@ -1168,16 +1272,9 @@ async def delete_vibe_plan(plan_id: str, request: Request):
     plan = _load_vibe_plan(plan_id, username)
     if not plan:
         raise HTTPException(404, "plan not found")
-    task = _TASKS.pop(plan_id, None)
-    if task and not task.done():
-        task.cancel()
-    session_id = str(plan.get("engine_session_id") or "")
-    if session_id:
-        try:
-            await engine_cancel(session_id)
-            await engine_delete_session(session_id)
-        except VibeEngineError as exc:
-            log.warning("failed to remove official vibe session %s: %s", session_id, exc)
+    if plan.get("status") in _ACTIVE_STATUSES:
+        raise HTTPException(409, "旧任务是否停止尚未确认，请先明确请求停止；暂不删除记录。")
+    # Delete only this account's local history; never mutate shared sidecar data.
     with get_db() as db:
         db.execute("DELETE FROM vibe_plans WHERE id=? AND username=?", [plan_id, username])
     return {"ok": True}

@@ -1,5 +1,7 @@
 # Vibe 会话迭代预算补丁
 
+`stop004-reconciliation-candidate.patch` 已晋升到正式控制器，保留原始补丁用于审阅和历史核对。包含 `RETIREMENT_RETAINED_OBSERVER_START` 的当前源码直接接受测试，不反向套用再重放旧补丁；仅缺少该常量的旧基底可向前应用。该控制只核对固定 004 的只读保留状态，不授权停止或清理保留单元，离线测试也不构成 Linux 验收证据。
+
 `vibe-session-iteration-budget.patch` 保留 Prism v0.19.7 使用的 Vibe sidecar 改动：从会话配置读取 `max_iterations`，无有效配置时使用 50，将预算限制在 3–50 后传入 `AgentLoop`。
 
 核验基底为 [HKUDS/Vibe-Trading 的固定提交](https://github.com/HKUDS/Vibe-Trading/commit/d456025672ae6cff1851ba2e77ca1a8f9abdcb47)：

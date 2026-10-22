@@ -1,17 +1,17 @@
-"""_read_jsonl_messages uses aiofiles (non-blocking on event loop)."""
+"""Historical JSONL reading remains asynchronous on the owned executor."""
 
 import asyncio
 import json
 
 
 def test_read_jsonl_is_async():
-    """_read_jsonl_messages is `async def` (proves it uses aiofiles)."""
+    """The reader keeps its asynchronous API."""
     import inspect
 
     from server import chat
 
     assert inspect.iscoroutinefunction(chat._read_jsonl_messages), (
-        "_read_jsonl_messages must be async to use aiofiles"
+        "_read_jsonl_messages must stay asynchronous"
     )
 
 

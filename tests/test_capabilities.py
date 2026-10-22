@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from server import capabilities as cap
 from server.database import get_db
+from server.work_lifecycle import Manager
 
 
 @pytest.fixture
@@ -19,8 +20,20 @@ def scoped_run(test_user):
         db.execute("INSERT INTO conversations(id,username) VALUES('owned-conv',?)", [user])
         db.execute("INSERT INTO users(username,password_hash) VALUES('other','unused-test-hash')")
         db.execute("INSERT INTO conversations(id,username) VALUES('other-conv','other')")
-    token = cap.issue_run_token(user, "owned-conv", "test-run")
-    return {"username": user, "conv_id": "owned-conv", "run_id": "test-run", "token": token}
+    manager = Manager()
+    parent = manager.admit("cli")
+    token = cap.issue_run_token(user, "owned-conv", "test-run", parent_lease=parent)
+    yield {
+        "username": user,
+        "conv_id": "owned-conv",
+        "run_id": "test-run",
+        "token": token,
+        "parent_lease": parent,
+    }
+    cap.revoke_run_token("test-run")
+    cap.revoke_run_token("next-run")
+    parent.release()
+    manager._pool.shutdown(wait=True, cancel_futures=False)
 
 
 @pytest.fixture
@@ -43,7 +56,11 @@ async def call(context, name, arguments=None, request_id="request-1"):
 
 async def test_bridge_auth_checks_loopback_origin_forwarding_expiry_and_owner(scoped_run, bridge_client):
     path = "/api/internal/capabilities/tools"
-    assert (await bridge_client.get(path)).status_code == 200
+    declared = await bridge_client.get(path)
+    assert declared.status_code == 200
+    names = {tool["name"] for tool in declared.json()["tools"]}
+    assert not names & {"vibe_start", "vibe_followup"}
+    assert {"vibe_list", "vibe_status", "vibe_cancel"} <= names
     for headers in (
         {"Origin": "http://127.0.0.1:8088"},
         {"X-Forwarded-For": "127.0.0.1"},
@@ -84,7 +101,9 @@ async def test_bridge_revoke_delete_and_schema_deny(scoped_run, bridge_client):
         assert response.status_code == status
     cap.revoke_run_token(scoped_run["run_id"])
     assert (await bridge_client.get("/api/internal/capabilities/tools")).status_code == 401
-    token = cap.issue_run_token(scoped_run["username"], "owned-conv", "next-run")
+    token = cap.issue_run_token(
+        scoped_run["username"], "owned-conv", "next-run", parent_lease=scoped_run["parent_lease"]
+    )
     with get_db() as db:
         db.execute("UPDATE conversations SET deleted_at=1 WHERE id='owned-conv'")
     assert (
@@ -98,28 +117,28 @@ async def test_idempotency_audit_targets_and_no_raw_prompt_or_tokens(scoped_run,
     execute = AsyncMock(
         return_value=(
             {"id": "task-one", "api_key": "fake-sensitive-value", "note": "password=placeholder-credential"},
-            {"view": "vibe", "id": "task-one"},
+            {"view": "indicators", "id": "task-one"},
             "研究已发起",
         )
     )
     monkeypatch.setattr(cap, "_execute", execute)
-    arguments = {"prompt": "private test research prompt"}
-    first = await call(scoped_run, "vibe_start", arguments)
-    assert await call(scoped_run, "vibe_start", arguments) == first
+    arguments = {"input": "private test research prompt"}
+    first = await call(scoped_run, "indicator_translate", arguments)
+    assert await call(scoped_run, "indicator_translate", arguments) == first
     assert execute.await_count == 1
-    assert first["call"]["target"] == {"view": "vibe", "id": "task-one"}
+    assert first["call"]["target"] == {"view": "indicators", "id": "task-one"}
     assert "api_key" not in first["data"]
     assert "placeholder-credential" not in json.dumps(first)
-    records = cap.list_calls(scoped_run["username"], view="vibe")
+    records = cap.list_calls(scoped_run["username"], view="indicators")
     assert len(records) == 1 and records[0]["conv_id"] == "owned-conv"
     assert cap.list_calls("other") == []
     with get_db() as db:
         serialized = json.dumps([dict(row) for row in db.execute("SELECT * FROM capability_calls")])
         run = dict(db.execute("SELECT * FROM capability_runs WHERE run_id='test-run'").fetchone())
-    assert arguments["prompt"] not in serialized
+    assert arguments["input"] not in serialized
     assert scoped_run["token"] not in json.dumps(run)
     with pytest.raises(HTTPException) as conflict:
-        await call(scoped_run, "vibe_start", {"prompt": "different prompt"})
+        await call(scoped_run, "indicator_translate", {"input": "different prompt"})
     assert conflict.value.status_code == 409
 
 
@@ -201,7 +220,7 @@ async def test_indicator_executes_real_dsl_and_missing_fund_is_failure(scoped_ru
         scoped_run, "indicator_eval", {"indicator_id": indicator["id"], "ticker": "600519"}, "missing-fund"
     )
     assert result["ok"] is False
-    assert result["error"]["code"] == "unavailable"
+    assert result["error"]["code"] == "data_insufficient"
 
 
 async def test_scan_background_creation_and_owner_status(scoped_run, monkeypatch):
@@ -244,19 +263,25 @@ async def test_analysis_uses_owned_persistent_record(scoped_run, monkeypatch):
     assert analysis_engine.get_analysis_record("analysis-one", "other") is None
 
 
-async def test_vibe_start_persists_owned_task_before_bridge_exit(scoped_run, monkeypatch):
-    from server import vibe
-
-    starts = []
-    monkeypatch.setattr(vibe, "_start_task", lambda plan_id, user: starts.append((plan_id, user)))
-    result = await call(scoped_run, "vibe_start", {"prompt": "芯片产业研究"})
-    assert result["ok"] is True
-    target = result["call"]["target"]
-    assert starts == [(target["id"], scoped_run["username"])]
-    cap.revoke_run_token(scoped_run["run_id"])
-    assert vibe._load_vibe_plan(target["id"], scoped_run["username"])
-    assert vibe._load_vibe_plan(target["id"], "other") is None
-    assert result["data"]["plan"]["research"]["timezone"] == "Asia/Shanghai"
+@pytest.mark.parametrize(
+    "name,arguments",
+    [
+        ("vibe_start", {"prompt": "芯片产业研究"}),
+        ("vibe_followup", {"id": "existing", "question": "继续核验"}),
+    ],
+)
+async def test_paused_vibe_bridge_rejects_before_any_task_or_audit_write(
+    scoped_run, monkeypatch, name, arguments
+):
+    execute = AsyncMock(side_effect=AssertionError("must not dispatch paused execution"))
+    monkeypatch.setattr(cap, "_execute", execute)
+    with pytest.raises(HTTPException) as blocked:
+        await call(scoped_run, name, arguments)
+    assert blocked.value.status_code == 503
+    execute.assert_not_awaited()
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM vibe_plans").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM capability_calls").fetchone()[0] == 0
 
 
 async def test_industry_exposes_background_provenance(scoped_run):
@@ -270,6 +295,15 @@ async def test_industry_exposes_background_provenance(scoped_run):
         "scan_start",
         "analysis_start",
         "vibe_start",
+        "watchlist_update",
+        "indicator_create",
+        "scan_cancel",
+        "vibe_followup",
+        "vibe_cancel",
+        "report_save",
+        "research_record_claims",
+        "research_record_relations",
+        "research_scope",
     }
 
 

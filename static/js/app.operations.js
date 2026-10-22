@@ -88,6 +88,7 @@
         var prefix = '/doubleh-ai/prism';
         var pathOK = type === 'run' ? /^\/doubleh-ai\/prism\/actions\/runs\/\d+\/?$/.test(parsed.pathname) :
           type === 'pr' ? /^\/doubleh-ai\/prism\/pull\/\d+\/?$/.test(parsed.pathname) :
+          type === 'operator' ? parsed.pathname === prefix+'/issues/9' :
           [prefix,prefix+'/',prefix+'/actions',prefix+'/pulls'].indexOf(parsed.pathname) >= 0;
         if (parsed.protocol === 'https:' && parsed.hostname === 'github.com' && !parsed.port && pathOK) accepted = value;
       } catch(error) {}
@@ -102,30 +103,45 @@
         var active = ['queued','requested','waiting','pending','in_progress'].indexOf(run.status) >= 0;
         var tone = run.conclusion === 'success' ? 'ok' : ['failure','startup_failure','timed_out','action_required'].indexOf(run.conclusion) >= 0 ? 'attention' : active ? 'active' : 'neutral';
         var state = conclusionLabels[run.conclusion] || runLabels[run.status] || '状态未知';
-        return '<article class="operations-run"><header><strong>'+esc(run.name || '未命名流程')+'</strong><span class="operations-state '+tone+'">'+esc(state)+'</span></header>'+ 
-          '<p>'+esc(run.branch || '分支未提供')+' · <code>'+esc(String(run.head_sha || '版本未提供').slice(0,12))+'</code> · '+esc(run.event || '触发原因未知')+'</p>'+ 
-          '<div class="operations-muted">创建 '+esc(self._operationsTime(run.created_at))+'<br>更新 '+esc(self._operationsTime(run.updated_at))+'</div>'+ 
+        return '<article class="operations-run"><header><strong>'+esc(run.name || '未命名流程')+'</strong><span class="operations-state '+tone+'">'+esc(state)+'</span></header>'+
+          '<p>'+esc(run.branch || '分支未提供')+' · <code>'+esc(String(run.head_sha || '版本未提供').slice(0,12))+'</code> · '+esc(run.event || '触发原因未知')+'</p>'+
+          '<div class="operations-muted">创建 '+esc(self._operationsTime(run.created_at))+'<br>更新 '+esc(self._operationsTime(run.updated_at))+'</div>'+
           '<footer>'+self._operationsLink(run.url, active ? '打开流程 / 在 GitHub 取消' : '打开流程', 'run')+'</footer></article>';
       }).join('');
-      return '<section class="operations-group"><div class="operations-section-head"><h3>'+title+'</h3><p>'+description+'</p></div>'+ 
+      return '<section class="operations-group"><div class="operations-section-head"><h3>'+title+'</h3><p>'+description+'</p></div>'+
         (rows || '<div class="operations-empty">'+(unavailable ? '当前数据不完整，不能据此判断没有流程。' : '本次返回的近期记录中没有此类流程。')+'</div>')+'</section>';
+    },
+    _renderProductionRecord: function(observation) {
+      var record = observation && observation.record;
+      var html = '<section class="operations-group"><div class="operations-section-head"><h3>生产发布记录</h3><p>显示执行器实际完成的阶段；检查、准备与切换分别记录。</p></div>';
+      if (!record) return html+'<div class="operations-empty">尚未取得可信的生产执行记录。'+this._operationsLink('https://github.com/doubleh-ai/prism/issues/9','查看整体进展','operator')+'</div></section>';
+      var labels={inspect:'生产复核',prepare:'准备版本',stage:'隔离验收',finish_stage:'结束隔离验收',diagnose_build:'诊断候选环境',quarantine_failed_prepare:'保留失败现场',integration_astock:'研究引擎联调',integration_cli:'调用协议验证',integration_live:'模型与搜索联调',integration_market:'行情来源验证',validate_legacy_retirement:'退出机制验证',validate_legacy_stop:'停止流程验证',legacy_drain:'等待后台任务保存',switch_stopped:'启动已验收版本',preflight:'切换前复核',quiesce:'暂停新任务',resume:'恢复访问',verified:'上线验收',cutover_config_written:'切换配置已写入',switch:'切换版本',verify:'上线验收',rollback:'恢复程序'};
+      var states={started:'已开始',running:'执行中',in_progress:'执行中',pending:'待完成',prepared:'已准备',staged:'已隔离验证',switched:'已切换，待验收',success:'通过',verified:'通过',completed:'已完成',complete:'已完成',failed:'失败',cancelled:'已取消',stopped:'已停止',rolled_back:'已回退'};
+      html+='<p><strong>'+esc(record.release_id)+'</strong> · '+esc(states[record.status] || '状态未知')+' · '+esc(labels[record.stage] || record.stage)+'</p><p><code>'+esc(record.commit)+'</code></p><p class="operations-muted">产物 SHA-256 '+esc(record.archive_sha256)+'<br>更新 '+esc(this._operationsTime(record.updated_at))+'</p>';
+      if (observation.status==='stale') html+='<p class="operations-notice attention">执行记录长时间未更新，请到独立记录核查，不能推断发布已经完成。</p>';
+      html+='<p>'+(record.production_verified?'该发布已完成独立验收。':record.cutover_occurred?'版本切换已经发生，尚未完成上线验收。':'尚无版本已切换的完成证据。')+'</p>';
+      var self=this;
+      html+='<ol>'+(record.steps || []).map(function(step){return '<li>'+esc(labels[step.stage] || step.stage)+' · '+esc(states[step.status] || step.status)+' · '+esc(self._operationsTime(step.at))+'</li>';}).join('')+'</ol>';
+      html+='<p>'+this._operationsLink('https://github.com/doubleh-ai/prism/issues/9','独立记录 / 请求停止剩余步骤','operator')+'</p><p class="operations-muted">关闭独立记录会阻止后续步骤；已发生的切换需要单独核对和恢复。只覆盖经受控执行器产生的变更。</p></section>';
+      return html;
     },
     _renderOperationsContent: function() {
       if (!this.isAdmin || this._operationsForbidden) return '<div class="operations-notice attention" role="alert">'+esc(this._operationsError || '无管理权限')+'</div>';
       var data = this._operationsData;
-      var html = '<div class="operations-heading"><div><span class="operations-eyebrow">DELIVERY OBSERVATION</span><h2>发布控制台</h2><p>只读观测公开 GitHub 流程与本实例信息；页面激活时每 30 秒刷新。</p></div><span class="operations-state neutral">只读</span></div>'+ 
-        '<div class="operations-notice"><strong>生产未接入 · 当前仅构建候选版本</strong><p>此页不能发布、回滚或停止生产服务。取消 GitHub 流程不等于回滚，已经执行的步骤不会自动撤销。</p><p>GitHub 快照最多约 3 分钟更新一次；实时日志与取消入口在 GitHub 流程页。</p></div>';
+      var html = '<div class="operations-heading"><div><span class="operations-eyebrow">DELIVERY OBSERVATION</span><h2>发布控制台</h2><p>只读观测公开 GitHub 流程与本实例信息；页面激活时每 30 秒刷新。</p></div><span class="operations-state neutral">只读</span></div>'+
+        '<div class="operations-notice"><strong>每次变更都有独立记录</strong><p>此页只读查看检查、候选和真实发布记录。生产操作由 Mac 上的受控执行器完成；停止剩余步骤不等于回滚已发生的切换。</p><p>GitHub 检查快照最多约 3 分钟更新一次；独立记录即使本站不可用仍可查看。</p></div>';
       if (this._operationsError) html += '<div class="operations-notice attention" role="alert">'+esc(this._operationsError)+'</div>';
       if (!data) return html+'<div class="operations-empty" role="status">'+(this._operationsLoading ? '正在读取真实流程与实例信息…' : '尚未取得观测数据。')+'</div>';
       var github = data.github, runtime = data.runtime, links = data.links || {};
       var unavailable = github.status !== 'ok' || !!github.stale || !!this._operationsError;
-      var env = {local:'本地',staging:'预发布',production:'生产（实例自报，未核验）',unknown:'未知'}[runtime.environment] || '未知';
+      var env = {local:'本地',staging:'预发布',production:runtime.production_verified?'生产（已验收该版本）':'生产（尚未核验）',unknown:'未知'}[runtime.environment] || '未知';
       html += '<div class="operations-observation"><span>本次观测 '+esc(this._operationsTime(data.observed_at))+'</span><span>GitHub 检查 '+esc(this._operationsTime(github.checked_at))+'</span><span class="operations-state '+(unavailable?'attention':'ok')+'">'+(unavailable?'数据不可用或已过期':'已取得本次数据')+'</span>'+(this._operationsLoading?'<span>刷新中…</span>':'')+'</div>';
       if (github.status !== 'ok' || github.stale) html += '<div class="operations-notice attention" role="status"><strong>'+(github.stale?'GitHub 数据已过期':'GitHub 数据暂不可用')+'</strong><p>'+esc(github.error || '请在 GitHub 查看最新状态；这里的历史记录不代表当前执行情况。')+'</p></div>';
-      html += '<div class="operations-summary"><article><span>当前查看的实例</span><strong>'+esc(runtime.version || '版本未知')+'</strong><p>'+esc(env)+' · 本实例版本，非生产核验</p><code>'+esc(runtime.deployed_revision || '部署版本未记录')+'</code></article><article><span>发布边界</span><strong>候选构建</strong><p>'+esc(data.delivery.reason || '生产环境尚未接入发布控制。')+'</p><div class="operations-disabled-actions"><button disabled>部署不可用</button><button disabled>回滚不可用</button></div></article></div>'+ 
-        '<div class="operations-links"><span>'+esc(data.repository || '仓库未提供')+'</span>'+this._operationsLink(links.actions,'全部流程')+this._operationsLink(links.pull_requests,'Pull requests')+this._operationsLink(links.repository,'仓库')+'</div>';
+      html += '<div class="operations-summary"><article><span>当前查看的实例</span><strong>'+esc(runtime.version || '版本未知')+'</strong><p>'+esc(env)+(runtime.production_verified?' · 发布验收版本':' · 本实例版本，非生产核验')+'</p><code>'+esc(runtime.deployed_revision || '部署版本未记录')+'</code></article><article><span>发布边界</span><strong>'+(data.delivery.production_connected?'受控外部发布':'尚无可信生产记录')+'</strong><p>'+esc(data.delivery.reason || '生产环境尚未接入发布控制。')+'</p><div class="operations-disabled-actions"><button disabled>部署不可用</button><button disabled>回滚不可用</button></div></article></div>'+
+        '<div class="operations-links"><span>'+esc(data.repository || '仓库未提供')+'</span>'+this._operationsLink(links.actions,'全部流程')+this._operationsLink(links.pull_requests,'Pull requests')+this._operationsLink(links.repository,'仓库')+this._operationsLink(links.operator_record || 'https://github.com/doubleh-ai/prism/issues/9','独立发布记录 / 紧急介入','operator')+'</div>';
+      html += this._renderProductionRecord(data.production);
       var runs = Array.isArray(github.runs) ? github.runs : [];
-      html += '<div class="operations-run-groups">'+this._renderOperationsRuns(runs,'ci','CI 检查','测试与静态检查；通过不代表已经发布。',unavailable)+this._renderOperationsRuns(runs,'candidate','候选构建','候选产物生成；构建成功不代表生产已更新。',unavailable)+this._renderOperationsRuns(runs,'deployment','部署流程','仅列出 GitHub 部署流程记录；不据此确认线上版本。',unavailable)+'</div>';
+      html += '<div class="operations-run-groups">'+this._renderOperationsRuns(runs,'ci','CI 检查','测试与静态检查；通过不代表已经发布。',unavailable)+this._renderOperationsRuns(runs,'candidate','候选构建','候选产物生成；构建成功不代表生产已更新。',unavailable)+'</div>';
       var self = this, prs = Array.isArray(github.pull_requests) ? github.pull_requests : [];
       html += '<section class="operations-group"><div class="operations-section-head"><h3>当前开放 PR</h3><p>展示当前开放的草稿与待合并 PR；已关闭或已合并的记录请到 GitHub 查看。</p></div><div class="operations-pr-list">'+(prs.map(function(pr) {
         return '<article class="operations-pr"><div><strong>#'+esc(pr.number)+' '+esc(pr.title)+'</strong><p>'+esc(pr.head || '未知分支')+' → '+esc(pr.base || '未知分支')+' · <code>'+esc(String(pr.head_sha || '').slice(0,12))+'</code></p></div><span class="operations-state neutral">'+esc(pr.draft?'草稿':{open:'待合并',closed:'已关闭',merged:'已合并'}[pr.state] || '状态未知')+'</span>'+self._operationsLink(pr.url,'查看 PR','pr')+'</article>';

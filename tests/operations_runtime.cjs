@@ -24,8 +24,8 @@ const settled=()=>new Promise(setImmediate);
 function rendersBoundariesAndSafeLinks() {
   const {app}=environment();app._operationsData=snapshot();
   let html=app._renderOperationsContent();
-  for(const text of ['CI 检查','候选构建','部署流程','生产未接入','本实例版本，非生产核验','取消 GitHub 流程不等于回滚','3 分钟','北京时间','打开流程 / 在 GitHub 取消','草稿'])assert(html.includes(text),text);
-  assert.equal((html.match(/class="operations-run"/g)||[]).length,3);
+  for(const text of ['CI 检查','候选构建','生产发布记录','尚未取得可信的生产执行记录','本实例版本，非生产核验','停止剩余步骤不等于回滚','3 分钟','北京时间','打开流程 / 在 GitHub 取消','草稿'])assert(html.includes(text),text);
+  assert.equal((html.match(/class="operations-run"/g)||[]).length,2);
   assert(html.includes('当前开放 PR'));assert(!html.includes('草稿与合并状态单独显示'));
   assert(html.includes('href="https://github.com/doubleh-ai/prism/actions/runs/2"'));
   assert(html.includes('<button disabled>部署不可用</button>'));
@@ -40,6 +40,23 @@ function rendersBoundariesAndSafeLinks() {
   app._operationsData.github.pull_requests[0].title='<script>probe()</script>';
   html=app._renderOperationsContent();assert(!html.includes('<img'));assert(!html.includes('<script>'));assert(!html.includes('href="javascript:'));
   for(const url of ['https://github.com.evil.invalid/doubleh-ai/prism/actions/runs/1','https://github.com/other/repo/actions/runs/1','https://user:password@github.com/doubleh-ai/prism/actions/runs/1','https://github.com/doubleh-ai/prism/settings','java\nscript:void(0)'])assert(!app._operationsLink(url,'open','run').includes('<a '),url);
+}
+function validationStagesHaveChineseLabelsWithoutProductionClaims() {
+  const {app}=environment();
+  const labels={finish_stage:'结束隔离验收',diagnose_build:'诊断候选环境',quarantine_failed_prepare:'保留失败现场',integration_astock:'研究引擎联调',integration_cli:'调用协议验证',integration_live:'模型与搜索联调',integration_market:'行情来源验证',validate_legacy_retirement:'退出机制验证',validate_legacy_stop:'停止流程验证',legacy_drain:'等待后台任务保存',switch_stopped:'启动已验收版本'};
+  for(const [stage,label] of Object.entries(labels)) {
+    const data=snapshot();
+    data.github.runs.forEach(run=>{run.status='completed';run.conclusion='success';});
+    data.runtime={version:'synthetic-local-build',deployed_revision:'a'.repeat(40),environment:'production',production_verified:false};
+    data.production={status:'ok',record:{release_id:'synthetic-validation',commit:'a'.repeat(40),archive_sha256:'b'.repeat(64),stage,status:'completed',updated_at:1792555818,production_verified:false,cutover_occurred:false,steps:[{stage,status:'completed',at:1792555818}]}};
+    app._operationsData=data;
+    const html=app._renderOperationsContent();
+    assert(html.includes(label),stage+' must have a Chinese label');
+    assert(!html.includes(' · '+stage+'</p>') && !html.includes('<li>'+stage),stage+' must not appear as an untranslated stage');
+    assert(html.includes('生产（尚未核验）') && html.includes('尚无版本已切换的完成证据。'));
+    assert(!html.includes('该发布已完成独立验收。') && !html.includes('生产（已验收该版本）'));
+    assert(html.includes('通过不代表已经发布。') && html.includes('构建成功不代表生产已更新。'));
+  }
 }
 async function adminPermissionClearsSnapshots() {
   const {app,document,timers}=environment();let calls=0;
@@ -104,6 +121,6 @@ async function stalledRequestHasABoundedDeadline() {
   assert.equal(timers.size,1);assert.equal([...timers.values()][0].delay,30000);
 }
 (async()=>{
-  rendersBoundariesAndSafeLinks();await adminPermissionClearsSnapshots();await pollsOnlyWhileVisibleWithoutOverlap();await ignoresLateResponsesAfterLeaving();await failuresAndStaleDataStayExplicit();await operationsTabUsesItsOwnReadOnlyEndpoint();builtInResearchSkillIsTheHealthDefault();await stalledRequestHasABoundedDeadline();
-  console.log('operations runtime ok: 8 scenarios');
+  rendersBoundariesAndSafeLinks();validationStagesHaveChineseLabelsWithoutProductionClaims();await adminPermissionClearsSnapshots();await pollsOnlyWhileVisibleWithoutOverlap();await ignoresLateResponsesAfterLeaving();await failuresAndStaleDataStayExplicit();await operationsTabUsesItsOwnReadOnlyEndpoint();builtInResearchSkillIsTheHealthDefault();await stalledRequestHasABoundedDeadline();
+  console.log('operations runtime ok: 9 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

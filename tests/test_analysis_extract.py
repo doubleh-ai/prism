@@ -116,11 +116,6 @@ def test_astock_legacy_node_delta_is_still_supported():
     assert state["investment_debate_state"] == {"bull_history": ""}
 
 
-class _Proc:
-    def __init__(self, out):
-        self.stdout = out.encode() if isinstance(out, str) else out
-
-
 def test_extract_structured_ok(monkeypatch):
     payload = {
         "signal": "买入",
@@ -132,7 +127,7 @@ def test_extract_structured_ok(monkeypatch):
         "bull_bear": {},
         "verdict_summary": "加仓",
     }
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(json.dumps(payload)))
+    monkeypatch.setattr("server.services.auxiliary_model.run_text", lambda *a, **k: json.dumps(payload))
     out = ae._extract_structured({"final_decision": "x"}, "300750", "宁德时代")
     assert out and out["signal"] == "买入"
     assert out["confidence"] is None
@@ -142,16 +137,16 @@ def test_extract_structured_timeout_returns_none(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr("server.services.auxiliary_model.run_text", boom)
     assert ae._extract_structured({"final_decision": "x"}, "300750", "n") is None
 
 
 def test_extract_structured_garbage_returns_none(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc("totally not json"))
+    monkeypatch.setattr("server.services.auxiliary_model.run_text", lambda *a, **k: "totally not json")
     assert ae._extract_structured({"final_decision": "x"}, "300750", "n") is None
 
 
 def test_extract_structured_missing_signal_and_thesis(monkeypatch):
     # Valid JSON but no signal/thesis → treated as garbage → None (fallback)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc('{"foo":"bar"}'))
+    monkeypatch.setattr("server.services.auxiliary_model.run_text", lambda *a, **k: '{"foo":"bar"}')
     assert ae._extract_structured({}, "300750", "n") is None

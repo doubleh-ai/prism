@@ -25,11 +25,14 @@ from ..config import (
 )
 from ..proxy import get_proxy_config
 from ..research_context import build_research_context, build_research_prompt
+from ..work_lifecycle import get_manager
+from .process_lease import start_process, wait_process
 
 log = logging.getLogger("stock-app")
 
 # Per-conversation running processes: {conv_id: process}
 _active_procs: dict = {}
+_cancelled_procs: set[int] = set()
 
 
 def _skill_dir_name(skill_id_or_dir: str) -> str:
@@ -85,7 +88,19 @@ def _resolve_skill_dir(dir_name: str) -> tuple[Path | None, list[Path]]:
     return None, candidates
 
 
-async def run_claude_stream(
+async def run_claude_stream(*args, parent_lease=None, **kwargs) -> AsyncGenerator[dict, None]:
+    """Reserve the real CLI owner before spawning or granting bridge access."""
+    manager = parent_lease.manager if parent_lease is not None else get_manager()
+    lease = manager.admit("cli", parent=parent_lease, persist_required=False)
+    try:
+        async with contextlib.aclosing(_run_claude_stream(*args, _lease=lease, **kwargs)) as stream:
+            async for event in stream:
+                yield event
+    finally:
+        lease.release()
+
+
+async def _run_claude_stream(
     question: str,
     skill_name: str = "prism-research",
     user: str = "anon",
@@ -94,6 +109,7 @@ async def run_claude_stream(
     conv_id: str | None = None,
     extra_skills: list | None = None,
     research_context: dict | None = None,
+    _lease=None,
 ) -> AsyncGenerator[dict, None]:
     """Spawn Claude CLI and stream JSON events.
 
@@ -243,6 +259,8 @@ async def run_claude_stream(
             "HOME": str(Path.home()),
             "NO_COLOR": "1",
             "ANTHROPIC_BASE_URL": model_cfg.get("base_url", ""),
+            "DISABLE_UPDATES": "1",
+            "DISABLE_AUTOUPDATER": "1",
             "ANTHROPIC_AUTH_TOKEN": model_cfg.get("api_key", ""),
         }
     )
@@ -253,14 +271,60 @@ async def run_claude_stream(
         # The unguessable token exists only in process memory/env; argv and MCP
         # config contain no credential. Each request rechecks conversation ownership.
         try:
-            bridge_token = issue_run_token(user, conv_id, research["run_id"])
+            bridge_token = issue_run_token(user, conv_id, research["run_id"], parent_lease=_lease)
         except Exception:
             yield {"type": "error", "message": "当前会话的研究授权不可用，请重新打开会话后重试"}
             return
         env["PRISM_CAPABILITY_TOKEN"] = bridge_token
         env["PRISM_CAPABILITY_URL"] = CAPABILITY_INTERNAL_URL
+    proc, registered, spawning = None, False, None
+    cleanup_requested = asyncio.Event()
+
+    async def stop_and_reap(_cleanup_lease):
+        # Reserve ownership before launch: a failed birth-identity check can
+        # block the parent, but must never prevent its actual child cleanup.
+        try:
+            await cleanup_requested.wait()
+            if spawning is None:
+                return
+            child, child_registered = await spawning.wait()
+            if child.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    child.terminate()
+                try:
+                    await asyncio.wait_for(wait_process(_lease, child, child_registered), timeout=3)
+                except TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        child.kill()
+                    # The original real wait remains owned across either timeout.
+                    # An uncertain child keeps this cleanup blocked on failure.
+                    await asyncio.wait_for(wait_process(_lease, child, child_registered), timeout=3)
+            else:
+                await wait_process(_lease, child, child_registered)
+            if conv_id and _active_procs.get(conv_id) is child:
+                _active_procs.pop(conv_id, None)
+        finally:
+            if use_bridge:
+                revoke_run_token(research["run_id"])
+
+    def request_cleanup():
+        try:
+            # Revoke before a potentially slow mandatory wait. Even a revocation
+            # error must wake the already-owned process cleanup.
+            if use_bridge:
+                revoke_run_token(research["run_id"])
+        finally:
+            cleanup_requested.set()
+
     try:
-        proc = await asyncio.create_subprocess_exec(
+        cleanup = _lease.manager.start("cli", stop_and_reap, parent=_lease)
+    except BaseException:
+        if use_bridge:
+            revoke_run_token(research["run_id"])
+        raise
+    try:
+        spawning = start_process(
+            _lease,
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE,  # Open stdin for AskUserQuestion answers
@@ -268,9 +332,10 @@ async def run_claude_stream(
             cwd=str(cwd),
             env=env,
         )
+        proc, registered = await spawning.wait()
     except BaseException:
-        if use_bridge:
-            revoke_run_token(research["run_id"])
+        request_cleanup()
+        await cleanup.wait()
         raise
     log.info(f"Claude PID={proc.pid} skill={skill_name} resume={bool(session_id)}")
 
@@ -365,7 +430,9 @@ async def run_claude_stream(
         if not timed_out:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=1)
-            if proc.returncode not in (None, 0):
+            if id(proc) in _cancelled_procs:
+                yield {"type": "cancelled", "message": "用户已取消本轮研究"}
+            elif proc.returncode not in (None, 0):
                 err_text = ""
                 try:
                     err_raw = await asyncio.wait_for(proc.stderr.read(4096), timeout=0.5)
@@ -381,17 +448,11 @@ async def run_claude_stream(
         for call_event in pending_calls(force=True):
             yield call_event
     finally:
-        if use_bridge:
-            revoke_run_token(research["run_id"])
-        if conv_id:
-            _active_procs.pop(conv_id, None)
-        if proc.returncode is None:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    proc.kill()
+        _cancelled_procs.discard(id(proc))
+        request_cleanup()
+        # HTTP cancellation only detaches this waiter. The independently owned
+        # cleanup keeps the actual launch/wait witness and final grant revocation.
+        await cleanup.wait()
 
 
 async def respond_to_question(conv_id: str, answer: str) -> bool:
@@ -422,12 +483,18 @@ async def cancel_process(conv_id: str) -> bool:
     proc = _active_procs.get(conv_id)
     if not proc:
         return False
+    _cancelled_procs.add(id(proc))
     try:
         proc.terminate()
         await asyncio.wait_for(proc.wait(), timeout=3)
     except Exception:
         with contextlib.suppress(Exception):
             proc.kill()
-    _active_procs.pop(conv_id, None)
+            await asyncio.wait_for(proc.wait(), timeout=3)
+    if proc.returncode is None:
+        log.warning("Claude process termination remains unconfirmed")
+        return False
+    if _active_procs.get(conv_id) is proc:
+        _active_procs.pop(conv_id, None)
     log.info(f"Cancelled Claude process for conv={conv_id}")
     return True

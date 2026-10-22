@@ -494,32 +494,16 @@ def translate(user_input: str) -> dict | None:
     if rule:
         return rule
 
-    import subprocess
-
-    from server.config import CLAUDE_BIN
+    from server.services.auxiliary_model import run_text
 
     prompt = f"{_SCHEMA}\n{_EXAMPLES}\n输入「{user_input}」:"
     try:
-        proc = subprocess.run(
-            [
-                CLAUDE_BIN,
-                "-p",
-                prompt,
-                "--model",
-                "minimax-m2.7-fast",
-                "--max-tokens",
-                "900",
-                "--output-format",
-                "json",
-            ],
-            capture_output=True,
-            timeout=40,
-        )
+        output = run_text(prompt, timeout=40, output_format="json")
     except Exception as exc:
-        log.warning("indicator translate subprocess failed: %s", exc)
+        log.warning("indicator translation unavailable (%s)", type(exc).__name__)
         return None
 
-    data = _parse_json_lenient(proc.stdout.decode("utf-8", errors="replace").strip())
+    data = _parse_json_lenient(output)
     if not isinstance(data, dict):
         return None
     dsl = data.get("dsl")

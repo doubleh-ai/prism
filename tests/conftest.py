@@ -19,6 +19,21 @@ def temp_data_dir(monkeypatch):
         # Re-import config to pick up new DATA_DIR
         import server.config
 
+        # Test runners never inherit production credentials. Chat fixtures use
+        # a synthetic configured model; separate error tests explicitly clear it.
+        monkeypatch.setattr(
+            server.config,
+            "MODELS",
+            {
+                key: {**value, "api_key": "synthetic-isolated-test"}
+                for key, value in server.config.MODELS.items()
+            },
+        )
+        # Modules may already hold the configuration dictionary from earlier tests.
+        for module_name in ("server.chat", "server.main", "server.services.claude_runner"):
+            module = sys.modules.get(module_name)
+            if module is not None:
+                monkeypatch.setattr(module, "MODELS", server.config.MODELS)
         server.config.DATA_DIR = Path(td)
         server.config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         # Reset DB_PATH

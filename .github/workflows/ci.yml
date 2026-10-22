@@ -9,7 +9,15 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench]
+    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench, codex/prism-release-control]
+
+permissions:
+  contents: read
+
+# Obsolete checks may stop; production writers use a separate serialized executor.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -45,8 +53,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check server/ tests/ scripts/release_candidate.py
-          ruff format --check server/ tests/ scripts/release_candidate.py
+          ruff check server/ tests/ scripts/release_candidate.py scripts/release_controller.py scripts/remote_release.py scripts/secure_backup.py scripts/verify_backup_boot.py scripts/verify_database_compatibility.py scripts/build_jsonpath_wheel.py
+          ruff format --check server/ tests/ scripts/release_candidate.py scripts/release_controller.py scripts/remote_release.py scripts/secure_backup.py scripts/verify_backup_boot.py scripts/verify_database_compatibility.py scripts/build_jsonpath_wheel.py
 
       - name: Run tests with coverage
         env:
@@ -58,13 +66,6 @@ jobs:
             --cov-report=xml \
             --cov-fail-under=45 \
             -v
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
-        with:
-          file: coverage.xml
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
 
   security-scan:
     name: Security scan

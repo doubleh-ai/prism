@@ -4,9 +4,9 @@ Follow the human's current authorization and these repository safety defaults. C
 
 ## Current delivery capability
 
-This repository currently provides CI, candidate packaging/verification and a read-only operations console. It does **not** have a production deployment or rollback executor. A successful CI run, candidate artifact, `/health/ready` response, environment label or local `.deploy-revision` alone is not evidence of a production release.
+This repository provides CI, candidate packaging/verification, a read-only operations console and a fixed-target external release controller (`scripts/release_controller.py` with `scripts/remote_release.py`). The controller has offline regression coverage; actual Linux isolation, candidate acceptance, recovery acceptance and production cutover require their own real receipts. Implementation and mock tests do not mean a deployment has occurred. A successful CI run, candidate artifact, `/health/ready` response, environment label or local `.deploy-revision` alone is not evidence of a production release.
 
-Until a reviewed executor and its recovery checks exist, do not work around that gap with ad-hoc SSH copies, `cp -r`, bootstrap/install scripts, `/tmp` deploy scripts or in-place dependency upgrades. Building this missing capability is development work; declaring it connected before validation is not.
+Use only the reviewed controller and fixed candidate for authorized release work. Do not bypass a failed gate with ad-hoc SSH copies, `cp -r`, bootstrap/install scripts, `/tmp` deploy scripts or in-place dependency upgrades. Each invocation performs one explicit stage; do not combine inspection with a later production switch. The application UI remains read-only and is not an execution authorization source.
 
 ## Required record for every future production change
 
@@ -17,6 +17,11 @@ Until a reviewed executor and its recovery checks exist, do not work around that
 - Verify readiness, the exact served revision and core user flows after switching. Check model/data integrations separately; a database probe cannot certify research quality or live data.
 - Roll back code/environment only when compatible with the current database. Do not silently restore a database or discard writes after a backup. A destructive data restore needs explicit, scoped human authorization and a stated loss window.
 - Mark a release successful only after verification; preserve failure, cancellation and rollback records. Never rewrite them as a successful deployment.
+- Honor the independent operator issue and stop flags before every controlled boundary. A closed, unavailable or unknown gate fails closed. After connection loss, reconcile the private journal and actual state; terminating SSH is not proof that a remote step stopped.
+- Build with trusted system Python and an isolated non-production UID. Never execute inherited virtual-environment startup hooks as root. Exclude the legacy TLS verification bypass and bytecode caches; bind inherited packages and separately copied external engine source to actual content manifests. A core dependency lock does not cover the entire inherited environment.
+- Keep candidate checks on isolated database copies with copied sessions revoked, a private network namespace and bounded resources. Real Linux canary checks must verify process, filesystem and network isolation; flags in a mock command are insufficient.
+- Before switching, require the controlled API admission hold, no active tasks, a matching actual current runtime/source fingerprint and an accepted compatible recovery candidate. Never assume the original production directory is a safe recovery target. Program rollback does not restore the database.
+- Distinguish internal service verification while admission is held from a completed release. Public `production_verified` is true only after successful verification and resume, with no rollback for that release.
 
 ## Development boundaries
 

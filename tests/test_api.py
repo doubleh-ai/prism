@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from server.release import APP_VERSION
+
 
 def test_chat_report_protocol_cleanup_and_file_priority():
     from server.chat import _clean_object_artifacts, _prioritize_report_files
@@ -327,7 +329,9 @@ class TestChatControl:
 
         assert r.status_code == 200
         assert "报告已交付" in r.text
-        assert '"report_status": "complete"' in r.text
+        # Recovering terminal prose is not evidence that its claims were checked.
+        assert '"report_status": "partial"' in r.text
+        assert "structured_claims_missing" in r.text
 
     async def test_conv_isolation(self, client, auth_cookies, test_user):
         """Different users can't see each other's conversations."""
@@ -362,8 +366,8 @@ class TestReleaseMetadata:
         r = await client.get("/api/releases", cookies=auth_cookies)
         assert r.status_code == 200
         data = r.json()
-        assert data["version"] == "v0.19.7"
-        assert data["latest"]["version"] == "v0.19.7"
+        assert data["version"] == APP_VERSION
+        assert data["latest"]["version"] == APP_VERSION
         assert data["releases"]
         assert data["releases"][0]["sections"]
 
@@ -514,7 +518,11 @@ class TestSavedReports:
             )
             assert r2.status_code == 200
             assert r2.json()["report"]["id"] == saved["id"]
-            assert r2.json()["report"]["title"] == "CATL refreshed"
+            # Re-saving a completed research revision is idempotent. Follow-ups
+            # create new runs instead of overwriting the previous report.
+            assert r2.json()["report"]["title"] == "CATL snapshot"
+            assert r2.json()["report"]["report"] == saved["report"]
+            assert r2.json()["report"]["updated_at"] == saved["updated_at"]
         finally:
             _store.pop(aid, None)
 
@@ -527,20 +535,21 @@ class TestSavedReports:
         assert created_conv.status_code == 200
         conv_id = created_conv.json()["id"]
 
-        created_report = await client.post(
-            "/api/reports/library",
-            cookies=auth_cookies,
-            json={
+        from server.reports import save_report_snapshot
+
+        # Server-generated chat provenance is created by the trusted producer,
+        # never accepted from a browser's arbitrary JSON body.
+        report_id = save_report_snapshot(
+            "testuser",
+            {
                 "source": "chat",
-                "source_id": conv_id,
+                "source_id": "fixture-run",
                 "conv_id": conv_id,
                 "title": "Chat thesis snapshot",
                 "summary": "Final answer was saved automatically.",
                 "report": {"final_decision": "A complete chat answer."},
             },
-        )
-        assert created_report.status_code == 200
-        report_id = created_report.json()["report"]["id"]
+        )["id"]
 
         listed = await client.get(f"/api/convs/{conv_id}/reports", cookies=auth_cookies)
         assert listed.status_code == 200
@@ -681,7 +690,7 @@ class TestAdminAccountManagement:
         r = await client.get("/api/admin/health", cookies=auth_cookies)
         assert r.status_code == 200
         data = r.json()
-        assert data["version"] == "v0.19.7"
+        assert data["version"] == APP_VERSION
         assert "checks" in data
         assert "database" in data["checks"]
         assert "claude_cli" in data["checks"]

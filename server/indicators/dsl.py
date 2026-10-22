@@ -12,11 +12,28 @@ Example — "5日线上穿20日线 且 量>5日均量2倍":
     ]}
 """
 
+import math
+
 import pandas as pd
 
 
 class DSLError(Exception):
     """Malformed or non-whitelisted DSL."""
+
+
+class MissingData(DSLError):
+    """Required inputs are unavailable; this is not a negative signal."""
+
+
+def required_fundamentals(node):
+    if isinstance(node, dict):
+        fields = {node["fund"]} if isinstance(node.get("fund"), str) else set()
+        for value in node.values():
+            fields.update(required_fundamentals(value))
+        return fields
+    if isinstance(node, (list, tuple)):
+        return set().union(*(required_fundamentals(value) for value in node))
+    return set()
 
 
 def _align(df, x):
@@ -61,8 +78,11 @@ def _b_rsi(df, fund, n):
     delta = df["close"].diff()
     gain = delta.clip(lower=0).rolling(int(n)).mean()
     loss = (-delta.clip(upper=0)).rolling(int(n)).mean()
-    rs = gain / loss.replace(0, pd.NA)
-    return (100 - 100 / (1 + rs)).fillna(50)
+    rs = gain / loss.where(loss.ne(0))
+    result = 100 - 100 / (1 + rs)
+    result = result.mask(loss.eq(0) & gain.gt(0), 100)
+    # A flat, fully warmed window is neutral; an unobserved window is unknown.
+    return result.mask(loss.eq(0) & gain.eq(0), 50)
 
 
 def _b_kdj_k(df, fund, n):
@@ -121,11 +141,19 @@ _BASE = {
 
 
 def _cross_up(df, a, b):
-    return (a > b) & (a.shift(1) <= b.shift(1))
+    return _comparison(a, b, "gt") & _comparison(a.shift(1), b.shift(1), "le")
 
 
 def _cross_down(df, a, b):
-    return (a < b) & (a.shift(1) >= b.shift(1))
+    return _comparison(a, b, "lt") & _comparison(a.shift(1), b.shift(1), "ge")
+
+
+def _comparison(a, b, method):
+    return getattr(a, method)(b).astype("boolean").mask(a.isna() | b.isna(), pd.NA)
+
+
+def _truth(value):
+    return value.ne(0).astype("boolean").mask(value.isna(), pd.NA)
 
 
 def _to_int(node):
@@ -158,15 +186,15 @@ _OPS = {
     "mul": (2, lambda df, a, b: a * b),
     "div": (2, lambda df, a, b: a / b.replace(0, pd.NA)),
     # comparison -> bool
-    "gt": (2, lambda df, a, b: a > b),
-    "lt": (2, lambda df, a, b: a < b),
-    "ge": (2, lambda df, a, b: a >= b),
-    "le": (2, lambda df, a, b: a <= b),
-    "eq": (2, lambda df, a, b: a == b),
+    "gt": (2, lambda df, a, b: _comparison(a, b, "gt")),
+    "lt": (2, lambda df, a, b: _comparison(a, b, "lt")),
+    "ge": (2, lambda df, a, b: _comparison(a, b, "ge")),
+    "le": (2, lambda df, a, b: _comparison(a, b, "le")),
+    "eq": (2, lambda df, a, b: _comparison(a, b, "eq")),
     # logic
-    "and": (2, lambda df, a, b: (a.astype(bool)) & (b.astype(bool))),
-    "or": (2, lambda df, a, b: (a.astype(bool)) | (b.astype(bool))),
-    "not": (1, lambda df, a: ~a.astype(bool)),
+    "and": (2, lambda df, a, b: _truth(a) & _truth(b)),
+    "or": (2, lambda df, a, b: _truth(a) | _truth(b)),
+    "not": (1, lambda df, a: ~_truth(a)),
     # time-series events
     "cross_up": (2, _cross_up),
     "cross_down": (2, _cross_down),
@@ -175,8 +203,8 @@ _OPS = {
     "ref": (2, lambda df, a, n: a.shift(_to_int(n))),
     "pct_change": (2, lambda df, a, n: (a / a.shift(_to_int(n)) - 1) * 100),
     "slope": (2, lambda df, a, n: a - a.shift(_to_int(n))),
-    "count": (2, lambda df, a, n: a.astype(bool).rolling(_to_int(n)).sum()),
-    "within": (2, lambda df, a, n: a.astype(bool).rolling(_to_int(n)).max().fillna(0).astype(bool)),
+    "count": (2, lambda df, a, n: _truth(a).rolling(_to_int(n)).sum()),
+    "within": (2, lambda df, a, n: _truth(a).rolling(_to_int(n)).max().astype("Float64").astype("boolean")),
     "range_pct": (
         2,
         lambda df, a, n: (
@@ -266,6 +294,18 @@ def evaluate(dsl, df, fund=None, params=None):
     """
     if fund is None:
         fund = {}
+    missing = []
+    for field in required_fundamentals(dsl):
+        if field not in _FUNDS:
+            raise DSLError(f"unknown fundamental: {field!r}")
+        try:
+            valid = math.isfinite(float(fund.get(field)))
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            missing.append(field)
+    if missing:
+        raise MissingData("缺少指标所需基本面数据: " + ", ".join(sorted(missing)))
     for col in ("close", "high", "low", "volume"):
         if col not in df.columns:
             raise DSLError(f"df missing column: {col!s}")

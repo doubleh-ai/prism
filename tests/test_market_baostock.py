@@ -34,6 +34,13 @@ def _make_fake_rs(rows, fields):
 
 def _patched_bs(fake_bs):
     """Context manager that reloads baostock_provider with a fake baostock."""
+    import importlib
+
+    # Keep one provider module in both sys.modules and its parent package.
+    # patch.dict restores newly imported module entries on exit; importing the
+    # provider only inside it can otherwise leave a stale package attribute
+    # with a second SDK lock/session generation in later scanner tests.
+    importlib.import_module("server.market.baostock_provider")
     return patch.dict("sys.modules", {"baostock": fake_bs})
 
 

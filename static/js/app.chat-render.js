@@ -82,7 +82,8 @@ var ChatRender = (function() {
     renderResearch: function(context) {
       if (!context || typeof context !== 'object') return '';
       return '<div class="research-context"><span>本轮研究截至 <strong>' + esc(this.formatTime(context.as_of)) + '</strong></span>' +
-        '<span>来源数据截至 <strong>以各来源标注为准；未提供则未知</strong></span></div>';
+        '<span>来源数据截至 <strong>以各来源标注为准；未提供则未知</strong></span>' +
+        (context.run_id ? '<button class="research-open" data-research-run="'+escAttr(context.run_id)+'">查看本轮研究与证据 ↗</button>' : '') + '</div>';
     },
 
     renderContent: function(input) {

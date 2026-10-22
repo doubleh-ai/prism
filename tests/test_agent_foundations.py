@@ -66,7 +66,7 @@ async def test_report_stream_finishes_after_optional_dashboard(monkeypatch, stru
     module.TradingAgentsGraph = Graph
     monkeypatch.setitem(sys.modules, "tradingagents.graph.trading_graph", module)
     monkeypatch.setattr(ae, "_ensure_astock", lambda: None)
-    monkeypatch.setattr(ae, "_build_config", lambda *args: {})
+    monkeypatch.setattr(ae, "_build_config", lambda *args, **kwargs: {})
     monkeypatch.setattr(ae, "ASTOCK_CACHE_TTL_SECONDS", 0)
 
     def extract(*args):
@@ -145,7 +145,9 @@ def test_structured_summary_does_not_create_unsourced_trade_numbers(monkeypatch)
         "trade": {"target_price": "1000元", "stop_loss": "10元", "position": "80%"},
     }
     monkeypatch.setattr(ae, "_parse_json_lenient", lambda *args: payload)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: types.SimpleNamespace(stdout=b"{}"))
+    # This test owns only dashboard post-processing. Actual child registration
+    # and process/tool boundaries are exercised in the lifecycle/auxiliary tests.
+    monkeypatch.setattr("server.services.auxiliary_model.run_text", lambda *args, **kwargs: "{}")
     result = ae._extract_structured({"final_decision": "原文未给出价格或仓位"}, "600000", "Example")
     assert result["confidence"] is None
     assert result["metrics"]["risk_score"] is None

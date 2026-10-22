@@ -593,7 +593,7 @@ class TestServiceWorkerCachePolicy:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
-        assert "prism-workbench-v79" in sw
+        assert "prism-workbench-v83" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
         assert "client.navigate(client.url)" in sw
@@ -622,7 +622,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     with open("static/sw.js", encoding="utf-8") as f:
         sw = f.read()
 
-    assert "app.indicator-chart.js?v=79" in template
+    assert "app.indicator-chart.js?v=83" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -653,7 +653,7 @@ def test_industry_workbench_static_contract():
         core = f.read()
 
     assert 'data-mode="industry"' in template
-    assert "app.industry.js?v=79" in template
+    assert "app.industry.js?v=83" in template
     assert "/api/industry/overview" in js
     assert "/api/industry/context" in js
     assert "_renderIndustryOverview" in js
@@ -691,7 +691,7 @@ def test_client_diagnostics_and_admin_bundle_static_contract():
     admin = Path("static/js/app.admin.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=79" in template
+    assert "app.diagnostics.js?v=83" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
@@ -755,8 +755,8 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert "app.css?v=79" in login
-    assert "app.css?v=79" in app
+    assert "app.css?v=83" in login
+    assert "app.css?v=83" in app
 
 
 def test_astock_fast_mode_controls_and_metadata_are_wired():
@@ -824,7 +824,7 @@ def test_watchlist_add_remove_static_contract():
     assert "移除自选" in market
     assert ".watchlist-item{display:grid;grid-template-columns:auto 1fr auto auto auto" in css
     assert ".watchlist-item__del{width:22px;height:22px;display:flex" in css
-    assert "var didAdd = this._addToWatchlist(ticker, name)" in vibe
+    assert "var didAdd = await this._addToWatchlist(ticker, name)" in vibe
 
 
 def test_full_market_screener_workbench_static_contract():
@@ -847,7 +847,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=79" in html
+    assert "app.screener.js?v=83" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener

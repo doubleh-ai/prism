@@ -54,6 +54,13 @@ def resample_kline(bars: Iterable[KLine], period: str, limit: int) -> list[KLine
                 close=last.close,
                 volume=sum(bar.volume for bar in group),
                 turnover=sum(turnovers) if turnovers else None,
+                # Aggregation cannot invent a common origin or acquisition time.
+                provenance=(
+                    first.provenance.model_copy(deep=True)
+                    if first.provenance is not None
+                    and all(bar.provenance == first.provenance for bar in group)
+                    else None
+                ),
             )
         )
     return result[-limit:]

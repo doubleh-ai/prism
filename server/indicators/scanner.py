@@ -15,14 +15,16 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..database import get_db
-from .dsl import DSLError, evaluate, is_signal
+from ..work_lifecycle import WorkHandle, get_manager
+from .dsl import DSLError, MissingData, evaluate, is_signal
 
 log = logging.getLogger("prism.indicator-scanner")
 
 _UNIVERSE_CACHE: list[dict[str, str]] = []
 _UNIVERSE_CACHE_AT = 0.0
 _UNIVERSE_TTL = 1800
-_TASKS: dict[str, asyncio.Task] = {}
+_TASKS: dict[str, WorkHandle] = {}
+_CANCEL_REQUESTED: set[str] = set()
 _GATES: dict[int, asyncio.Semaphore] = {}
 _SINA_KLINE_URL = (
     "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
@@ -88,20 +90,28 @@ def _load_universe_sync() -> list[dict[str, str]]:
     try:
         import baostock as bs
 
-        login = bs.login()
-        if getattr(login, "error_code", "1") != "0":
-            return []
-        rs = bs.query_stock_basic()
-        data = []
-        fields = list(getattr(rs, "fields", []) or [])
-        while getattr(rs, "error_code", "1") == "0" and rs.next():
-            values = rs.get_row_data()
-            row = dict(zip(fields, values, strict=False))
-            if row.get("type") not in (None, "", "1") or row.get("status") == "0":
-                continue
-            code = str(row.get("code", "")).split(".")[-1]
-            data.append({"code": code, "name": row.get("code_name", code)})
-        bs.logout()
+        from ..market.baostock_provider import run_serial_transaction
+
+        def load_baostock():
+            login = bs.login()
+            if getattr(login, "error_code", "1") != "0":
+                return []
+            try:
+                rs = bs.query_stock_basic()
+                data = []
+                fields = list(getattr(rs, "fields", []) or [])
+                while getattr(rs, "error_code", "1") == "0" and rs.next():
+                    values = rs.get_row_data()
+                    row = dict(zip(fields, values, strict=False))
+                    if row.get("type") not in (None, "", "1") or row.get("status") == "0":
+                        continue
+                    code = str(row.get("code", "")).split(".")[-1]
+                    data.append({"code": code, "name": row.get("code_name", code)})
+                return data
+            finally:
+                bs.logout()
+
+        data = run_serial_transaction(load_baostock)
         if data:
             import pandas as pd
 
@@ -116,7 +126,7 @@ async def load_universe() -> list[dict[str, str]]:
     now = time.time()
     if _UNIVERSE_CACHE and now - _UNIVERSE_CACHE_AT < _UNIVERSE_TTL:
         return [dict(row) for row in _UNIVERSE_CACHE]
-    rows = await asyncio.to_thread(_load_universe_sync)
+    rows = await get_manager().run_blocking("scan", _load_universe_sync)
     if rows:
         _UNIVERSE_CACHE = rows
         _UNIVERSE_CACHE_AT = now
@@ -212,6 +222,7 @@ def get_job(job_id: str, username: str) -> dict[str, Any] | None:
 
 
 def list_jobs(username: str, limit: int = 10) -> list[dict[str, Any]]:
+    reconcile_jobs(username)
     with get_db() as db:
         rows = db.execute(
             "SELECT * FROM indicator_scan_jobs WHERE username=? ORDER BY created_at DESC LIMIT ?",
@@ -220,12 +231,27 @@ def list_jobs(username: str, limit: int = 10) -> list[dict[str, Any]]:
     return [_job_row(row) for row in rows]
 
 
+def reconcile_jobs(username: str) -> None:
+    """A lost process is interrupted, never silently queued for another execution."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM indicator_scan_jobs WHERE username=? AND status IN ('queued','running','cancelling')",
+            [username],
+        ).fetchall()
+    for row in rows:
+        task = _TASKS.get(row["id"])
+        if task is None or task.done():
+            _persist_job(
+                _job_row(row), status="interrupted", error="服务重启或任务已失去执行上下文", completed=True
+            )
+
+
 def active_job(username: str) -> dict[str, Any] | None:
     with get_db() as db:
         row = db.execute(
             """
             SELECT * FROM indicator_scan_jobs
-            WHERE username=? AND status IN ('queued','running')
+            WHERE username=? AND status IN ('queued','running','cancelling')
             ORDER BY created_at DESC LIMIT 1
             """,
             [username],
@@ -246,6 +272,8 @@ def _persist_job(
 ) -> None:
     if status:
         job["status"] = status
+    if job["id"] in _CANCEL_REQUESTED and job.get("status") in {"queued", "running"}:
+        job["status"] = "cancelling"
     if error is not None:
         job["error"] = error
     now = int(time.time())
@@ -257,7 +285,7 @@ def _persist_job(
             """
             UPDATE indicator_scan_jobs SET
                 status=?,results_json=?,total=?,processed=?,matched=?,failed=?,error=?,
-                updated_at=?,completed_at=? WHERE id=? AND username=?
+                updated_at=?,completed_at=?,evaluated=?,insufficient=?,excluded=? WHERE id=? AND username=?
             """,
             [
                 job.get("status", "running"),
@@ -269,6 +297,9 @@ def _persist_job(
                 str(job.get("error") or "")[:500],
                 now,
                 completed_at,
+                int(job.get("evaluated") or 0),
+                int(job.get("insufficient") or 0),
+                int(job.get("excluded") or 0),
                 job["id"],
                 job["username"],
             ],
@@ -330,7 +361,11 @@ async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
             volume = float(bar.get("volume") or 0)
             rows.append(
                 {
-                    "t": int(datetime.datetime.combine(day, datetime.time()).timestamp()),
+                    "t": int(
+                        datetime.datetime.combine(
+                            day, datetime.time(), tzinfo=datetime.timezone(datetime.timedelta(hours=8))
+                        ).timestamp()
+                    ),
                     "open": float(bar["open"]),
                     "high": float(bar["high"]),
                     "low": float(bar["low"]),
@@ -345,7 +380,7 @@ async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
         return None
     frame = pd.DataFrame(rows).sort_values("t")
     if period in {"1w", "1m"}:
-        frame["date"] = pd.to_datetime(frame["t"], unit="s")
+        frame["date"] = pd.to_datetime(frame["t"], unit="s", utc=True).dt.tz_convert("Asia/Shanghai")
         frame = (
             frame.set_index("date")
             .resample("W-FRI" if period == "1w" else "ME")
@@ -391,9 +426,15 @@ async def _run_job(
 ) -> None:
     config = job["config"]
     try:
+        if job["id"] in _CANCEL_REQUESTED:
+            _persist_job(job, status="cancelled", error="用户已取消扫描", completed=True)
+            return
         loop_id = id(asyncio.get_running_loop())
         gate = _GATES.setdefault(loop_id, asyncio.Semaphore(1))
         async with gate:
+            if job["id"] in _CANCEL_REQUESTED:
+                _persist_job(job, status="cancelled", error="用户已取消扫描", completed=True)
+                return
             job["status"] = "running"
             if config.get("scope") == "market":
                 rows = filter_universe(await load_universe(), config)
@@ -440,6 +481,8 @@ async def _run_job(
 
             async def worker() -> None:
                 while True:
+                    if job["id"] in _CANCEL_REQUESTED:
+                        return
                     try:
                         row = queue.get_nowait()
                     except asyncio.QueueEmpty:
@@ -468,17 +511,25 @@ async def _run_job(
                             )
                         if df is None or len(df) == 0:
                             raise RuntimeError("no kline")
-                        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else 0.0
+                        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else float("nan")
+                        if min_turnover and not math.isfinite(turnover):
+                            raise MissingData("缺少成交额，无法执行成交额门槛")
                         if min_turnover and turnover < min_turnover:
+                            job["excluded"] = job.get("excluded", 0) + 1
                             continue
                         result = evaluate(indicator["dsl"], df, fund, params)
+                        if result.empty or result.iloc[-1:].isna().any():
+                            raise MissingData("指标预热或输入资料不足")
+                        job["evaluated"] = job.get("evaluated", 0) + 1
                         match = None
                         if is_signal(result):
                             window = (
                                 result.iloc[-trigger_window:] if len(result) >= trigger_window else result
                             )
                             if bool(window.fillna(False).any()):
-                                indexes = [idx for idx in range(len(result)) if bool(result.iloc[idx])]
+                                indexes = [
+                                    idx for idx in range(len(result)) if bool(result.fillna(False).iloc[idx])
+                                ]
                                 idx = indexes[-1]
                                 days_ago = max(0, len(df) - 1 - idx)
                                 match = {
@@ -512,6 +563,8 @@ async def _run_job(
                                     del job["matches"][max_keep:]
                     except asyncio.CancelledError:
                         raise
+                    except MissingData:
+                        job["insufficient"] = job.get("insufficient", 0) + 1
                     except (TimeoutError, DSLError, RuntimeError):
                         job["failed"] += 1
                     except Exception as exc:
@@ -523,22 +576,43 @@ async def _run_job(
                         if job["processed"] % 10 == 0 or job["processed"] == job["total"]:
                             _persist_job(job)
 
-            workers = [asyncio.create_task(worker()) for _ in range(min(20, len(rows)))]
-            try:
-                await asyncio.gather(*workers)
-            finally:
-                if fast_client is not None:
-                    await fast_client.aclose()
+            async def run_workers(_lease):
+                # This registered owner holds every native async request until
+                # all workers and their shared client have actually finished.
+                workers = [asyncio.create_task(worker()) for _ in range(min(20, len(rows)))]
+                try:
+                    return await asyncio.gather(*workers, return_exceptions=True)
+                finally:
+                    if fast_client is not None:
+                        await fast_client.aclose()
+
+            batch = get_manager().start("request", run_workers)
+            outcomes = await batch.wait_result()
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
             _sort_matches(job["matches"], config, signal_kind)
             job["matches"] = job["matches"][: int(config.get("max_results") or 100)]
-            _persist_job(job, status="completed", completed=True)
+            if job["id"] in _CANCEL_REQUESTED:
+                _persist_job(job, status="cancelled", error="用户已取消扫描，已有结果已保存", completed=True)
+                return
+            incomplete = int(job.get("failed") or 0) + int(job.get("insufficient") or 0)
+            status = "completed"
+            message = ""
+            if incomplete:
+                status = "partial" if job.get("evaluated") or job.get("excluded") else "failed"
+                message = "部分股票缺少资料或读取失败，请按实际覆盖范围解读结果"
+            _persist_job(job, status=status, error=message, completed=True)
     except asyncio.CancelledError:
         _persist_job(job, status="cancelled", error="用户已取消扫描", completed=True)
+        # Only cancel_job's cooperative flag is an authorized normal stop. An
+        # unknown owner cancellation remains blocked in the lifecycle manager.
+        raise
     except Exception as exc:
         log.exception("indicator scan job %s failed", job.get("id"))
         _persist_job(job, status="failed", error=str(exc), completed=True)
     finally:
-        _TASKS.pop(job["id"], None)
+        _CANCEL_REQUESTED.discard(job["id"])
 
 
 def start_job(
@@ -546,24 +620,48 @@ def start_job(
     indicator: dict[str, Any],
     build_df: Callable[..., Awaitable[tuple[Any, dict[str, Any]]]],
 ) -> None:
-    task = asyncio.create_task(_run_job(job, indicator, build_df))
-    _TASKS[job["id"]] = task
+    async def execute(_lease):
+        await _run_job(job, indicator, build_df)
+
+    def persist_terminal(_result):
+        stored = get_job(job["id"], job["username"])
+        if not stored or stored["status"] not in {"completed", "partial", "failed", "cancelled"}:
+            raise RuntimeError("scan_terminal_state_missing")
+
+    handle = get_manager().start("scan", execute, persist=persist_terminal)
+    _TASKS[job["id"]] = handle
+
+    def completed(done):
+        if _TASKS.get(job["id"]) is done:
+            _TASKS.pop(job["id"], None)
+
+    handle.add_done_callback(completed)
 
 
 def cancel_job(job_id: str, username: str) -> bool:
     job = get_job(job_id, username)
     if not job:
         return False
+    if job.get("status") not in {"queued", "running", "cancelling"}:
+        return True
     task = _TASKS.get(job_id)
     if task and not task.done():
-        task.cancel()
-    elif job.get("status") in {"queued", "running"}:
+        _persist_job(job, status="cancelling", error="正在停止扫描，等待当前读取完成")
+        _CANCEL_REQUESTED.add(job_id)
+    elif job.get("status") in {"queued", "running", "cancelling"}:
         _persist_job(job, status="cancelled", error="用户已取消扫描", completed=True)
     return True
 
 
 def delete_job(job_id: str, username: str) -> bool:
+    if get_job(job_id, username) is None:
+        return False
     cancel_job(job_id, username)
+    handle = _TASKS.get(job_id)
+    if handle is not None and not handle.done():
+        from fastapi import HTTPException
+
+        raise HTTPException(409, "扫描尚未确认停止，请等待结束后再删除")
     with get_db() as db:
         cur = db.execute(
             "DELETE FROM indicator_scan_jobs WHERE id=? AND username=?",

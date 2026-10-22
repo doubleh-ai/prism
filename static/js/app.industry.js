@@ -22,6 +22,7 @@ Object.assign(App, {
   },
 
   _leaveIndustry: function() {
+    this._industryChainSeq = (this._industryChainSeq || 0) + 1;
     if (this._industryContextTimer) {
       clearTimeout(this._industryContextTimer);
       this._industryContextTimer = null;
@@ -201,6 +202,7 @@ Object.assign(App, {
   },
 
   _backToMap: function() {
+    this._industryChainSeq = (this._industryChainSeq || 0) + 1;
     this._industryView = "overview";
     this._industryCategory = "";
     this._renderIndustrySidebar();
@@ -306,7 +308,7 @@ Object.assign(App, {
       ["watchlist", "自选", totals.watchlist || 0]
     ];
     return '<section class="industry-context-strip">' +
-      '<div class="industry-context-copy"><span>实时数据层</span><strong>' + esc(String(summary.linked_tickers || 0)) + ' 个标的已归链</strong><em>预置关系为待核验背景</em></div>' +
+      '<div class="industry-context-copy"><span>研究记录覆盖</span><strong>' + esc(String(summary.linked_tickers || 0)) + ' 个标的已归链</strong><em>预置关系为待核验背景</em></div>' +
       '<div class="industry-context-sources">' + sources.map(function(source) {
         return '<span data-source="' + source[0] + '"><i></i><b>' + esc(source[1]) + '</b><em>' + esc(String(source[2])) + '</em></span>';
       }).join("") + '</div>' +
@@ -435,6 +437,7 @@ Object.assign(App, {
   },
 
   _renderIndustryChain: async function(cat, focusNodeId) {
+    var sequence = this._industryChainSeq = (this._industryChainSeq || 0) + 1;
     var inner = document.getElementById("industryPanelInner");
     if (!inner) return;
     this._industryView = "chain";
@@ -444,13 +447,16 @@ Object.assign(App, {
       var r = await this.api("/api/industry/graph?category=" + encodeURIComponent(cat) + "&depth=2&min_confidence=0");
       if (!r.ok) throw new Error("chain failed");
       var d = await r.json();
+      if (sequence !== this._industryChainSeq) return;
       this._renderIndustryChainDetail(cat, d.nodes || [], d.edges || [], d.summary || {}, focusNodeId);
     } catch (e) {
+      if (sequence !== this._industryChainSeq) return;
       inner.innerHTML = this._industryShell("chain", '<div class="ind-empty">产业链加载失败</div>');
     }
   },
 
   _renderIndustryChainByTicker: async function(ticker) {
+    var sequence = this._industryChainSeq = (this._industryChainSeq || 0) + 1;
     var inner = document.getElementById("industryPanelInner");
     if (!inner) return;
     this._industryView = "chain";
@@ -461,6 +467,7 @@ Object.assign(App, {
       var r = await this.api("/api/industry/ticker/" + encodeURIComponent(ticker) + "/chain");
       if (r.ok) { var d = await r.json(); nodes = d.nodes || []; edges = d.edges || []; }
     } catch (e) {}
+    if (sequence !== this._industryChainSeq) return;
     this._industryCategory = (nodes[0] && nodes[0].category) || ticker;
     this._renderIndustrySidebar();
     this._renderIndustryChainDetail(this._industryCategory, nodes, edges, {}, "", ticker);
@@ -658,9 +665,12 @@ Object.assign(App, {
 
   _showIndustryNode: async function(nodeId) {
     if (!nodeId) return;
+    var sequence = this._industryNodeSeq = (this._industryNodeSeq || 0) + 1;
     var r = await this.api("/api/industry/node/" + encodeURIComponent(nodeId));
+    if (sequence !== this._industryNodeSeq) return;
     if (!r.ok) return;
     var d = await r.json();
+    if (sequence !== this._industryNodeSeq) return;
     this._renderIndustryNodeDrawer(d.node || {}, d.upstream || [], d.downstream || []);
   },
 
@@ -715,6 +725,7 @@ Object.assign(App, {
   },
 
   _closeIndustryDrawer: function() {
+    this._industryNodeSeq = (this._industryNodeSeq || 0) + 1;
     var d = document.getElementById("industryDrawer");
     if (d) d.classList.remove("open");
   },

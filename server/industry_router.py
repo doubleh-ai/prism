@@ -65,7 +65,7 @@ def _category_stats(db) -> list[dict]:
                    market_share, confidence
             FROM industry_nodes
             WHERE category = ?
-            ORDER BY COALESCE(market_share, 0) DESC, confidence DESC, tier ASC, name ASC
+            ORDER BY tier ASC, name ASC
             LIMIT 4
             """,
                 [cat],
@@ -110,8 +110,8 @@ async def graph(
     """Filter a graph and expand explicit roots without dangling edges."""
     if not 0 <= depth <= 4 or not 0 <= min_confidence <= 1:
         raise HTTPException(400, "invalid graph bounds")
-    wheres = ["confidence >= ?"]
-    params = [min_confidence]
+    wheres = ["1=1"]
+    params = []
     if category:
         wheres.append("category = ?")
         params.append(category)
@@ -186,6 +186,7 @@ async def graph(
                 ),
             },
             "evidence_status": "background_requires_verification",
+            "confidence_filter_applied": False,
         }
     )
 
@@ -243,10 +244,7 @@ async def overview():
             SELECT n.*, COALESCE(deg.degree, 0) AS degree
             FROM industry_nodes n
             LEFT JOIN deg ON deg.id = n.id
-            ORDER BY COALESCE(deg.degree, 0) DESC,
-                     COALESCE(n.market_share, 0) DESC,
-                     n.confidence DESC,
-                     n.name ASC
+            ORDER BY COALESCE(deg.degree, 0) DESC, n.name ASC
             LIMIT 18
             """
             ).fetchall()
@@ -298,6 +296,7 @@ async def search(q: str = "", limit: int = 20):
     if not q:
         return {"results": []}
     q = q.strip()
+    limit = max(1, min(100, limit))
     if len(q) > 40:
         q = q[:40]
     with get_db() as db:
@@ -317,7 +316,6 @@ async def search(q: str = "", limit: int = 20):
                     WHEN name LIKE ? THEN 2
                     ELSE 3
                 END,
-                confidence DESC,
                 name ASC
             LIMIT ?
             """,
@@ -328,47 +326,10 @@ async def search(q: str = "", limit: int = 20):
 
 
 @router.get("/ticker/{ticker}/chain")
-async def ticker_chain(ticker: str):
-    """Return the complete upstream/downstream chain for a ticker."""
-    with get_db() as db:
-        nodes = [
-            dict(r)
-            for r in db.execute(
-                "SELECT * FROM industry_nodes WHERE source_ticker = ? ORDER BY tier, confidence DESC",
-                [ticker],
-            ).fetchall()
-        ]
-        node_ids = {n["id"] for n in nodes}
-        edges = []
-        if node_ids:
-            placeholders = ",".join("?" for _ in node_ids)
-            edges = [
-                dict(r)
-                for r in db.execute(
-                    f"SELECT e.*, s.name AS source_name, t.name AS target_name FROM industry_edges e "
-                    f"JOIN industry_nodes s ON e.source_node_id = s.id "
-                    f"JOIN industry_nodes t ON e.target_node_id = t.id "
-                    f"WHERE e.source_node_id IN ({placeholders}) OR e.target_node_id IN ({placeholders})",
-                    list(node_ids) + list(node_ids),
-                ).fetchall()
-            ]
-            expanded_ids = set(node_ids)
-            for edge in edges:
-                expanded_ids.add(edge["source_node_id"])
-                expanded_ids.add(edge["target_node_id"])
-            missing_ids = expanded_ids - node_ids
-            if missing_ids:
-                placeholders2 = ",".join("?" for _ in missing_ids)
-                nodes.extend(
-                    [
-                        dict(r)
-                        for r in db.execute(
-                            f"SELECT * FROM industry_nodes WHERE id IN ({placeholders2}) ORDER BY tier, confidence DESC",
-                            list(missing_ids),
-                        ).fetchall()
-                    ]
-                )
-    return _research_view({"ticker": ticker, "nodes": nodes, "edges": edges})
+async def ticker_chain(ticker: str, depth: int = 3):
+    """Return bounded background paths, without asserting commercial relations."""
+    result = await graph(ticker=ticker, depth=depth, min_confidence=0)
+    return {**result, "ticker": ticker, "depth": depth}
 
 
 @router.get("/categories")

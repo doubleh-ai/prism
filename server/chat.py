@@ -1,9 +1,11 @@
 """聊天流式端点 — Claude Code JSONL 集成 + 双向交互 + 参考引用"""
 
+import asyncio
 import json
 import logging
 import re
 import time
+from contextlib import aclosing
 from pathlib import Path
 
 from fastapi import Request
@@ -13,6 +15,12 @@ from .analysis_graph import persist_graph
 from .auth import require_auth
 from .config import DEFAULT_MODEL, MODELS, RATE_CHAT_PER_MIN
 from .database import check_rate_limit, get_db
+from .research import (
+    create_research_run,
+    finalize_research_run,
+    ingest_tool_result,
+    set_run_status,
+)
 from .research_context import (
     EvidenceTracker,
     build_research_context,
@@ -20,13 +28,15 @@ from .research_context import (
     parse_claude_jsonl_events,
 )
 from .services.claude_runner import (
-    _resolve_skill_dir,
     cancel_process,
     respond_to_question,
     run_claude_stream,
 )
+from .source_urls import redact_source_text, source_display_payload
+from .work_lifecycle import LifecycleError, get_manager
 
 log = logging.getLogger("stock-app")
+_chat_finalizers: set[asyncio.Task] = set()
 
 # Claude Code stores project data under ~/.claude/projects/
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -35,7 +45,7 @@ CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 # loaded by Claude Code — no server-side prompt injection needed.
 
 
-def _clean_object_artifacts(text: str) -> str:
+def _clean_object_artifacts(text: str, *, strip_edges: bool = True) -> str:
     """Remove JavaScript object-stringification artifacts from Claude CLI output."""
     if not text:
         return ""
@@ -45,7 +55,8 @@ def _clean_object_artifacts(text: str) -> str:
         r"\1 ",
         cleaned,
     )
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip() if strip_edges else cleaned
 
 
 _REPORT_DELIVERY_RE = re.compile(
@@ -56,7 +67,6 @@ _REPORT_FAILURE_RE = re.compile(
     r"API Error|operation timed out|timed out|请求超时|任务中止",
     re.IGNORECASE,
 )
-_REPORT_FILE_EXTENSIONS = {".html", ".htm", ".pdf", ".md"}
 
 
 def _prepare_chat_report(text: str, skill_name: str = "") -> tuple[str, str]:
@@ -68,34 +78,6 @@ def _prepare_chat_report(text: str, skill_name: str = "") -> tuple[str, str]:
     if skill_name or _REPORT_FAILURE_RE.search(cleaned):
         return cleaned, "incomplete"
     return cleaned, "complete"
-
-
-def _skill_report_snapshot(skill_name: str) -> dict[str, tuple[int, int]]:
-    """Return safe metadata for report files produced by the active skill."""
-    try:
-        from .config import SKILL_MAP
-
-        info = SKILL_MAP.get(skill_name)
-        if not info:
-            return {}
-        skill_dir, _ = _resolve_skill_dir(info["dir"])
-        reports_dir = skill_dir / "reports" if skill_dir else None
-        if not reports_dir or not reports_dir.exists():
-            return {}
-        snapshot = {}
-        for path in reports_dir.iterdir():
-            if not path.is_file() or path.suffix.lower() not in _REPORT_FILE_EXTENSIONS:
-                continue
-            stat = path.stat()
-            snapshot[path.name] = (stat.st_mtime_ns, stat.st_size)
-        return snapshot
-    except OSError:
-        return {}
-
-
-def _changed_report_files(before: dict, after: dict) -> list[str]:
-    changed = [name for name, meta in after.items() if before.get(name) != meta and meta[1] > 0]
-    return sorted(changed, key=lambda name: after[name][0], reverse=True)
 
 
 def _prioritize_report_files(files: list[str]) -> list[str]:
@@ -160,23 +142,35 @@ def _content_to_text(value) -> str:
 
 
 async def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
-    """Read historical turns asynchronously using the shared provenance parser."""
-    import aiofiles
-
+    """Read historical turns in an owned thread using the provenance parser."""
     jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
-    if not jsonl_path.exists():
-        return []
-    events = []
-    async with aiofiles.open(jsonl_path, encoding="utf-8") as f:
-        async for line in f:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return parse_claude_jsonl_events(events, session_id=session_id)
+
+    def read():
+        if not jsonl_path.exists():
+            return []
+        events = []
+        with jsonl_path.open(encoding="utf-8") as source:
+            for line in source:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return parse_claude_jsonl_events(events, session_id=session_id)
+
+    return await get_manager().run_blocking("cli", read)
 
 
 async def chat_stream(request: Request):
+    manager = get_manager(getattr(request, "scope", None))
+    try:
+        lease = manager.admit("request", persist_required=False)
+    except LifecycleError:
+        return JSONResponse({"error": "服务维护中，请稍后重试；已有任务仍保留"}, status_code=503)
+    with lease:
+        return await _chat_stream(request, lease)
+
+
+async def _chat_stream(request: Request, request_lease):
     """POST /api/chat/stream — Claude Code CLI streaming with SSE + reference citations.
     Returns: ``StreamingResponse`` with the SSE stream, or ``JSONResponse`` for
     early validation/rate-limit errors."""
@@ -196,12 +190,16 @@ async def chat_stream(request: Request):
     extra_skills = req.extra_skills  # Additional skills via --append-system-prompt
     conv_id = req.conv_id or ""
     model_id = req.model or DEFAULT_MODEL
-    model_cfg = MODELS.get(model_id, MODELS[DEFAULT_MODEL])
+    if model_id not in MODELS:
+        return JSONResponse({"error": "所选模型不存在，请重新选择"}, status_code=422)
+    model_cfg = MODELS[model_id]
+    if not model_cfg.get("api_key"):
+        return JSONResponse({"error": "所选模型尚未配置认证，请选择可用模型或联系管理员"}, status_code=503)
     if not question:
         return JSONResponse({"error": "空问题"}, status_code=400)
 
     t0 = time.time()
-    log.info(f"[{user}] Q({skill_name}): {question[:80]}...")
+    log.info(f"[{user}] Q({skill_name}): {redact_source_text(question[:80])}...")
 
     # Validate ownership before reading session history, writing, or starting an engine.
     resume_session_id = None
@@ -232,13 +230,131 @@ async def chat_stream(request: Request):
             ).fetchone():
                 return JSONResponse({"error": "对话不存在"}, status_code=404)
             db.execute(
-                "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [conv_id, "user", question]
+                "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                [conv_id, "user", redact_source_text(question)],
             )
             db.execute(
                 "UPDATE conversations SET title=? WHERE id=? AND username=? AND title='新对话'",
-                [question[:40], conv_id, user],
+                [redact_source_text(question)[:40], conv_id, user],
             )
     research = build_research_context(engine="chat")
+    lease = request_lease.manager.admit("cli", parent=request_lease, persist_required=True)
+    try:
+        create_research_run(user, conv_id, redact_source_text(question), research)
+    except BaseException:
+        lease.block("persistence_failed")
+        lease.release()
+        raise
+    research["ledger_available"] = True
+    research["status"] = "queued"
+    progress = {"text": "", "finished": False}
+
+    def persist_turn(*, error=False, cancelled=False):
+        full_text = progress["text"]
+        report_text, _ = _prepare_chat_report(full_text, skill_name)
+        revision = finalize_research_run(
+            user, research["run_id"], report_text, error=error, cancelled=cancelled
+        )
+        report_status = revision["acceptance_status"]
+        research.update(
+            status=report_status,
+            revision_id=revision["revision_id"],
+            gaps=revision["gaps"],
+            information_cutoff=revision.get("information_cutoff"),
+            cutoff_precision=revision.get("cutoff_precision", "unknown"),
+            requested_period=revision.get("requested_period"),
+        )
+        live_chunks = list(progress.get("chunks", []))
+        collected_refs = progress.get("refs", [])
+        platform_calls = progress.get("calls", {})
+        session_id, project_dir = progress.get("session_id"), progress.get("project_dir")
+        delivery_reports = []
+        # Persist only this turn. Re-importing every JSONL assistant duplicates old research.
+        if conv_id:
+            live_chunks.extend({"t": "platform_call", "call": call} for call in platform_calls.values())
+            payload = json.dumps(
+                source_display_payload(
+                    {
+                        "text": full_text,
+                        "chunks": live_chunks,
+                        "refs": collected_refs,
+                        "research": research,
+                        "history_anchor": history_anchor,
+                        "report_status": report_status,
+                        "report_files": delivery_reports[:5],
+                    }
+                ),
+                ensure_ascii=False,
+            )
+            with get_db() as db:
+                if db.execute(
+                    "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
+                    [conv_id, user],
+                ).fetchone():
+                    if session_id and project_dir:
+                        db.execute(
+                            "UPDATE conversations SET session_id=?, project_dir=? WHERE id=? AND username=?",
+                            [session_id, project_dir, conv_id, user],
+                        )
+                    cursor = db.execute(
+                        "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                        [conv_id, "assistant", payload],
+                    )
+                    progress["message_id"] = cursor.lastrowid
+                    progress["message_payload"] = payload
+                else:
+                    raise RuntimeError("chat_conversation_no_longer_owned")
+
+        progress["revision"] = revision
+        progress["finished"] = True
+
+    def verify_terminal():
+        if not progress["finished"]:
+            raise RuntimeError("chat_terminal_persistence_unconfirmed")
+        with get_db() as db:
+            revision = db.execute(
+                "SELECT payload FROM research_revisions WHERE run_id=? AND revision_id=?",
+                [research["run_id"], progress["revision"]["revision_id"]],
+            ).fetchone()
+            if not revision or json.loads(revision["payload"]) != progress["revision"]:
+                raise RuntimeError("chat_revision_persistence_unconfirmed")
+            if conv_id:
+                message = db.execute(
+                    "SELECT content FROM messages WHERE id=? AND conv_id=? AND role='assistant'",
+                    [progress["message_id"], conv_id],
+                ).fetchone()
+                if not message or message["content"] != progress["message_payload"]:
+                    raise RuntimeError("chat_message_persistence_unconfirmed")
+
+    async def complete():
+        try:
+            await lease.wait_owned()
+            await lease.finish(verify_terminal)
+        except BaseException:
+            lease.block("owned_task_cancelled")
+            raise
+        finally:
+            lease.release()
+
+    def save_turn(*, error=False, cancelled=False):
+        progress["persist_attempted"] = True
+        try:
+            # No await/yield between final revision, this turn's assistant message,
+            # and finished=True. A later disconnect cannot append a second turn.
+            persist_turn(error=error, cancelled=cancelled)
+        except BaseException:
+            lease.block("persistence_failed")
+            raise
+        finally:
+            finalizer = asyncio.create_task(complete())
+            _chat_finalizers.add(finalizer)
+
+            def completed(task):
+                _chat_finalizers.discard(task)
+                if not task.cancelled():
+                    task.exception()
+
+            finalizer.add_done_callback(completed)
 
     async def generate():
         session_id = resume_session_id  # May be None for first message
@@ -261,7 +377,11 @@ async def chat_stream(request: Request):
                 return _content_to_text(v)
 
             clean = {str(k): _json_safe(v) for k, v in event.items()}
-            return f"data: {json.dumps(clean, ensure_ascii=False)}\n\n"
+            if isinstance(event.get("text"), str):
+                # Preserve paragraph boundaries when the client appends text;
+                # apply the same artifact filter without trimming the edges.
+                clean["text"] = _clean_object_artifacts(event["text"], strip_edges=False)
+            return f"data: {json.dumps(source_display_payload(clean), ensure_ascii=False)}\n\n"
 
         full_text = ""
         step_num = 0
@@ -270,13 +390,25 @@ async def chat_stream(request: Request):
         live_chunks = [{"t": "research", "research": research}]
         platform_calls = {}
         stream_error = ""
+        stream_cancelled = False
+        terminal_result_seen = False
         delivery_note = ""
-        report_files_before = _skill_report_snapshot(skill_name)
+        # Shared skill directories have no provable owner/run binding. Only
+        # explicitly registered artifacts may ever appear as report files.
+        delivery_reports = []
+        progress.update(
+            chunks=live_chunks,
+            refs=collected_refs,
+            calls=platform_calls,
+            session_id=session_id,
+            project_dir=project_dir,
+        )
 
         yield _emit({"research": research})
         yield _emit({"pulse": "start"})
+        set_run_status(user, research["run_id"], "discovering")
 
-        async for ev in run_claude_stream(
+        engine = run_claude_stream(
             question,
             skill_name,
             user=user,
@@ -285,7 +417,10 @@ async def chat_stream(request: Request):
             conv_id=conv_id,
             extra_skills=extra_skills,
             research_context=research,
-        ):
+            parent_lease=lease,
+        )
+        progress["engine"] = engine
+        async for ev in engine:
             t = ev.get("type", "")
 
             # Capture session info from system/init (first message only)
@@ -295,6 +430,7 @@ async def chat_stream(request: Request):
                 if new_sid and cwd:
                     session_id = new_sid
                     project_dir = _cwd_to_project_dir(cwd)
+                    progress.update(session_id=session_id, project_dir=project_dir)
                     log.info(f"[{user}] session={session_id} project={project_dir}")
 
             # Only a successful result associated with this turn's known call is a source.
@@ -307,6 +443,9 @@ async def chat_stream(request: Request):
                             refs = evidence.record_result(
                                 block, retrieved_at=build_research_context()["as_of"]
                             )
+                            if refs:
+                                call = evidence.calls.get(str(block.get("tool_use_id") or ""), {})
+                                refs = ingest_tool_result(user, research["run_id"], call, block, refs)
                             for ref in refs:
                                 collected_refs.append(ref)
                                 live_chunks.append({"t": "ref", **ref})
@@ -325,7 +464,7 @@ async def chat_stream(request: Request):
                 name = tool.get("name", "?")
                 inp = tool.get("input", {})
                 step_num += 1
-                live_chunks.append({"t": "tool", "c": name, "d": _content_to_text(inp)})
+                live_chunks.append({"t": "tool", "c": name, "d": redact_source_text(_content_to_text(inp))})
                 if name == "AskUserQuestion":
                     yield _emit(
                         {
@@ -343,11 +482,25 @@ async def chat_stream(request: Request):
             elif t == "assistant":
                 for b in ev.get("message", {}).get("content", []):
                     bt = b.get("type", "")
-                    if bt == "text":
-                        txt = _content_to_text(b.get("text", ""))
+                    if bt == "server_tool_use":
+                        evidence.record_server_call(b)
+                    elif bt == "web_search_tool_result":
+                        normalized = evidence.record_server_result(
+                            b, retrieved_at=build_research_context()["as_of"]
+                        )
+                        if normalized:
+                            call, result_block, refs = normalized
+                            refs = ingest_tool_result(user, research["run_id"], call, result_block, refs)
+                            for ref in refs:
+                                collected_refs.append(ref)
+                                live_chunks.append({"t": "ref", **ref})
+                                yield _emit({"ref": ref})
+                    elif bt == "text":
+                        txt = redact_source_text(_content_to_text(b.get("text", "")))
                         if not txt:
                             continue
                         full_text += txt
+                        progress["text"] = full_text
                         live_chunks.append({"t": "text", "c": txt})
                         yield _emit({"text": txt})
                     elif bt == "tool_use":
@@ -355,7 +508,9 @@ async def chat_stream(request: Request):
                         step_num += 1
                         name = b.get("name", "?")
                         inp = b.get("input", {})
-                        live_chunks.append({"t": "tool", "c": name, "d": _content_to_text(inp)})
+                        live_chunks.append(
+                            {"t": "tool", "c": name, "d": redact_source_text(_content_to_text(inp))}
+                        )
                         if name == "AskUserQuestion":
                             yield _emit(
                                 {
@@ -369,7 +524,7 @@ async def chat_stream(request: Request):
                             detail = _content_to_text(list(inp.values())[:1]) if inp else ""
                             yield _emit({"tool": name, "n": step_num, "d": detail})
                     elif bt == "thinking":
-                        thought = _content_to_text(b.get("thinking", ""))
+                        thought = redact_source_text(_content_to_text(b.get("thinking", "")))
                         if thought:
                             live_chunks.append({"t": "think", "c": thought})
                             yield _emit({"think": thought})
@@ -381,16 +536,25 @@ async def chat_stream(request: Request):
                     yield _emit({"status": message})
 
             # Error from Claude
+            elif t == "cancelled":
+                stream_cancelled = True
+                message = "用户已取消本轮研究"
+                live_chunks.append({"t": "status", "c": message})
+                yield _emit({"status": message})
+
             elif t == "error":
-                stream_error = _content_to_text(ev.get("message")) or "AI引擎异常"
+                stream_error = redact_source_text(_content_to_text(ev.get("message"))) or "AI引擎异常"
                 log.error(f"[{user}] Claude error: {stream_error}")
                 yield _emit({"error": stream_error})
 
             elif t == "result":
+                terminal_result_seen = True
+                if ev.get("is_error") or str(ev.get("subtype", "")).startswith("error"):
+                    stream_error = stream_error or "研究引擎返回未完成状态"
                 log.info(
                     f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}"
                 )
-                terminal_text = _result_payload_text(ev)
+                terminal_text = redact_source_text(_result_payload_text(ev))
                 if terminal_text and terminal_text not in full_text:
                     if full_text and terminal_text.startswith(full_text):
                         terminal_text = terminal_text[len(full_text) :]
@@ -399,94 +563,65 @@ async def chat_stream(request: Request):
                     if terminal_text:
                         addition = terminal_text if not full_text else "\n\n" + terminal_text
                         full_text += addition
+                        progress["text"] = full_text
                         live_chunks.append({"t": "text", "c": addition})
                         yield _emit({"text": addition, "recovered": True})
 
             elif t == "heartbeat":
                 yield _emit({"pulse": "wait", "idle_ms": ev.get("idle_ms", 0)})
 
-        report_files_after = _skill_report_snapshot(skill_name)
-        changed_reports = _changed_report_files(report_files_before, report_files_after)
-        delivery_reports = _prioritize_report_files(changed_reports)
-        if skill_name and not _REPORT_DELIVERY_RE.search(full_text):
-            if delivery_reports:
-                filename = delivery_reports[0]
-                delivery_note = f"\n\n## 报告已交付\n\n完整报告：reports/{filename}"
-            else:
-                reason = _clean_object_artifacts(stream_error) or "Agent 在形成最终结论前结束"
-                delivery_note = (
-                    f"\n\n> **研究未完成**：{reason}。已保留研究过程，可在本对话中发送“继续完成报告”恢复。"
-                )
+        if not terminal_result_seen and not stream_error and not stream_cancelled:
+            stream_error = "研究引擎未返回结束状态，已保留收到的内容"
+        if skill_name and (not _REPORT_DELIVERY_RE.search(full_text) or stream_error or stream_cancelled):
+            reason = "用户已取消本轮研究" if stream_cancelled else _clean_object_artifacts(stream_error)
+            delivery_note = "\n\n**本轮尚未形成完整可核查报告**。"
+            if reason:
+                delivery_note += reason + "。"
+            delivery_note += "已保留回答与研究过程，可在本对话中发送“继续完成报告”发起后续研究。"
             full_text += delivery_note
+            progress["text"] = full_text
             live_chunks.append({"t": "text", "c": delivery_note})
             yield _emit({"text": delivery_note, "delivery": True})
 
         elapsed = time.time() - t0
         log.info(f"[{user}] DONE {elapsed:.1f}s len={len(full_text)} refs={len(collected_refs)}")
 
-        report_text, report_status = _prepare_chat_report(full_text, skill_name)
+        report_text, _ = _prepare_chat_report(full_text, skill_name)
+        progress["text"] = full_text
+        save_turn(error=bool(stream_error), cancelled=stream_cancelled)
+        revision = progress["revision"]
+        report_status = revision["acceptance_status"]
+        yield _emit({"research": research})
 
         if conv_id and full_text.strip():
             try:
                 from .reports import save_report_snapshot
 
                 clean_text = " ".join(report_text.split())
-                title = question[:80] + ("..." if len(question) > 80 else "")
+                title = redact_source_text(question)[:80] + ("..." if len(question) > 80 else "")
                 save_report_snapshot(
                     user,
                     {
                         "source": "chat",
-                        "source_id": conv_id,
+                        "source_id": research["run_id"],
                         "conv_id": conv_id,
                         "title": title or "Chat report",
-                        "summary": (
-                            clean_text[:240]
-                            if report_status == "complete"
-                            else "研究过程已保存，但任务在形成最终报告前中止。"
-                        ),
+                        "summary": clean_text[:240],
                         "report": {
-                            "question": question,
+                            "question": redact_source_text(question),
                             "final_decision": report_text,
                             "status": report_status,
                             "model": model_id,
                             "skill": skill_name,
                             "references": collected_refs,
                             "research": research,
+                            "research_revision_id": revision["revision_id"],
+                            "run_id": research["run_id"],
                         },
                     },
                 )
             except Exception as e:
                 log.warning(f"[{user}] Failed to save chat report snapshot: {e}")
-
-        # Persist only this turn. Re-importing every JSONL assistant duplicates old research.
-        if conv_id:
-            live_chunks.extend({"t": "platform_call", "call": call} for call in platform_calls.values())
-            payload = json.dumps(
-                {
-                    "text": full_text,
-                    "chunks": live_chunks,
-                    "refs": collected_refs,
-                    "research": research,
-                    "history_anchor": history_anchor,
-                    "report_status": report_status,
-                    "report_files": delivery_reports[:5],
-                },
-                ensure_ascii=False,
-            )
-            with get_db() as db:
-                if db.execute(
-                    "SELECT 1 FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL",
-                    [conv_id, user],
-                ).fetchone():
-                    if session_id and project_dir:
-                        db.execute(
-                            "UPDATE conversations SET session_id=?, project_dir=? WHERE id=? AND username=?",
-                            [session_id, project_dir, conv_id, user],
-                        )
-                    db.execute(
-                        "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
-                        [conv_id, "assistant", payload],
-                    )
 
         # Auto-extract analysis graph from saved messages
         if conv_id:
@@ -521,7 +656,28 @@ async def chat_stream(request: Request):
         )
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    async def tracked_generate():
+        failed = False
+        try:
+            async with aclosing(generate()) as events:
+                async for event in events:
+                    yield event
+        except Exception:
+            failed = True
+            raise
+        finally:
+            try:
+                engine = progress.get("engine")
+                if engine is not None:
+                    await engine.aclose()
+            finally:
+                try:
+                    if not progress.get("persist_attempted"):
+                        save_turn(error=failed, cancelled=not failed)
+                finally:
+                    lease.release()
+
+    return StreamingResponse(tracked_generate(), media_type="text/event-stream")
 
 
 async def chat_respond(request: Request):
