@@ -368,7 +368,14 @@ def test_boot_environment_does_not_inherit_credentials(monkeypatch, tmp_path):
     assert "ANTHROPIC_API_KEY" not in environment and "HTTPS_PROXY" not in environment
     assert environment["HOME"] == str(tmp_path / "home")
     assert environment["CLAUDE_BIN"] == str(tmp_path / "disabled-claude")
-    policy = boot.sandbox_policy(tmp_path, tmp_path.parent, 18811, Path("/operator"))
+    policy = boot.sandbox_policy(
+        tmp_path,
+        tmp_path.parent,
+        18811,
+        Path("/operator"),
+        workspace=Path("/workspace"),
+        source_mount=tmp_path.parent,
+    )
     assert "(deny network*)" in policy and '(allow network-inbound (local ip "localhost:18811"))' in policy
     assert "network-outbound" not in policy
 
@@ -383,7 +390,15 @@ def test_failed_boot_is_false_does_not_spawn_or_modify_restored_database(monkeyp
     monkeypatch.setattr(
         boot.subprocess, "Popen", lambda *a, **kw: pytest.fail("No process should be started")
     )
-    result = boot.verify_boot(target, recovery, tmp_path, backup.read_manifest(target), backup.digest(target))
+    result = boot.verify_boot(
+        target,
+        recovery,
+        tmp_path,
+        backup.read_manifest(target),
+        backup.digest(target),
+        workspace=tmp_path / "workspace",
+        source_mount=tmp_path,
+    )
     assert result["ok"] is False and result["error_type"] == "ValueError"
     assert result["live_models_tested"] is False
     assert backup.digest(recovery / "0") == original
@@ -472,3 +487,117 @@ def test_base_history_receipt_is_bound_to_report_and_actual_ciphertext(tmp_path)
     report.write_text('{"status":"changed"}')
     with pytest.raises(ValueError, match="absent or changed"):
         backup.verified_base(base, path)
+
+
+def test_restore_policy_requires_explicit_trusted_scopes():
+    with pytest.raises(TypeError, match="workspace"):
+        boot.sandbox_policy(Path("/boot"), Path("/image"), 12345, Path("/operator"))
+    with pytest.raises(TypeError, match="source_mount"):
+        boot.sandbox_policy(
+            Path("/boot"), Path("/image"), 12345, Path("/operator"), workspace=Path("/workspace")
+        )
+
+
+def test_secure_backup_requires_workspace_before_any_execution_side_effect(tmp_path, monkeypatch):
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "BACKUP-REPORT.json").write_text(json.dumps({"status": "verified and unmounted"}))
+    monkeypatch.setattr(backup.os, "uname", lambda: SimpleNamespace(sysname="Darwin"))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "secure_backup.py",
+            "--base-backup",
+            str(base),
+            "--backup-root",
+            str(tmp_path / "output"),
+            "--verify-boot",
+            "--execute",
+        ],
+    )
+    monkeypatch.setattr(
+        backup, "verified_base", lambda *a: pytest.fail("Workspace must fail before base verification")
+    )
+    monkeypatch.setattr(backup.subprocess, "run", lambda *a, **kw: pytest.fail("No subprocess may run"))
+    with pytest.raises(ValueError, match="Explicit restore workspace"):
+        backup.main()
+
+
+@pytest.mark.parametrize("separate_source", [False, True])
+@pytest.mark.skipif(not Path("/usr/bin/sandbox-exec").is_file(), reason="Native macOS sandbox required")
+def test_native_sealed_boot_helper_allows_own_copy_but_denies_sources(tmp_path, monkeypatch, separate_source):
+    """Synthetic OPS layout only; no key, real archive, image or database is opened."""
+    import os
+    import subprocess
+    import sys
+
+    operator = tmp_path / "synthetic-operator"
+    ops = operator / "Library/Application Support/Prism-Release/date"
+    executor = ops / "compat-executor-synthetic"
+    run = executor / "fresh-run"
+    source_mount = run / ("source-mounted" if separate_source else "mounted")
+    image = run / "acceptance-mounted/old-source-probe" if separate_source else source_mount
+    area = image / "boot-verification"
+    workspace = operator / "workspace"
+    monkeypatch.setattr(boot, "__file__", str(executor / "verify_backup_boot.py"))
+    denied = {
+        "source_database_denied": source_mount / "recovery-databases/synthetic-db",
+        "source_archive_denied": source_mount / "production.tar.gz",
+        "whole_source_sibling_denied": source_mount / "other/synthetic.txt",
+        "workspace_denied": workspace / "server/main.py",
+        "credential_denied": operator / ".ssh/known_hosts",
+        "original_backups_denied": operator / "Backups/Prism/synthetic.txt",
+    }
+    allowed = {
+        "restored_source_readable": area / "app/server/main.py",
+        "restored_database_readable": area / "data/chat.db",
+    }
+    write_probe = image / "outside-boot-write-probe"
+    for path in (*denied.values(), *allowed.values(), write_probe):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text("synthetic-canary-only")
+    assert not source_mount.is_relative_to(operator / "Backups")
+    policy = area / "synthetic.sb"
+    policy.write_text(
+        boot.sandbox_policy(area, image, 12345, operator, workspace=workspace, source_mount=source_mount)
+    )
+    child = r"""
+import errno,json,os,sys
+from pathlib import Path
+c=json.loads(sys.stdin.readline())
+def denied(path,flags=os.O_RDONLY):
+ try:fd=os.open(path,flags)
+ except OSError as error:return error.errno in (errno.EPERM,errno.EACCES)
+ else:os.close(fd);return False
+checks={name:denied(path) for name,path in c['denied'].items()}
+for name,path in c['allowed'].items():
+ try:checks[name]=Path(path).read_text()=='synthetic-canary-only'
+ except OSError:checks[name]=False
+checks['outside_write_denied']=denied(c['write_probe'],os.O_WRONLY)
+print(json.dumps(checks,sort_keys=True))
+raise SystemExit(0 if all(checks.values()) else 3)
+"""
+    result = subprocess.run(
+        ["/usr/bin/sandbox-exec", "-f", str(policy), sys.executable, "-I", "-B", "-c", child],
+        input=json.dumps(
+            {
+                "denied": {k: str(v) for k, v in denied.items()},
+                "allowed": {k: str(v) for k, v in allowed.items()},
+                "write_probe": str(write_probe),
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=15,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(operator), "LANG": "en_US.UTF-8"},
+    )
+    if result.returncode == 71 and result.stderr == b"sandbox-exec: sandbox_apply: Operation not permitted\n":
+        if os.environ.get("PRISM_REQUIRE_NATIVE_SANDBOX") == "1":
+            pytest.fail("native_sandbox_application_denied_by_outer_sandbox")
+        pytest.skip("Outer sandbox blocks native application; no native acceptance claimed")
+    assert result.returncode == 0, {
+        "native_process_succeeded": result.returncode == 0,
+        "stderr_empty": result.stderr == b"",
+    }
+    checks = json.loads(result.stdout)
+    assert set(checks) == set(denied) | set(allowed) | {"outside_write_denied"}
+    assert all(value is True for value in checks.values())

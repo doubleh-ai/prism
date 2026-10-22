@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 
 VENV = Path("/private/tmp/prism-dependency-audit-20261021/venv")
 MAIN_DATABASE = "/home/ubuntu/stock-analyzer/data/chat.db"
+BACKUP_BOOT_HELPER_SHA256 = "eb9491ab455e0d3a867216364e4b2d54989fb392a48e0a3ce7cf424d10fcf80c"
 PRIVATE_TABLES = {
     "users",
     "conversations",
@@ -564,15 +565,19 @@ def backup_boot_diagnostic(mount):
     return result
 
 
-def verify_original_boot(archive, recovery, mount, manifest, archive_sha256):
+def verify_original_boot(archive, recovery, mount, manifest, archive_sha256, *, workspace, source_mount):
     """Run the reviewed source-restoration helper in a separate encrypted copy."""
     helper = Path(__file__).with_name("verify_backup_boot.py")
+    if digest(helper) != BACKUP_BOOT_HELPER_SHA256:
+        raise ValueError("reviewed_original_boot_helper_required")
     spec = importlib.util.spec_from_file_location("prism_original_boot_probe", helper)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     area = mount / "old-source-probe"
     area.mkdir(mode=0o700, exist_ok=False)
-    result = module.verify_boot(archive, recovery, area, manifest, archive_sha256)
+    result = module.verify_boot(
+        archive, recovery, area, manifest, archive_sha256, workspace=workspace, source_mount=source_mount
+    )
     return {"verifier_sha256": digest(helper), **result}
 
 
@@ -826,7 +831,13 @@ def main():
         if args.verify_original_boot:
             result["stage"] = "verify_original_production_boot"
             result["original_boot_verification"] = verify_original_boot(
-                archive, source_mount / "recovery-databases", mount, manifest, archive_before
+                archive,
+                source_mount / "recovery-databases",
+                mount,
+                manifest,
+                archive_before,
+                workspace=args.new_source.resolve().parent,
+                source_mount=source_mount,
             )
             result["original_application_restore_verified"] = (
                 result["original_boot_verification"].get("ok") is True

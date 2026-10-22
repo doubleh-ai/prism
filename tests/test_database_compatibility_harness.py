@@ -508,3 +508,47 @@ raise SystemExit(0 if all(checks.values()) else 3)
     checks = json.loads(result.stdout)
     assert set(checks) == set(denied) | set(allowed)
     assert all(value is True for value in checks.values())
+
+
+def test_original_boot_binding_rejects_modified_helper_before_import(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness, "__file__", str(tmp_path / "verify_database_compatibility.py"))
+    (tmp_path / "verify_backup_boot.py").write_text("raise RuntimeError('must not execute')")
+    monkeypatch.setattr(
+        harness.importlib.util,
+        "spec_from_file_location",
+        lambda *a: pytest.fail("Unreviewed helper cannot import"),
+    )
+    with pytest.raises(ValueError, match="reviewed_original_boot_helper_required"):
+        harness.verify_original_boot(
+            tmp_path / "archive",
+            tmp_path / "recovery",
+            tmp_path,
+            {},
+            "0" * 64,
+            workspace=tmp_path / "workspace",
+            source_mount=tmp_path / "source",
+        )
+
+
+def test_original_boot_receives_only_explicit_parent_workspace_and_source_mount(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    module = SimpleNamespace(
+        verify_boot=lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": False}
+    )
+    spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
+    monkeypatch.setattr(harness.importlib.util, "spec_from_file_location", lambda *args: spec)
+    monkeypatch.setattr(harness.importlib.util, "module_from_spec", lambda *args: module)
+    workspace, source_mount = tmp_path / "explicit-workspace", tmp_path / "explicit-source-mounted"
+    value = harness.verify_original_boot(
+        tmp_path / "archive",
+        tmp_path / "recovery",
+        tmp_path,
+        {},
+        "0" * 64,
+        workspace=workspace,
+        source_mount=source_mount,
+    )
+    assert calls[0][1] == {"workspace": workspace, "source_mount": source_mount}
+    assert value["verifier_sha256"] == harness.BACKUP_BOOT_HELPER_SHA256 and value["ok"] is False

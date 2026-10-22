@@ -160,6 +160,7 @@ def digest(path: Path) -> str:
 
 
 PRODUCTION_ROOT = "snapshot/home/ubuntu/stock-analyzer"
+BACKUP_BOOT_HELPER_SHA256 = "eb9491ab455e0d3a867216364e4b2d54989fb392a48e0a3ce7cf424d10fcf80c"
 MAIN_DATABASE = "/home/ubuntu/stock-analyzer/data/chat.db"
 REQUIRED_SOURCE_FILES = {"server/main.py", "server/config.py", "server/database.py", "server/auth.py", ".env"}
 MAX_MANIFEST_BYTES = 32 * 1024 * 1024
@@ -400,6 +401,9 @@ def main():
         help="Independent recheck receipt outside Git; required for execution",
     )
     parser.add_argument("--backup-root", type=Path, default=Path.home() / "Backups/Prism")
+    parser.add_argument(
+        "--workspace", type=Path, help="Explicit original workspace denied to restore children"
+    )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--verify-boot",
@@ -429,6 +433,8 @@ def main():
             )
         )
         return
+    if args.verify_boot and not args.workspace:
+        raise ValueError("Explicit restore workspace is required")
     if not args.base_verification:
         raise ValueError("Independent encrypted base verification is required")
     base_verification = verified_base(args.base_backup.resolve(), args.base_verification.resolve())
@@ -493,12 +499,21 @@ def main():
         (mount / "verification.json").write_text(json.dumps(verified, indent=2))
         boot = {"requested": args.verify_boot, "ok": False, "live_models_tested": False}
         if args.verify_boot:
-            spec = importlib.util.spec_from_file_location(
-                "prism_backup_boot", Path(__file__).with_name("verify_backup_boot.py")
-            )
+            helper = Path(__file__).with_name("verify_backup_boot.py")
+            if digest(helper) != BACKUP_BOOT_HELPER_SHA256:
+                raise ValueError("reviewed_original_boot_helper_required")
+            spec = importlib.util.spec_from_file_location("prism_backup_boot", helper)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            boot = module.verify_boot(archive, recovery, mount, read_manifest(archive), archive_sha)
+            boot = module.verify_boot(
+                archive,
+                recovery,
+                mount,
+                read_manifest(archive),
+                archive_sha,
+                workspace=args.workspace.resolve(),
+                source_mount=mount,
+            )
         (mount / "boot-verification.json").write_text(json.dumps(boot, indent=2))
         _hdi("detach", mount)
         mounted = False

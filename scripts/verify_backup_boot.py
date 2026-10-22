@@ -106,7 +106,9 @@ def restore_sources(archive_path: Path, app: Path, manifest: dict) -> dict:
     return written
 
 
-def sandbox_policy(boot: Path, image: Path, port: int, operator_home: Path) -> str:
+def sandbox_policy(
+    boot: Path, image: Path, port: int, operator_home: Path, *, workspace: Path, source_mount: Path
+) -> str:
     def quoted(path):
         return json.dumps(str(path))
 
@@ -126,7 +128,7 @@ def sandbox_policy(boot: Path, image: Path, port: int, operator_home: Path) -> s
         operator_home / ".claude",
         operator_home / ".config",
         operator_home / ".codex",
-        Path(__file__).resolve().parents[1],
+        workspace,
         operator_home / "Library/Keychains",
     ]
     reads = " ".join("(subpath " + quoted(path) + ")" for path in protected)
@@ -137,6 +139,7 @@ def sandbox_policy(boot: Path, image: Path, port: int, operator_home: Path) -> s
         f'(deny file-write* (require-all (require-not (subpath {quoted(boot)})) (require-not (literal "/dev/null"))))\n'
         f"(deny file-read* {reads} (literal {quoted(operator_home / '.claude.json')}))\n"
         + outside_reads(operator_home / "Backups")
+        + outside_reads(source_mount)
         + outside_reads(image)
     )
 
@@ -263,7 +266,14 @@ def startup_diagnostic(status: int, response, nonce: str, pid: int) -> dict:
 
 
 def verify_boot(
-    archive_path: Path, recovery: Path, image: Path, manifest: dict, expected_archive_sha256: str
+    archive_path: Path,
+    recovery: Path,
+    image: Path,
+    manifest: dict,
+    expected_archive_sha256: str,
+    *,
+    workspace: Path,
+    source_mount: Path,
 ) -> dict:
     """Return honest boolean evidence; failures retain private logs and backup."""
     result = {
@@ -307,7 +317,9 @@ def verify_boot(
         write_probe = image / "outside-boot-write-probe"
         write_probe.write_text("unchanged")
         policy = boot / "sandbox.sb"
-        policy.write_text(sandbox_policy(boot, image, port, Path.home()))
+        policy.write_text(
+            sandbox_policy(boot, image, port, Path.home(), workspace=workspace, source_mount=source_mount)
+        )
         result["stage"] = "isolated_startup"
         with (boot / "logs/process.log").open("wb") as log:
             process = subprocess.Popen(
