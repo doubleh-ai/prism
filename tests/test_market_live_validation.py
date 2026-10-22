@@ -39,6 +39,8 @@ def engine(tmp_path):
     value.pid, value.invocation, value.ticks = 222, "b" * 32, 55
     value.pins = {"qt.gtimg.cn": ["1.1.1.1"], "money.finance.sina.com.cn": ["8.8.4.4"]}
     value.negative = "9.9.9.9"
+    value.network_programs = ()
+    value.network_gate = types.SimpleNamespace(verify=lambda: (), cleanup=lambda: None)
     return value, calls, events, boundaries
 
 
@@ -60,6 +62,20 @@ def proof(value):
         "binding": binding(value),
         "checked_at": value.issued,
         "checks": dict.fromkeys(validation.BOOT_CHECKS, True),
+        "positive_tls": {
+            host: {"peer": peers[0], "tls_verified": True} for host, peers in value.pins.items()
+        },
+        "additional_network_errno": dict.fromkeys(validation.EXTRA_NEGATIVES, 13),
+        "negative_errno": dict.fromkeys(
+            {
+                "production_8088_denied",
+                "vibe_8899_denied",
+                "metadata_denied",
+                "private_ip_denied",
+                "other_public_denied",
+            },
+            13,
+        ),
     }
 
 
@@ -340,10 +356,16 @@ def test_nonlinux_cannot_be_reported_as_actual_linux_collection(tmp_path, monkey
 
 
 @pytest.mark.parametrize("bad_proof,pid_reused", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("preflight_only", [False, True])
 def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_unit(
-    tmp_path, monkeypatch, bad_proof, pid_reused
+    tmp_path, monkeypatch, bad_proof, pid_reused, preflight_only
 ):
     value, _, events, boundaries = engine(tmp_path)
+    value.preflight_only = preflight_only
+    if preflight_only:
+        monkeypatch.setattr(
+            value, "result", lambda: pytest.fail("network preflight must not enter market HTTP result")
+        )
     calls, observations = [], []
     monkeypatch.setattr(validation.sys, "platform", "linux")
     monkeypatch.setattr(validation.os, "getuid", lambda: 0)
@@ -367,12 +389,14 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
         return {"verified_fixture": True}
 
     monkeypatch.setattr(value, "identity", identity)
+    monkeypatch.setattr(value, "install_network_gate", lambda: observations.append("attach"))
     monkeypatch.setattr(value, "empty", lambda: True)
     monkeypatch.setattr(value, "idle", lambda: None)
 
     def run(argv, **kwargs):
         calls.append(argv)
         if argv[0] == "/usr/bin/systemd-run":
+            save(value.work / "output/hello.json", {"offline_fixture": True})
             data = proof(value)
             if bad_proof:
                 data["checks"]["metadata_denied"] = False
@@ -388,7 +412,10 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
             if not (value.work / "output/market-result.json").exists():
                 save(value.work / "output/market-result.json", result(value))
         return {
-            "MainPID": "0" if allowed else "222",
+            "MainPID": "0"
+            if (value.work / "result-ack.json").exists()
+            or (preflight_only and pid_reused and value.report["network_gate_verified_before_cleanup"])
+            else "222",
             "ExecMainPID": "222",
             "InvocationID": "b" * 32,
             "ControlGroup": "/system.slice/" + value.unit,
@@ -401,16 +428,40 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
     assert report["passed"] is (not bad_proof and not pid_reused)
     assert report["unit_stopped"] is (not pid_reused)
     assert report["original_runtime_unchanged"] is True
-    assert (value.work / "root-allow.json").exists() is (not bad_proof)
+    assert (value.work / "root-allow.json").exists() is (not bad_proof and not preflight_only)
+    if preflight_only:
+        assert report["market_provider_verified"] is False
     if bad_proof:
         assert "market_allow_public_http" not in boundaries
         assert report["error_class"] == "proof_rejected"
     if pid_reused:
         assert report["error_class"] == "cleanup_failed"
+        if preflight_only:
+            assert report["network_gate_verified_before_cleanup"] and not report["network_gate_verified"]
     stops = [argv for argv in calls if argv[:2] == ["/usr/bin/systemctl", "stop"]]
     assert stops == ([] if pid_reused else [["/usr/bin/systemctl", "stop", value.unit]])
     assert value.unit.startswith("prism-market-probe-") and "stock-app.service" not in str(stops)
     assert events[-1] == report
+
+
+@pytest.mark.parametrize("code", [0, 11, 97, 111])
+def test_failed_network_errno_stays_typed_without_becoming_a_deny(tmp_path, code):
+    value, _, _, _ = engine(tmp_path)
+    document = proof(value)
+    document["additional_network_errno"]["ipv6_loopback"] = code
+    save(value.work / "output/bootstrap.json", document)
+    with pytest.raises(validation.ValidationError, match="proof_rejected"):
+        value.proof()
+    assert value.report["additional_network_errno"]["ipv6_loopback"] == code
+    assert not value.report["network_gate_verified"] and not (value.work / "root-allow.json").exists()
+
+
+def test_changed_network_gate_blocks_market_result_before_reading_worker_data(tmp_path):
+    value, _, _, _ = engine(tmp_path)
+    value.network_gate.verify = lambda: (_ for _ in ()).throw(RuntimeError("synthetic changed hook"))
+    with pytest.raises(validation.ValidationError, match="network_gate_rejected"):
+        value.result()
+    assert not value.report["market_provider_verified"]
 
 
 @pytest.mark.parametrize("mode", ["inventory_exists", "launch_uncertain", "identity_unknown"])
@@ -451,7 +502,8 @@ def test_unknown_or_preexisting_instance_never_receives_cleanup_stop(tmp_path, m
         assert not observed and not any(argv[0] == "/usr/bin/systemd-run" for argv in calls)
         assert result["error_class"] == "unit_rejected"
     else:
-        assert observed and result["error_class"] == "cleanup_failed"
+        assert observed and result["cleanup_error_class"] == "cleanup_failed"
+        assert result["error_class"] in {"supervision_failed", "unit_rejected"}
 
 
 @pytest.mark.parametrize(

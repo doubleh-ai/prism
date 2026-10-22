@@ -354,7 +354,7 @@ def test_observer_actual_reference_and_nonpropagation_are_mandatory(monkeypatch,
     state[field] = value
     monkeypatch.setattr(obj, "observer_show", lambda _: state)
     monkeypatch.setattr(obj, "observer_empty", lambda *_: True)
-    with pytest.raises(base.RetirementValidationError, match="observer_reference_rejected"):
+    with pytest.raises(base.RetirementValidationError, match="observer_(reference|dependency)_rejected"):
         obj.observer_ready(case)
     obj.run.assert_not_called()
 
@@ -557,3 +557,136 @@ def test_nonempty_show_job_must_match_actual_typed_value():
     actual = {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/7"]}
     assert stop.validate_job(actual, "7") == actual
     assert stop.validate_job(actual, "") == actual
+
+
+@pytest.mark.parametrize(
+    "wants", ["MAIN tmp.mount extra.service", "MAIN tmp.mount tmp.mount", "tmp.mount", "MAIN other.mount"]
+)
+def test_observer_extra_dependencies_are_finite_not_generic_mount_allowlist(monkeypatch, wants):
+    main = "prism-retirement-probe-" + NONCE + "-int-executor.service"
+    state = {"Wants": wants.replace("MAIN", main), "PrivateTmp": "yes"}
+    called = []
+    with pytest.raises(base.RetirementValidationError, match="observer_dependency_rejected"):
+        stop.observer_dependency(lambda *a, **k: called.append(a), state, main)
+    assert not called
+
+
+@pytest.mark.parametrize(
+    "change", [None, "private-tmp", "mounted", "missing-root", "tmp-mounted", "duplicate-property"]
+)
+def test_only_actual_private_tmp_weak_want_and_absent_host_mount_are_accepted(monkeypatch, change):
+    main = "prism-retirement-probe-" + NONCE + "-int-executor.service"
+    state = {"Wants": main + " tmp.mount", "PrivateTmp": "no" if change == "private-tmp" else "yes"}
+    mount = dict(stop.ABSENT_TMP_MOUNT)
+    if change == "mounted":
+        mount.update(LoadState="loaded", ActiveState="active", SubState="mounted", Where="/tmp")
+    raw = "".join(k + "=" + v + "\n" for k, v in mount.items()).encode()
+    if change == "duplicate-property":
+        raw += b"Where=\n"
+    kernel = b"36 25 8:1 / / rw - ext4 /dev/public rw\n"
+    if change == "missing-root":
+        kernel = b""
+    if change == "tmp-mounted":
+        kernel += b"37 36 0:2 / /tmp rw - tmpfs tmpfs rw\n"
+    monkeypatch.setattr(probe, "_read_regular", lambda *args: (kernel, None))
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv == stop.TMP_MOUNT_COMMAND and timeout == 10
+        return raw
+
+    if change is None:
+        proof = stop.observer_dependency(run, state, main)
+        assert stop.validate_observer_dependency(state, main, proof) == proof
+        assert proof["mount_unit"] == stop.ABSENT_TMP_MOUNT and proof["kernel_tmp_mount_count"] == 0
+    else:
+        with pytest.raises(base.RetirementValidationError, match="observer_dependency_rejected"):
+            stop.observer_dependency(run, state, main)
+
+
+def test_single_expected_want_needs_no_mount_exception_or_host_read(monkeypatch):
+    main = "prism-retirement-probe-" + NONCE + "-int-executor.service"
+    assert (
+        stop.observer_dependency(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()), {"Wants": main}, main
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "change", [None, "no-root-witness", "witness-drift", "extra-observer", "active-job", "argv", "cgroup"]
+)
+def test_only_independently_rechecked_004_empty_observer_can_remain_in_inventory(
+    tmp_path, monkeypatch, change
+):
+    plan = probe.descriptor(REQUEST, nonce=stop.RETAINED_OBSERVER["nonce"])
+    unit = stop.observer_unit(plan, "int-executor")
+    state = dict.fromkeys(stop.OBSERVER_PROPERTIES.split(","), "")
+    state.update(
+        LoadState="loaded",
+        ActiveState="active",
+        SubState="exited",
+        MainPID="0",
+        ExecMainPID=str(stop.RETAINED_OBSERVER["exec_main_pid"]),
+        ExecMainCode="1",
+        ExecMainStatus="0",
+        Result="success",
+        InvocationID=stop.RETAINED_OBSERVER["invocation_id"],
+        Transient="yes",
+        DynamicUser="yes",
+        RemainAfterExit="yes",
+        PrivateTmp="yes",
+        Wants=probe._case(plan, "int-executor")["unit"] + " tmp.mount",
+        ExecMainExitTimestampMonotonic="4",
+    )
+    commands = stop.retained_observer_read_commands(REQUEST)
+    launch = stop.observer_command(plan, "int-executor")
+    argv = launch[launch.index("--") + 1 :]
+    start = {
+        "type": "a(sasbttttuii)",
+        "data": [[argv[0], argv, False, 1, 2, 3, 4, stop.RETAINED_OBSERVER["exec_main_pid"], 1, 0]],
+    }
+    facts = {"job": {"type": "(uo)", "data": [0, "/"]}}
+    monkeypatch.setattr(probe, "CGROUP_ROOT", tmp_path / "cgroup")
+    monkeypatch.setattr(
+        probe, "_read_regular", lambda *args: (b"36 25 8:1 / / rw - ext4 /dev/public rw\n", None)
+    )
+
+    def run(command, *, timeout):
+        if command == stop.OBSERVER_INVENTORY:
+            return (
+                unit
+                + " loaded active exited public\n"
+                + (
+                    "prism-retirement-stop-ref-" + NONCE + "-int-post.service loaded active exited public\n"
+                    if change == "extra-observer"
+                    else ""
+                )
+            ).encode()
+        if command == commands[1]:
+            return "".join(k + "=" + v + "\n" for k, v in state.items()).encode()
+        if command == commands[2]:
+            return probe.encoded(facts["job"])
+        if command == commands[3]:
+            return probe.encoded(start)
+        if command == stop.TMP_MOUNT_COMMAND:
+            return "".join(k + "=" + v + "\n" for k, v in stop.ABSENT_TMP_MOUNT.items()).encode()
+        raise AssertionError("no_other_command_allowed")
+
+    witness = stop.retained_observer_state(run, REQUEST)
+    if change == "witness-drift":
+        witness["state_sha256"] = "f" * 64
+    if change == "active-job":
+        facts["job"] = {"type": "(uo)", "data": [7, "/org/freedesktop/systemd1/job/7"]}
+    if change == "argv":
+        start["data"][0][1][-1] = "/usr/bin/false"
+    if change == "cgroup":
+        (probe.CGROUP_ROOT / "system.slice" / unit).mkdir(parents=True)
+    value = controller(run=run, retained_observer=None if change == "no-root-witness" else witness)
+    if change is None:
+        assert value.no_existing_observers() is True
+    else:
+        with pytest.raises(base.RetirementValidationError):
+            value.no_existing_observers()

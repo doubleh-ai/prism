@@ -33,6 +33,8 @@ ACTIONS = (
     "integration_cli",
     "integration_live",
     "integration_market",
+    "integration_live_network_preflight",
+    "integration_market_network_preflight",
     "validate_legacy_retirement",
     "validate_legacy_stop",
     "quiesce",
@@ -59,18 +61,20 @@ RETIREMENT_HELPERS = {
 }
 MARKET_INTEGRATION_HELPERS = {
     "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
-    "market_live_validation.py": "30fdabce0929eaee447ea37e87a28e6b9e267274caaed2fe2b942576cf944d32",
+    "market_live_validation.py": "a68e11d8e3805d00201d4e1ff77462a2460f14fc03fe200383ef7e4af42a665b",
+    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
 }
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
-    "retirement_stop_validation.py": "5ef57f46e21327105d233987a85f7a70e9ea6efc7f90b22e075466062ecc7034",
+    "retirement_stop_validation.py": "854382bae5bfdcc7b75d1716bb2543271deefeac9ef288e196153ee80112b58b",
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "95991b9ee669dfd99a2fe40f1fb1306534fae04b1d366a3e1ee6eab0f91a6815",
+    "live_integration_validation.py": "1f491336c6301a164bf09586e62cf4c0f713659a1f5780d27298d5e48241684f",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
+    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
 }
 
 # This small stdlib loader stays below Linux's single-argument limit. The
@@ -196,6 +200,11 @@ def request_for(args):
     request = {"action": args.action, "commit": args.commit, "release_id": args.release_id}
     if args.action == "inspect":
         return request, source
+    if (
+        args.action in {"integration_live_network_preflight", "integration_market_network_preflight"}
+        and args.external_source_manifest
+    ):
+        raise ControlError("network_preflight_request_rejected")
     receipt_path = outside_git(args.receipts)
     receipt_raw = receipt_path.read_bytes()
     receipts = json.loads(receipt_raw)
@@ -226,7 +235,7 @@ def request_for(args):
             integration_probe_sha256=approved,
             integration_attempt=attempt,
         )
-    if args.action == "integration_live":
+    if args.action in {"integration_live", "integration_live_network_preflight"}:
         attempt = getattr(args, "integration_attempt", None)
         if not isinstance(attempt, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,39}", attempt):
             raise ControlError("explicit_live_integration_attempt_required")
@@ -239,10 +248,18 @@ def request_for(args):
                 "sha256": approved,
                 "content": base64.b64encode(trusted_source(filename, approved)).decode(),
             }
-        if not args.source_manifest or not isinstance(receipts.get("model_environment"), dict):
+        preflight = args.action == "integration_live_network_preflight"
+        if (
+            not args.source_manifest
+            or (not preflight and not isinstance(receipts.get("model_environment"), dict))
+            or (
+                preflight
+                and not re.fullmatch("[0-9a-f]{64}", receipts.get("expected_network_runtime_fingerprint", ""))
+            )
+        ):
             raise ControlError("live_integration_private_bindings_required")
         request.update(live_helpers=helpers, integration_attempt=attempt)
-    if args.action == "integration_market":
+    if args.action in {"integration_market", "integration_market_network_preflight"}:
         attempt = getattr(args, "integration_attempt", None)
         if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
             raise ControlError("explicit_market_integration_attempt_required")
@@ -256,7 +273,13 @@ def request_for(args):
                 "content": base64.b64encode(trusted_source(filename, approved)).decode(),
             }
         if not args.source_manifest or not re.fullmatch(
-            "[0-9a-f]{64}", receipts.get("expected_current_fingerprint", "")
+            "[0-9a-f]{64}",
+            receipts.get(
+                "expected_network_runtime_fingerprint"
+                if args.action.endswith("_network_preflight")
+                else "expected_current_fingerprint",
+                "",
+            ),
         ):
             raise ControlError("market_integration_private_bindings_required")
         request.update(market_helpers=helpers, integration_attempt=attempt)
@@ -495,6 +518,7 @@ def main():
         "live-worker-sha256",
         "live-transport-sha256",
         "live-policy-sha256",
+        "cgroup-network-gate-sha256",
         "retirement-probe-sha256",
         "retirement-validation-sha256",
         "retirement-attempt",

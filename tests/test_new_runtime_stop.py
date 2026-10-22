@@ -157,6 +157,7 @@ def observer_value(plan):
         "empty": True,
         "state": value,
         "job": {"type": "(uo)", "data": [0, "/"]},
+        "private_tmp_dependency": None,
     }
 
 
@@ -326,6 +327,7 @@ def artifacts(plan, monkeypatch):
             "state": dict.fromkeys(stop.OBSERVER_PROPERTIES.split(","), "") | {"LoadState": "not-found"},
             "cgroup": empty,
             "job": None,
+            "private_tmp_dependency": None,
         },
         "sources_reverified": sources,
         "completed": summary,
@@ -1099,3 +1101,89 @@ def test_pending_stop_job_is_polled_until_manager_finishes_not_prematurely_faile
         operation.own_state()
     state["Job"] = "0"
     assert operation.own_state() == state
+
+
+@pytest.mark.parametrize(
+    "wants", ["MAIN tmp.mount extra.service", "MAIN tmp.mount tmp.mount", "tmp.mount", "MAIN other.mount"]
+)
+def test_observer_extra_dependencies_are_finite_not_generic_mount_allowlist(plan, monkeypatch, wants):
+    main = plan["unit"]
+    state = {"Wants": wants.replace("MAIN", main), "PrivateTmp": "yes"}
+    called = []
+    with pytest.raises(stop.StopError, match="observer_dependency_rejected"):
+        stop.observer_dependency(lambda *a, **k: called.append(a), state, main)
+    assert not called
+
+
+@pytest.mark.parametrize(
+    "change", [None, "private-tmp", "mounted", "missing-root", "tmp-mounted", "duplicate-property"]
+)
+def test_only_actual_private_tmp_weak_want_and_absent_host_mount_are_accepted(plan, monkeypatch, change):
+    main = plan["unit"]
+    state = {"Wants": main + " tmp.mount", "PrivateTmp": "no" if change == "private-tmp" else "yes"}
+    mount = dict(stop.ABSENT_TMP_MOUNT)
+    if change == "mounted":
+        mount.update(LoadState="loaded", ActiveState="active", SubState="mounted", Where="/tmp")
+    raw = "".join(k + "=" + v + "\n" for k, v in mount.items()).encode()
+    if change == "duplicate-property":
+        raw += b"Where=\n"
+    kernel = b"36 25 8:1 / / rw - ext4 /dev/public rw\n"
+    if change == "missing-root":
+        kernel = b""
+    if change == "tmp-mounted":
+        kernel += b"37 36 0:2 / /tmp rw - tmpfs tmpfs rw\n"
+    monkeypatch.setattr(stop, "read", lambda *args, **kwargs: kernel)
+    calls = []
+
+    def run(argv, *, timeout):
+        calls.append(argv)
+        assert argv == stop.TMP_MOUNT_COMMAND and timeout == 10
+        return raw
+
+    if change is None:
+        proof = stop.observer_dependency(run, state, main)
+        assert stop.validate_observer_dependency(state, main, proof) == proof
+        assert proof["mount_unit"] == stop.ABSENT_TMP_MOUNT and proof["kernel_tmp_mount_count"] == 0
+    else:
+        with pytest.raises(stop.StopError, match="observer_dependency_rejected"):
+            stop.observer_dependency(run, state, main)
+
+
+def test_single_expected_want_needs_no_mount_exception_or_host_read(plan, monkeypatch):
+    main = plan["unit"]
+    assert (
+        stop.observer_dependency(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()), {"Wants": main}, main
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("change", [None, "mount-state", "kernel-mount", "private-tmp", "extra-want"])
+def test_private_reader_replays_exact_absent_tmp_mount_dependency_proof(plan, monkeypatch, change):
+    identity, details = artifacts(plan, monkeypatch)
+    observer = details["observer_ready"]
+    observer["state"].update(Wants=plan["unit"] + " tmp.mount", PrivateTmp="yes")
+    observer["private_tmp_dependency"] = {
+        "schema": 1,
+        "private_tmp": "yes",
+        "extra_want": "tmp.mount",
+        "mount_unit": dict(stop.ABSENT_TMP_MOUNT),
+        "kernel_tmp_mount_count": 0,
+        "kernel_root_mount_observed": True,
+    }
+    if change == "mount-state":
+        observer["private_tmp_dependency"]["mount_unit"]["Where"] = "/tmp"
+    if change == "kernel-mount":
+        observer["private_tmp_dependency"]["kernel_tmp_mount_count"] = 1
+    if change == "private-tmp":
+        observer["state"]["PrivateTmp"] = "no"
+    if change == "extra-want":
+        observer["state"]["Wants"] += " other.service"
+    details["observer_release_intent"] = copy.deepcopy(observer)
+    raw, receipt = chain(identity, details)
+    if change is None:
+        assert stop.replay(identity, raw, receipt, plan["request"])
+    else:
+        with pytest.raises(stop.StopError):
+            stop.replay(identity, raw, receipt, plan["request"])

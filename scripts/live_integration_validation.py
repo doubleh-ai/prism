@@ -29,6 +29,7 @@ import stat
 import struct
 import sys
 import time
+import types
 from pathlib import Path
 
 OPERATIONS = Path("/var/lib/prism-operations/integration")
@@ -37,6 +38,8 @@ TOOLS = Path("/opt/prism/tools/claude")
 PROC = Path("/proc")
 CGROUP = Path("/sys/fs/cgroup")
 RESOLV = Path("/etc/resolv.conf")
+NETWORK_GATE_SHA256 = "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c"
+EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
 RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
 SOURCE_PINS = {
     "worker": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
@@ -108,13 +111,63 @@ SAFE_ERRORS = {
     "cleanup_failed",
     "supervision_failed",
     "operator_stop",
+    "network_gate_rejected",
 }
+
+NETWORK_PERMIT_READER = r"""
+def self_ticks():
+    return int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])
+def extra_network_denials(pin):
+    values={}
+    for name,family,kind,target in (
+        ('ipv6_loopback',socket.AF_INET6,socket.SOCK_STREAM,('::1',443,0,0)),
+        ('ipv4_mapped_public',socket.AF_INET6,socket.SOCK_STREAM,('::ffff:'+pin,443,0,0)),
+        ('udp_provider',socket.AF_INET,socket.SOCK_DGRAM,(pin,443)),
+        ('udp6_loopback',socket.AF_INET6,socket.SOCK_DGRAM,('::1',53,0,0)),
+    ):
+        try:
+            with socket.socket(family,kind) as probe:
+                probe.settimeout(.5)
+                if kind==socket.SOCK_STREAM:code=probe.connect_ex(target)
+                else:
+                    probe.sendto(b'',target);code=0
+        except OSError as error:code=error.errno
+        if type(code) is not int or not 0<=code<=4095:raise RuntimeError('network_canary_rejected')
+        values[name]=code
+    return values
+def network_permit(work,binding,config,expected_sha=None):
+    path=work/'network-allow.json';deadline=time.monotonic()+25
+    while not path.exists() and time.monotonic()<deadline:time.sleep(.05)
+    for part in (path,*path.parents):
+        info=part.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:raise RuntimeError('network_permit_rejected')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o444 or info.st_size>16384:raise RuntimeError('network_permit_rejected')
+        raw=stream.read(16385)
+    if expected_sha is not None and hashlib.sha256(raw).hexdigest()!=expected_sha:raise RuntimeError('network_permit_rejected')
+    value=json.loads(raw);identity=value.get('identity',{});receipt=value.get('programs',[])
+    unit=('prism-live-broker' if config['network_role']=='live' else 'prism-market-probe')+'-'+config['candidate'][:12]+'-'+config['nonce']+'.service'
+    group=Path('/sys/fs/cgroup/system.slice')/unit;cg=group.stat()
+    if set(value)!={'schema','binding','identity','programs','helper_sha256','provider_ipv4','allowed_at','preflight_only'} or type(value['schema']) is not int or value['schema']!=1 or value['binding']!=binding or value['helper_sha256']!=config['network_gate_sha256'] or value['provider_ipv4']!=config['network_pins'] or type(value['preflight_only']) is not bool or value['preflight_only'] is not config['preflight_only']:raise RuntimeError('network_permit_rejected')
+    if set(identity)!={'unit','invocation_id','pid','startticks','uid','cgroup_inode','cgroup_device'} or identity['unit']!=unit or not isinstance(identity['invocation_id'],str) or not re.fullmatch('[0-9a-f]{32}',identity['invocation_id']) or any(type(identity[key]) is not int for key in ('pid','startticks','uid','cgroup_inode','cgroup_device')) or (identity['pid'],identity['startticks'],identity['uid'],identity['cgroup_inode'],identity['cgroup_device'])!=(os.getpid(),self_ticks(),os.getuid(),cg.st_ino,cg.st_dev) or Path('/proc/self/cgroup').read_text().strip()!='0::/system.slice/'+unit:raise RuntimeError('network_permit_rejected')
+    if type(value['allowed_at']) is not int or not config['issued_at']<=value['allowed_at']<=time.time()<=config['issued_at']+180 or type(receipt) is not list or len(receipt)!=4:raise RuntimeError('network_permit_rejected')
+    for row,hook in zip(receipt,(10,11,14,15)):
+        if type(row) is not list or len(row)!=4 or type(row[0]) is not int or row[0]!=hook or type(row[1]) is not int or not 0<row[1]<2**32 or not isinstance(row[2],str) or not re.fullmatch('[0-9a-f]{16}',row[2]) or not isinstance(row[3],str) or not re.fullmatch('[0-9a-f]{64}',row[3]):raise RuntimeError('network_permit_rejected')
+    if len({row[1] for row in receipt})!=4:raise RuntimeError('network_permit_rejected')
+    return value
+"""
 
 # No site or candidate import; exact sealed transport/policy only. Real key is
 # requested over this one root-owned, peer-verified UDS after the root permit.
-BROKER_BOOTSTRAP = r"""
+BROKER_BOOTSTRAP = (
+    r"""
 import contextlib, ctypes, errno, hashlib, importlib.util, ipaddress, json, os, resource, socket, stat, struct, sys, time
 from pathlib import Path
+"""
+    + NETWORK_PERMIT_READER
+    + r"""
 
 def packed(value):
     raw=json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode()
@@ -173,11 +226,13 @@ def main():
         channel.settimeout(25);channel.connect(str(path))
         pid,uid,gid=struct.unpack("3i",channel.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
         if (pid,uid)!=(config["root_pid"],0): raise RuntimeError("ipc_rejected")
-        channel.sendall(packed({"schema":1,"kind":"hello","nonce":config["nonce"],"pid":os.getpid()}))
+        channel.sendall(packed({"schema":1,"kind":"hello","candidate":config['candidate'],"nonce":config["nonce"],"pid":os.getpid(),"startticks":self_ticks(),"bootstrap_sha256":config['bootstrap_sha256'],"transport_sha256":config['transport_sha256']}))
         launch=receive(channel)
-        if set(launch)!={"schema","kind","binding","negative_targets","provider_pins"} or launch["schema"]!=1 or launch["kind"]!="binding": raise RuntimeError("ipc_rejected")
+        if set(launch)!={"schema","kind","binding","negative_targets","provider_pins","network_permit_sha256"} or launch["schema"]!=1 or launch["kind"]!="binding": raise RuntimeError("ipc_rejected")
         binding=launch["binding"]
         if binding["broker_pid"]!=os.getpid() or binding["nonce"]!=config["nonce"]: raise RuntimeError("ipc_rejected")
+        config['network_pins']=launch['provider_pins']
+        network_permit(work,binding,config,launch['network_permit_sha256'])
         broker=module.Broker(work,binding); observed=set();original=broker.upstream.connect
         def connect(deadline):
             secured=original(deadline);peer=secured.getpeername()[0]
@@ -190,6 +245,7 @@ def main():
             for name,target in launch["negative_targets"].items():
                 with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:
                     probe.settimeout(0.5);negative[name]=probe.connect_ex(tuple(target))
+            negative.update(extra_network_denials(launch["provider_pins"][0]))
             channel.sendall(packed({"schema":1,"kind":"preflight","binding":identity,"facts":{**facts,"broker_memory_sealed":memory_sealed},"negative_errno":negative,"positive_peers":sorted(observed),"filesystem_checks":filesystem}))
             reply=receive(channel)
             if reply!={"schema":1,"kind":"allowed","nonce":config["nonce"]}: raise RuntimeError("ipc_rejected")
@@ -198,17 +254,25 @@ def main():
             reply=receive(channel)
             if set(reply)!={"schema","kind","key"} or reply["schema"]!=1 or reply["kind"]!="key" or type(reply["key"]) is not str: raise RuntimeError("ipc_rejected")
             return reply["key"]
+        if config['preflight_only']:
+            facts=broker.upstream.preflight(min(broker.deadline,time.monotonic()+25))
+            gatekeeper(binding,facts)
+            if receive(channel)!={'schema':1,'kind':'preflight-finish','nonce':config['nonce']}:raise RuntimeError('ipc_rejected')
+            return
         with module.serve_broker(broker,config["bridge_gid"]):
             broker.authorize(gatekeeper=gatekeeper,key_provider=key_provider)
             channel.sendall(packed({"schema":1,"kind":"authorized","binding":binding}))
             channel.settimeout(max(0.1,config["issued_at"]+178-time.time()))
             if receive(channel)!={"schema":1,"kind":"finish","nonce":config["nonce"]}: raise RuntimeError("ipc_rejected")
             channel.sendall(packed({"schema":1,"kind":"summary","binding":binding,"summary":broker.summary()}))
+            if receive(channel)!={'schema':1,'kind':'result-ack','nonce':config['nonce']}:raise RuntimeError('ipc_rejected')
 try:
     main()
 except Exception:
     raise SystemExit(1)
 """
+)
+BROKER_BOOTSTRAP_SHA256 = hashlib.sha256(BROKER_BOOTSTRAP.encode()).hexdigest()
 
 
 class ValidationError(RuntimeError):
@@ -279,6 +343,38 @@ def root_locked(path):
         info = part.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise ValidationError("source_rejected")
+
+
+def load_network_gate(path):
+    """Load the frozen helper from a trusted sealed path, including dataclasses.
+
+    The path is a controller argument, never request input. Restore sys.modules
+    even on failure: old sealed loaders do not register dynamically exec'd code.
+    """
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValidationError("network_gate_rejected")
+    root_locked(path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_size > 65536:
+            raise ValidationError("network_gate_rejected")
+        raw = stream.read(65537)
+    if hashlib.sha256(raw).hexdigest() != NETWORK_GATE_SHA256:
+        raise ValidationError("network_gate_rejected")
+    name = "_prism_owned_network_gate_" + NETWORK_GATE_SHA256
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    previous = sys.modules.get(name)
+    try:
+        sys.modules[name] = module
+        exec(compile(raw, str(path), "exec"), module.__dict__)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
 
 
 def write(path, raw, mode=0o644):
@@ -373,8 +469,9 @@ def network_policy(resolve=None):
     )
     if not isinstance(addresses, list) or not 0 < len(addresses) <= 32:
         raise ValidationError("dns_rejected")
-    pins = sorted({public_ip(value) for value in addresses})
-    if not pins or len(pins) > 16:
+    checked = {public_ip(value) for value in addresses}
+    pins = sorted(value for value in checked if ":" not in value)
+    if not pins or len(pins) > 8:
         raise ValidationError("dns_rejected")
     with RESOLV.open("rb") as stream:
         raw = stream.read(16385)
@@ -394,11 +491,10 @@ def network_policy(resolve=None):
                 address = ipaddress.ip_address(fields[1])
             except ValueError:
                 raise ValidationError("dns_rejected") from None
-            # Only explicit public resolvers or the two documented local stubs.
-            resolvers.add(
-                str(address) if str(address) in {"127.0.0.53", "127.0.0.54"} else public_ip(fields[1])
-            )
-    if not resolvers or len(resolvers) > 3:
+            if str(address) != "127.0.0.53":
+                raise ValidationError("dns_rejected")
+            resolvers.add(str(address))
+    if resolvers != {"127.0.0.53"}:
         raise ValidationError("dns_rejected")
     off_public = next(
         value
@@ -464,10 +560,19 @@ def private_run(process):
 
 
 class Validation:
-    def __init__(self, request, *, boundary, run, record, key_provider):
+    def __init__(
+        self, request, *, boundary, run, record, key_provider, network_gate_path=None, preflight_only=False
+    ):
+        if type(preflight_only) is not bool:
+            raise ValidationError("request_rejected")
         self.request = request
         self.sources = validate_request(request)
         self.boundary, self._run, self.record, self.key_provider = boundary, run, record, key_provider
+        self.preflight_only = preflight_only
+        if preflight_only:
+            self.key_provider = None
+        self.network_gate_path, self.network_gate = network_gate_path, None
+        self.network_programs = None
         self.nonce, self.issued = secrets.token_hex(16), int(time.time())
         self.work = OPERATIONS / request["release_id"] / "live"
         self.candidate = RELEASES / request["candidate"]
@@ -486,7 +591,7 @@ class Validation:
         self.deadline = time.monotonic() + 180
         self.report = {
             "schema": 1,
-            "action": "integration_live",
+            "action": "integration_network_preflight" if preflight_only else "integration_live",
             "candidate": request["candidate"],
             "release_id": request["release_id"],
             "source_sha256": dict(SOURCE_PINS),
@@ -515,6 +620,11 @@ class Validation:
             "blocked_provider_header_names": [],
             "official_source_count": 0,
             "broker_summary_sha256": None,
+            "preflight_only": preflight_only,
+            "network_gate_verified": False,
+            "network_gate_verified_before_cleanup": False,
+            "network_gate_cleaned": False,
+            "key_acquisition_attempted": False,
             "requests": dict.fromkeys(("messages", "count_tokens", "quote", "kline", "public_fetch"), 0),
         }
 
@@ -526,7 +636,7 @@ class Validation:
         self.record(
             {
                 "schema": 1,
-                "action": "integration_live",
+                "action": self.report["action"],
                 "candidate": self.request["candidate"],
                 "release_id": self.request["release_id"],
                 "stage": value,
@@ -748,6 +858,11 @@ class Validation:
                 "bridge_gid": self.bridge_gid,
                 "issued_at": self.issued,
                 "production_pid": self.request["production_pid"],
+                "candidate": self.request["candidate"],
+                "bootstrap_sha256": BROKER_BOOTSTRAP_SHA256,
+                "network_gate_sha256": NETWORK_GATE_SHA256,
+                "network_role": "live",
+                "preflight_only": self.preflight_only,
             }
             command = ["/usr/bin/python3", "-I", "-B", "-S", "-c", BROKER_BOOTSTRAP, encoded(config).decode()]
         return [
@@ -907,6 +1022,58 @@ class Validation:
             raise ValidationError("bootstrap_rejected")
         return proof, sha
 
+    def install_network_gate(self, pins):
+        self.stage("network_attach")
+        self.kernel = self.kernel_identity()
+        module = load_network_gate(self.network_gate_path)
+        group = CGROUP / "system.slice" / self.units["broker"]
+        info = group.stat()
+        saved = self.invocations["broker"]
+        descriptor = module.ControllerDescriptor(
+            role="live",
+            candidate_prefix=self.request["candidate"][:12],
+            nonce=self.nonce,
+            invocation_id=saved[0],
+            pid=self.pids["broker"],
+            startticks=saved[2],
+            uid=self.accounts["broker"].pw_uid,
+            cgroup_inode=info.st_ino,
+            cgroup_device=info.st_dev,
+            provider_ipv4=tuple(pins),
+        )
+        if descriptor.unit != self.units["broker"] or self.kernel_identity() != self.kernel:
+            raise ValidationError("network_gate_rejected")
+        self.network_gate = module.OwnedNetworkGate(descriptor)
+        self.network_programs = self.network_gate.install()
+        self.verify_network_gate()
+        identity = {
+            name: getattr(descriptor, name)
+            for name in ("invocation_id", "pid", "startticks", "uid", "cgroup_inode", "cgroup_device")
+        }
+        identity["unit"] = descriptor.unit
+        permit = {
+            "schema": 1,
+            "binding": self.binding,
+            "identity": identity,
+            "programs": self.network_programs,
+            "helper_sha256": NETWORK_GATE_SHA256,
+            "provider_ipv4": pins,
+            "allowed_at": int(time.time()),
+            "preflight_only": self.preflight_only,
+        }
+        raw = encoded(permit)
+        self.stage("network_permit")
+        self.verify_network_gate()
+        write(self.work / "network-allow.json", raw, 0o444)
+        return hashlib.sha256(raw).hexdigest()
+
+    def verify_network_gate(self):
+        try:
+            if self.network_gate is None or self.network_gate.verify() != self.network_programs:
+                raise ValidationError("network_gate_rejected")
+        except Exception:
+            raise ValidationError("network_gate_rejected") from None
+
     def preflight(self, value, pins):
         # Only typed, bounded diagnostics survive a failed gate. Never retain
         # raw IPC, host addresses, provider text or arbitrary exception detail.
@@ -940,7 +1107,7 @@ class Validation:
             or set(value["filesystem_checks"]) != BROKER_FILESYSTEM_CHECKS
             or any(type(flag) is not bool for flag in value["filesystem_checks"].values())
             or type(value.get("negative_errno")) is not dict
-            or set(value["negative_errno"]) != {*NEGATIVE_TARGETS, "disallowed_public"}
+            or set(value["negative_errno"]) != {*NEGATIVE_TARGETS, "disallowed_public", *EXTRA_NEGATIVES}
             or any(
                 type(number) is not int or not 0 <= number <= 4095
                 for number in value["negative_errno"].values()
@@ -965,6 +1132,8 @@ class Validation:
             raise ValidationError("broker_preflight_rejected")
 
     def allow(self):
+        if self.preflight_only:
+            raise ValidationError("key_rejected")
         self.stage("allow")
         self.candidate_identity()
         self.source_identity()
@@ -973,6 +1142,7 @@ class Validation:
         if self.kernel_identity() != self.kernel or self.proof()[1] != self.proof_sha:
             raise ValidationError("bootstrap_rejected")
         checked = int(time.time())
+        self.verify_network_gate()
         value = {
             "schema": 1,
             "binding": self.binding,
@@ -992,6 +1162,8 @@ class Validation:
         self.report["bootstrap_proof_sha256"] = self.proof_sha
 
     def release_key(self, channel):
+        if self.preflight_only:
+            raise ValidationError("key_rejected")
         self.stage("key_release")
         if self.key_attempted:
             raise ValidationError("key_rejected")
@@ -1000,7 +1172,9 @@ class Validation:
             raise ValidationError("kernel_rejected")
         self.candidate_identity()
         self.source_identity()
+        self.verify_network_gate()
         self.key_attempted = True
+        self.report["key_acquisition_attempted"] = True
         key = self.key_provider()
         if not isinstance(key, str) or not 16 <= len(key) <= 4096 or not re.fullmatch("[!-~]+", key):
             raise ValidationError("key_rejected")
@@ -1010,9 +1184,11 @@ class Validation:
             raise ValidationError("kernel_rejected")
         self.candidate_identity()
         self.source_identity()
+        self.verify_network_gate()
         send(channel, {"schema": 1, "kind": "key", "key": key})
 
     def result(self):
+        self.verify_network_gate()
         value, sha = read_private(self.work / "output/live-result.json", self.accounts["worker"].pw_uid)
         fields = {
             "schema",
@@ -1282,8 +1458,15 @@ class Validation:
             except Exception:
                 failed = True
         self.report["units_stopped"] = not failed
+        if self.network_gate is not None:
+            try:
+                self.network_gate.cleanup()
+                self.report["network_gate_cleaned"] = True
+            except Exception:
+                failed = True
         if failed:
             self.report["passed"] = False
+            self.report["network_gate_verified"] = False
             self.report["cleanup_error_class"] = "cleanup_failed"
             if self.report["error_class"] is None:
                 self.report["error_class"] = "cleanup_failed"
@@ -1325,8 +1508,26 @@ class Validation:
             channel.settimeout(25)
             peer(channel, self.pids["broker"], self.accounts["broker"].pw_uid)
             hello = receive(channel)
-            if hello != {"schema": 1, "kind": "hello", "nonce": self.nonce, "pid": self.pids["broker"]}:
+            if (
+                hello
+                != {
+                    "schema": 1,
+                    "kind": "hello",
+                    "candidate": self.request["candidate"],
+                    "nonce": self.nonce,
+                    "pid": self.pids["broker"],
+                    "startticks": self.invocations["broker"][2],
+                    "bootstrap_sha256": BROKER_BOOTSTRAP_SHA256,
+                    "transport_sha256": SOURCE_PINS["transport"],
+                }
+                or type(hello.get("schema")) is not int
+                or type(hello.get("pid")) is not int
+                or type(hello.get("startticks")) is not int
+            ):
                 raise ValidationError("ipc_rejected")
+            permit_sha = self.install_network_gate(pins)
+            self.stage("network_launch")
+            self.verify_network_gate()
             send(
                 channel,
                 {
@@ -1335,16 +1536,30 @@ class Validation:
                     "binding": self.binding,
                     "negative_targets": targets,
                     "provider_pins": pins,
+                    "network_permit_sha256": permit_sha,
                 },
             )
             self.stage("preflight")
             self.preflight(receive(channel), pins)
+            self.verify_network_gate()
+            self.report["network_gate_verified_before_cleanup"] = True
+            self.report["network_gate_verified"] = True
             deadline = min(self.deadline, time.monotonic() + 15)
             while not (self.work / "output/bootstrap-proof.json").exists():
                 self.boundary("live_wait_bootstrap")
                 if time.monotonic() >= deadline:
                     raise ValidationError("bootstrap_rejected")
                 time.sleep(0.05)
+            if self.preflight_only:
+                self.kernel_identity()
+                self.proof()
+                self.verify_network_gate()
+                send(channel, {"schema": 1, "kind": "allowed", "nonce": self.nonce})
+                self.verify_network_gate()
+                send(channel, {"schema": 1, "kind": "preflight-finish", "nonce": self.nonce})
+                self.report["passed"] = True
+                self.report["stage"] = "network_preflight_complete"
+                return self.report
             self.allow()
             send(channel, {"schema": 1, "kind": "allowed", "nonce": self.nonce})
             if receive(channel) != {"schema": 1, "kind": "key", "binding": self.binding}:
@@ -1366,8 +1581,11 @@ class Validation:
             self.stage("result_validation")
             self.result()
             self.stage("broker_finish")
+            self.verify_network_gate()
             send(channel, {"schema": 1, "kind": "finish", "nonce": self.nonce})
             self.broker_result(receive(channel))
+            self.verify_network_gate()
+            send(channel, {"schema": 1, "kind": "result-ack", "nonce": self.nonce})
             self.completed("broker")
             self.stage("verification")
             self.report["passed"] = True
@@ -1395,6 +1613,26 @@ class Validation:
         return self.report
 
 
-def run_validation(request, *, boundary, run, record, key_provider):
+def run_validation(request, *, boundary, run, record, key_provider, network_gate_path=None):
     """One attempt; callbacks are trusted controller functions, never request code."""
-    return Validation(request, boundary=boundary, run=run, record=record, key_provider=key_provider).execute()
+    return Validation(
+        request,
+        boundary=boundary,
+        run=run,
+        record=record,
+        key_provider=key_provider,
+        network_gate_path=network_gate_path,
+    ).execute()
+
+
+def run_network_preflight(request, *, boundary, run, record, network_gate_path):
+    """Fixed credential-free diagnostic: TLS handshake only; never authorizes models."""
+    return Validation(
+        request,
+        boundary=boundary,
+        run=run,
+        record=record,
+        key_provider=None,
+        network_gate_path=network_gate_path,
+        preflight_only=True,
+    ).execute()

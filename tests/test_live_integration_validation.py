@@ -63,6 +63,8 @@ def validation(tmp_path, monkeypatch):
         "broker_pid": 654,
     }
     value.test_log, value.test_calls = log, calls
+    value.network_programs = ()
+    value.network_gate = types.SimpleNamespace(verify=lambda: (), cleanup=lambda: None)
     return value
 
 
@@ -212,7 +214,9 @@ def preflight(validation):
         "binding": validation.binding,
         "facts": {"public_dns_pinned": True, "upstream_tls_verified": True, "broker_memory_sealed": True},
         "filesystem_checks": dict.fromkeys(supervisor.BROKER_FILESYSTEM_CHECKS, True),
-        "negative_errno": dict.fromkeys([*supervisor.NEGATIVE_TARGETS, "disallowed_public"], 13),
+        "negative_errno": dict.fromkeys(
+            [*supervisor.NEGATIVE_TARGETS, "disallowed_public", *supervisor.EXTRA_NEGATIVES], 13
+        ),
         "positive_peers": ["1.1.1.1"],
     }
 
@@ -246,6 +250,7 @@ def key_ready(validation, monkeypatch):
     monkeypatch.setattr(validation, "proof", lambda: events.append("proof") or ({}, validation.proof_sha))
     monkeypatch.setattr(validation, "candidate_identity", lambda: events.append("candidate"))
     monkeypatch.setattr(validation, "source_identity", lambda: events.append("sources"))
+    monkeypatch.setattr(validation, "verify_network_gate", lambda: events.append("network"))
     validation.boundary = lambda stage: events.append(stage)
     validation.key_provider = lambda: events.append("key_provider") or "public-synthetic-key-only"
     return events
@@ -256,13 +261,57 @@ def test_key_only_after_actual_rechecks_and_second_stop_gate_before_send(validat
     channel = Channel()
     validation.release_key(channel)
     index = events.index("key_provider")
-    assert events[:index] == ["live_key_release", "peer", "kernel", "proof", "candidate", "sources"]
-    assert events[index + 1 :] == ["live_key_send", "peer", "kernel", "proof", "candidate", "sources"]
+    assert events[:index] == [
+        "live_key_release",
+        "peer",
+        "kernel",
+        "proof",
+        "candidate",
+        "sources",
+        "network",
+    ]
+    assert events[index + 1 :] == [
+        "live_key_send",
+        "peer",
+        "kernel",
+        "proof",
+        "candidate",
+        "sources",
+        "network",
+    ]
     assert supervisor.receive(Channel(channel.outgoing))["key"] == "public-synthetic-key-only"
     assert "public-synthetic-key-only" not in json.dumps(validation.test_log)
     with pytest.raises(supervisor.ValidationError, match="key_rejected"):
         validation.release_key(Channel())
     assert events.count("key_provider") == 1
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_changed_network_gate_blocks_key_acquisition_or_send(validation, monkeypatch, failure_at):
+    events = key_ready(validation, monkeypatch)
+    checks = []
+
+    def verify():
+        checks.append("network")
+        if len(checks) == failure_at:
+            raise supervisor.ValidationError("network_gate_rejected")
+
+    monkeypatch.setattr(validation, "verify_network_gate", verify)
+    channel = Channel()
+    with pytest.raises(supervisor.ValidationError, match="network_gate_rejected"):
+        validation.release_key(channel)
+    assert events.count("key_provider") == (0 if failure_at == 1 else 1)
+    assert not channel.outgoing
+
+
+def test_preflight_mode_cannot_enter_key_or_business_allow_even_when_called_directly(validation):
+    validation.preflight_only = True
+    validation.key_provider = lambda: pytest.fail("preflight cannot acquire credentials")
+    with pytest.raises(supervisor.ValidationError, match="key_rejected"):
+        validation.release_key(Channel())
+    with pytest.raises(supervisor.ValidationError, match="key_rejected"):
+        validation.allow()
+    assert validation.key_attempted is False
 
 
 @pytest.mark.parametrize("failure", ["before", "after", "kernel", "source"])
@@ -605,6 +654,7 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
     validation, monkeypatch
 ):
     """All OS/model witnesses below are explicitly fixtures, never live claims."""
+    validation.invocations = {"broker": ("c" * 32, 654, 102), "worker": ("d" * 32, 321, 101)}
     monkeypatch.setattr(supervisor.sys, "platform", "linux")
     monkeypatch.setattr(supervisor.os, "geteuid", lambda: 0)
     monkeypatch.setattr(supervisor.os, "chown", lambda *args: None)
@@ -612,6 +662,7 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
     monkeypatch.setattr(supervisor, "peer", lambda *args: None)
     monkeypatch.setattr(validation, "candidate_identity", lambda: None)
     monkeypatch.setattr(validation, "source_identity", lambda: None)
+    monkeypatch.setattr(validation, "install_network_gate", lambda pins: "e" * 64)
     monkeypatch.setattr(validation, "accounts_ready", lambda: None)
     monkeypatch.setattr(supervisor, "network_policy", lambda *args: (["1.1.1.1"], ["127.0.0.53"], {}))
     validation.accounts["worker"].pw_uid = os.getuid()
@@ -674,7 +725,16 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
     )
     incoming = iter(
         [
-            {"schema": 1, "kind": "hello", "nonce": validation.nonce, "pid": 654},
+            {
+                "schema": 1,
+                "kind": "hello",
+                "nonce": validation.nonce,
+                "pid": 654,
+                "candidate": validation.request["candidate"],
+                "startticks": 102,
+                "bootstrap_sha256": supervisor.BROKER_BOOTSTRAP_SHA256,
+                "transport_sha256": supervisor.SOURCE_PINS["transport"],
+            },
             preflight(validation),
             {"schema": 1, "kind": "key", "binding": validation.binding},
             {"schema": 1, "kind": "authorized", "binding": validation.binding},
@@ -704,7 +764,10 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
 
 
 @pytest.mark.parametrize("failed_canary", [False, True])
-def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_key(validation, failed_canary):
+@pytest.mark.parametrize("preflight_only", [False, True])
+def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_key(
+    validation, failed_canary, preflight_only
+):
     # Execute the actual stdlib bootstrap functions with explicit offline I/O
     # fixtures. This validates protocol order, not real UID/BPF/TLS evidence.
     parsed = ast.parse(supervisor.BROKER_BOOTSTRAP)
@@ -722,10 +785,20 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
                 "binding": binding,
                 "negative_targets": {**supervisor.NEGATIVE_TARGETS, "disallowed_public": ("9.9.9.9", 443)},
                 "provider_pins": ["1.1.1.1"],
+                "network_permit_sha256": "e" * 64,
             },
             {"schema": 1, "kind": "allowed", "nonce": validation.nonce},
-            {"schema": 1, "kind": "key", "key": "public-synthetic-key-only"},
-            {"schema": 1, "kind": "finish", "nonce": validation.nonce},
+            *(
+                [
+                    {"schema": 1, "kind": "preflight-finish", "nonce": validation.nonce},
+                ]
+                if preflight_only
+                else [
+                    {"schema": 1, "kind": "key", "key": "public-synthetic-key-only"},
+                    {"schema": 1, "kind": "finish", "nonce": validation.nonce},
+                    {"schema": 1, "kind": "result-ack", "nonce": validation.nonce},
+                ]
+            ),
         ]
     )
     channel = Channel(incoming, credentials=(900, 0, 0))
@@ -747,6 +820,10 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
         def connect_ex(self, target):
             events.append("bpf_negative")
             return 13
+
+        def sendto(self, payload, target):
+            events.append("bpf_negative")
+            raise PermissionError(13, "synthetic denial")
 
     class SyntheticPath:
         def __init__(self, value):
@@ -775,6 +852,7 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
             self.upstream, self.deadline = Upstream(), supervisor.time.monotonic() + 180
 
         def authorize(self, *, gatekeeper, key_provider):
+            assert not preflight_only, "preflight must not reach credential acquisition"
             facts = self.upstream.preflight(1)
             gatekeeper(binding, facts)
             events.append("root_allow_received")
@@ -793,6 +871,8 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
     namespace["Path"] = SyntheticPath
     namespace["root_source"] = lambda *args: events.append("source_verified") or b"pass\n"
     namespace["seal_memory"] = lambda: events.append("memory_sealed") or True
+    namespace["self_ticks"] = lambda: 102
+    namespace["network_permit"] = lambda *args: None
     namespace["denied_open"] = lambda path, **kw: events.append("filesystem_canary") or not failed_canary
     namespace["os"] = types.SimpleNamespace(getuid=lambda: 2002, getpid=lambda: 654)
     namespace["sys"] = types.SimpleNamespace(
@@ -811,6 +891,9 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
                     "bridge_gid": 2003,
                     "issued_at": validation.issued,
                     "production_pid": 123,
+                    "candidate": validation.request["candidate"],
+                    "bootstrap_sha256": supervisor.BROKER_BOOTSTRAP_SHA256,
+                    "preflight_only": preflight_only,
                 }
             ),
         ],
@@ -818,7 +901,9 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
     namespace["socket"] = types.SimpleNamespace(
         AF_UNIX=1,
         AF_INET=2,
+        AF_INET6=10,
         SOCK_STREAM=1,
+        SOCK_DGRAM=2,
         SOL_SOCKET=1,
         SO_PEERCRED=17,
         socket=lambda family, kind: channel if family == 1 else Negative(),
@@ -830,7 +915,11 @@ def test_actual_bootstrap_protocol_orders_canaries_tls_root_allow_then_single_ke
     else:
         namespace["main"]()
         stream = Channel(channel.outgoing)
-        messages = [supervisor.receive(stream) for _ in range(5)]
+        messages = [supervisor.receive(stream) for _ in range(2 if preflight_only else 5)]
+        if preflight_only:
+            assert [value["kind"] for value in messages] == ["hello", "preflight"]
+            assert "key_received" not in events and "root_allow_received" not in events
+            return
         assert [value["kind"] for value in messages] == ["hello", "preflight", "key", "authorized", "summary"]
         assert events[:6] == ["memory_sealed"] + ["filesystem_canary"] * 4 + ["source_verified"]
         assert (

@@ -42,7 +42,7 @@ PROPERTIES = (
     + ",".join((*(key for key in POLICY if key not in {"ExecStop", "ExecStopPost"}), "Job"))
 )
 OBSERVER_PROPERTIES = (
-    base.PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit,Job"
+    base.PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit,Job,PrivateTmp"
 )
 # Actual reviewed Ubuntu busctl JSON: both properties returned this typed empty
 # array. systemctl omits these custom-formatted arrays even with --all.
@@ -153,6 +153,83 @@ def _job(value):
     return base._number(value)
 
 
+TMP_MOUNT_PROPERTIES = "Id,LoadState,ActiveState,SubState,Where"
+TMP_MOUNT_COMMAND = ["/usr/bin/systemctl", "show", "--all", "--property=" + TMP_MOUNT_PROPERTIES, "tmp.mount"]
+ABSENT_TMP_MOUNT = {
+    "Id": "tmp.mount",
+    "LoadState": "not-found",
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "Where": "",
+}
+
+
+def validate_observer_dependency(state, main_unit, proof):
+    wants = state["Wants"].split()
+    if len(wants) != len(set(wants)) or set(wants) not in ({main_unit}, {main_unit, "tmp.mount"}):
+        reject("observer_dependency_rejected")
+    if "tmp.mount" not in wants:
+        if proof is not None:
+            reject("observer_dependency_rejected")
+        return None
+    expected = {
+        "schema": 1,
+        "private_tmp": "yes",
+        "extra_want": "tmp.mount",
+        "mount_unit": ABSENT_TMP_MOUNT,
+        "kernel_tmp_mount_count": 0,
+        "kernel_root_mount_observed": True,
+    }
+    if state.get("PrivateTmp") != "yes" or probe.encoded(proof) != probe.encoded(expected):
+        reject("observer_dependency_rejected")
+    return proof
+
+
+def observer_dependency(run, state, main_unit):
+    wants = state["Wants"].split()
+    if len(wants) != len(set(wants)) or set(wants) not in ({main_unit}, {main_unit, "tmp.mount"}):
+        reject("observer_dependency_rejected")
+    if "tmp.mount" not in wants:
+        return None
+    if state.get("PrivateTmp") != "yes":
+        reject("observer_dependency_rejected")
+    raw = run(TMP_MOUNT_COMMAND, timeout=10)
+    if type(raw) is not bytes or len(raw) > 4096:
+        reject("observer_dependency_rejected")
+    try:
+        rows = [line.split("=", 1) for line in raw.decode("ascii").splitlines()]
+    except UnicodeError:
+        reject("observer_dependency_rejected")
+    if any(len(row) != 2 for row in rows):
+        reject("observer_dependency_rejected")
+    mount = dict(rows)
+    if len(rows) != len(mount) or mount != ABSENT_TMP_MOUNT:
+        reject("observer_dependency_rejected")
+    raw = probe._read_regular(Path("/proc") / str(os.getpid()) / "mountinfo", 1048576)[0]
+    try:
+        roots, tmp = 0, 0
+        for line in raw.decode("ascii").splitlines():
+            head, sep, tail = line.partition(" - ")
+            fields = head.split()
+            if not sep or len(fields) < 6 or len(tail.split()) < 3:
+                reject("observer_dependency_rejected")
+            roots += fields[4] == "/"
+            tmp += fields[4] == "/tmp"
+    except UnicodeError:
+        reject("observer_dependency_rejected")
+    if roots < 1 or tmp != 0:
+        reject("observer_dependency_rejected")
+    proof = {
+        "schema": 1,
+        "private_tmp": "yes",
+        "extra_want": "tmp.mount",
+        "mount_unit": mount,
+        "kernel_tmp_mount_count": 0,
+        "kernel_root_mount_observed": True,
+    }
+    return validate_observer_dependency(state, main_unit, proof)
+
+
 def validate_job(value, printed=None):
     if (
         type(value) is not dict
@@ -258,6 +335,116 @@ def empty_exec_arrays(run, unit):
     return observed
 
 
+RETAINED_OBSERVER = {
+    "nonce": "0e17a0ff8cb154f535b748421034ffd3",
+    "case_id": "int-executor",
+    "invocation_id": "ce03d5dadce3408ab875ca19baed02fe",
+    "exec_main_pid": 2181971,
+}
+
+
+def retained_observer_read_commands(bindings):
+    plan = probe.descriptor(bindings, nonce=RETAINED_OBSERVER["nonce"])
+    unit = observer_unit(plan, RETAINED_OBSERVER["case_id"])
+    start = job_command(unit)
+    start[-2:] = ["org.freedesktop.systemd1.Service", "ExecStart"]
+    return [
+        TMP_MOUNT_COMMAND,
+        ["/usr/bin/systemctl", "show", "--all", "--property=" + OBSERVER_PROPERTIES, unit],
+        job_command(unit),
+        start,
+    ]
+
+
+def retained_observer_state(run, bindings):
+    """Observe only the fixed 004 empty observer, without stop/cleanup authority."""
+    plan = probe.descriptor(bindings, nonce=RETAINED_OBSERVER["nonce"])
+    case_id = RETAINED_OBSERVER["case_id"]
+    unit = observer_unit(plan, case_id)
+    commands = retained_observer_read_commands(bindings)
+    state = _rows(run(commands[1], timeout=10), OBSERVER_PROPERTIES)
+    before = dict(state)
+    expected = {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "exited",
+        "MainPID": "0",
+        "ExecMainPID": str(RETAINED_OBSERVER["exec_main_pid"]),
+        "ExecMainCode": "1",
+        "ExecMainStatus": "0",
+        "Result": "success",
+        "InvocationID": RETAINED_OBSERVER["invocation_id"],
+        "ControlGroup": "",
+        "Transient": "yes",
+        "DynamicUser": "yes",
+        "RemainAfterExit": "yes",
+        "PrivateTmp": "yes",
+    }
+    if any(state[key] != value for key, value in expected.items()) or any(
+        state[key] for key in ("PartOf", "BindsTo", "PropagatesStopTo")
+    ):
+        reject("retained_observer_rejected")
+    job = typed_job(run, unit, state["Job"])
+    if job != {"type": "(uo)", "data": [0, "/"]}:
+        reject("retained_observer_rejected")
+    state["Job"] = "0"
+    dependency = observer_dependency(run, state, probe._case(plan, case_id)["unit"])
+    raw = run(commands[3], timeout=10)
+    if type(raw) is not bytes or len(raw) > 4096:
+        reject("retained_observer_rejected")
+
+    def pairs(rows):
+        value = dict(rows)
+        if len(value) != len(rows):
+            raise ValueError("duplicate_key")
+        return value
+
+    try:
+        start = json.loads(raw, object_pairs_hook=pairs)
+    except (ValueError, UnicodeError):
+        reject("retained_observer_rejected")
+    command = observer_command(plan, case_id)
+    argv = command[command.index("--") + 1 :]
+    if (
+        type(start) is not dict
+        or set(start) != {"type", "data"}
+        or start["type"] != "a(sasbttttuii)"
+        or type(start["data"]) is not list
+        or len(start["data"]) != 1
+    ):
+        reject("retained_observer_rejected")
+    row = start["data"][0]
+    if (
+        type(row) is not list
+        or len(row) != 10
+        or row[0] != argv[0]
+        or row[1] != argv
+        or row[2] is not False
+        or any(type(number) is not int for number in row[3:])
+        or any(not 0 < number < 2**64 for number in row[3:7])
+        or row[7:] != [RETAINED_OBSERVER["exec_main_pid"], 1, 0]
+        or state["ExecMainExitTimestampMonotonic"] != str(row[6])
+    ):
+        reject("retained_observer_rejected")
+    group = probe.CGROUP_ROOT / "system.slice" / unit
+    if group.is_symlink() or group.exists():
+        reject("retained_observer_rejected")
+    after = _rows(run(commands[1], timeout=10), OBSERVER_PROPERTIES)
+    if before != after:
+        reject("retained_observer_rejected")
+    return {
+        "unit": unit,
+        "invocation_id": RETAINED_OBSERVER["invocation_id"],
+        "exec_main_pid": RETAINED_OBSERVER["exec_main_pid"],
+        "typed_job": job,
+        "exec_start_argv_sha256": probe.sha256(probe.encoded(argv)),
+        "state_sha256": probe.sha256(probe.encoded(before)),
+        "private_tmp_dependency": dependency,
+        "cgroup_absent": True,
+        "no_signal_or_cleanup_authorized": True,
+    }
+
+
 class StopValidation(base.Validation):
     def __init__(
         self,
@@ -269,6 +456,7 @@ class StopValidation(base.Validation):
         record,
         monotonic=time.monotonic,
         sleep=time.sleep,
+        retained_observer=None,
     ):
         super().__init__(request, boundary=boundary, run=run, record=record, monotonic=monotonic, sleep=sleep)
         self.stop_plan = descriptor(
@@ -280,6 +468,8 @@ class StopValidation(base.Validation):
         self.case_identities = {}
         self.exec_arrays = {}
         self.jobs = {}
+        self.observer_dependencies = {}
+        self.retained_observer = retained_observer
 
     def unit_missing(self, unit):
         allowed = {probe._case(self.plan, case_id)["unit"] for case_id in CASES}
@@ -305,6 +495,17 @@ class StopValidation(base.Validation):
                 r"prism-retirement-stop-ref-[0-9a-f]{32}-(?:int-executor|int-post)\.service", row[0]
             ):
                 reject("observer_inventory_rejected")
+        if self.retained_observer is not None:
+            plan = probe.descriptor(self.plan["bindings"], nonce=RETAINED_OBSERVER["nonce"])
+            unit = observer_unit(plan, RETAINED_OBSERVER["case_id"])
+            if (
+                len(rows) != 1
+                or rows[0][0] != unit
+                or probe.encoded(retained_observer_state(self.run, self.plan["bindings"]))
+                != probe.encoded(self.retained_observer)
+            ):
+                reject("previous_observer_unreconciled")
+            return True
         if rows:
             # Empty active observers retain the old invocation too: neither
             # their cgroup absence nor a new nonce authorizes replacing them.
@@ -366,6 +567,8 @@ class StopValidation(base.Validation):
         state = self.observer_show(case)
         if state["LoadState"] == "not-found" or state["ActiveState"] == "activating":
             return None
+        dependency = observer_dependency(self.run, state, case["unit"])
+        self.observer_dependencies[case["case_id"]] = dependency
         if (
             state["LoadState"] != "loaded"
             or state["Transient"] != "yes"
@@ -374,7 +577,6 @@ class StopValidation(base.Validation):
             or state["ExecMainCode"] != "1"
             or state["ExecMainStatus"] != "0"
             or state["Result"] != "success"
-            or state["Wants"].split() != [case["unit"]]
             or any(state[name] for name in ("PartOf", "BindsTo", "PropagatesStopTo"))
             or state["DynamicUser"] != "yes"
             or state["RemainAfterExit"] != "yes"
@@ -661,7 +863,7 @@ class StopValidation(base.Validation):
         return False
 
 
-def run_stop_validation(request, *, expected_python_sha256, boundary, run, record):
+def run_stop_validation(request, *, expected_python_sha256, boundary, run, record, retained_observer=None):
     """Fixed controller interface; do not call from candidates or old environments.
 
     The controller must trusted_source+seal all THREE helpers under a root-owned
@@ -674,7 +876,12 @@ def run_stop_validation(request, *, expected_python_sha256, boundary, run, recor
     """
     probe._require_linux()
     validator = StopValidation(
-        request, expected_python_sha256=expected_python_sha256, boundary=boundary, run=run, record=record
+        request,
+        expected_python_sha256=expected_python_sha256,
+        boundary=boundary,
+        run=run,
+        record=record,
+        retained_observer=retained_observer,
     )
     results, error = [], None
     try:

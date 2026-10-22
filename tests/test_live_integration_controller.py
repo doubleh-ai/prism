@@ -159,10 +159,10 @@ def test_mac_requires_all_four_explicit_pins_new_attempt_and_opaque_receipt(prep
         controller.request_for(args)
 
 
-def gate_fixture(prepared, monkeypatch):
+def gate_fixture(prepared, monkeypatch, *, module=helper, validator=None):
     fixture, data = prepared
     engine = fixture.engine
-    engine._live_module, engine._live_attempt = helper, ATTEMPT
+    engine._live_module, engine._live_attempt = module, ATTEMPT
     monkeypatch.setattr(remote, "seal_executor_memory", lambda: True)  # No offline process limits change.
     work = engine.operations / "integration" / ATTEMPT / "live"
     work.mkdir(parents=True, mode=0o755)
@@ -206,6 +206,12 @@ def gate_fixture(prepared, monkeypatch):
         "worker_pid": 321,
         "broker_pid": 654,
     }
+    validator = validator or object.__new__(module.Validation)
+    validator.preflight_only, validator.work, validator.binding = False, work, binding
+    validator.request = getattr(validator, "request", {"candidate": COMMIT, "release_id": ATTEMPT})
+    validator.network_programs = ("synthetic retained-program receipt",)
+    validator.network_gate = types.SimpleNamespace(verify=lambda: validator.network_programs)
+    engine._live_validator = validator
     kernel = {
         "worker_uids": [2001] * 4,
         "broker_uids": [2002] * 4,
@@ -236,7 +242,7 @@ def gate_fixture(prepared, monkeypatch):
     original = engine.run
     engine.run = lambda argv, **kwargs: (
         "\n".join(key + "=" + value for key, value in states[argv[-1]].items()).encode()
-        if argv[-1] in states
+        if argv[:2] == ["/usr/bin/systemctl", "show"] and argv[-1] in states
         else original(argv, **kwargs)
     )
     monkeypatch.setattr(engine, "stage_runtime_mount", lambda process: True)  # Explicit synthetic OS witness.
@@ -471,7 +477,14 @@ def safe_summary(data):
         "production_verified": False,
         "units_stopped": True,
         "cleanup_error_class": None,
-        "broker_negative_errno": dict.fromkeys([*helper.NEGATIVE_TARGETS, "disallowed_public"], 13),
+        "broker_negative_errno": dict.fromkeys(
+            [*helper.NEGATIVE_TARGETS, "disallowed_public", *helper.EXTRA_NEGATIVES], 13
+        ),
+        "preflight_only": False,
+        "network_gate_verified": True,
+        "network_gate_verified_before_cleanup": True,
+        "network_gate_cleaned": True,
+        "key_acquisition_attempted": True,
         "broker_filesystem_checks": dict.fromkeys(helper.BROKER_FILESYSTEM_CHECKS, True),
         "broker_preflight_facts": dict.fromkeys(
             ("public_dns_pinned", "upstream_tls_verified", "broker_memory_sealed"), True
@@ -520,11 +533,18 @@ def test_fixed_orchestration_persists_safe_failure_and_never_calls_key_early(pre
     engine = fixture.engine
     callback_calls = []
 
-    def run_validation(bindings, *, boundary, run, record, key_provider):
+    def run_validation(validator, module):
+        bindings = validator.request
+        boundary, run, record, key_provider = (
+            validator.boundary,
+            validator._run,
+            validator.record,
+            validator.key_provider,
+        )
         assert bindings["candidate"] == COMMIT and bindings["release_id"] == ATTEMPT
         assert set(bindings["sources"]) == set(remote.LIVE_SOURCE_PINS)
         if mode == "stop":
-            with pytest.raises(helper.ValidationError, match="operator_stop"):
+            with pytest.raises(module.ValidationError, match="operator_stop"):
                 boundary("live_accounts")
         if mode == "bad_command":
             with pytest.raises(remote.ReleaseError, match="live_command_rejected"):
@@ -534,8 +554,50 @@ def test_fixed_orchestration_persists_safe_failure_and_never_calls_key_early(pre
                 record(dict(safe_summary(data), raw_secret=SYNTHETIC))
         if mode in {"pass", "unsafe_record", "bad_command", "missing_record"}:
             # Explicit synthetic Linux facts; no real credentials or network.
-            gate_fixture(prepared, monkeypatch)
+            gate_fixture(prepared, monkeypatch, module=module, validator=validator)
+            validator.nonce, validator.issued = "d" * 32, NOW
+            validator.units = {
+                role: "prism-live-" + role + "-" + COMMIT[:12] + "-" + validator.nonce + ".service"
+                for role in ("broker", "worker")
+            }
+            validator.accounts = {
+                role: remote.pwd.getpwnam("prism-integration" + ("-broker" if role == "broker" else ""))
+                for role in ("broker", "worker")
+            }
+            validator.bridge_gid = 2003
+            validator.pids = {"broker": 654}
+            validator.candidate = engine.release
+            monkeypatch.setattr(remote.grp, "getgrnam", lambda name: types.SimpleNamespace(gr_gid=2003))
+            resolver = fixture.root / "etc/resolv.conf"
+            resolver.parent.mkdir(exist_ok=True)
+            resolver.write_text("nameserver 127.0.0.53\n")
+            module.RESOLV = resolver
+            previous_run = engine.run
+            monkeypatch.setattr(
+                engine,
+                "run",
+                lambda argv, **kwargs: (
+                    b'["1.1.1.1"]' if argv == remote.LIVE_RESOLVE_COMMAND else previous_run(argv, **kwargs)
+                ),
+            )
+            run(remote.LIVE_RESOLVE_COMMAND, timeout=8)
+            for role in ("broker", "worker"):
+                run(
+                    [
+                        "/usr/bin/systemctl",
+                        "list-units",
+                        "--all",
+                        "--plain",
+                        "--no-legend",
+                        validator.units[role],
+                    ],
+                    timeout=5,
+                )
+                run(validator.unit_command(role, ["1.1.1.1"], ["127.0.0.53"]), timeout=15)
+                validator.show(role)
             assert key_provider() == SYNTHETIC
+            for unit in validator.units.values():
+                run(["/usr/bin/systemctl", "stop", unit], timeout=5)
         value = safe_summary(data)
         if mode in {"fail", "stop"}:
             value.update(passed=False, error_class="worker_failed", stage="public_qa")
@@ -544,14 +606,14 @@ def test_fixed_orchestration_persists_safe_failure_and_never_calls_key_early(pre
         callback_calls.append("returned")
         return value
 
+    original_module = engine.live_module
+
     @contextmanager
     def module(contents):
         assert set(contents) == set(remote.LIVE_INTEGRATION_HELPERS)
-        yield types.SimpleNamespace(
-            run_validation=run_validation,
-            ValidationError=helper.ValidationError,
-            RESOLVE_CODE=helper.RESOLVE_CODE,
-        )
+        with original_module(contents) as sealed:
+            monkeypatch.setattr(sealed.Validation, "execute", lambda self: run_validation(self, sealed))
+            yield sealed
 
     monkeypatch.setattr(engine, "live_module", module)
     monkeypatch.setattr(remote, "seal_executor_memory", lambda: True)
@@ -621,6 +683,7 @@ def test_safe_failed_preflight_keeps_bounded_evidence_but_cannot_pass(prepared, 
     fixture, data = prepared
     value = safe_summary(data)
     value.update(passed=False, error_class="broker_preflight_rejected", stage="preflight")
+    value.update(network_gate_verified=False, network_gate_verified_before_cleanup=False)
     value["broker_negative_errno"]["production"] = code
     value["broker_preflight_facts"]["upstream_tls_verified"] = False
     value["broker_filesystem_checks"]["config_write_denied"] = False

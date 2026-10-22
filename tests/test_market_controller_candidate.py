@@ -33,6 +33,7 @@ def modules(tmp_path):
         "release_controller.py",
         "market_live_probe.py",
         "market_live_validation.py",
+        "cgroup_network_gate.py",
     ):
         raw = (ROOT / "scripts" / name).read_bytes()
         before[name] = raw
@@ -169,6 +170,22 @@ def synthetic_result(context, module, *, accepted=False):
         "native_fetch_verified": False,
         "error_class": None if accepted else "market_acceptance_incomplete",
         "unit_stopped": True,
+        "preflight_only": False,
+        "network_gate_verified": True,
+        "network_gate_verified_before_cleanup": True,
+        "network_gate_cleaned": True,
+        "negative_errno": dict.fromkeys(
+            (
+                "production_8088_denied",
+                "vibe_8899_denied",
+                "metadata_denied",
+                "private_ip_denied",
+                "other_public_denied",
+            ),
+            13,
+        ),
+        "additional_network_errno": dict.fromkeys(module.EXTRA_NEGATIVES, 13),
+        "cleanup_error_class": None,
         "identity": {
             "pid": 321,
             "startticks": 123,
@@ -191,6 +208,7 @@ def synthetic_command(context, module, bindings):
     validation.work = context.engine.operations / "integration" / ATTEMPT / "market"
     validation.candidate = context.engine.release
     validation.nonce, validation.issued = "d" * 32, NOW
+    validation.preflight_only = False
     validation.unit = "prism-market-probe-" + COMMIT[:12] + "-" + validation.nonce + ".service"
     validation.pins = {"qt.gtimg.cn": ["1.1.1.1"], "money.finance.sina.com.cn": ["8.8.8.8"]}
     validation.negative = "9.9.9.9"
@@ -212,7 +230,7 @@ def install_synthetic_driver(context, monkeypatch, driver):
 
 
 def successful_driver(context, *, accepted=False, mutate=None):
-    def driver(module, bindings, *, boundary, run, record):
+    def driver(module, bindings, *, boundary, run, record, network_gate_path):
         assert set(bindings) == {"schema", "release_id", "candidate", "production_pid", "probe_source"}
         assert bindings["probe_source"]["sha256"] == module.PROBE_SHA256
         boundary("market_start")
@@ -243,7 +261,11 @@ def successful_driver(context, *, accepted=False, mutate=None):
 def test_two_frozen_helpers_are_exactly_pinned_on_both_sides(modules):
     remote, controller = modules
     assert remote.MARKET_INTEGRATION_HELPERS == controller.MARKET_INTEGRATION_HELPERS
-    assert set(remote.MARKET_INTEGRATION_HELPERS) == {"market_live_probe.py", "market_live_validation.py"}
+    assert set(remote.MARKET_INTEGRATION_HELPERS) == {
+        "market_live_probe.py",
+        "market_live_validation.py",
+        "cgroup_network_gate.py",
+    }
     assert "integration_market" in remote.ACTIONS and "integration_market" in controller.ACTIONS
     for name, pin in remote.MARKET_INTEGRATION_HELPERS.items():
         assert remote.digest((ROOT / "scripts" / name).read_bytes()) == pin
@@ -408,7 +430,7 @@ def test_synthetic_complete_contract_records_success_only_with_observed_cleanup(
 def test_missing_cleanup_or_non_durable_results_cannot_complete(prepared, monkeypatch, mode):
     raw = "synthetic-private-value-never-journaled"
 
-    def driver(module, bindings, *, boundary, run, record):
+    def driver(module, bindings, *, boundary, run, record, network_gate_path):
         validation = synthetic_command(prepared, module, bindings)
         result = synthetic_result(prepared, module, accepted=True)
         if mode == "unsafe_event":
@@ -498,7 +520,7 @@ def test_append_journal_survives_short_writes_and_fsyncs_each_event(prepared, mo
     ],
 )
 def test_only_exact_nonce_command_and_own_cleanup_are_executable(prepared, monkeypatch, kind):
-    def driver(module, bindings, *, boundary, run, record):
+    def driver(module, bindings, *, boundary, run, record, network_gate_path):
         validation = synthetic_command(prepared, module, bindings)
         argv = validation.command()
         run(validation.inventory_command(), timeout=5)
@@ -543,7 +565,7 @@ def test_only_exact_nonce_command_and_own_cleanup_are_executable(prepared, monke
 def test_stop_boundary_keeps_only_own_nonce_cleanup_available(prepared, monkeypatch):
     stopped = []
 
-    def driver(module, bindings, *, boundary, run, record):
+    def driver(module, bindings, *, boundary, run, record, network_gate_path):
         validation = synthetic_command(prepared, module, bindings)
         run(validation.inventory_command(), timeout=5)
         run(validation.command(), timeout=15)
@@ -571,7 +593,7 @@ def test_launch_requires_empty_inventory_for_exact_same_nonce(prepared, monkeypa
 
     monkeypatch.setattr(prepared.engine, "run", observations)
 
-    def driver(module, bindings, *, boundary, run, record):
+    def driver(module, bindings, *, boundary, run, record, network_gate_path):
         value = synthetic_command(prepared, module, bindings)
         if mode != "missing":
             run(value.inventory_command(), timeout=5)

@@ -23,8 +23,11 @@ import socket
 import stat
 import sys
 import time
+import types
 from pathlib import Path
 
+NETWORK_GATE_SHA256 = "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c"
+EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
 PROBE_SHA256 = "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab"
 OPERATIONS = Path("/var/lib/prism-operations/integration")
 RELEASES = Path("/opt/prism/releases")
@@ -72,11 +75,61 @@ ERRORS = {
     "supervision_failed",
     "market_acceptance_incomplete",
     "operator_stop",
+    "network_gate_rejected",
 }
 
-WORKER_SOURCE = r"""
-import asyncio, contextlib, errno, hashlib, importlib.util, json, os, pwd, re, socket, stat, sys, time
+NETWORK_PERMIT_READER = r"""
+def self_ticks():
+    return int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])
+def extra_network_denials(pin):
+    values={}
+    for name,family,kind,target in (
+        ('ipv6_loopback',socket.AF_INET6,socket.SOCK_STREAM,('::1',443,0,0)),
+        ('ipv4_mapped_public',socket.AF_INET6,socket.SOCK_STREAM,('::ffff:'+pin,443,0,0)),
+        ('udp_provider',socket.AF_INET,socket.SOCK_DGRAM,(pin,443)),
+        ('udp6_loopback',socket.AF_INET6,socket.SOCK_DGRAM,('::1',53,0,0)),
+    ):
+        try:
+            with socket.socket(family,kind) as probe:
+                probe.settimeout(.5)
+                if kind==socket.SOCK_STREAM:code=probe.connect_ex(target)
+                else:
+                    probe.sendto(b'',target);code=0
+        except OSError as error:code=error.errno
+        if type(code) is not int or not 0<=code<=4095:raise RuntimeError('network_canary_rejected')
+        values[name]=code
+    return values
+def network_permit(work,binding,config,expected_sha=None):
+    path=work/'network-allow.json';deadline=time.monotonic()+25
+    while not path.exists() and time.monotonic()<deadline:time.sleep(.05)
+    for part in (path,*path.parents):
+        info=part.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:raise RuntimeError('network_permit_rejected')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o444 or info.st_size>16384:raise RuntimeError('network_permit_rejected')
+        raw=stream.read(16385)
+    if expected_sha is not None and hashlib.sha256(raw).hexdigest()!=expected_sha:raise RuntimeError('network_permit_rejected')
+    value=json.loads(raw);identity=value.get('identity',{});receipt=value.get('programs',[])
+    unit=('prism-live-broker' if config['network_role']=='live' else 'prism-market-probe')+'-'+config['candidate'][:12]+'-'+config['nonce']+'.service'
+    group=Path('/sys/fs/cgroup/system.slice')/unit;cg=group.stat()
+    if set(value)!={'schema','binding','identity','programs','helper_sha256','provider_ipv4','allowed_at','preflight_only'} or type(value['schema']) is not int or value['schema']!=1 or value['binding']!=binding or value['helper_sha256']!=config['network_gate_sha256'] or value['provider_ipv4']!=config['network_pins'] or type(value['preflight_only']) is not bool or value['preflight_only'] is not config['preflight_only']:raise RuntimeError('network_permit_rejected')
+    if set(identity)!={'unit','invocation_id','pid','startticks','uid','cgroup_inode','cgroup_device'} or identity['unit']!=unit or not isinstance(identity['invocation_id'],str) or not re.fullmatch('[0-9a-f]{32}',identity['invocation_id']) or any(type(identity[key]) is not int for key in ('pid','startticks','uid','cgroup_inode','cgroup_device')) or (identity['pid'],identity['startticks'],identity['uid'],identity['cgroup_inode'],identity['cgroup_device'])!=(os.getpid(),self_ticks(),os.getuid(),cg.st_ino,cg.st_dev) or Path('/proc/self/cgroup').read_text().strip()!='0::/system.slice/'+unit:raise RuntimeError('network_permit_rejected')
+    if type(value['allowed_at']) is not int or not config['issued_at']<=value['allowed_at']<=time.time()<=config['issued_at']+180 or type(receipt) is not list or len(receipt)!=4:raise RuntimeError('network_permit_rejected')
+    for row,hook in zip(receipt,(10,11,14,15)):
+        if type(row) is not list or len(row)!=4 or type(row[0]) is not int or row[0]!=hook or type(row[1]) is not int or not 0<row[1]<2**32 or not isinstance(row[2],str) or not re.fullmatch('[0-9a-f]{16}',row[2]) or not isinstance(row[3],str) or not re.fullmatch('[0-9a-f]{64}',row[3]):raise RuntimeError('network_permit_rejected')
+    if len({row[1] for row in receipt})!=4:raise RuntimeError('network_permit_rejected')
+    return value
+"""
+
+WORKER_SOURCE = (
+    r"""
+import asyncio, contextlib, errno, hashlib, importlib.util, json, os, pwd, re, socket, ssl, stat, sys, time
 from pathlib import Path
+"""
+    + NETWORK_PERMIT_READER
+    + r"""
 
 def encoded(value):return json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode()
 def write(path,value):
@@ -99,9 +152,11 @@ def denied(path,create=False):
  os.close(fd)
  if create:os.unlink(path)
  return False
-def connect_denied(host,port):
+NETWORK_ERRNO={}
+def connect_denied(name,host,port):
  with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as channel:
   channel.settimeout(.5);code=channel.connect_ex((host,port))
+ NETWORK_ERRNO[name]=code
  return code in {errno.EACCES,errno.EPERM}
 def main():
  config=json.loads(sys.argv[1]);work=Path(config["work"]);candidate=Path('/opt/prism/releases')/config['candidate']
@@ -110,23 +165,42 @@ def main():
  if os.getuid()==0 or os.getuid()!=account.pw_uid or account.pw_shell!='/usr/sbin/nologin' or any(group!=account.pw_gid for group in os.getgroups()):raise RuntimeError("account_rejected")
  source(work/'worker.py',config['worker_sha256']);source(work/'probe.py',config['probe_sha256'])
  if any(re.search(r'(?i)(?:password|secret|token|api.?key|authorization)',key) for key in os.environ):raise RuntimeError('runtime_rejected')
+ binding={key:config[key] for key in ('candidate','release_id','nonce','probe_sha256','worker_sha256','production_pid','issued_at')};binding['pid']=os.getpid()
+ write(work/'output/hello.json',{'schema':1,'kind':'hello','binding':binding,'startticks':self_ticks(),'checked_at':int(time.time())})
+ network_permit(work,binding,config)
  checks={
  'production_home_denied':denied('/home/ubuntu/stock-analyzer/.env'),
  'production_proc_denied':denied('/proc/'+str(config['production_pid'])+'/environ'),
  'candidate_write_denied':denied(candidate/('.market-canary-'+config['nonce']),True),
  'run_readonly':denied(Path('/run')/('prism-market-denied-'+config['nonce']),True),
- 'production_8088_denied':connect_denied('127.0.0.1',8088),
- 'vibe_8899_denied':connect_denied('127.0.0.1',8899),
- 'metadata_denied':connect_denied('169.254.169.254',80),
- 'private_ip_denied':connect_denied('10.0.0.1',443),
- 'other_public_denied':connect_denied(config['negative_public'],443),
+ 'production_8088_denied':connect_denied('production_8088_denied','127.0.0.1',8088),
+ 'vibe_8899_denied':connect_denied('vibe_8899_denied','127.0.0.1',8899),
+ 'metadata_denied':connect_denied('metadata_denied','169.254.169.254',80),
+ 'private_ip_denied':connect_denied('private_ip_denied','10.0.0.1',443),
+ 'other_public_denied':connect_denied('other_public_denied',config['negative_public'],443),
  'staging_denied':denied('/var/lib/prism-operations/staging'),
  'synthetic_empty_data':not any((work/'data').iterdir()),
  }
- binding={key:config[key] for key in ('candidate','release_id','nonce','probe_sha256','worker_sha256','production_pid','issued_at')};binding['pid']=os.getpid()
- proof={'schema':1,'binding':binding,'checked_at':int(time.time()),'checks':checks}
+ additional=extra_network_denials(config['network_pins'][0])
+ positive={}
+ if not all(checks.values()) or any(code not in {1,13} for code in additional.values()):
+  write(work/'output/bootstrap.json',{'schema':1,'binding':binding,'checked_at':int(time.time()),'checks':checks,'positive_tls':{},'additional_network_errno':additional,'negative_errno':NETWORK_ERRNO});raise RuntimeError('proof_rejected')
+ for host,pins in sorted(config['pins'].items()):
+  pin=pins[0]
+  with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as channel:
+   channel.settimeout(5);channel.connect((pin,443));context=ssl.create_default_context()
+   if context.verify_mode!=ssl.CERT_REQUIRED or not context.check_hostname:raise RuntimeError('tls_rejected')
+   context.minimum_version=ssl.TLSVersion.TLSv1_2
+   with context.wrap_socket(channel,server_hostname=host) as secured:
+    if secured.getpeername()[0]!=pin:raise RuntimeError('tls_rejected')
+    positive[host]={'peer':pin,'tls_verified':True}
+ proof={'schema':1,'binding':binding,'checked_at':int(time.time()),'checks':checks,'positive_tls':positive,'additional_network_errno':additional,'negative_errno':NETWORK_ERRNO}
  write(work/'output/bootstrap.json',proof)
  if not all(checks.values()):raise RuntimeError('proof_rejected')
+ if config['preflight_only']:
+  deadline=time.monotonic()+25
+  while not (work/'preflight-finish.json').exists() and time.monotonic()<deadline:time.sleep(.05)
+  raise SystemExit(0)
  deadline=time.monotonic()+20
  while not (work/'root-allow.json').exists() and time.monotonic()<deadline:time.sleep(.05)
  fd=os.open(work/'root-allow.json',os.O_RDONLY|os.O_NOFOLLOW)
@@ -155,10 +229,19 @@ def main():
   if not result['passed']:result['error_class']='market_acceptance_incomplete'
  except Exception:result['error_class']='worker_failed'
  result['checked_at']=int(time.time());write(work/'output/market-result.json',result)
+ deadline=time.monotonic()+15
+ while not (work/'result-ack.json').exists() and time.monotonic()<deadline:time.sleep(.05)
+ fd=os.open(work/'result-ack.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ with os.fdopen(fd,'rb') as stream:
+  info=os.fstat(stream.fileno())
+  if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o444 or info.st_size>16384:raise RuntimeError('proof_rejected')
+  ack=json.loads(stream.read(16385))
+ if ack!={'schema':1,'binding':binding,'result_sha256':hashlib.sha256(encoded(result)).hexdigest()}:raise RuntimeError('proof_rejected')
  raise SystemExit(0 if result['passed'] else 1)
 try:main()
 except Exception:raise SystemExit(1)
 """
+)
 WORKER_SHA256 = hashlib.sha256(WORKER_SOURCE.encode()).hexdigest()
 
 
@@ -184,6 +267,38 @@ def locked(path):
         info = part.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise ValidationError("source_rejected")
+
+
+def load_network_gate(path):
+    """Load the frozen helper from a trusted sealed path, including dataclasses.
+
+    The path is a controller argument, never request input. Restore sys.modules
+    even on failure: old sealed loaders do not register dynamically exec'd code.
+    """
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValidationError("network_gate_rejected")
+    locked(path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_size > 65536:
+            raise ValidationError("network_gate_rejected")
+        raw = stream.read(65537)
+    if hashlib.sha256(raw).hexdigest() != NETWORK_GATE_SHA256:
+        raise ValidationError("network_gate_rejected")
+    name = "_prism_owned_network_gate_" + NETWORK_GATE_SHA256
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    previous = sys.modules.get(name)
+    try:
+        sys.modules[name] = module
+        exec(compile(raw, str(path), "exec"), module.__dict__)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
 
 
 def validate_request(request):
@@ -242,7 +357,10 @@ def network_policy(resolve=socket.getaddrinfo):
             ):
                 raise ValidationError("dns_rejected")
             peers.add(str(address))
-        pins[host] = [sorted(peers, key=lambda value: (":" in value, value))[0]]
+        ipv4 = sorted(value for value in peers if ":" not in value)
+        if not ipv4:
+            raise ValidationError("dns_rejected")
+        pins[host] = [ipv4[0]]
     allowed = {value for values in pins.values() for value in values}
     negative = next(value for value in ("9.9.9.9", "8.8.4.4", "1.0.0.1") if value not in allowed)
     return pins, negative
@@ -309,7 +427,9 @@ def read_private(path, uid):
 
 
 class Validation:
-    def __init__(self, request, *, boundary, run, record):
+    def __init__(self, request, *, boundary, run, record, network_gate_path=None, preflight_only=False):
+        if type(preflight_only) is not bool:
+            raise ValidationError("request_rejected")
         self.request, self.source = request, validate_request(request)
         self.boundary, self.run, self.record = boundary, run, record
         self.nonce, self.issued = secrets.token_hex(16), int(time.time())
@@ -321,9 +441,14 @@ class Validation:
         self.workspace_created = False
         self.original = None
         self.pins, self.negative = None, None
+        self.preflight_only = preflight_only
+        self.network_gate_path, self.network_gate = network_gate_path, None
+        self.network_programs = None
         self.report = {
             "schema": 1,
-            "probe": "credential_free_market_linux",
+            "probe": "credential_free_market_network_preflight"
+            if preflight_only
+            else "credential_free_market_linux",
             "candidate": request["candidate"],
             "release_id": request["release_id"],
             "started_at": self.issued,
@@ -338,7 +463,14 @@ class Validation:
             "native_fetch_verified": False,
             "error_class": None,
             "unit_stopped": False,
-            "scope": "market_public_https_only",
+            "scope": "pinned_tls_handshake_only" if preflight_only else "market_public_https_only",
+            "preflight_only": preflight_only,
+            "network_gate_verified": False,
+            "network_gate_verified_before_cleanup": False,
+            "network_gate_cleaned": False,
+            "negative_errno": {},
+            "additional_network_errno": {},
+            "cleanup_error_class": None,
         }
 
     def stage(self, label):
@@ -432,6 +564,10 @@ class Validation:
             worker_sha256=WORKER_SHA256,
             pins=self.pins,
             negative_public=self.negative,
+            preflight_only=self.preflight_only,
+            network_gate_sha256=NETWORK_GATE_SHA256,
+            network_role="market",
+            network_pins=sorted({value for values in self.pins.values() for value in values}),
         )
         addresses = sorted({value for values in self.pins.values() for value in values})
         properties = {
@@ -616,7 +752,16 @@ class Validation:
             worker_sha256=WORKER_SHA256,
         )
         if (
-            set(proof) != {"schema", "binding", "checked_at", "checks"}
+            set(proof)
+            != {
+                "schema",
+                "binding",
+                "checked_at",
+                "checks",
+                "positive_tls",
+                "additional_network_errno",
+                "negative_errno",
+            }
             or type(proof.get("schema")) is not int
             or proof["schema"] != 1
             or proof.get("binding") != binding
@@ -628,11 +773,118 @@ class Validation:
         ):
             raise ValidationError("proof_rejected")
         self.report["os_denial_controls"] = dict(proof["checks"])
-        if not all(proof["checks"].values()):
+        additional = proof.get("additional_network_errno")
+        negatives = proof.get("negative_errno")
+        expected_negative = {
+            "production_8088_denied",
+            "vibe_8899_denied",
+            "metadata_denied",
+            "private_ip_denied",
+            "other_public_denied",
+        }
+        if (
+            type(additional) is not dict
+            or set(additional) != EXTRA_NEGATIVES
+            or type(negatives) is not dict
+            or set(negatives) != expected_negative
+            or any(
+                type(code) is not int or not 0 <= code <= 4095
+                for code in [*additional.values(), *negatives.values()]
+            )
+        ):
             raise ValidationError("proof_rejected")
+        self.report["additional_network_errno"] = dict(additional)
+        self.report["negative_errno"] = dict(negatives)
+        if not all(proof["checks"].values()) or any(
+            code not in {1, 13} for code in [*additional.values(), *negatives.values()]
+        ):
+            raise ValidationError("proof_rejected")
+        positive = proof.get("positive_tls")
+        if type(positive) is not dict or set(positive) != HOSTS:
+            raise ValidationError("proof_rejected")
+        for host, facts in positive.items():
+            if (
+                type(facts) is not dict
+                or set(facts) != {"peer", "tls_verified"}
+                or type(facts.get("peer")) is not str
+                or facts["peer"] not in self.pins[host]
+                or facts.get("tls_verified") is not True
+            ):
+                raise ValidationError("proof_rejected")
         return proof, digest
 
+    def install_network_gate(self):
+        self.stage("network_attach")
+        identity = self.identity()
+        hello, _ = read_private(self.work / "output/hello.json", self.account.pw_uid)
+        binding = {key: self.request[key] for key in ("candidate", "release_id", "production_pid")}
+        binding.update(
+            pid=self.pid,
+            nonce=self.nonce,
+            issued_at=self.issued,
+            probe_sha256=PROBE_SHA256,
+            worker_sha256=WORKER_SHA256,
+        )
+        if (
+            set(hello) != {"schema", "kind", "binding", "startticks", "checked_at"}
+            or type(hello.get("schema")) is not int
+            or hello["schema"] != 1
+            or hello.get("kind") != "hello"
+            or hello.get("binding") != binding
+            or type(hello.get("startticks")) is not int
+            or hello["startticks"] != self.ticks
+            or type(hello.get("checked_at")) is not int
+            or not self.issued <= hello["checked_at"] <= time.time() <= self.issued + 60
+        ):
+            raise ValidationError("network_gate_rejected")
+        module = load_network_gate(self.network_gate_path)
+        info = (CGROUP / "system.slice" / self.unit).stat()
+        pins = sorted({value for values in self.pins.values() for value in values})
+        descriptor = module.ControllerDescriptor(
+            role="market",
+            candidate_prefix=self.request["candidate"][:12],
+            nonce=self.nonce,
+            invocation_id=self.invocation,
+            pid=self.pid,
+            startticks=self.ticks,
+            uid=self.account.pw_uid,
+            cgroup_inode=info.st_ino,
+            cgroup_device=info.st_dev,
+            provider_ipv4=tuple(pins),
+        )
+        if descriptor.unit != self.unit or self.identity() != identity:
+            raise ValidationError("network_gate_rejected")
+        self.network_gate = module.OwnedNetworkGate(descriptor)
+        self.network_programs = self.network_gate.install()
+        self.verify_network_gate()
+        observed = {
+            name: getattr(descriptor, name)
+            for name in ("invocation_id", "pid", "startticks", "uid", "cgroup_inode", "cgroup_device")
+        }
+        observed["unit"] = descriptor.unit
+        permit = {
+            "schema": 1,
+            "binding": binding,
+            "identity": observed,
+            "programs": self.network_programs,
+            "helper_sha256": NETWORK_GATE_SHA256,
+            "provider_ipv4": pins,
+            "allowed_at": int(time.time()),
+            "preflight_only": self.preflight_only,
+        }
+        self.stage("network_permit")
+        self.verify_network_gate()
+        write(self.work / "network-allow.json", encoded(permit), 0o444)
+
+    def verify_network_gate(self):
+        try:
+            if self.network_gate is None or self.network_gate.verify() != self.network_programs:
+                raise ValidationError("network_gate_rejected")
+        except Exception:
+            raise ValidationError("network_gate_rejected") from None
+
     def result(self):
+        self.verify_network_gate()
         result, digest = read_private(self.work / "output/market-result.json", self.account.pw_uid)
         proof, _ = self.proof()
         fixed = {
@@ -770,14 +1022,32 @@ class Validation:
                 time.sleep(0.05)
             if self.pid is None:
                 raise ValidationError("unit_rejected")
+            while not (self.work / "output/hello.json").exists() and time.monotonic() < deadline:
+                self.boundary("market_wait_hello")
+                time.sleep(0.05)
+            self.install_network_gate()
+            deadline = min(time.monotonic() + 25, time.monotonic() + max(0, self.issued + 55 - time.time()))
             while not (self.work / "output/bootstrap.json").exists() and time.monotonic() < deadline:
                 self.boundary("market_wait_proof")
                 time.sleep(0.05)
             proof, digest = self.proof()
             identity = self.identity()
+            self.verify_network_gate()
+            self.report.update(network_gate_verified=True, network_gate_verified_before_cleanup=True)
+            if self.preflight_only:
+                if (
+                    self.production() != self.original
+                    or self.identity() != identity
+                    or self.proof()[1] != digest
+                ):
+                    raise ValidationError("kernel_rejected")
+                self.verify_network_gate()
+                self.report.update(passed=True, identity=identity, bootstrap_sha256=digest)
+                return self.report
             self.stage("allow_public_http")
             if self.production() != self.original or self.identity() != identity or self.proof()[1] != digest:
                 raise ValidationError("kernel_rejected")
+            self.verify_network_gate()
             write(
                 self.work / "root-allow.json",
                 encoded(
@@ -792,17 +1062,38 @@ class Validation:
                 0o444,
             )
             self.report.update(identity=identity, bootstrap_sha256=digest, os_denial_controls=proof["checks"])
-            while time.time() <= self.issued + 65:
+            while not (self.work / "output/market-result.json").exists() and time.time() <= self.issued + 65:
                 self.boundary("market_wait_result")
+                state = self.show()
+                if state.get("MainPID") == "0":
+                    raise ValidationError("worker_failed")
+                if state.get("MainPID") != str(self.pid) or state.get("InvocationID") != self.invocation:
+                    raise ValidationError("unit_rejected")
+                time.sleep(0.1)
+            self.identity()
+            accepted = self.result()
+            self.verify_network_gate()
+            write(
+                self.work / "result-ack.json",
+                encoded(
+                    {
+                        "schema": 1,
+                        "binding": proof["binding"],
+                        "result_sha256": self.report["worker_result_sha256"],
+                    }
+                ),
+                0o444,
+            )
+            while time.time() <= self.issued + 65:
+                self.boundary("market_wait_exit")
                 state = self.show()
                 if state.get("MainPID") == "0":
                     break
                 if state.get("MainPID") != str(self.pid) or state.get("InvocationID") != self.invocation:
                     raise ValidationError("unit_rejected")
-                time.sleep(0.1)
+                time.sleep(0.05)
             if state.get("MainPID") != "0":
                 raise ValidationError("worker_failed")
-            accepted = self.result()
             if (
                 state.get("ExecMainStatus") not in {"0", "1"}
                 or state.get("ExecMainPID") != str(self.pid)
@@ -834,8 +1125,15 @@ class Validation:
                         raise ValidationError("cleanup_failed")
                     self.idle()
                     self.report["unit_stopped"] = True
+                    if self.network_gate is not None:
+                        self.network_gate.cleanup()
+                        self.report["network_gate_cleaned"] = True
                 except Exception:
-                    self.report.update(passed=False, error_class="cleanup_failed")
+                    self.report.update(
+                        passed=False, cleanup_error_class="cleanup_failed", network_gate_verified=False
+                    )
+                    if self.report["error_class"] is None:
+                        self.report["error_class"] = "cleanup_failed"
             if self.original is not None:
                 try:
                     self.report["original_runtime_unchanged"] = self.production() == self.original
@@ -850,6 +1148,24 @@ class Validation:
         return self.report
 
 
-def run_validation(request, *, boundary, run, record):
+def run_validation(request, *, boundary, run, record, network_gate_path=None):
     """Trusted callbacks are controller-owned; request carries public source only."""
-    return Validation(request, boundary=boundary, run=run, record=record).execute()
+    return Validation(
+        request,
+        boundary=boundary,
+        run=run,
+        record=record,
+        network_gate_path=network_gate_path,
+    ).execute()
+
+
+def run_network_preflight(request, *, boundary, run, record, network_gate_path):
+    """Fixed diagnostic: direct pinned TLS only, before any candidate import/HTTP."""
+    return Validation(
+        request,
+        boundary=boundary,
+        run=run,
+        record=record,
+        network_gate_path=network_gate_path,
+        preflight_only=True,
+    ).execute()

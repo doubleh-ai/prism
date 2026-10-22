@@ -65,7 +65,7 @@ EMPTY_EXEC_ARRAY = {"type": "a(sasbttttuii)", "data": []}
 OBSERVER_PROPERTIES = (
     "LoadState,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,"
     "ExecMainCode,ExecMainStatus,Result,Transient,DynamicUser,RemainAfterExit,"
-    "Wants,PartOf,BindsTo,PropagatesStopTo,Job"
+    "Wants,PartOf,BindsTo,PropagatesStopTo,Job,PrivateTmp"
 )
 REQUEST_KEYS = {
     "commit",
@@ -99,6 +99,7 @@ ERRORS = {
     "census_rejected",
     "stop_policy_rejected",
     "job_property_rejected",
+    "observer_dependency_rejected",
     "stop_rejected",
     "stop_already_consumed",
     "result_rejected",
@@ -557,6 +558,83 @@ def command(plan, worker):
     ]
 
 
+TMP_MOUNT_PROPERTIES = "Id,LoadState,ActiveState,SubState,Where"
+TMP_MOUNT_COMMAND = ["/usr/bin/systemctl", "show", "--all", "--property=" + TMP_MOUNT_PROPERTIES, "tmp.mount"]
+ABSENT_TMP_MOUNT = {
+    "Id": "tmp.mount",
+    "LoadState": "not-found",
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "Where": "",
+}
+
+
+def validate_observer_dependency(state, main_unit, proof):
+    wants = state["Wants"].split()
+    if len(wants) != len(set(wants)) or set(wants) not in ({main_unit}, {main_unit, "tmp.mount"}):
+        reject("observer_dependency_rejected")
+    if "tmp.mount" not in wants:
+        if proof is not None:
+            reject("observer_dependency_rejected")
+        return None
+    expected = {
+        "schema": 1,
+        "private_tmp": "yes",
+        "extra_want": "tmp.mount",
+        "mount_unit": ABSENT_TMP_MOUNT,
+        "kernel_tmp_mount_count": 0,
+        "kernel_root_mount_observed": True,
+    }
+    if state.get("PrivateTmp") != "yes" or encoded(proof) != encoded(expected):
+        reject("observer_dependency_rejected")
+    return proof
+
+
+def observer_dependency(run, state, main_unit):
+    wants = state["Wants"].split()
+    if len(wants) != len(set(wants)) or set(wants) not in ({main_unit}, {main_unit, "tmp.mount"}):
+        reject("observer_dependency_rejected")
+    if "tmp.mount" not in wants:
+        return None
+    if state.get("PrivateTmp") != "yes":
+        reject("observer_dependency_rejected")
+    raw = run(TMP_MOUNT_COMMAND, timeout=10)
+    if type(raw) is not bytes or len(raw) > 4096:
+        reject("observer_dependency_rejected")
+    try:
+        rows = [line.split("=", 1) for line in raw.decode("ascii").splitlines()]
+    except UnicodeError:
+        reject("observer_dependency_rejected")
+    if any(len(row) != 2 for row in rows):
+        reject("observer_dependency_rejected")
+    mount = dict(rows)
+    if len(rows) != len(mount) or mount != ABSENT_TMP_MOUNT:
+        reject("observer_dependency_rejected")
+    raw = read(PROC / str(os.getpid()) / "mountinfo", uid=None, limit=1048576)
+    try:
+        roots, tmp = 0, 0
+        for line in raw.decode("ascii").splitlines():
+            head, sep, tail = line.partition(" - ")
+            fields = head.split()
+            if not sep or len(fields) < 6 or len(tail.split()) < 3:
+                reject("observer_dependency_rejected")
+            roots += fields[4] == "/"
+            tmp += fields[4] == "/tmp"
+    except UnicodeError:
+        reject("observer_dependency_rejected")
+    if roots < 1 or tmp != 0:
+        reject("observer_dependency_rejected")
+    proof = {
+        "schema": 1,
+        "private_tmp": "yes",
+        "extra_want": "tmp.mount",
+        "mount_unit": mount,
+        "kernel_tmp_mount_count": 0,
+        "kernel_root_mount_observed": True,
+    }
+    return validate_observer_dependency(state, main_unit, proof)
+
+
 def validate_job(value, printed=None):
     if (
         type(value) is not dict
@@ -690,7 +768,7 @@ def observer_command(plan):
     ]
 
 
-def show(run, unit, *, observer=False, evidence=None, jobs=None):
+def show(run, unit, *, observer=False, evidence=None, jobs=None, dependencies=None):
     names = OBSERVER_PROPERTIES if observer else PROPERTIES
     raw = run(["/usr/bin/systemctl", "show", "--all", "--property=" + names, unit], timeout=10)
     if type(raw) is not bytes or len(raw) > 32768:
@@ -709,6 +787,11 @@ def show(run, unit, *, observer=False, evidence=None, jobs=None):
         if jobs is not None:
             jobs[unit] = job
         result["Job"] = str(job["data"][0])
+        if observer:
+            main_unit = unit.removesuffix("-ref.service") + ".service"
+            dependency = observer_dependency(run, result, main_unit)
+            if dependencies is not None:
+                dependencies[unit] = dependency
     if not observer and result["LoadState"] == "loaded":
         observed = empty_exec_arrays(run, unit)
         if evidence is not None:
@@ -1146,6 +1229,7 @@ class Validation:
         self.http_start_consumed = False
         self.exec_arrays = {}
         self.jobs = {}
+        self.observer_dependencies = {}
 
     def event(self, event, details):
         if self.fd is None or self.events >= 64:
@@ -1170,6 +1254,8 @@ class Validation:
         if type(timeout) not in {int, float} or not 0 < timeout <= 15:
             reject("unit_rejected")
         valid = argv == INVENTORY and not self.started
+        if self.observer_started and argv == TMP_MOUNT_COMMAND:
+            valid = True
         if self.started and argv in exec_array_commands(plan["unit"]):
             valid = True
         if (self.started and argv == job_command(plan["unit"])) or (
@@ -1260,7 +1346,13 @@ class Validation:
         return value
 
     def observer_state(self):
-        state = show(self.run, self.plan["observer"], observer=True, jobs=self.jobs)
+        state = show(
+            self.run,
+            self.plan["observer"],
+            observer=True,
+            jobs=self.jobs,
+            dependencies=self.observer_dependencies,
+        )
         group = CGROUP / ("system.slice/" + self.plan["observer"])
         if (
             state["LoadState"] != "loaded"
@@ -1270,7 +1362,6 @@ class Validation:
             or state["ExecMainCode"] != "1"
             or state["ExecMainStatus"] != "0"
             or state["Result"] != "success"
-            or state["Wants"].split() != [self.plan["unit"]]
             or any(state[k] for k in ("PartOf", "BindsTo", "PropagatesStopTo"))
             or state["DynamicUser"] != "yes"
             or state["RemainAfterExit"] != "yes"
@@ -1288,6 +1379,7 @@ class Validation:
             "empty": True,
             "state": state,
             "job": self.jobs[self.plan["observer"]],
+            "private_tmp_dependency": self.observer_dependencies[self.plan["observer"]],
         }
 
     def own_state(self, *, waiting=False, allow_pending=False):
@@ -1359,7 +1451,13 @@ class Validation:
         self.run(["/usr/bin/systemctl", "stop", "--no-block", self.plan["observer"]], timeout=10)
 
         def gone():
-            state = show(self.run, self.plan["observer"], observer=True, jobs=self.jobs)
+            state = show(
+                self.run,
+                self.plan["observer"],
+                observer=True,
+                jobs=self.jobs,
+                dependencies=self.observer_dependencies,
+            )
             if state["LoadState"] == "not-found":
                 return state
             if state["InvocationID"] != self.observer["invocation_id"]:
@@ -1378,6 +1476,9 @@ class Validation:
                 "state": state,
                 "cgroup": group,
                 "job": None if state["LoadState"] == "not-found" else self.jobs[self.plan["observer"]],
+                "private_tmp_dependency": None
+                if state["LoadState"] == "not-found"
+                else self.observer_dependencies[self.plan["observer"]],
             },
         )
 
@@ -1851,7 +1952,16 @@ def empty_evidence(value):
 def observer_evidence(value, plan):
     if (
         type(value) is not dict
-        or set(value) != {"invocation_id", "exec_main_pid", "control_group", "empty", "state", "job"}
+        or set(value)
+        != {
+            "invocation_id",
+            "exec_main_pid",
+            "control_group",
+            "empty",
+            "state",
+            "job",
+            "private_tmp_dependency",
+        }
         or type(value["invocation_id"]) is not str
         or not re.fullmatch("[0-9a-f]{32}", value["invocation_id"])
         or not positive(value["exec_main_pid"])
@@ -1861,6 +1971,7 @@ def observer_evidence(value, plan):
         reject("record_rejected")
     exact(validate_job(value["job"]), {"type": "(uo)", "data": [0, "/"]})
     state = value["state"]
+    validate_observer_dependency(state, plan["unit"], value["private_tmp_dependency"])
     if (
         type(state) is not dict
         or set(state) != set(OBSERVER_PROPERTIES.split(","))
@@ -1878,7 +1989,6 @@ def observer_evidence(value, plan):
         or state["Result"] != "success"
         or state["RemainAfterExit"] != "yes"
         or state["Job"] != "0"
-        or state["Wants"].split() != [plan["unit"]]
         or state["ControlGroup"] not in {"", value["control_group"]}
         or any(state[k] for k in ("PartOf", "BindsTo", "PropagatesStopTo"))
     ):
@@ -2092,7 +2202,7 @@ def replay(identity, raw, receipt, request):
         reject("record_rejected")
     exact(details["observer_release_intent"], observer)
     released = details["observer_released"]
-    if set(released) != {"state", "cgroup", "job"}:
+    if set(released) != {"state", "cgroup", "job", "private_tmp_dependency"}:
         reject("record_rejected")
     empty_evidence(released["cgroup"])
     state = released["state"]
@@ -2111,8 +2221,10 @@ def replay(identity, raw, receipt, request):
         reject("record_rejected")
     if state["LoadState"] == "not-found":
         exact(released["job"], None)
+        exact(released["private_tmp_dependency"], None)
     else:
         exact(validate_job(released["job"]), {"type": "(uo)", "data": [0, "/"]})
+        validate_observer_dependency(state, plan["unit"], released["private_tmp_dependency"])
     exact(details["sources_reverified"], sources)
     summary = details["completed"]
     if not positive(summary.get("completed_at_us")) or summary["completed_at_us"] < exited["exit_at_us"]:
@@ -2193,6 +2305,7 @@ def read_accepted(request, *, role, candidate, archive_sha256, environment_sha25
         *exec_array_commands(plan["unit"]),
         job_command(plan["unit"]),
         job_command(plan["observer"]),
+        TMP_MOUNT_COMMAND,
         *(
             ["/usr/bin/systemctl", "show", "--all", "--property=" + names, unit]
             for names, unit in ((PROPERTIES, plan["unit"]), (OBSERVER_PROPERTIES, plan["observer"]))

@@ -47,6 +47,8 @@ ACTIONS = {
     "integration_cli",
     "integration_live",
     "integration_market",
+    "integration_live_network_preflight",
+    "integration_market_network_preflight",
     "validate_legacy_retirement",
     "validate_legacy_stop",
     "quiesce",
@@ -74,16 +76,23 @@ INTEGRATION_PROBES = {
 }
 MARKET_INTEGRATION_HELPERS = {
     "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
-    "market_live_validation.py": "30fdabce0929eaee447ea37e87a28e6b9e267274caaed2fe2b942576cf944d32",
+    "market_live_validation.py": "a68e11d8e3805d00201d4e1ff77462a2460f14fc03fe200383ef7e4af42a665b",
+    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
 }
-MARKET_WORKER_SHA256 = "aa4b2e250b856ac230d5a74bc18105c1f887a5e5168af1ccd7150176d7ff5970"
+MARKET_WORKER_SHA256 = "ef6d587b97f9c8a6ad9c532a20c0ddf56baa46b64774326c09ed689eab86d7cc"
 MARKET_BOUNDARIES = {
     "market_workspace",
     "market_start",
     "market_allow_public_http",
     "market_wait_proof",
     "market_wait_result",
+    "market_wait_hello",
+    "market_wait_exit",
+    "market_network_attach",
+    "market_network_permit",
 }
+NETWORK_EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
+NETWORK_RUNTIME_PROPERTIES = "MainPID,InvocationID,WorkingDirectory,ExecStart"
 MARKET_CHECKS = {
     "unauthenticated_api_denied",
     "quote_real_provider",
@@ -109,10 +118,11 @@ MARKET_BOOT_CHECKS = {
 }
 MARKET_UNIT_PROPERTIES = "MainPID,ExecMainPID,InvocationID,ActiveState,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "95991b9ee669dfd99a2fe40f1fb1306534fae04b1d366a3e1ee6eab0f91a6815",
+    "live_integration_validation.py": "1f491336c6301a164bf09586e62cf4c0f713659a1f5780d27298d5e48241684f",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
+    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
 }
 LIVE_RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
 LIVE_RESOLVE_COMMAND = ["/usr/bin/python3", "-I", "-B", "-S", "-c", LIVE_RESOLVE_CODE]
@@ -131,6 +141,10 @@ LIVE_STAGES = {
     "broker_finish",
     "verification",
     "complete",
+    "network_attach",
+    "network_permit",
+    "network_launch",
+    "network_preflight_complete",
 }
 LIVE_BOUNDARIES = {"live_" + stage for stage in LIVE_STAGES} | {
     "live_wait_bootstrap",
@@ -160,11 +174,12 @@ LIVE_ERRORS = {
     "cleanup_failed",
     "supervision_failed",
     "operator_stop",
+    "network_gate_rejected",
 }
 LIVE_SOURCE_PINS = {
     name.removeprefix("live_integration_").removesuffix(".py"): value
     for name, value in LIVE_INTEGRATION_HELPERS.items()
-    if name != "live_integration_validation.py"
+    if name in {"live_integration_worker.py", "live_integration_transport.py", "live_integration_policy.py"}
 }
 RETIREMENT_HELPERS = {
     "retirement_probe.py": "e6e9181b0dcd33dda28bf4125781579555039f71af932e10641c2da3bedb4624",
@@ -172,7 +187,7 @@ RETIREMENT_HELPERS = {
 }
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
-    "retirement_stop_validation.py": "5ef57f46e21327105d233987a85f7a70e9ea6efc7f90b22e075466062ecc7034",
+    "retirement_stop_validation.py": "854382bae5bfdcc7b75d1716bb2543271deefeac9ef288e196153ee80112b58b",
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 RETIREMENT_PRESTART_ATTEMPT = "prism-20261022-stop-e2e-001"
@@ -200,6 +215,23 @@ RETIREMENT_RETAINED_START = {
     "receipt_sha256": "068a9145c87d0331aaff39e5d400a18145857e38e8d0504072d453cf52873999",
     "events_sha256": "8d34615ca08b4d198b79adb90249d6d1a7ccab819dacabfc88d77f0e2a9cbd59",
     "argv_sha256": "06b7ea1aad40d13c89bb9c54793ef30f77c8d5aa4b5ecfa3b53af65fa16d78a6",
+}
+RETIREMENT_RETAINED_OBSERVER_START = {
+    "commit": "f0897e84cdc0fa31871eeee90ed2e2511cc72a13",
+    "release_id": "prism-20261022-main-f0897e84",
+    "attempt": "prism-20261022-stop-e2e-004",
+    "nonce": "0e17a0ff8cb154f535b748421034ffd3",
+    "case_id": "int-executor",
+    "invocation_id": "35314cc6a3a940d3a63bdc45b49fc515",
+    "exec_main_pid": 2179861,
+    "start_ticks": 1131196658,
+    "uid": 63683,
+    "helper_sha256": "5ef57f46e21327105d233987a85f7a70e9ea6efc7f90b22e075466062ecc7034",
+    "identity_sha256": "21701aa76167aa8b4ee5430bb8aafb02e4d0302a0ac4f913833316061b515b4b",
+    "receipt_sha256": "49fa3c3b2efaada39f9afcf534a69d00bf35c4ec0c70e53581ac66d88a123e6e",
+    "events_sha256": "0bb34da9347e0017f3b0a7e9b6719b83fc4fa16e2dfa2a7848b8191278b3868b",
+    "main_argv_sha256": "18b63f1317656b4d0b49e71f519a1d16abeb4bd8efc128cba78f84d1fa4d6fd1",
+    "observer_argv_sha256": "cdffa3e18bfe6ae671972f377072654ed2022b6049c3894bc0bdab584985038f",
 }
 RETIREMENT_RETAINED_PROPERTIES = "LoadState,ActiveState,SubState,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus,Result,InvocationID,ControlGroup,Job,Transient,ExecMainExitTimestampMonotonic"
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
@@ -258,7 +290,8 @@ RETIREMENT_STOP_PROPERTIES = (
     + ",KillSignal,KillMode,SendSIGKILL,SendSIGHUP,TimeoutStopUSec,Restart,WatchdogUSec,RuntimeMaxUSec,NRestarts,RemainAfterExit,Job"
 )
 RETIREMENT_OBSERVER_PROPERTIES = (
-    RETIREMENT_PROPERTIES + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit,Job"
+    RETIREMENT_PROPERTIES
+    + ",Wants,PartOf,BindsTo,PropagatesStopTo,DynamicUser,RemainAfterExit,Job,PrivateTmp"
 )
 RETIREMENT_PYTHON_VERSION_COMMAND = [
     "/usr/bin/python3.12",
@@ -777,6 +810,20 @@ def run_command(args, *, env=None, timeout=120):
         "org.freedesktop.systemd1.Service",
         "ExecStart",
     ]
+    retained_prefix = "/org/freedesktop/systemd1/unit/prism_2dretirement_2d"
+    retained_nonce = RETIREMENT_RETAINED_OBSERVER_START["nonce"]
+    capture = capture or (
+        len(args) == 8
+        and args[:5]
+        == ["/usr/bin/busctl", "--system", "--json=short", "get-property", "org.freedesktop.systemd1"]
+        and args[5]
+        in {
+            retained_prefix + role + retained_nonce + "_2dint_2dexecutor_2eservice"
+            for role in ("probe_2d", "stop_2dref_2d")
+        }
+        and args[6] == "org.freedesktop.systemd1.Service"
+        and args[7] in {"ExecStart", "ExecStop", "ExecStopPost"}
+    )
     result = subprocess.run(
         args,
         env=env,
@@ -840,7 +887,22 @@ def run_command(args, *, env=None, timeout=120):
             for line in (result.stdout or b"").splitlines()
         )
     )
-    if result.returncode and not (missing_stage or missing_retirement):
+    missing_retained_tmp = (
+        args
+        == [
+            "/usr/bin/systemctl",
+            "show",
+            "--all",
+            "--property=Id,LoadState,ActiveState,SubState,Where",
+            "tmp.mount",
+        ]
+        and b"LoadState=not-found" in (result.stdout or b"").splitlines()
+        and all(
+            line.split(b"=", 1)[0] in {b"Id", b"LoadState", b"ActiveState", b"SubState", b"Where"}
+            for line in (result.stdout or b"").splitlines()
+        )
+    )
+    if result.returncode and not (missing_stage or missing_retirement or missing_retained_tmp):
         raise ReleaseError("command_failed")
     if result.stdout and len(result.stdout) > 65536:
         raise ReleaseError("command_output_limit")
@@ -2459,6 +2521,105 @@ class RemoteRelease:
             raise ReleaseError("live_original_source_changed")
         return {"production_pid": self.process_id(SERVICE), "runtime_fingerprint": current["fingerprint"]}
 
+    def network_preflight_request(self, role):
+        """A fixed action has no caller-selected mode, path, address or command."""
+        if self.request.get("action") != "integration_" + role + "_network_preflight" or set(
+            self.request
+        ) != {
+            "action",
+            "commit",
+            "release_id",
+            "receipts",
+            "receipts_sha256",
+            "receipts_raw",
+            "archive_sha256",
+            "manifest_sha256",
+            "source_manifest",
+            "integration_attempt",
+            role + "_helpers",
+        }:
+            raise ReleaseError("network_preflight_request_rejected")
+
+    def network_original_state(self):
+        """Metadata-only baseline; never runtime(), ready(), HTTP or environment.
+
+        expected_network_runtime_fingerprint is SHA256(encoded(facts)), where
+        encoded is canonical UTF-8 JSON (sort_keys=True, separators=(',', ':')).
+        ExecStart hashes the exact UTF-8 property value, excluding the line LF.
+        The receipt must be collected independently for this candidate/source.
+        """
+        command = ["/usr/bin/systemctl", "show", "--property=" + NETWORK_RUNTIME_PROPERTIES, SERVICE]
+
+        def properties():
+            raw = self.run(command, timeout=5)
+            if type(raw) is not bytes or len(raw) > 32768:
+                raise ReleaseError("network_original_runtime_changed")
+            try:
+                rows = [line.split("=", 1) for line in raw.decode("utf-8").splitlines()]
+                state = dict(rows)
+            except (ValueError, UnicodeError):
+                raise ReleaseError("network_original_runtime_changed") from None
+            if len(rows) != 4 or set(state) != set(NETWORK_RUNTIME_PROPERTIES.split(",")):
+                raise ReleaseError("network_original_runtime_changed")
+            return state
+
+        state = properties()
+        pid = state["MainPID"]
+        if (
+            not re.fullmatch("[1-9][0-9]*", pid)
+            or int(pid) <= 1
+            or not re.fullmatch("[0-9a-f]{32}", state["InvocationID"])
+            or state["WorkingDirectory"] != str(self.production)
+            or not state["ExecStart"]
+        ):
+            raise ReleaseError("network_original_runtime_changed")
+        process = self.root / "proc" / pid
+
+        def process_facts():
+            raw = (process / "stat").read_text()
+            fields = raw[raw.rfind(")") + 2 :].split()
+            if (
+                raw.split(" ", 1)[0] != pid
+                or len(fields) < 20
+                or not fields[19].isdigit()
+                or int(fields[19]) <= 0
+            ):
+                raise ReleaseError("network_original_runtime_changed")
+            if Path(os.readlink(process / "cwd")) != self.production:
+                raise ReleaseError("network_original_runtime_changed")
+            return int(fields[19])
+
+        ticks = process_facts()
+        source_sha = self.source_inventory(self.request.get("source_manifest", {}), self.production)
+        expected = self.request.get("receipts", {})
+        if source_sha != expected.get("expected_source_manifest_sha256"):
+            raise ReleaseError("network_original_source_changed")
+        facts = {
+            "schema": 1,
+            "candidate": self.request["commit"],
+            "unit": SERVICE,
+            "production_pid": int(pid),
+            "production_startticks": ticks,
+            "invocation_id": state["InvocationID"],
+            "working_directory": state["WorkingDirectory"],
+            "exec_start_sha256": digest(state["ExecStart"].encode("utf-8")),
+            "source_manifest_sha256": source_sha,
+        }
+        fingerprint = digest(encoded(facts))
+        if (
+            type(expected.get("expected_network_runtime_fingerprint")) is not str
+            or not DIGEST.fullmatch(expected["expected_network_runtime_fingerprint"])
+            or fingerprint != expected["expected_network_runtime_fingerprint"]
+            or properties() != state
+            or process_facts() != ticks
+        ):
+            raise ReleaseError("network_original_runtime_changed")
+        return {
+            "production_pid": int(pid),
+            "runtime_fingerprint": fingerprint,
+            "source_manifest_sha256": source_sha,
+        }
+
     def live_helper_sources(self):
         supplied = self.request.get("live_helpers")
         if type(supplied) is not dict or set(supplied) != set(LIVE_INTEGRATION_HELPERS):
@@ -2544,6 +2705,8 @@ class RemoteRelease:
             module.SOURCE_PINS != LIVE_SOURCE_PINS
             or module.SAFE_ERRORS != LIVE_ERRORS
             or module.RESOLVE_CODE != LIVE_RESOLVE_CODE
+            or LIVE_INTEGRATION_HELPERS["cgroup_network_gate.py"] != module.NETWORK_GATE_SHA256
+            or module.EXTRA_NEGATIVES != NETWORK_EXTRA_NEGATIVES
         ):
             raise ReleaseError("live_helper_source_rejected")
         self._live_module = module
@@ -2556,6 +2719,7 @@ class RemoteRelease:
         """Re-read the root permit and real processes before opening any config."""
         try:
             module = getattr(self, "_live_module", None)
+            validator = getattr(self, "_live_validator", None)
             attempt = self.request.get("integration_attempt")
             if (
                 self.request.get("action") != "integration_live"
@@ -2563,8 +2727,14 @@ class RemoteRelease:
                 or type(attempt) is not str
                 or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt)
                 or getattr(self, "_live_attempt", None) != attempt
+                or type(validator) is not module.Validation
+                or validator.preflight_only is not False
+                or validator.work != Path(work)
+                or validator.request.get("candidate") != self.request["commit"]
+                or validator.request.get("release_id") != attempt
             ):
                 raise ValueError
+            validator.verify_network_gate()
             fixed = self.checked(self.operations / "integration" / attempt / "live")
             if Path(work) != fixed:
                 raise ValueError
@@ -2621,6 +2791,8 @@ class RemoteRelease:
             ):
                 raise ValueError
             binding = allow["binding"]
+            if binding != validator.binding:
+                raise ValueError
             cli = (self.release / ".cli-revision").read_text().strip()
             if (
                 type(binding) is not dict
@@ -2848,6 +3020,21 @@ class RemoteRelease:
 
     def live_safe_record(self, value, attempt):
         """Whitelist every value before any journal/write/output sees it."""
+        preflight = self.request.get("action") == "integration_live_network_preflight"
+        stages = LIVE_STAGES - (
+            {
+                "allow",
+                "key_release",
+                "key_send",
+                "public_qa",
+                "result_validation",
+                "broker_finish",
+                "verification",
+                "complete",
+            }
+            if preflight
+            else {"network_preflight_complete"}
+        )
         progress = {
             "schema",
             "action",
@@ -2890,16 +3077,21 @@ class RemoteRelease:
             "official_source_count",
             "broker_summary_sha256",
             "requests",
+            "preflight_only",
+            "network_gate_verified",
+            "network_gate_verified_before_cleanup",
+            "network_gate_cleaned",
+            "key_acquisition_attempted",
         }
         if (
             type(value) is not dict
             or set(value) not in (progress, final)
             or type(value.get("schema")) is not int
             or value["schema"] != 1
-            or value.get("action") != "integration_live"
+            or value.get("action") != ("integration_network_preflight" if preflight else "integration_live")
             or value.get("candidate") != self.request["commit"]
             or value.get("release_id") != attempt
-            or value.get("stage") not in LIVE_STAGES
+            or value.get("stage") not in stages
             or type(value.get("passed")) is not bool
             or value.get("production_verified") is not False
         ):
@@ -2923,6 +3115,11 @@ class RemoteRelease:
             "production_verified",
             "units_stopped",
             "broker_memory_sealed",
+            "preflight_only",
+            "network_gate_verified",
+            "network_gate_verified_before_cleanup",
+            "network_gate_cleaned",
+            "key_acquisition_attempted",
         }
         requests = value.get("requests")
         errno = value.get("broker_negative_errno")
@@ -2930,6 +3127,7 @@ class RemoteRelease:
         preflight_facts = value.get("broker_preflight_facts")
         if (
             value.get("source_sha256") != LIVE_SOURCE_PINS
+            or value.get("preflight_only") is not preflight
             or any(type(value.get(key)) is not bool for key in flags)
             or any(
                 value[key] is not False
@@ -2952,7 +3150,11 @@ class RemoteRelease:
             or requests["count_tokens"] > 2
             or any(requests[key] != 0 for key in ("quote", "kline", "public_fetch"))
             or type(errno) is not dict
-            or set(errno) not in (set(), {"production", "vibe", "metadata", "private", "disallowed_public"})
+            or set(errno)
+            not in (
+                set(),
+                {"production", "vibe", "metadata", "private", "disallowed_public"} | NETWORK_EXTRA_NEGATIVES,
+            )
             or any(type(code) is not int or not 0 <= code <= 4095 for code in errno.values())
             or type(filesystem) is not dict
             or set(filesystem)
@@ -2976,6 +3178,45 @@ class RemoteRelease:
             )
         ):
             raise ReleaseError("live_safe_record_rejected")
+        if (
+            value["network_gate_verified"]
+            != (
+                value["network_gate_verified_before_cleanup"]
+                and value["network_gate_cleaned"]
+                and value["units_stopped"]
+                and value["cleanup_error_class"] is None
+            )
+            or value["network_gate_verified_before_cleanup"]
+            and (
+                not errno
+                or any(code not in {1, 13} for code in errno.values())
+                or not filesystem
+                or not all(filesystem.values())
+                or not preflight_facts
+                or not all(preflight_facts.values())
+                or not value["broker_memory_sealed"]
+                or type(value["provider_peer_count"]) is not int
+                or value["provider_peer_count"] < 1
+            )
+            or preflight
+            and (
+                value["key_acquisition_attempted"]
+                or any(
+                    value[key]
+                    for key in (
+                        "live_model_verified",
+                        "native_search_verified",
+                        "owned_mcp_verified",
+                        "server_clock_verified",
+                    )
+                )
+                or any(requests.values())
+                or value["official_source_count"] != 0
+                or value["worker_result_sha256"] is not None
+                or value["broker_summary_sha256"] is not None
+            )
+        ):
+            raise ReleaseError("live_safe_record_rejected")
         for name, maximum in (("provider_peer_count", 16), ("official_source_count", 16)):
             if type(value.get(name)) is not int or not 0 <= value[name] <= maximum:
                 raise ReleaseError("live_safe_record_rejected")
@@ -2996,10 +3237,13 @@ class RemoteRelease:
         if value["passed"] and (
             value["error_class"] is not None
             or value["cleanup_error_class"] is not None
-            or value["stage"] != "complete"
+            or value["stage"] != ("network_preflight_complete" if preflight else "complete")
             or value["units_stopped"] is not True
             or value["broker_memory_sealed"] is not True
-            or any(
+            or not value["network_gate_verified"]
+            or value["key_acquisition_attempted"] is preflight
+            or not preflight
+            and any(
                 value[key] is not True
                 for key in (
                     "live_model_verified",
@@ -3008,7 +3252,8 @@ class RemoteRelease:
                     "server_clock_verified",
                 )
             )
-            or requests["messages"] < 2
+            or not preflight
+            and requests["messages"] < 2
             or not errno
             or not filesystem
             or not preflight_facts
@@ -3016,11 +3261,16 @@ class RemoteRelease:
             or any(flag is not True for flag in filesystem.values())
             or any(flag is not True for flag in preflight_facts.values())
             or value["provider_peer_count"] < 1
-            or value["official_source_count"] < 1
+            or not preflight
+            and value["official_source_count"] < 1
             or headers
             or any(
                 value[name] is None
-                for name in ("bootstrap_proof_sha256", "worker_result_sha256", "broker_summary_sha256")
+                for name in (
+                    ("bootstrap_proof_sha256",)
+                    if preflight
+                    else ("bootstrap_proof_sha256", "worker_result_sha256", "broker_summary_sha256")
+                )
             )
         ):
             raise ReleaseError("live_safe_record_rejected")
@@ -3029,15 +3279,31 @@ class RemoteRelease:
         return json.loads(encoded(value))
 
     def integration_live(self):
+        return self._integration_live(network_preflight=False)
+
+    def integration_live_network_preflight(self):
+        self.network_preflight_request("live")
+        return self._integration_live(network_preflight=True)
+
+    def _integration_live(self, *, network_preflight):
+        if self.request.get("action") != (
+            "integration_live_network_preflight" if network_preflight else "integration_live"
+        ):
+            raise ReleaseError("network_preflight_request_rejected")
         self.verify_tree()
-        self.live_environment_binding()
+        if not network_preflight:
+            self.live_environment_binding()
         contents = self.live_helper_sources()
         attempt = self.request.get("integration_attempt")
         if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
             raise ReleaseError("explicit_live_integration_attempt_required")
-        baseline = self.live_original_state()
+        original_state = self.network_original_state if network_preflight else self.live_original_state
+        baseline = original_state()
         work = self.checked(self.operations / "integration" / attempt / "live")
-        directory = self.checked(self.record / ("integration-live-" + attempt))
+        directory = self.checked(
+            self.record
+            / (("network-preflight-live-" if network_preflight else "integration-live-") + attempt)
+        )
         if work.exists() or directory.exists():
             raise ReleaseError("live_integration_attempt_already_exists")
         self.boundary("live_attempt")
@@ -3050,16 +3316,22 @@ class RemoteRelease:
         summary, count, chain, cancelled, boundary_error, key_error = None, 0, digest(b""), None, None, None
         key_provided = False
         own_units = set()
+        stopped_units = set()
+        inventories, observed_pids = {}, {}
+        resolved_policy = None
+        validator = None
         self._live_attempt = attempt
         self._live_key_attempted = False
         self._live_executor_memory_sealed = False
         try:
             with self.live_module(contents) as module:
+                validation_type = module.Validation
+                network_gate_path = Path(module.__file__).with_name("cgroup_network_gate.py")
 
                 def record(value):
                     nonlocal summary, count, chain
                     safe = self.live_safe_record(value, attempt)
-                    if summary is not None:
+                    if summary is not None or count >= 32:
                         raise ReleaseError("live_events_after_result_rejected")
                     entry = encoded({"sequence": count + 1, "previous_sha256": chain, "event": safe}) + b"\n"
                     if len(entry) > 16384:
@@ -3078,11 +3350,27 @@ class RemoteRelease:
 
                 def boundary(label):
                     nonlocal cancelled, boundary_error
-                    if label not in LIVE_BOUNDARIES:
+                    if (
+                        label not in LIVE_BOUNDARIES
+                        or network_preflight
+                        and label
+                        in {
+                            "live_allow",
+                            "live_key_release",
+                            "live_key_send",
+                            "live_public_qa",
+                            "live_result_validation",
+                            "live_broker_finish",
+                            "live_verification",
+                            "live_complete",
+                            "live_wait_qa",
+                            "live_wait_broker",
+                        }
+                    ):
                         raise module.ValidationError("supervision_failed")
                     try:
                         self.boundary(label)
-                        if self.live_original_state() != baseline:
+                        if original_state() != baseline:
                             raise ReleaseError("live_original_runtime_changed")
                     except Exception as error:
                         code = failure_code(error)
@@ -3098,6 +3386,7 @@ class RemoteRelease:
                         raise module.ValidationError("supervision_failed") from None
 
                 def run(argv, *, timeout):
+                    nonlocal resolved_policy
                     if (
                         type(argv) is not list
                         or any(type(item) is not str or "\0" in item for item in argv)
@@ -3105,20 +3394,80 @@ class RemoteRelease:
                         or not 0 < timeout <= 30
                     ):
                         raise ReleaseError("live_command_rejected")
-                    unit_pattern = (
-                        "prism-live-(worker|broker)-"
+                    if (
+                        validator is None
+                        or type(validator.nonce) is not str
+                        or not re.fullmatch("[0-9a-f]{32}", validator.nonce)
+                        or type(validator.issued) is not int
+                        or validator.issued <= 0
+                    ):
+                        raise ReleaseError("live_command_rejected")
+                    units = {
+                        role: "prism-live-"
+                        + role
+                        + "-"
                         + self.request["commit"][:12]
-                        + "-[0-9a-f]{32}\\.service"
+                        + "-"
+                        + validator.nonce
+                        + ".service"
+                        for role in ("worker", "broker")
+                    }
+                    owned_cleanup = (
+                        len(argv) == 3
+                        and argv[:2] == ["/usr/bin/systemctl", "stop"]
+                        and argv[-1] in own_units
+                        and argv[-1] in units.values()
+                    ) or (
+                        len(argv) == 4
+                        and argv[:2] == ["/usr/bin/systemctl", "show"]
+                        and argv[-1] in own_units
+                        and argv[-1] in units.values()
+                        and argv[2]
+                        in {
+                            "--property=MainPID",
+                            "--property=MainPID,ExecMainPID,InvocationID,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE",
+                        }
                     )
+                    if not owned_cleanup and not 0 <= self.now() - validator.issued <= 180:
+                        raise ReleaseError("live_command_rejected")
                     allowed = False
                     if argv[:1] == ["/usr/bin/systemd-run"]:
                         names = [item.removeprefix("--unit=") for item in argv if item.startswith("--unit=")]
-                        allowed = (
+                        if (
                             len(names) == 1
-                            and re.fullmatch(unit_pattern, names[0])
+                            and names[0] in units.values()
                             and names[0] not in own_units
-                            and len(own_units) < 2
-                        )
+                            and inventories.get(names[0]) is True
+                            and resolved_policy is not None
+                        ):
+                            role = next(key for key, value in units.items() if value == names[0])
+                            expected = object.__new__(validation_type)
+                            expected.request, expected.work, expected.candidate = bindings, work, self.release
+                            expected.nonce, expected.issued = validator.nonce, validator.issued
+                            expected.preflight_only = network_preflight
+                            expected.units = {
+                                key: "prism-live-"
+                                + key
+                                + "-"
+                                + self.request["commit"][:12]
+                                + "-"
+                                + expected.nonce
+                                + ".service"
+                                for key in ("worker", "broker")
+                            }
+                            expected.accounts = {
+                                key: pwd.getpwnam(name)
+                                for key, name in (
+                                    ("worker", "prism-integration"),
+                                    ("broker", "prism-integration-broker"),
+                                )
+                            }
+                            expected.bridge_gid = grp.getgrnam("prism-integration-bridge").gr_gid
+                            expected.pids = observed_pids
+                            if role == "broker" or observed_pids.get("broker", 0) > 1:
+                                allowed = argv == expected.unit_command(
+                                    role, resolved_policy[0], resolved_policy[1]
+                                )
                         if allowed:
                             own_units.add(names[0])
                     elif argv[:2] == ["/usr/bin/systemctl", "stop"]:
@@ -3127,10 +3476,19 @@ class RemoteRelease:
                         allowed = (
                             len(argv) == 6
                             and argv[2:5] == ["--all", "--plain", "--no-legend"]
-                            and re.fullmatch(unit_pattern, argv[5])
+                            and argv[5] in units.values()
+                            and argv[5] not in own_units
                         )
                     elif argv[:2] == ["/usr/bin/systemctl", "show"]:
-                        allowed = bool(re.fullmatch(unit_pattern, argv[-1])) or argv == [
+                        allowed = (
+                            len(argv) == 4
+                            and argv[3] in own_units
+                            and argv[2]
+                            in {
+                                "--property=MainPID",
+                                "--property=MainPID,ExecMainPID,InvocationID,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE",
+                            }
+                        ) or argv == [
                             "/usr/bin/systemctl",
                             "show",
                             "--value",
@@ -3146,14 +3504,35 @@ class RemoteRelease:
                             "--shell",
                             "/usr/sbin/nologin",
                         ] and argv[-1] in {"prism-integration", "prism-integration-broker"}
-                    elif argv in (
-                        ["/usr/sbin/groupadd", "--system", "prism-integration-bridge"],
-                        LIVE_RESOLVE_COMMAND,
-                    ):
+                    elif argv == ["/usr/sbin/groupadd", "--system", "prism-integration-bridge"]:
                         allowed = True
+                    elif argv == LIVE_RESOLVE_COMMAND:
+                        allowed = resolved_policy is None and not own_units
                     if not allowed:
                         raise ReleaseError("live_command_rejected")
-                    return self.run(argv, timeout=timeout)
+                    # Read identity before stopping, then stop/reconcile only our
+                    # launched nonce. Cleanup must survive budget expiry and STOP.
+                    if not owned_cleanup:
+                        self.stop()
+                    output = self.run(argv, timeout=timeout)
+                    if argv[:2] == ["/usr/bin/systemctl", "stop"]:
+                        stopped_units.add(argv[-1])
+                    if argv == LIVE_RESOLVE_COMMAND:
+                        resolved_policy = module.network_policy(lambda: json.loads(output))
+                    if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
+                        inventories[argv[-1]] = (
+                            type(output) is bytes and len(output) <= 65536 and not output.strip()
+                        )
+                    if argv[:2] == ["/usr/bin/systemctl", "show"] and argv[-1] in own_units:
+                        state = dict(
+                            line.split("=", 1) for line in output.decode("ascii").splitlines() if "=" in line
+                        )
+                        if state.get("MainPID", "").isdigit() and int(state["MainPID"]) > 1:
+                            role = next(key for key, value in units.items() if value == argv[-1])
+                            previous = observed_pids.setdefault(role, int(state["MainPID"]))
+                            if previous != int(state["MainPID"]):
+                                raise ReleaseError("live_command_rejected")
+                    return output
 
                 def key_provider():
                     nonlocal key_error, key_provided
@@ -3177,21 +3556,53 @@ class RemoteRelease:
                         for name in LIVE_SOURCE_PINS
                     },
                 }
-                returned = self.live_safe_record(
-                    module.run_validation(
-                        bindings, boundary=boundary, run=run, record=record, key_provider=key_provider
-                    ),
-                    attempt,
-                )
+                if network_preflight:
+                    # The fixed preflight API has no key-provider parameter.
+                    # Its constructor creates the same trusted validator; capture
+                    # only that instance for exact owned-unit command validation.
+                    original_validation = module.Validation
+
+                    def preflight_validation(*args, **kwargs):
+                        nonlocal validator
+                        validator = original_validation(*args, **kwargs)
+                        return validator
+
+                    module.Validation = preflight_validation
+                    try:
+                        result = module.run_network_preflight(
+                            bindings,
+                            boundary=boundary,
+                            run=run,
+                            record=record,
+                            network_gate_path=network_gate_path,
+                        )
+                    finally:
+                        module.Validation = original_validation
+                else:
+                    validator = module.Validation(
+                        bindings,
+                        boundary=boundary,
+                        run=run,
+                        record=record,
+                        key_provider=key_provider,
+                        network_gate_path=network_gate_path,
+                    )
+                    self._live_validator = validator
+                    result = validator.execute()
+                returned = self.live_safe_record(result, attempt)
                 if summary != returned:
                     raise ReleaseError("live_durable_result_required")
                 if cancelled:
                     raise ReleaseError(cancelled)
-                if self.live_original_state() != baseline:
+                if original_state() != baseline:
                     raise ReleaseError("live_original_runtime_changed")
                 if returned["passed"] is not True:
                     raise ReleaseError(key_error or boundary_error or "live_integration_failed")
-                if not key_provided or self._live_executor_memory_sealed is not True:
+                if len(own_units) != 2 or stopped_units != own_units:
+                    raise ReleaseError("live_cleanup_not_observed")
+                if not network_preflight and (
+                    not key_provided or self._live_executor_memory_sealed is not True
+                ):
                     raise ReleaseError("live_model_authorization_rejected")
                 self.action_report = {
                     "attempt": attempt,
@@ -3200,12 +3611,15 @@ class RemoteRelease:
                     "last_event_sha256": chain,
                     "passed": True,
                     "production_verified": False,
-                    "executor_memory_sealed": True,
-                    "model_key_read_after_gate": True,
+                    "executor_memory_sealed": not network_preflight,
+                    "model_key_read_after_gate": key_provided,
+                    "preflight_only": network_preflight,
+                    "network_gate_verified": returned["network_gate_verified"],
                 }
         finally:
             self._live_attempt = None
             self._live_module = None
+            self._live_validator = None
             self._live_key_attempted = True
             os.close(descriptor)
             self.write(
@@ -3219,7 +3633,11 @@ class RemoteRelease:
                         "summary": summary,
                         "events": count,
                         "last_event_sha256": chain,
-                        "model_environment_binding_supplied": True,
+                        "operation": self.request["action"],
+                        "preflight_only": network_preflight,
+                        "baseline_kind": "network_metadata" if network_preflight else "business_runtime",
+                        "runtime_fingerprint": baseline["runtime_fingerprint"],
+                        "model_environment_binding_supplied": not network_preflight,
                         "executor_memory_sealed": getattr(self, "_live_executor_memory_sealed", False)
                         is True,
                         "model_key_read_after_gate": key_provided,
@@ -3315,6 +3733,8 @@ class RemoteRelease:
             or module.CHECKS != MARKET_CHECKS
             or module.BOOT_CHECKS != MARKET_BOOT_CHECKS
             or {"qt.gtimg.cn", "money.finance.sina.com.cn"} != module.HOSTS
+            or MARKET_INTEGRATION_HELPERS["cgroup_network_gate.py"] != module.NETWORK_GATE_SHA256
+            or module.EXTRA_NEGATIVES != NETWORK_EXTRA_NEGATIVES
         ):
             raise ReleaseError("market_helper_source_rejected")
         yield module
@@ -3339,6 +3759,8 @@ class RemoteRelease:
         }
 
     def market_safe_record(self, value, attempt, module, baseline):
+        preflight = self.request.get("action") == "integration_market_network_preflight"
+
         def rejected():
             raise ReleaseError("market_safe_record_rejected")
 
@@ -3357,7 +3779,11 @@ class RemoteRelease:
             rejected()
         if set(value) == {"stage", "candidate", "release_id", "at"}:
             if (
-                value["stage"] not in {"workspace", "start", "allow_public_http"}
+                value["stage"]
+                not in (
+                    {"workspace", "start", "network_attach", "network_permit"}
+                    | (set() if preflight else {"allow_public_http"})
+                )
                 or not integer(value["at"])
                 or not 0 <= self.now() - value["at"] <= 300
             ):
@@ -3365,8 +3791,11 @@ class RemoteRelease:
             return json.loads(encoded(value))
         fixed = {
             "schema": 1,
-            "probe": "credential_free_market_linux",
-            "scope": "market_public_https_only",
+            "probe": "credential_free_market_network_preflight"
+            if preflight
+            else "credential_free_market_linux",
+            "scope": "pinned_tls_handshake_only" if preflight else "market_public_https_only",
+            "preflight_only": preflight,
             "production_verified": False,
             "research_quality_verified": False,
             "live_model_verified": False,
@@ -3385,6 +3814,12 @@ class RemoteRelease:
             "market_provider_verified",
             "error_class",
             "unit_stopped",
+            "network_gate_verified",
+            "network_gate_verified_before_cleanup",
+            "network_gate_cleaned",
+            "negative_errno",
+            "additional_network_errno",
+            "cleanup_error_class",
         }
         optional = {
             "identity",
@@ -3406,6 +3841,9 @@ class RemoteRelease:
                     "original_runtime_unchanged",
                     "market_provider_verified",
                     "unit_stopped",
+                    "network_gate_verified",
+                    "network_gate_verified_before_cleanup",
+                    "network_gate_cleaned",
                 )
             )
             or not integer(value["started_at"])
@@ -3413,6 +3851,59 @@ class RemoteRelease:
             or not value["started_at"] <= value["finished_at"] <= self.now()
             or not 0 <= self.now() - value["started_at"] <= 300
             or value["error_class"] not in module.ERRORS | {None}
+            or value["cleanup_error_class"] not in {None, "cleanup_failed"}
+        ):
+            rejected()
+        for name, keys in (
+            (
+                "negative_errno",
+                {
+                    "production_8088_denied",
+                    "vibe_8899_denied",
+                    "metadata_denied",
+                    "private_ip_denied",
+                    "other_public_denied",
+                },
+            ),
+            ("additional_network_errno", NETWORK_EXTRA_NEGATIVES),
+        ):
+            codes = value[name]
+            if (
+                type(codes) is not dict
+                or set(codes) not in (set(), keys)
+                or any(type(code) is not int or not 0 <= code <= 4095 for code in codes.values())
+            ):
+                rejected()
+        if (
+            value["network_gate_verified"]
+            != (
+                value["network_gate_verified_before_cleanup"]
+                and value["network_gate_cleaned"]
+                and value["unit_stopped"]
+                and value["cleanup_error_class"] is None
+            )
+            or value["network_gate_cleaned"]
+            and not value["unit_stopped"]
+            or value["network_gate_verified_before_cleanup"]
+            and (
+                not value["negative_errno"]
+                or not value["additional_network_errno"]
+                or any(
+                    code not in {1, 13}
+                    for codes in (value["negative_errno"], value["additional_network_errno"])
+                    for code in codes.values()
+                )
+                or "os_denial_controls" not in value
+                or type(value["os_denial_controls"]) is not dict
+                or set(value["os_denial_controls"]) != MARKET_BOOT_CHECKS
+                or any(flag is not True for flag in value["os_denial_controls"].values())
+            )
+            or preflight
+            and (
+                "worker_result" in value
+                or "worker_result_sha256" in value
+                or value["market_provider_verified"]
+            )
         ):
             rejected()
         for name in ("bootstrap_sha256", "worker_result_sha256"):
@@ -3575,15 +4066,25 @@ class RemoteRelease:
         elif value["market_provider_verified"] is not False:
             rejected()
         if value["passed"] and (
-            worker is None
-            or worker["passed"] is not True
-            or set(value) != required | optional
+            not preflight
+            and (worker is None or worker["passed"] is not True)
+            or set(value)
+            != required | (optional - {"worker_result", "worker_result_sha256"} if preflight else optional)
             or any(
                 value[name] is not True
                 for name in ("actual_linux_collection", "original_runtime_unchanged", "unit_stopped")
             )
             or not all(value["os_denial_controls"].values())
             or value["error_class"] is not None
+            or value["cleanup_error_class"] is not None
+            or not value["network_gate_verified"]
+            or not value["negative_errno"]
+            or not value["additional_network_errno"]
+            or any(
+                code not in {1, 13}
+                for codes in (value["negative_errno"], value["additional_network_errno"])
+                for code in codes.values()
+            )
         ):
             rejected()
         if not value["passed"] and value["error_class"] is None:
@@ -3591,14 +4092,29 @@ class RemoteRelease:
         return json.loads(encoded(value))
 
     def integration_market(self):
+        return self._integration_market(network_preflight=False)
+
+    def integration_market_network_preflight(self):
+        self.network_preflight_request("market")
+        return self._integration_market(network_preflight=True)
+
+    def _integration_market(self, *, network_preflight):
+        if self.request.get("action") != (
+            "integration_market_network_preflight" if network_preflight else "integration_market"
+        ):
+            raise ReleaseError("network_preflight_request_rejected")
         self.verify_tree()
         contents = self.market_helper_sources()
         attempt = self.request.get("integration_attempt")
         if type(attempt) is not str or not re.fullmatch("[a-z0-9][a-z0-9-]{7,39}", attempt):
             raise ReleaseError("explicit_market_integration_attempt_required")
-        baseline = self.market_original_state()
+        original_state = self.network_original_state if network_preflight else self.market_original_state
+        baseline = original_state()
         work = self.checked(self.operations / "integration" / attempt / "market")
-        directory = self.checked(self.record / ("integration-market-" + attempt))
+        directory = self.checked(
+            self.record
+            / (("network-preflight-market-" if network_preflight else "integration-market-") + attempt)
+        )
         if work.exists() or directory.exists():
             raise ReleaseError("market_integration_attempt_already_exists")
         self.boundary("market_attempt")
@@ -3622,6 +4138,7 @@ class RemoteRelease:
                 finally:
                     os.close(fd)
             with self.market_module(contents) as module:
+                network_gate_path = Path(module.__file__).with_name("cgroup_network_gate.py")
                 bindings = {
                     "schema": 1,
                     "release_id": attempt,
@@ -3654,11 +4171,15 @@ class RemoteRelease:
 
                 def boundary(label):
                     nonlocal cancelled
-                    if label not in MARKET_BOUNDARIES:
+                    if (
+                        label not in MARKET_BOUNDARIES
+                        or network_preflight
+                        and label in {"market_allow_public_http", "market_wait_result", "market_wait_exit"}
+                    ):
                         raise module.ValidationError("supervision_failed")
                     try:
                         self.boundary(label)
-                        if self.market_original_state() != baseline:
+                        if original_state() != baseline:
                             raise ReleaseError("market_original_runtime_changed")
                         if label == "market_allow_public_http":
                             self.verify_tree()
@@ -3711,10 +4232,14 @@ class RemoteRelease:
                                 "work": str(work),
                                 "probe_sha256": MARKET_INTEGRATION_HELPERS["market_live_probe.py"],
                                 "worker_sha256": MARKET_WORKER_SHA256,
+                                "preflight_only": network_preflight,
+                                "network_gate_sha256": MARKET_INTEGRATION_HELPERS["cgroup_network_gate.py"],
+                                "network_role": "market",
                             }
                             if (
                                 type(config) is not dict
-                                or set(config) != {*fixed, "nonce", "issued_at", "pins", "negative_public"}
+                                or set(config)
+                                != {*fixed, "nonce", "issued_at", "pins", "negative_public", "network_pins"}
                                 or any(
                                     type(config.get(key)) is not type(item) or config[key] != item
                                     for key, item in fixed.items()
@@ -3736,11 +4261,17 @@ class RemoteRelease:
                                     (None, None, None, None, (config["pins"][host][0], 443))
                                 ]
                             )
-                            if pins != config["pins"] or negative != config["negative_public"]:
+                            if (
+                                pins != config["pins"]
+                                or negative != config["negative_public"]
+                                or config["network_pins"]
+                                != sorted({value for values in pins.values() for value in values})
+                            ):
                                 raise ValueError
                             expected = object.__new__(module.Validation)
                             expected.request, expected.work, expected.candidate = bindings, work, self.release
                             expected.nonce, expected.issued = config["nonce"], config["issued_at"]
+                            expected.preflight_only = network_preflight
                             expected.pins, expected.negative = pins, negative
                             expected.unit = (
                                 "prism-market-probe-"
@@ -3781,7 +4312,14 @@ class RemoteRelease:
                     if not allowed:
                         raise ReleaseError("market_command_rejected")
                     # Cleanup of this nonce remains available after STOP; no new work.
-                    if argv[:2] != ["/usr/bin/systemctl", "stop"]:
+                    if not (
+                        launch is not None
+                        and (
+                            argv == ["/usr/bin/systemctl", "stop", launch]
+                            or argv
+                            == ["/usr/bin/systemctl", "show", "--property=" + MARKET_UNIT_PROPERTIES, launch]
+                        )
+                    ):
                         self.stop()
                     output = self.run(argv, timeout=timeout)
                     if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
@@ -3791,7 +4329,13 @@ class RemoteRelease:
                     return output
 
                 returned = self.market_safe_record(
-                    module.run_validation(bindings, boundary=boundary, run=run, record=record),
+                    (module.run_network_preflight if network_preflight else module.run_validation)(
+                        bindings,
+                        boundary=boundary,
+                        run=run,
+                        record=record,
+                        network_gate_path=network_gate_path,
+                    ),
                     attempt,
                     module,
                     baseline,
@@ -3801,7 +4345,7 @@ class RemoteRelease:
                 if returned["passed"] and (launch is None or not stopped):
                     raise ReleaseError("market_cleanup_not_observed")
                 self.boundary("market_reconcile")
-                original_after = self.market_original_state() == baseline
+                original_after = original_state() == baseline
                 self.verify_tree()
                 candidate_after = True
                 self.action_report = {
@@ -3812,6 +4356,8 @@ class RemoteRelease:
                     "market_provider_verified": returned["market_provider_verified"],
                     "passed": returned["passed"],
                     "production_verified": False,
+                    "preflight_only": network_preflight,
+                    "network_gate_verified": returned["network_gate_verified"],
                 }
                 if cancelled:
                     raise ReleaseError(cancelled)
@@ -3825,7 +4371,7 @@ class RemoteRelease:
         finally:
             os.close(descriptor)
             try:
-                original_after = self.market_original_state() == baseline
+                original_after = original_state() == baseline
             except Exception:
                 original_after = False
             try:
@@ -3841,6 +4387,10 @@ class RemoteRelease:
                 "attempt": attempt,
                 "candidate": self.request["commit"],
                 "helper_sha256": dict(MARKET_INTEGRATION_HELPERS),
+                "operation": self.request["action"],
+                "preflight_only": network_preflight,
+                "baseline_kind": "network_metadata" if network_preflight else "business_runtime",
+                "runtime_fingerprint": baseline["runtime_fingerprint"],
                 "summary": summary,
                 "events": count,
                 "last_event_sha256": chain,
@@ -5256,15 +5806,264 @@ class RemoteRelease:
         except Exception:
             raise ReleaseError("retirement_retained_start_unreconciled") from None
 
+    def retirement_retained_observer_state(self, bindings, probe, validation, stop):
+        reviewed = RETIREMENT_RETAINED_OBSERVER_START
+        plan = probe.descriptor(bindings, nonce=reviewed["nonce"])
+        case = probe._case(plan, reviewed["case_id"])
+        unit, observer = case["unit"], stop.observer_unit(plan, reviewed["case_id"])
+        query = ["/usr/bin/systemctl", "show", "--all", "--property=" + stop.OBSERVER_PROPERTIES, unit]
+        before = stop._rows(self.run(query, timeout=10), stop.OBSERVER_PROPERTIES)
+        expected = {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "exited",
+            "MainPID": "0",
+            "ExecMainPID": str(reviewed["exec_main_pid"]),
+            "ExecMainCode": "1",
+            "ExecMainStatus": "0",
+            "Result": "success",
+            "InvocationID": reviewed["invocation_id"],
+            "ControlGroup": "",
+            "Transient": "yes",
+            "DynamicUser": "yes",
+            "RemainAfterExit": "yes",
+            "PrivateTmp": "yes",
+        }
+        if (
+            any(before[key] != value for key, value in expected.items())
+            or before["Wants"].split() != ["tmp.mount"]
+            or any(before[key] for key in ("PartOf", "BindsTo", "PropagatesStopTo"))
+        ):
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+        job = stop.typed_job(self.run, unit, before["Job"])
+        if job != {"type": "(uo)", "data": [0, "/"]}:
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+
+        def typed(command):
+            raw = self.run(command, timeout=10)
+            if type(raw) is not bytes or len(raw) > 16384:
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+
+            def pairs(rows):
+                value = dict(rows)
+                if len(value) != len(rows):
+                    raise ValueError("duplicate_key")
+                return value
+
+            return json.loads(raw, object_pairs_hook=pairs)
+
+        launch = validation.launch_command(plan, reviewed["case_id"])
+        argv = launch[launch.index("--") + 1 :]
+        command = stop.job_command(unit)
+        command[-2:] = ["org.freedesktop.systemd1.Service", "ExecStart"]
+        start = typed(command)
+        if (
+            digest(encoded(argv)) != reviewed["main_argv_sha256"]
+            or type(start) is not dict
+            or set(start) != {"type", "data"}
+            or start["type"] != "a(sasbttttuii)"
+            or type(start["data"]) is not list
+            or len(start["data"]) != 1
+        ):
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+        row = start["data"][0]
+        if (
+            type(row) is not list
+            or len(row) != 10
+            or row[0] != argv[0]
+            or row[1] != argv
+            or row[2] is not False
+            or any(type(number) is not int for number in row[3:])
+            or any(not 0 < number < 2**64 for number in row[3:7])
+            or row[7:] != [reviewed["exec_main_pid"], 1, 0]
+            or before["ExecMainExitTimestampMonotonic"] != str(row[6])
+        ):
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+        arrays = {}
+        for name in (unit, observer):
+            arrays[name] = {}
+            for key in ("ExecStop", "ExecStopPost"):
+                command = stop.job_command(name)
+                command[-2:] = ["org.freedesktop.systemd1.Service", key]
+                value = typed(command)
+                if encoded(value) != encoded(stop.EMPTY_EXEC_ARRAY):
+                    raise ReleaseError("retirement_retained_observer_unreconciled")
+                arrays[name][key] = value
+        observed = stop.retained_observer_state(self.run, bindings)
+        if observed["exec_start_argv_sha256"] != reviewed["observer_argv_sha256"]:
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+        cgroot = self.checked(self.root / "sys/fs/cgroup")
+        if not self.checked(cgroot / "cgroup.controllers").is_file() or any(
+            self.checked(cgroot / "system.slice" / name).exists() for name in (unit, observer)
+        ):
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+        if before != stop._rows(self.run(query, timeout=10), stop.OBSERVER_PROPERTIES):
+            raise ReleaseError("retirement_retained_observer_unreconciled")
+        return {
+            "main": {
+                "unit": unit,
+                "invocation_id": reviewed["invocation_id"],
+                "exec_main_pid": reviewed["exec_main_pid"],
+                "typed_job": job,
+                "state_sha256": digest(encoded(before)),
+                "exec_start_argv_sha256": digest(encoded(argv)),
+                "cgroup_absent": True,
+            },
+            "observer": observed,
+            "empty_stop_arrays": arrays,
+            "no_signal_or_cleanup_authorized": True,
+        }
+
+    def retirement_reconcile_retained_observer(
+        self, previous, baseline, bindings, probe, validation, stop, proof, prestart, retained_start
+    ):
+        reviewed = RETIREMENT_RETAINED_OBSERVER_START
+        try:
+            if (
+                previous.name != reviewed["attempt"]
+                or [item["attempt"] for item in prestart] != list(RETIREMENT_PRESTART_REVIEWED)
+                or retained_start is None
+            ):
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+            identity, identity_sha = self.retirement_private_record(previous / "identity.json")
+            receipt, receipt_sha = self.retirement_private_record(previous / "receipt.json")
+            raw, events_sha = self.retirement_private_record(
+                previous / "events.jsonl", limit=32768, json_value=False
+            )
+            if any(
+                actual != reviewed[key]
+                for key, actual in (
+                    ("identity_sha256", identity_sha),
+                    ("receipt_sha256", receipt_sha),
+                    ("events_sha256", events_sha),
+                )
+            ):
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+            if identity != {
+                "commit": self.request["commit"],
+                "attempt": previous.name,
+                "helpers": {**RETIREMENT_HELPERS, "retirement_stop_validation.py": reviewed["helper_sha256"]},
+                "baseline": baseline,
+                "signal_proof": proof,
+                "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
+                "prestart_reconciliations": prestart,
+                "retained_start_reconciliation": retained_start,
+            }:
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+            summary = self.retirement_stop_summary(receipt.get("summary"), bindings, probe, validation, stop)
+            if (
+                set(receipt)
+                != {
+                    "attempt",
+                    "signal_proof",
+                    "summary",
+                    "events",
+                    "last_event_sha256",
+                    "production_verified",
+                    "passed",
+                    "baseline_verified_after",
+                    "failure_code",
+                }
+                or receipt["attempt"] != previous.name
+                or receipt["signal_proof"] != proof
+                or type(receipt["events"]) is not int
+                or receipt["events"] != 6
+                or receipt["production_verified"] is not False
+                or receipt["passed"] is not False
+                or receipt["baseline_verified_after"] is not True
+                or receipt["failure_code"] != "legacy_stop_validation_failed"
+                or summary["cases"] != []
+                or summary["synthetic_cleanup_verified"] is not False
+                or summary["retirement_stop_validation_passed"] is not False
+                or summary["systemctl_stop_end_to_end_proven"] is not False
+                or summary.get("error_code") != "retirement_stop_observer_reference_rejected"
+            ):
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+            expected = (
+                (
+                    "public_bundles_verified",
+                    {
+                        "bundle_sha256": probe.bundle_identity(),
+                        "wrapper_sha256": validation.wrapper_directory().name,
+                    },
+                ),
+                ("synthetic_start_intent", {"case_id": reviewed["case_id"], "nonce": reviewed["nonce"]}),
+                (
+                    "synthetic_stop_actual_isolation",
+                    {
+                        "case_id": reviewed["case_id"],
+                        "invocation": reviewed["invocation_id"],
+                        "pid": reviewed["exec_main_pid"],
+                        "start_ticks": reviewed["start_ticks"],
+                        "uid": reviewed["uid"],
+                        "actual_kernel_verified": True,
+                    },
+                ),
+                (
+                    "synthetic_stop_exec_arrays_observed",
+                    {
+                        "case_id": reviewed["case_id"],
+                        "properties": {key: stop.EMPTY_EXEC_ARRAY for key in ("ExecStop", "ExecStopPost")},
+                    },
+                ),
+                ("synthetic_observer_start_intent", {"case_id": reviewed["case_id"]}),
+                ("retirement_stop_validation_result", summary),
+            )
+            lines, chain = raw.splitlines(keepends=True), "0" * 64
+            if len(lines) != 6:
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+            for sequence, (line, (event, details)) in enumerate(zip(lines, expected, strict=True), 1):
+                row = json.loads(line)
+                if (
+                    type(row) is not dict
+                    or set(row) != {"sequence", "at", "previous_sha256", "event", "details"}
+                    or type(row["sequence"]) is not int
+                    or row["sequence"] != sequence
+                    or type(row["at"]) is not int
+                    or row["at"] <= 0
+                    or row["previous_sha256"] != chain
+                    or row["event"] != event
+                    or encoded(row["details"]) != encoded(details)
+                    or not line.endswith(b"\n")
+                ):
+                    raise ReleaseError("retirement_retained_observer_unreconciled")
+                chain = digest(line)
+            if chain != receipt["last_event_sha256"]:
+                raise ReleaseError("retirement_retained_observer_unreconciled")
+            observation = self.retirement_retained_observer_state(bindings, probe, validation, stop)
+            return {
+                "schema": 1,
+                "attempt": previous.name,
+                "identity_sha256": identity_sha,
+                "receipt_sha256": receipt_sha,
+                "events_sha256": events_sha,
+                "last_event_sha256": chain,
+                "observation": observation,
+                "previous_passed": False,
+                "previous_cleanup_verified": False,
+                "failed_record_retained": True,
+                "no_stop_intent_in_complete_chain": True,
+                "baseline_verified_after": True,
+            }
+        except Exception:
+            raise ReleaseError("retirement_retained_observer_unreconciled") from None
+
     def retirement_reconcile_prestart(self, baseline, bindings, probe, validation, stop, proof):
         """Reconcile only the reviewed pre-actuation property-query failure."""
         parent = self.checked(self.record / "legacy-stop")
         reconciled = []
         self._retirement_retained_start_reconciliation = None
+        self._retirement_retained_observer_reconciliation = None
         known = RETIREMENT_RETAINED_START
         if (
             all(bindings[key] == known[key] for key in ("commit", "release_id"))
             and not self.checked(parent / known["attempt"]).is_dir()
+        ):
+            raise ReleaseError("retirement_previous_stop_unreconciled")
+        known_observer = RETIREMENT_RETAINED_OBSERVER_START
+        if (
+            all(bindings[key] == known_observer[key] for key in ("commit", "release_id"))
+            and not self.checked(parent / known_observer["attempt"]).is_dir()
         ):
             raise ReleaseError("retirement_previous_stop_unreconciled")
         if not parent.exists():
@@ -5275,6 +6074,21 @@ class RemoteRelease:
         for previous in sorted(parent.iterdir(), key=lambda path: path.name):
             try:
                 receipt, receipt_sha = self.retirement_private_record(previous / "receipt.json")
+                if previous.name == RETIREMENT_RETAINED_OBSERVER_START["attempt"]:
+                    self._retirement_retained_observer_reconciliation = (
+                        self.retirement_reconcile_retained_observer(
+                            previous,
+                            baseline,
+                            bindings,
+                            probe,
+                            validation,
+                            stop,
+                            proof,
+                            reconciled,
+                            self._retirement_retained_start_reconciliation,
+                        )
+                    )
+                    continue
                 if previous.name == RETIREMENT_RETAINED_START["attempt"]:
                     self._retirement_retained_start_reconciliation = self.retirement_reconcile_retained_start(
                         previous, baseline, bindings, probe, validation, stop, proof, reconciled
@@ -5416,6 +6230,7 @@ class RemoteRelease:
         contents = self.retirement_sources(stop=True)
         baseline = self.retirement_baseline()
         retained = None
+        retained_observer = None
 
         def active_baseline():
             # No legacy environment is executed: the fixture uses separately
@@ -5434,6 +6249,12 @@ class RemoteRelease:
                 != retained["observation"]
             ):
                 raise ReleaseError("retirement_retained_start_unreconciled")
+            if (
+                retained_observer is not None
+                and self.retirement_retained_observer_state(bindings, probe, validation, stop)
+                != retained_observer["observation"]
+            ):
+                raise ReleaseError("retirement_retained_observer_unreconciled")
 
         bindings = {
             "commit": self.request["commit"],
@@ -5450,6 +6271,7 @@ class RemoteRelease:
                 baseline, bindings, probe, validation, stop, proof
             )
             retained = self._retirement_retained_start_reconciliation
+            retained_observer = self._retirement_retained_observer_reconciliation
             self.boundary("retirement_stop_attempt")
             active_baseline()
             directory.mkdir(parents=True, mode=0o700)
@@ -5465,6 +6287,11 @@ class RemoteRelease:
                         "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
                         "prestart_reconciliations": reconciled,
                         **({"retained_start_reconciliation": retained} if retained is not None else {}),
+                        **(
+                            {"retained_observer_reconciliation": retained_observer}
+                            if retained_observer is not None
+                            else {}
+                        ),
                     }
                 ),
             )
@@ -5483,6 +6310,8 @@ class RemoteRelease:
                 )
             if retained is not None:
                 self.write(directory / "retained-start-reconciliation.json", encoded(retained))
+            if retained_observer is not None:
+                self.write(directory / "retained-observer-reconciliation.json", encoded(retained_observer))
             fd = os.open(
                 self.checked(directory / "events.jsonl"),
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -5630,6 +6459,14 @@ class RemoteRelease:
                         raise
                     if argv == stop.VERSION_COMMAND or argv == stop.OBSERVER_INVENTORY:
                         return self.run(argv, timeout=timeout)
+                    if retained_observer is not None and argv in stop.retained_observer_read_commands(
+                        bindings
+                    ):
+                        return self.run(argv, timeout=timeout)
+                    if argv == stop.TMP_MOUNT_COMMAND and any(
+                        item.get("observer_dispatched") is True for item in state.values()
+                    ):
+                        return self.run(argv, timeout=timeout)
                     if argv == ["/usr/bin/systemctl", "show", "--property=" + validation.PROPERTIES, SERVICE]:
                         return self.run(argv, timeout=timeout)
                     if (
@@ -5717,6 +6554,11 @@ class RemoteRelease:
                         boundary=boundary,
                         run=run,
                         record=record,
+                        **(
+                            {"retained_observer": retained_observer["observation"]["observer"]}
+                            if retained_observer is not None
+                            else {}
+                        ),
                     ),
                     bindings,
                     probe,
@@ -6722,6 +7564,11 @@ class RemoteRelease:
                     "integration_market",
                 }:
                     result["integration"] = self.action_report
+                elif request["action"] in {
+                    "integration_live_network_preflight",
+                    "integration_market_network_preflight",
+                }:
+                    result["network_preflight"] = self.action_report
                 elif request["action"] == "validate_legacy_retirement":
                     result["legacy_retirement"] = self.action_report
                 elif request["action"] == "validate_legacy_stop":
