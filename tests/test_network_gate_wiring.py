@@ -31,6 +31,8 @@ def root_metadata(info):
         st_dev=info.st_dev,
         st_nlink=info.st_nlink,
         st_size=info.st_size,
+        st_mtime_ns=info.st_mtime_ns,
+        st_ctime_ns=info.st_ctime_ns,
     )
 
 
@@ -57,6 +59,7 @@ def test_sealed_helper_loader_registers_dataclasses_restores_namespace_and_check
     sentinel = types.ModuleType(name)
     monkeypatch.setitem(sys.modules, name, sentinel)
     loaded = sealed_loader(module, path, monkeypatch)
+    assert loaded.DIAGNOSTIC_STAGES == module.NETWORK_DIAGNOSTIC_STAGES
     assert loaded.__file__ == str(path) and sys.modules[name] is sentinel
     config = loaded.ControllerDescriptor(
         role="live",
@@ -77,7 +80,96 @@ def test_sealed_helper_loader_registers_dataclasses_restores_namespace_and_check
     assert sys.modules[name] is sentinel
 
 
+class ProofGate:
+    """Typed supervisor fixture; it is not an actual Linux/kernel proof."""
+
+    programs = tuple((hook, 500 + hook, "7461676279746573", "a" * 64) for hook in (10, 11, 14, 15))
+
+    def verify(self):
+        return self.programs
+
+    def prepare_stop(self):
+        return {
+            "schema": 1,
+            "profile": "linux-6.8",
+            "identity": {"fixture": True},
+            "programs": self.programs,
+            "verified_at_ns": 1234,
+        }
+
+    def cleanup(self):
+        return {
+            "schema": 1,
+            "mode": "retained_empty",
+            "complete": True,
+            "objects_released": True,
+            "program_count": 4,
+            "programs": [[hook, identifier, source] for hook, identifier, _, source in self.programs],
+            "offline_queries": [],
+            "detached_hooks": [10, 11, 14, 15],
+            "stop_verified_at_ns": 1234,
+            "profile": "linux-6.8",
+        }
+
+    def diagnostic(self):
+        return {"stage": "complete", "command": None, "errno": None}
+
+
+class ProofReference:
+    """Explicit offline C-bus fixture, never a real Linux unit reference."""
+
+    def __init__(self, identity):
+        self.identity = identity
+        self.events = []
+
+    def proof(self, state):
+        return {"schema": 1, **self.identity, "unique_name": ":1.234", "state": state}
+
+    def acquire(self):
+        self.events.append("acquire")
+        return self.proof("acquired")
+
+    def verify(self, *, stopped=False):
+        self.events.append("stopped" if stopped else "running")
+        return self.proof("verified_stopped" if stopped else "verified_running")
+
+    def verify_held(self):
+        exited = getattr(self, "exited", False)
+        self.events.append("held_exited" if exited else "held_running")
+        return self.proof("verified_exited" if exited else "verified_running")
+
+    def release(self):
+        self.events.append("release")
+        return self.proof("released")
+
+    def close(self):
+        self.events.append("close")
+
+
+def bind_reference(value):
+    live_value = hasattr(value, "units")
+    roles = ("broker", "worker") if live_value else ("market",)
+    value.reference_roles = roles
+    value.reference_identities = {}
+    value.reference_unique_names = {}
+    value.unit_references = {}
+    for role in roles:
+        identity = {
+            "unit": value.units[role] if live_value else value.unit,
+            "invocation_id": "c" * 32 if live_value else value.invocation,
+            "pid": value.pids[role] if live_value else value.pid,
+            "startticks": 55 if live_value else value.ticks,
+            "uid": value.accounts[role].pw_uid if live_value else value.account.pw_uid,
+        }
+        value.reference_identities[role] = identity
+        value.reference_unique_names[role] = ":1.234"
+        value.unit_references[role] = ProofReference(identity)
+    value.report["unit_reference_acquire_sha256"] = "a" * 64
+
+
 class MemoryKernel:
+    profile = "linux-6.8"
+
     def __init__(self, module, events):
         self.module, self.events = module, events
         self.programs, self.attached = {}, {}
@@ -90,10 +182,11 @@ class MemoryKernel:
     def check_identity(self, fd, descriptor, *, stopped):
         assert fd == 40 and stopped == self.stopped
         self.events.append("kernel_stopped" if stopped else "kernel_running")
+        return "retained_empty" if stopped else None
 
     def query(self, fd, hook, *, effective):
         identifiers = self.attached.get(hook, ())
-        return (2 if identifiers else 0), identifiers
+        return (2 if identifiers and not effective else 0), identifiers
 
     def load(self, descriptor, hook):
         fd = 100 + len(self.programs)
@@ -111,6 +204,10 @@ class MemoryKernel:
         assert self.stopped and self.attached[hook] == (self.programs[program_fd].identifier,)
         self.attached[hook] = ()
         self.events.append("detach_" + str(hook))
+
+    def open_program(self, identifier):
+        assert identifier in {500, 501, 502, 503}
+        raise self.module.GateError("released_program", command=13, error_number=2)
 
     def close(self, fd):
         self.events.append("close_owned_fd")
@@ -167,6 +264,22 @@ def test_market_actual_bootstrap_hello_sealed_attach_permit_canaries_tls_then_no
         return module
 
     monkeypatch.setattr(market, "load_network_gate", load)
+    monkeypatch.setattr(
+        market,
+        "load_unit_reference",
+        lambda path: types.SimpleNamespace(
+            ExpectedIdentity=lambda **kw: types.SimpleNamespace(unit=value.unit, **kw),
+            UnitReference=lambda expected: ProofReference(
+                {
+                    "unit": value.unit,
+                    **{
+                        name: getattr(expected, name)
+                        for name in ("invocation_id", "pid", "startticks", "uid")
+                    },
+                }
+            ),
+        ),
+    )
     parsed = ast.parse(market.WORKER_SOURCE)
     parsed.body = [node for node in parsed.body if not isinstance(node, ast.Try)]
     namespace = {}
@@ -330,7 +443,10 @@ def test_market_actual_bootstrap_hello_sealed_attach_permit_canaries_tls_then_no
     assert events.index("strict_udp_negative") < events.index("positive_tls")
     assert not (value.work / "root-allow.json").exists()
     assert not (value.work / "output/market-result.json").exists()
+    value.prepare_network_stop()
     events.append("stop_owned_unit")
     holder["kernel"].stopped = True
-    value.network_gate.cleanup()
+    value.cleanup_network_gate()
+    assert value.report["network_gate_objects_released"] is True
+    assert value.report["network_gate_cleanup_mode"] == "retained_empty"
     assert events.index("stop_owned_unit") < events.index("detach_10")

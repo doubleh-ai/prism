@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 import pytest
+from test_network_gate_wiring import ProofGate, bind_reference
 
 from scripts import market_live_validation as validation
 
@@ -39,8 +40,9 @@ def engine(tmp_path):
     value.pid, value.invocation, value.ticks = 222, "b" * 32, 55
     value.pins = {"qt.gtimg.cn": ["1.1.1.1"], "money.finance.sina.com.cn": ["8.8.4.4"]}
     value.negative = "9.9.9.9"
-    value.network_programs = ()
-    value.network_gate = types.SimpleNamespace(verify=lambda: (), cleanup=lambda: None)
+    value.network_gate = ProofGate()
+    value.network_programs = value.network_gate.programs
+    bind_reference(value)
     return value, calls, events, boundaries
 
 
@@ -357,10 +359,17 @@ def test_nonlinux_cannot_be_reported_as_actual_linux_collection(tmp_path, monkey
 
 @pytest.mark.parametrize("bad_proof,pid_reused", [(False, False), (True, False), (False, True)])
 @pytest.mark.parametrize("preflight_only", [False, True])
+@pytest.mark.parametrize("close_failure", [False, True])
 def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_unit(
-    tmp_path, monkeypatch, bad_proof, pid_reused, preflight_only
+    tmp_path, monkeypatch, bad_proof, pid_reused, preflight_only, close_failure
 ):
     value, _, events, boundaries = engine(tmp_path)
+    if close_failure:
+        monkeypatch.setattr(
+            value.unit_references["market"],
+            "close",
+            lambda: (_ for _ in ()).throw(RuntimeError("public synthetic close failure")),
+        )
     value.preflight_only = preflight_only
     if preflight_only:
         monkeypatch.setattr(
@@ -404,6 +413,15 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
         return b""
 
     value.run = run
+    actual_write = validation.write
+
+    def checked_write(path, raw, mode=0o600):
+        if path.name == "result-ack.json":
+            assert (value.work / "network-gate-stop.json").exists()
+            assert value.report["network_gate_stop_proof_sha256"] is not None
+        actual_write(path, raw, mode)
+
+    monkeypatch.setattr(validation, "write", checked_write)
 
     def show():
         allowed = (value.work / "root-allow.json").exists()
@@ -425,7 +443,13 @@ def test_offline_supervisor_requires_real_gate_before_allow_and_only_stops_own_u
 
     monkeypatch.setattr(value, "show", show)
     report = value.execute()
-    assert report["passed"] is (not bad_proof and not pid_reused)
+    assert report["passed"] is (not bad_proof and not pid_reused and not close_failure)
+    if close_failure:
+        from scripts import remote_release
+
+        assert report["unit_reference_error_class"] == "reference_state_rejected"
+        assert report["network_gate_cleaned"] is False
+        assert remote_release.valid_network_cleanup_record(report)
     assert report["unit_stopped"] is (not pid_reused)
     assert report["original_runtime_unchanged"] is True
     assert (value.work / "root-allow.json").exists() is (not bad_proof and not preflight_only)

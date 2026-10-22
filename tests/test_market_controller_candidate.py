@@ -34,6 +34,7 @@ def modules(tmp_path):
         "market_live_probe.py",
         "market_live_validation.py",
         "cgroup_network_gate.py",
+        "systemd_unit_reference.py",
     ):
         raw = (ROOT / "scripts" / name).read_bytes()
         before[name] = raw
@@ -174,6 +175,16 @@ def synthetic_result(context, module, *, accepted=False):
         "network_gate_verified": True,
         "network_gate_verified_before_cleanup": True,
         "network_gate_cleaned": True,
+        "network_gate_diagnostic": {"stage": "complete", "command": None, "errno": None},
+        "network_gate_stop_proof_sha256": "f" * 64,
+        "network_gate_cleanup_proof_sha256": "1" * 64,
+        "network_gate_cleanup_mode": "retained_empty",
+        "network_gate_objects_released": True,
+        "unit_reference_acquire_sha256": "c" * 64,
+        "unit_reference_stop_sha256": "d" * 64,
+        "unit_reference_release_sha256": "e" * 64,
+        "unit_reference_released": True,
+        "unit_reference_error_class": None,
         "negative_errno": dict.fromkeys(
             (
                 "production_8088_denied",
@@ -265,6 +276,7 @@ def test_two_frozen_helpers_are_exactly_pinned_on_both_sides(modules):
         "market_live_probe.py",
         "market_live_validation.py",
         "cgroup_network_gate.py",
+        "systemd_unit_reference.py",
     }
     assert "integration_market" in remote.ACTIONS and "integration_market" in controller.ACTIONS
     for name, pin in remote.MARKET_INTEGRATION_HELPERS.items():

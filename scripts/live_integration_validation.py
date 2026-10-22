@@ -38,7 +38,43 @@ TOOLS = Path("/opt/prism/tools/claude")
 PROC = Path("/proc")
 CGROUP = Path("/sys/fs/cgroup")
 RESOLV = Path("/etc/resolv.conf")
-NETWORK_GATE_SHA256 = "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c"
+NETWORK_GATE_SHA256 = "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134"
+UNIT_REFERENCE_SHA256 = "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be"
+UNIT_REFERENCE_ERRORS = frozenset(
+    {
+        "reference_platform_rejected",
+        "reference_library_rejected",
+        "reference_bus_rejected",
+        "reference_identity_rejected",
+        "reference_refs_rejected",
+        "reference_state_rejected",
+        "reference_call_failed",
+        "reference_close_failed",
+    }
+)
+NETWORK_DIAGNOSTIC_STAGES = frozenset(
+    {
+        "not_started",
+        "construct",
+        "open_cgroup",
+        "identity",
+        "query_direct",
+        "query_effective",
+        "load",
+        "info",
+        "attach",
+        "verify",
+        "prepare_stop",
+        "stop_identity",
+        "offline_query",
+        "detach",
+        "close_owned",
+        "object_release",
+        "partial_cleanup",
+        "complete",
+        "unknown",
+    }
+)
 EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
 RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
 SOURCE_PINS = {
@@ -377,6 +413,49 @@ def load_network_gate(path):
     return module
 
 
+def load_unit_reference(path):
+    """The reference implementation is separately sealed, never candidate code."""
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValidationError("network_gate_rejected")
+    root_locked(path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_size > 65536:
+            raise ValidationError("network_gate_rejected")
+        raw = stream.read(65537)
+
+        def stable(value):
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_uid,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+
+        if stable(info) != stable(os.fstat(stream.fileno())) or stable(info) != stable(path.lstat()):
+            raise ValidationError("network_gate_rejected")
+    if hashlib.sha256(raw).hexdigest() != UNIT_REFERENCE_SHA256:
+        raise ValidationError("network_gate_rejected")
+    name = "_prism_owned_unit_reference_" + UNIT_REFERENCE_SHA256
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    previous = sys.modules.get(name)
+    try:
+        sys.modules[name] = module
+        exec(compile(raw, str(path), "exec"), module.__dict__)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
+
+
 def write(path, raw, mode=0o644):
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     with os.fdopen(descriptor, "wb") as stream:
@@ -573,6 +652,12 @@ class Validation:
             self.key_provider = None
         self.network_gate_path, self.network_gate = network_gate_path, None
         self.network_programs = None
+        self.network_module = self.network_stop_proof = None
+        self.unit_references, self.reference_identities, self.reference_unique_names = {}, {}, {}
+        self.reference_releases = {}
+        self.reference_roles = ("broker", "worker")
+        self.network_diagnostic_failed = False
+        self.network_cleanup_complete = False
         self.nonce, self.issued = secrets.token_hex(16), int(time.time())
         self.work = OPERATIONS / request["release_id"] / "live"
         self.candidate = RELEASES / request["candidate"]
@@ -624,6 +709,16 @@ class Validation:
             "network_gate_verified": False,
             "network_gate_verified_before_cleanup": False,
             "network_gate_cleaned": False,
+            "network_gate_diagnostic": {"stage": "not_started", "command": None, "errno": None},
+            "network_gate_stop_proof_sha256": None,
+            "network_gate_cleanup_proof_sha256": None,
+            "network_gate_cleanup_mode": None,
+            "network_gate_objects_released": False,
+            "unit_reference_acquire_sha256": None,
+            "unit_reference_stop_sha256": None,
+            "unit_reference_release_sha256": None,
+            "unit_reference_released": False,
+            "unit_reference_error_class": None,
             "key_acquisition_attempted": False,
             "requests": dict.fromkeys(("messages", "count_tokens", "quote", "kline", "public_fetch"), 0),
         }
@@ -1026,6 +1121,7 @@ class Validation:
         self.stage("network_attach")
         self.kernel = self.kernel_identity()
         module = load_network_gate(self.network_gate_path)
+        self.network_module = module
         group = CGROUP / "system.slice" / self.units["broker"]
         info = group.stat()
         saved = self.invocations["broker"]
@@ -1043,9 +1139,14 @@ class Validation:
         )
         if descriptor.unit != self.units["broker"] or self.kernel_identity() != self.kernel:
             raise ValidationError("network_gate_rejected")
-        self.network_gate = module.OwnedNetworkGate(descriptor)
-        self.network_programs = self.network_gate.install()
-        self.verify_network_gate()
+        try:
+            self.network_gate = module.OwnedNetworkGate(descriptor)
+            self.acquire_unit_reference(descriptor)
+            self.network_programs = self.network_gate.install()
+            self.verify_network_gate()
+        except Exception as error:
+            self.network_diagnostic(error)
+            raise ValidationError("network_gate_rejected") from None
         identity = {
             name: getattr(descriptor, name)
             for name in ("invocation_id", "pid", "startticks", "uid", "cgroup_inode", "cgroup_device")
@@ -1069,9 +1170,329 @@ class Validation:
 
     def verify_network_gate(self):
         try:
+            self.verify_unit_reference(role="worker", held=True)
+            self.verify_unit_reference()
             if self.network_gate is None or self.network_gate.verify() != self.network_programs:
                 raise ValidationError("network_gate_rejected")
+            self.verify_unit_reference()
+            self.verify_unit_reference(role="worker", held=True)
+        except Exception as error:
+            self.network_diagnostic(error)
+            raise ValidationError("network_gate_rejected") from None
+
+    def network_diagnostic(self, error=None):
+        try:
+            value = (
+                self.network_gate.diagnostic()
+                if self.network_gate is not None
+                else self.network_module.safe_diagnostic(error)
+                if self.network_module is not None
+                else {"stage": "unknown", "command": None, "errno": None}
+            )
+            valid = (
+                type(value) is dict
+                and set(value) == {"stage", "command", "errno"}
+                and type(value["stage"]) is str
+                and value["stage"] in NETWORK_DIAGNOSTIC_STAGES
+                and (
+                    value["command"] is None
+                    or type(value["command"]) is int
+                    and value["command"] in {5, 8, 9, 13, 15, 16}
+                )
+                and (value["errno"] is None or type(value["errno"]) is int and 0 <= value["errno"] <= 4095)
+            )
+            if not valid:
+                raise ValidationError("network_gate_rejected")
         except Exception:
+            value = {"stage": "unknown", "command": None, "errno": None}
+        # A successful cleanup must not erase an earlier failed phase. Prefer
+        # the first bounded syscall errno if a later failure supplies one.
+        if error is None and self.network_diagnostic_failed:
+            return
+        if error is not None:
+            self.network_diagnostic_failed = True
+        if self.report["network_gate_diagnostic"]["errno"] is None:
+            self.report["network_gate_diagnostic"] = dict(value)
+
+    def network_proof(self, kind, document):
+        if type(document) is not dict or type(document.get("schema")) is not int or document["schema"] != 1:
+            raise ValidationError("network_gate_rejected")
+        raw = encoded(document)
+        if len(raw) > 16384:
+            raise ValidationError("network_gate_rejected")
+        write(self.work / ("network-gate-" + kind + ".json"), raw, 0o600)
+        directory = os.open(self.work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return hashlib.sha256(raw).hexdigest()
+
+    def reference_failure(self, error):
+        category = getattr(error, "category", None)
+        if type(category) is not str or category not in UNIT_REFERENCE_ERRORS:
+            category = "reference_state_rejected"
+        if self.report["unit_reference_error_class"] is None:
+            self.report["unit_reference_error_class"] = category
+
+    def reference_proof(self, proof, state, role):
+        identity = self.reference_identities.get(role)
+        if (
+            type(identity) is not dict
+            or type(proof) is not dict
+            or set(proof)
+            != {"schema", "unit", "invocation_id", "pid", "startticks", "uid", "unique_name", "state"}
+            or type(proof["schema"]) is not int
+            or proof["schema"] != 1
+            or any(
+                type(proof[key]) is not type(value) or proof[key] != value for key, value in identity.items()
+            )
+            or proof["state"] != state
+            or type(proof["unique_name"]) is not str
+            or len(proof["unique_name"]) > 255
+            or not re.fullmatch(r":[0-9]+\.[0-9]+", proof["unique_name"])
+            or role in self.reference_unique_names
+            and proof["unique_name"] != self.reference_unique_names[role]
+        ):
+            raise ValidationError("network_gate_rejected")
+        return proof
+
+    def write_reference_proof(self, kind, proof):
+        allowed = {"acquire", "stop", "release", *("release-" + role for role in self.reference_roles)}
+        if kind not in allowed:
+            raise ValidationError("network_gate_rejected")
+        raw = encoded(proof)
+        if len(raw) > 16384:
+            raise ValidationError("network_gate_rejected")
+        write(self.work / ("unit-reference-" + kind + ".json"), raw, 0o600)
+        directory = os.open(self.work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return hashlib.sha256(raw).hexdigest()
+
+    def reference_bundle(self, proofs):
+        if set(proofs) != set(self.reference_roles):
+            raise ValidationError("network_gate_rejected")
+        return {
+            "schema": 1,
+            "references": [{"role": role, "proof": proofs[role]} for role in self.reference_roles],
+        }
+
+    def acquire_unit_reference(self, descriptor):
+        try:
+            if self.unit_references or self.report["unit_reference_acquire_sha256"] is not None:
+                raise ValidationError("network_gate_rejected")
+            module = load_unit_reference(self.network_gate_path.with_name("systemd_unit_reference.py"))
+            expected = {
+                self.reference_roles[0]: module.ExpectedIdentity(
+                    **{
+                        name: getattr(descriptor, name)
+                        for name in (
+                            "role",
+                            "candidate_prefix",
+                            "nonce",
+                            "invocation_id",
+                            "pid",
+                            "startticks",
+                            "uid",
+                        )
+                    }
+                )
+            }
+            saved = self.invocations.get("worker")
+            if saved is None or self.pids["worker"] != saved[1]:
+                raise ValidationError("network_gate_rejected")
+            expected["worker"] = module.ExpectedIdentity(
+                role="live-worker",
+                candidate_prefix=descriptor.candidate_prefix,
+                nonce=descriptor.nonce,
+                invocation_id=saved[0],
+                pid=self.pids["worker"],
+                startticks=saved[2],
+                uid=self.accounts["worker"].pw_uid,
+            )
+            if expected["worker"].unit != self.units["worker"]:
+                raise ValidationError("network_gate_rejected")
+            proofs = {}
+            for role in self.reference_roles:
+                item = expected[role]
+                self.reference_identities[role] = {
+                    "unit": item.unit,
+                    **{name: getattr(item, name) for name in ("invocation_id", "pid", "startticks", "uid")},
+                }
+                self.unit_references[role] = module.UnitReference(item)
+                proof = self.reference_proof(self.unit_references[role].acquire(), "acquired", role)
+                self.reference_unique_names[role] = proof["unique_name"]
+                proofs[role] = proof
+            self.report["unit_reference_acquire_sha256"] = self.write_reference_proof(
+                "acquire", self.reference_bundle(proofs)
+            )
+        except Exception as error:
+            self.reference_failure(error)
+            raise ValidationError("network_gate_rejected") from None
+
+    def verify_unit_reference(self, *, stopped=False, role=None, held=False):
+        try:
+            role = self.reference_roles[0] if role is None else role
+            if (
+                role not in self.reference_roles
+                or role not in self.unit_references
+                or self.report["unit_reference_acquire_sha256"] is None
+            ):
+                raise ValidationError("network_gate_rejected")
+            if type(held) is not bool or held and (role != "worker" or stopped):
+                raise ValidationError("network_gate_rejected")
+            if held:
+                proof = self.unit_references[role].verify_held()
+                if type(proof) is not dict or proof.get("state") not in {
+                    "verified_running",
+                    "verified_exited",
+                }:
+                    raise ValidationError("network_gate_rejected")
+                return self.reference_proof(proof, proof["state"], role)
+            return self.reference_proof(
+                self.unit_references[role].verify(stopped=stopped),
+                "verified_stopped" if stopped else "verified_running",
+                role,
+            )
+        except Exception as error:
+            self.reference_failure(error)
+            raise ValidationError("network_gate_rejected") from None
+
+    def reference_snapshot(self):
+        return self.reference_bundle(
+            {
+                role: self.verify_unit_reference(role=role, held=role == "worker")
+                for role in self.reference_roles
+            }
+        )
+
+    def release_unit_reference(self, role=None):
+        try:
+            role = self.reference_roles[0] if role is None else role
+            self.verify_unit_reference(stopped=True, role=role)
+            if (
+                not self.report["network_gate_objects_released"]
+                or self.report["unit_reference_stop_sha256"] is None
+                or role in self.reference_releases
+            ):
+                raise ValidationError("network_gate_rejected")
+            proof = self.reference_proof(self.unit_references[role].release(), "released", role)
+            self.write_reference_proof("release-" + role, proof)
+            self.reference_releases[role] = proof
+            if set(self.reference_releases) == set(self.reference_roles):
+                self.report["unit_reference_release_sha256"] = self.write_reference_proof(
+                    "release", self.reference_bundle(self.reference_releases)
+                )
+                self.report["unit_reference_released"] = True
+                if self.network_cleanup_complete:
+                    self.report["network_gate_cleaned"] = True
+        except Exception as error:
+            self.reference_failure(error)
+            raise ValidationError("network_gate_rejected") from None
+
+    def close_unit_reference(self):
+        failed = None
+        for role in self.reference_roles:
+            if role not in self.unit_references:
+                continue
+            try:
+                self.unit_references[role].close()
+            except Exception as error:
+                self.reference_failure(error)
+                failed = error
+        if failed is not None:
+            raise ValidationError("network_gate_rejected") from None
+
+    def prepare_network_stop(self):
+        if self.report["network_gate_stop_proof_sha256"] is not None:
+            return
+        try:
+            reference = self.reference_snapshot()
+            document = self.network_gate.prepare_stop()
+            if self.reference_snapshot() != reference:
+                raise ValidationError("network_gate_rejected")
+            if (
+                type(document) is not dict
+                or set(document) != {"schema", "profile", "identity", "programs", "verified_at_ns"}
+                or document.get("profile") not in {"linux-6.8", "linux-5.15-source-audit"}
+                or type(document.get("identity")) is not dict
+                or document.get("programs") != self.network_programs
+                or type(document.get("verified_at_ns")) is not int
+                or document["verified_at_ns"] <= 0
+            ):
+                raise ValidationError("network_gate_rejected")
+            digest = self.network_proof("stop", document)
+            self.network_stop_proof = document
+            self.report["network_gate_stop_proof_sha256"] = digest
+            self.report["unit_reference_stop_sha256"] = self.write_reference_proof("stop", reference)
+        except Exception as error:
+            self.network_diagnostic(error)
+            raise ValidationError("network_gate_rejected") from None
+
+    def cleanup_network_gate(self):
+        try:
+            self.verify_unit_reference(stopped=True)
+            document = self.network_gate.cleanup()
+            if (
+                type(document) is not dict
+                or set(document)
+                != {
+                    "schema",
+                    "mode",
+                    "complete",
+                    "objects_released",
+                    "program_count",
+                    "programs",
+                    "offline_queries",
+                    "detached_hooks",
+                    "stop_verified_at_ns",
+                    "profile",
+                }
+                or document.get("mode") not in {"retained_empty", "collected_offline", "partial_closed"}
+                or document.get("profile") not in {"linux-6.8", "linux-5.15-source-audit"}
+                or type(document.get("complete")) is not bool
+                or type(document.get("objects_released")) is not bool
+                or type(document.get("program_count")) is not int
+                or not 0 <= document["program_count"] <= 4
+                or type(document.get("programs")) is not list
+                or len(document["programs"]) != document["program_count"]
+                or type(document.get("offline_queries")) is not list
+                or len(document["offline_queries"]) not in {0, 8}
+                or type(document.get("detached_hooks")) is not list
+                or len(document["detached_hooks"]) > 4
+                or document["objects_released"]
+                and not document["complete"]
+                or document["complete"]
+                and (
+                    document["program_count"] != 4
+                    or self.network_stop_proof is None
+                    or document["stop_verified_at_ns"] != self.network_stop_proof["verified_at_ns"]
+                    or document["profile"] != self.network_stop_proof["profile"]
+                )
+            ):
+                raise ValidationError("network_gate_rejected")
+            digest = self.network_proof("cleanup", document)
+            self.report.update(
+                network_gate_cleanup_proof_sha256=digest,
+                network_gate_cleanup_mode=document["mode"],
+                network_gate_objects_released=document["objects_released"],
+            )
+            self.network_diagnostic()
+            if not (
+                document["complete"]
+                and document["objects_released"]
+                and document["mode"] in {"retained_empty", "collected_offline"}
+                and self.report["network_gate_stop_proof_sha256"] is not None
+            ):
+                raise ValidationError("network_gate_rejected")
+            self.release_unit_reference()
+            self.network_cleanup_complete = True
+            self.report["network_gate_cleaned"] = self.report["unit_reference_released"]
+        except Exception as error:
+            self.network_diagnostic(error)
             raise ValidationError("network_gate_rejected") from None
 
     def preflight(self, value, pins):
@@ -1430,9 +1851,69 @@ class Validation:
                 raise ValidationError(role + "_failed")
             time.sleep(0.05)
 
+    def owned_group_empty(self, unit):
+        if unit not in self.units.values():
+            raise ValidationError("cleanup_failed")
+        base = CGROUP / "system.slice" / unit
+
+        def sample():
+            try:
+                before = base.lstat()
+            except FileNotFoundError:
+                return None
+            if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode):
+                raise ValidationError("cleanup_failed")
+            pending, result = [base], []
+            while pending:
+                path = pending.pop()
+                info = path.lstat()
+                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or len(result) >= 512:
+                    raise ValidationError("cleanup_failed")
+                descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    actual = os.fstat(descriptor)
+                    if (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
+                        raise ValidationError("cleanup_failed")
+                    values = {}
+                    for name in ("cgroup.events", "cgroup.procs"):
+                        child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor)
+                        try:
+                            raw = os.read(child, 16385)
+                        finally:
+                            os.close(child)
+                        if len(raw) > 16384:
+                            raise ValidationError("cleanup_failed")
+                        values[name] = raw.decode("ascii")
+                    events = dict(row.split() for row in values["cgroup.events"].splitlines())
+                    if events.get("populated") != "0" or values["cgroup.procs"].strip():
+                        return False
+                    for child in path.iterdir():
+                        item = child.lstat()
+                        if stat.S_ISLNK(item.st_mode):
+                            raise ValidationError("cleanup_failed")
+                        if stat.S_ISDIR(item.st_mode):
+                            pending.append(child)
+                    after = path.lstat()
+                    if (actual.st_dev, actual.st_ino) != (after.st_dev, after.st_ino):
+                        raise ValidationError("cleanup_failed")
+                    result.append((str(path.relative_to(base)), actual.st_dev, actual.st_ino))
+                finally:
+                    os.close(descriptor)
+            final = base.lstat()
+            if (before.st_dev, before.st_ino) != (final.st_dev, final.st_ino):
+                raise ValidationError("cleanup_failed")
+            return tuple(sorted(result))
+
+        before, after = sample(), sample()
+        return before is not False and before == after
+
     def cleanup(self):
-        failed = False
-        for role in sorted(self.launched):
+        unit_failed = gate_failed = False
+        # The retained stop witness is short-lived: reconcile the broker and
+        # its gate before stopping the worker. Never detach while it is alive.
+        for role in ("broker", "worker"):
+            if role not in self.launched:
+                continue
             unit = self.units[role]
             try:
                 saved = self.invocations.get(role)
@@ -1446,25 +1927,52 @@ class Validation:
                     raise ValidationError("cleanup_failed")
                 if state.get("MainPID") != "0" and startticks(PROC / str(saved[1])) != saved[2]:
                     raise ValidationError("cleanup_failed")
+            except Exception:
+                unit_failed = True
+                continue
+            if (
+                role == "broker"
+                and self.network_gate is not None
+                and self.report["network_gate_stop_proof_sha256"] is None
+            ):
+                try:
+                    self.prepare_network_stop()
+                except Exception:
+                    # A failed read-only witness must not prevent containment
+                    # of this already authenticated, exact synthetic instance.
+                    gate_failed = True
+            try:
                 self._run(["/usr/bin/systemctl", "stop", unit], timeout=30)
                 raw = self._run(["/usr/bin/systemctl", "show", "--property=MainPID", unit], timeout=5)
                 if raw.strip() != b"MainPID=0":
                     raise ValidationError("cleanup_failed")
-                group = CGROUP / "system.slice" / unit
-                if group.exists():
-                    events = dict(line.split() for line in (group / "cgroup.events").read_text().splitlines())
-                    if events.get("populated") != "0" or (group / "cgroup.procs").read_text().strip():
-                        raise ValidationError("cleanup_failed")
+                if not self.owned_group_empty(unit):
+                    raise ValidationError("cleanup_failed")
             except Exception:
-                failed = True
-        self.report["units_stopped"] = not failed
-        if self.network_gate is not None:
-            try:
-                self.network_gate.cleanup()
-                self.report["network_gate_cleaned"] = True
-            except Exception:
-                failed = True
-        if failed:
+                unit_failed = True
+                continue
+            if role == "broker" and self.network_gate is not None:
+                try:
+                    self.cleanup_network_gate()
+                except Exception:
+                    gate_failed = True
+            if role == "worker" and "worker" in self.unit_references:
+                try:
+                    self.release_unit_reference("worker")
+                except Exception:
+                    gate_failed = True
+        try:
+            self.close_unit_reference()
+        except Exception:
+            gate_failed = True
+        self.report["network_gate_cleaned"] = (
+            self.network_cleanup_complete
+            and self.report["unit_reference_released"]
+            and self.report["unit_reference_error_class"] is None
+            and not gate_failed
+        )
+        self.report["units_stopped"] = not unit_failed
+        if unit_failed or gate_failed:
             self.report["passed"] = False
             self.report["network_gate_verified"] = False
             self.report["cleanup_error_class"] = "cleanup_failed"
@@ -1556,6 +2064,7 @@ class Validation:
                 self.verify_network_gate()
                 send(channel, {"schema": 1, "kind": "allowed", "nonce": self.nonce})
                 self.verify_network_gate()
+                self.prepare_network_stop()
                 send(channel, {"schema": 1, "kind": "preflight-finish", "nonce": self.nonce})
                 self.report["passed"] = True
                 self.report["stage"] = "network_preflight_complete"
@@ -1585,6 +2094,7 @@ class Validation:
             send(channel, {"schema": 1, "kind": "finish", "nonce": self.nonce})
             self.broker_result(receive(channel))
             self.verify_network_gate()
+            self.prepare_network_stop()
             send(channel, {"schema": 1, "kind": "result-ack", "nonce": self.nonce})
             self.completed("broker")
             self.stage("verification")
@@ -1597,11 +2107,13 @@ class Validation:
                 detail if isinstance(detail, str) and detail in SAFE_ERRORS else "supervision_failed"
             )
         finally:
+            # Closing the IPC channel can release the broker naturally. Keep
+            # it until the active stop witness and exact-unit cleanup finish.
+            self.cleanup()
             if channel is not None:
                 channel.close()
             if listener is not None:
                 listener.close()
-            self.cleanup()
             self.report["finished_at"] = int(time.time())
             if self.workspace_created:
                 try:

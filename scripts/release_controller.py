@@ -61,8 +61,9 @@ RETIREMENT_HELPERS = {
 }
 MARKET_INTEGRATION_HELPERS = {
     "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
-    "market_live_validation.py": "a68e11d8e3805d00201d4e1ff77462a2460f14fc03fe200383ef7e4af42a665b",
-    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
+    "market_live_validation.py": "298ff2992bc8c3d9a87a22a956af3c8c8d4373269873c1124ab5ccf09ae6b41f",
+    "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
+    "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }
 RETIREMENT_STOP_HELPERS = {
     **RETIREMENT_HELPERS,
@@ -70,11 +71,12 @@ RETIREMENT_STOP_HELPERS = {
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "1f491336c6301a164bf09586e62cf4c0f713659a1f5780d27298d5e48241684f",
+    "live_integration_validation.py": "a5dbd65258475ca4107d2f3ce98b814057f231633622b5b1caaf663d9c76e2af",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
-    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
+    "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
+    "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }
 
 # This small stdlib loader stays below Linux's single-argument limit. The
@@ -519,6 +521,7 @@ def main():
         "live-transport-sha256",
         "live-policy-sha256",
         "cgroup-network-gate-sha256",
+        "systemd-unit-reference-sha256",
         "retirement-probe-sha256",
         "retirement-validation-sha256",
         "retirement-attempt",

@@ -207,6 +207,7 @@ class KernelFixture:
     """In-memory object/FD lifecycle only. Never creates an OS FD or socket."""
 
     def __init__(self):
+        self.profile = "linux-5.15-source-audit"
         self.attached = {}
         self.inherited = {}
         self.infos = {}
@@ -226,6 +227,7 @@ class KernelFixture:
         self.events.append(("identity", stopped))
         if not self.identity_ok or stopped != self.stopped:
             raise gate.GateError("identity_rejected")
+        return "retained_empty" if stopped else "running"
 
     def query(self, fd, hook, *, effective):
         assert fd == 40
@@ -255,6 +257,16 @@ class KernelFixture:
             raise gate.GateError("attach_rejected")
         self.attached[hook] = (self.infos[program_fd].identifier,)
 
+    def open_program(self, identifier):
+        matches = [(fd, info) for fd, info in self.infos.items() if info.identifier == identifier]
+        if all(fd in self.closed for fd, info in matches) and not any(
+            identifier in ids for ids in self.attached.values()
+        ):
+            raise gate.GateError("network_gate_syscall_failed", command=13, error_number=2)
+        fd = max(self.infos) + 1
+        self.infos[fd] = matches[0][1]
+        return fd
+
     def detach(self, fd, hook, program_fd):
         assert fd == 40 and self.stopped
         assert self.attached[hook] == (self.infos[program_fd].identifier,)
@@ -273,6 +285,7 @@ def test_install_reverify_and_cleanup_only_after_actual_stopped_identity():
     receipt = instance.install()
     assert [row[:2] for row in receipt] == [(10, 500), (11, 501), (14, 502), (15, 503)]
     assert instance.verify() == receipt and kernel.closed == []
+    instance.prepare_stop()
     with pytest.raises(gate.GateError, match="cleanup_failed"):
         instance.cleanup()
     assert not any(row[0] == "detach" for row in kernel.events)
@@ -328,7 +341,7 @@ def test_partial_install_holds_descriptors_until_owned_stopped_cleanup(boundary)
     kernel.stopped = True
     kernel.fail_info = None
     instance.cleanup()
-    assert instance.state == "cleaned"
+    assert instance.state == "failed"
     assert set(kernel.closed) == {40, *kernel.infos}
 
 
@@ -358,14 +371,15 @@ def test_interruption_retains_failed_state_for_owned_cleanup():
         instance.install()
     assert instance.state == "failed" and kernel.closed == []
     kernel.stopped = True
-    instance.cleanup()
-    assert instance.state == "cleaned"
+    proof = instance.cleanup()
+    assert instance.state == "failed" and proof["complete"] is False
 
 
 def test_uncertain_close_is_never_retried_on_possibly_reused_descriptor():
     kernel = KernelFixture()
     instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
     instance.install()
+    instance.prepare_stop()
     kernel.stopped = True
 
     def uncertain(fd):
@@ -462,6 +476,7 @@ def test_actual_identity_parser_rejects_mismatched_evidence(monkeypatch, mutatio
         "Id": config.unit,
         "InvocationID": "d" * 32 if mutation == "invocation" else config.invocation_id,
         "MainPID": str(config.pid),
+        "ExecMainPID": str(config.pid),
         "ControlGroup": "/system.slice/other.service" if mutation == "path" else config.cgroup,
         "ActiveState": "active",
         "User": config.account,
@@ -491,3 +506,393 @@ def test_actual_identity_parser_rejects_mismatched_evidence(monkeypatch, mutatio
     else:
         with pytest.raises(gate.GateError):
             kernel.check_identity(40, config, stopped=mutation == "stopped_populated")
+
+
+class CollectedKernel(KernelFixture):
+    """Synthetic 6.8 offline/async release; no actual syscall or kernel claim."""
+
+    def __init__(self):
+        super().__init__()
+        self.profile = "linux-6.8"
+        self.query_error = 2
+        self.release_delay = 0
+        self.lookup_counts = {}
+        self.lookup_fds = []
+        self.bad_lookup_info = False
+        self.release_error = 2
+
+    def check_identity(self, fd, config, *, stopped):
+        super().check_identity(fd, config, stopped=stopped)
+        return "collected_offline" if stopped else "running"
+
+    def query(self, fd, hook, *, effective):
+        if self.stopped:
+            self.events.append(("offline_query", hook, effective, self.query_error))
+            if self.query_error is None:
+                return 0, ()
+            raise gate.GateError("network_gate_syscall_failed", command=16, error_number=self.query_error)
+        flags, ids = super().query(fd, hook, effective=effective)
+        return (0 if effective else flags), ids
+
+    def open_program(self, identifier):
+        assert all(fd in self.closed for fd in (100, 101, 102, 103)), "lookup cannot precede owned close"
+        self.events.append(("get_known_id", identifier))
+        count = self.lookup_counts.get(identifier, 0)
+        self.lookup_counts[identifier] = count + 1
+        if count < self.release_delay:
+            info = next(info for fd, info in self.infos.items() if info.identifier == identifier)
+            fd = 700 + len(self.lookup_fds)
+            self.lookup_fds.append(fd)
+            self.infos[fd] = dataclasses.replace(info, maps=1) if self.bad_lookup_info else info
+            return fd
+        raise gate.GateError("network_gate_syscall_failed", command=13, error_number=self.release_error)
+
+
+@pytest.mark.parametrize("profile", ["linux-6.8", "linux-5.15-source-audit"])
+@pytest.mark.parametrize("effective", [False, True])
+def test_kernel_profiles_require_distinct_exact_query_flags(profile, effective):
+    kernel = KernelFixture()
+    kernel.profile = profile
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance._cgroup_fd = 40
+    expected = 0 if profile == "linux-6.8" and effective else 2
+
+    def correct(fd, hook, *, effective):
+        return (0 if profile == "linux-6.8" and effective else 2), (500,)
+
+    kernel.query = correct
+    instance._query(10, (500,))
+
+    def wrong(fd, hook, *, effective):
+        current = 0 if profile == "linux-6.8" and effective else 2
+        return (2 if expected == 0 else 0) if effective == test_effective else current, (500,)
+
+    test_effective = effective
+    kernel.query = wrong
+    with pytest.raises(gate.GateError):
+        instance._query(10, (500,))
+
+
+def test_collected_cgroup_requires_eight_actual_errno_queries_and_no_detach():
+    kernel = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    programs = instance.install()
+    stop = instance.prepare_stop()
+    assert stop["programs"] == programs and stop["profile"] == "linux-6.8"
+    kernel.stopped = True
+    result = instance.cleanup()
+    assert result["complete"] is True and result["objects_released"] is True
+    assert result["mode"] == "collected_offline" and result["detached_hooks"] == []
+    assert result["offline_queries"] == [
+        {"hook": hook, "effective": effective, "errno": 2}
+        for hook in (10, 11, 14, 15)
+        for effective in (False, True)
+    ]
+    assert not any(row[0] == "detach" for row in kernel.events)
+    assert {row[1] for row in kernel.events if row[0] == "get_known_id"} == {500, 501, 502, 503}
+    assert set(kernel.closed) == {40, 100, 101, 102, 103}
+
+
+@pytest.mark.parametrize("query_error", [None, 0, 1, 5, 9, 13, 22])
+def test_collected_query_success_or_non_enoent_never_becomes_empty_success(query_error):
+    kernel = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped, kernel.query_error = True, query_error
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert kernel.closed == [] and not any(row[0] == "detach" for row in kernel.events)
+    assert instance.diagnostic()["stage"] == "offline_query"
+    if query_error is not None:
+        assert instance.diagnostic()["command"] == 16 and instance.diagnostic()["errno"] == query_error
+
+
+def test_stop_witness_must_precede_stop_and_match_all_programs(monkeypatch):
+    kernel = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    kernel.stopped = True
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert kernel.closed == []
+    other = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=other)
+    instance.install()
+    instance.prepare_stop()
+    other.stopped = True
+    monkeypatch.setattr(gate, "_STOP_FRESH_NS", 0)
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert other.closed == []
+
+
+def test_async_object_release_closes_every_lookup_fd_and_only_polls_known_ids(monkeypatch):
+    kernel = CollectedKernel()
+    kernel.release_delay = 2
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    monkeypatch.setattr(gate.time, "sleep", lambda _: None)
+    result = instance.cleanup()
+    assert result["objects_released"] is True
+    assert len(kernel.lookup_fds) == 8
+    assert all(fd in kernel.closed for fd in kernel.lookup_fds)
+    assert all(count == 3 for count in kernel.lookup_counts.values())
+    assert set(kernel.lookup_counts) == {500, 501, 502, 503}
+
+
+@pytest.mark.parametrize("mutation", ["identity", "not_released", "wrong_errno"])
+def test_release_timeout_changed_object_or_unexpected_errno_is_unknown_and_not_retried(monkeypatch, mutation):
+    kernel = CollectedKernel()
+    kernel.release_delay = 10 if mutation != "wrong_errno" else 0
+    kernel.bad_lookup_info = mutation == "identity"
+    kernel.release_error = 13 if mutation == "wrong_errno" else 2
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    monkeypatch.setattr(gate, "_RELEASE_ROUNDS", 2)
+    monkeypatch.setattr(gate.time, "sleep", lambda _: None)
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert instance.state == "failed"
+    assert all(fd in kernel.closed for fd in kernel.lookup_fds)
+    assert 40 not in kernel.closed
+    before = list(kernel.closed)
+    with pytest.raises(gate.GateError):
+        instance.cleanup()
+    assert kernel.closed == before
+    assert instance.diagnostic()["stage"] == "object_release"
+
+
+def test_partial_four_loaded_but_failed_attach_is_not_complete_policy_cleanup():
+    kernel = CollectedKernel()
+    kernel.fail_attach = 15
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    with pytest.raises(gate.GateError, match="install_failed"):
+        instance.install()
+    assert len(instance._programs) == 4
+    kernel.stopped = True
+    result = instance.cleanup()
+    assert result["mode"] == "partial_closed" and result["complete"] is False
+    assert result["objects_released"] is False and instance.state == "failed"
+    assert set(kernel.closed) == {40, 100, 101, 102, 103}
+    assert not kernel.lookup_counts and not any(row[0] == "detach" for row in kernel.events)
+
+
+def test_syscall_errno_diagnostic_is_bounded_and_contains_no_raw_error_or_pointer():
+    kernel = object.__new__(gate._LinuxKernel)
+
+    def denied(*args):
+        ctypes.set_errno(13)
+        return -1
+
+    kernel.libc = types.SimpleNamespace(syscall=denied)
+    with pytest.raises(gate.GateError) as error:
+        kernel._call(5, bytearray(128))
+    assert gate.safe_diagnostic(error.value) == {"stage": "construct", "command": 5, "errno": 13}
+    assert gate.safe_diagnostic(
+        types.SimpleNamespace(stage="private/raw", command=12345, error_number="secret")
+    ) == {
+        "stage": "unknown",
+        "command": None,
+        "errno": None,
+    }
+
+
+def test_get_program_fd_uses_only_known_identifier_uapi_prefix_without_real_syscall():
+    kernel = object.__new__(gate._LinuxKernel)
+
+    def call(command, attr):
+        assert command == 13 and struct.unpack_from("<I", attr)[0] == 501
+        assert attr[4:] == bytes(124)
+        return 71
+
+    kernel._call = call
+    assert kernel.open_program(501) == 71
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "live_pid",
+        "reused_pid",
+        "proc_permission",
+        "path_permission",
+        "path_symlink",
+        "retained_inode",
+        "retained_filesystem",
+        "invocation",
+        "exec_pid",
+        "main_pid",
+        "active",
+        "group_not_cleared",
+        "user",
+        "missing_property",
+        "duplicate_property",
+    ],
+)
+def test_collected_identity_requires_actual_missing_path_pid_and_retained_cgroup2_fd(monkeypatch, mutation):
+    config = descriptor()
+    kernel = object.__new__(gate._LinuxKernel)
+    observations = []
+
+    def statfs(fd, buffer):
+        assert fd == 40
+        magic = 0 if mutation == "retained_filesystem" else 0x63677270
+        ctypes.memmove(buffer, struct.pack("<q", magic), 8)
+        return 0
+
+    kernel.libc = types.SimpleNamespace(fstatfs=statfs)
+    filesystem = types.SimpleNamespace(
+        st_mode=0o40755,
+        st_uid=0,
+        st_ino=config.cgroup_inode + int(mutation == "retained_inode"),
+        st_dev=config.cgroup_device,
+    )
+
+    def actual_stat(path, *, follow_symlinks):
+        assert follow_symlinks is False
+        observations.append(path)
+        if path == "/proc/" + str(config.pid):
+            if mutation in {"live_pid", "reused_pid"}:
+                return filesystem
+            if mutation == "proc_permission":
+                raise PermissionError(13, "synthetic")
+            raise FileNotFoundError(2, "synthetic")
+        assert path == config.path
+        if mutation == "path_permission":
+            raise PermissionError(13, "synthetic")
+        if mutation == "path_symlink":
+            return types.SimpleNamespace(
+                st_mode=0o120777, st_uid=0, st_ino=config.cgroup_inode, st_dev=config.cgroup_device
+            )
+        raise FileNotFoundError(2, "synthetic")
+
+    monkeypatch.setattr(gate, "os", types.SimpleNamespace(fstat=lambda fd: filesystem, stat=actual_stat))
+    monkeypatch.setattr(
+        gate, "pwd", types.SimpleNamespace(getpwnam=lambda name: types.SimpleNamespace(pw_uid=config.uid))
+    )
+    state = {
+        "Id": config.unit,
+        "InvocationID": config.invocation_id,
+        "MainPID": "0",
+        "ExecMainPID": str(config.pid),
+        "ControlGroup": "",
+        "ActiveState": "inactive",
+        "User": config.account,
+    }
+    replacements = {
+        "invocation": ("InvocationID", "d" * 32),
+        "exec_pid": ("ExecMainPID", "9999"),
+        "main_pid": ("MainPID", str(config.pid)),
+        "active": ("ActiveState", "active"),
+        "group_not_cleared": ("ControlGroup", config.cgroup),
+        "user": ("User", "root"),
+    }
+    if mutation in replacements:
+        key, value = replacements[mutation]
+        state[key] = value
+    if mutation == "missing_property":
+        state.pop("ExecMainPID")
+
+    def show(argv, **kwargs):
+        assert argv == [
+            "/usr/bin/systemctl",
+            "show",
+            "--all",
+            "--property=Id,InvocationID,MainPID,ExecMainPID,ControlGroup,ActiveState,User",
+            config.unit,
+        ]
+        raw = "".join(f"{key}={value}\n" for key, value in state.items())
+        if mutation == "duplicate_property":
+            raw += "MainPID=0\n"
+        return types.SimpleNamespace(stdout=raw.encode(), stderr=b"")
+
+    monkeypatch.setattr(gate, "subprocess", types.SimpleNamespace(run=show))
+    if mutation is None:
+        assert kernel.check_identity(40, config, stopped=True) == "collected_offline"
+        assert observations.count("/proc/" + str(config.pid)) >= 2
+    else:
+        with pytest.raises(gate.GateError):
+            kernel.check_identity(40, config, stopped=True)
+
+
+def test_known_id_cannot_reappear_after_enoent_even_with_identical_metadata(monkeypatch):
+    kernel = CollectedKernel()
+    kernel.release_delay = 2
+    original = kernel.open_program
+
+    def lookup(identifier):
+        if identifier == 500 and not kernel.lookup_counts.get(identifier):
+            kernel.lookup_counts[identifier] = 1
+            raise gate.GateError("network_gate_syscall_failed", command=13, error_number=2)
+        return original(identifier)
+
+    kernel.open_program = lookup
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    monkeypatch.setattr(gate.time, "sleep", lambda _: None)
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert all(fd in kernel.closed for fd in kernel.lookup_fds)
+    assert instance.state == "failed" and 40 not in kernel.closed
+
+
+@pytest.mark.parametrize(
+    ("release", "expected"),
+    [
+        ("5.15.0-164-generic", "linux-5.15-source-audit"),
+        ("6.8.0-87-generic", "linux-6.8"),
+        ("6.9.0", None),
+        ("6.80.0", None),
+        ("6.8x", None),
+        ("5.150.0", None),
+    ],
+)
+def test_only_exact_source_audited_kernel_profiles_are_selectable_without_syscalls(
+    monkeypatch, release, expected
+):
+    monkeypatch.setattr(gate, "sys", types.SimpleNamespace(platform="linux", byteorder="little"))
+    monkeypatch.setattr(
+        gate, "platform", types.SimpleNamespace(machine=lambda: "x86_64", release=lambda: release)
+    )
+    monkeypatch.setattr(gate, "os", types.SimpleNamespace(geteuid=lambda: 0))
+
+    def forbidden(*args):
+        pytest.fail("constructor must never issue a BPF syscall")
+
+    libc = types.SimpleNamespace(syscall=forbidden, fstatfs=lambda *args: 0)
+    monkeypatch.setattr(gate.ctypes, "CDLL", lambda *args, **kwargs: libc)
+    if expected is None:
+        with pytest.raises(gate.GateError, match="unsupported"):
+            gate._LinuxKernel()
+    else:
+        assert gate._LinuxKernel().profile == expected
+
+
+def test_even_all_enoent_must_arrive_within_the_release_deadline(monkeypatch):
+    kernel = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    clock = iter((1.0, 1.0, 7.0))
+    monkeypatch.setattr(
+        gate,
+        "time",
+        types.SimpleNamespace(
+            monotonic=lambda: next(clock, 7.0), monotonic_ns=lambda: 1, sleep=lambda _: None
+        ),
+    )
+    # Keep the existing witness inside its separate stop freshness window.
+    old = instance._stop_witness
+    instance._stop_witness = (old[0], old[1], 1)
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert not kernel.lookup_counts and instance.diagnostic()["stage"] == "object_release"

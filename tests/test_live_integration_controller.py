@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import test_release_controller as existing
+from test_network_gate_wiring import ProofReference
 
 from scripts import live_integration_validation as helper
 
@@ -145,6 +146,8 @@ def test_mac_requires_all_four_explicit_pins_new_attempt_and_opaque_receipt(prep
         "live_worker_sha256",
         "live_transport_sha256",
         "live_policy_sha256",
+        "cgroup_network_gate_sha256",
+        "systemd_unit_reference_sha256",
     ):
         saved = getattr(args, name)
         setattr(args, name, None)
@@ -211,6 +214,21 @@ def gate_fixture(prepared, monkeypatch, *, module=helper, validator=None):
     validator.request = getattr(validator, "request", {"candidate": COMMIT, "release_id": ATTEMPT})
     validator.network_programs = ("synthetic retained-program receipt",)
     validator.network_gate = types.SimpleNamespace(verify=lambda: validator.network_programs)
+    validator.reference_roles = ("broker", "worker")
+    validator.unit_references, validator.reference_identities, validator.reference_unique_names = {}, {}, {}
+    validator.report = getattr(validator, "report", {})
+    validator.report.update(unit_reference_acquire_sha256="a" * 64, unit_reference_error_class=None)
+    for role, pid, ticks, uid in (("broker", 654, 501, 2002), ("worker", 321, 500, 2001)):
+        identity = {
+            "unit": "prism-live-" + role + "-" + COMMIT[:12] + "-" + nonce + ".service",
+            "invocation_id": "e" * 32,
+            "pid": pid,
+            "startticks": ticks,
+            "uid": uid,
+        }
+        validator.reference_identities[role] = identity
+        validator.reference_unique_names[role] = ":1.234"
+        validator.unit_references[role] = ProofReference(identity)
     engine._live_validator = validator
     kernel = {
         "worker_uids": [2001] * 4,
@@ -484,6 +502,16 @@ def safe_summary(data):
         "network_gate_verified": True,
         "network_gate_verified_before_cleanup": True,
         "network_gate_cleaned": True,
+        "network_gate_diagnostic": {"stage": "complete", "command": None, "errno": None},
+        "network_gate_stop_proof_sha256": "f" * 64,
+        "network_gate_cleanup_proof_sha256": "1" * 64,
+        "network_gate_cleanup_mode": "retained_empty",
+        "network_gate_objects_released": True,
+        "unit_reference_acquire_sha256": "c" * 64,
+        "unit_reference_stop_sha256": "d" * 64,
+        "unit_reference_release_sha256": "e" * 64,
+        "unit_reference_released": True,
+        "unit_reference_error_class": None,
         "key_acquisition_attempted": True,
         "broker_filesystem_checks": dict.fromkeys(helper.BROKER_FILESYSTEM_CHECKS, True),
         "broker_preflight_facts": dict.fromkeys(

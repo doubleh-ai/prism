@@ -14,6 +14,7 @@ import types
 from pathlib import Path
 
 import pytest
+from test_network_gate_wiring import ProofGate, bind_reference
 
 from scripts import live_integration_validation as supervisor
 
@@ -63,8 +64,9 @@ def validation(tmp_path, monkeypatch):
         "broker_pid": 654,
     }
     value.test_log, value.test_calls = log, calls
-    value.network_programs = ()
-    value.network_gate = types.SimpleNamespace(verify=lambda: (), cleanup=lambda: None)
+    value.network_gate = ProofGate()
+    value.network_programs = value.network_gate.programs
+    bind_reference(value)
     return value
 
 
@@ -526,6 +528,7 @@ def test_cleanup_never_stops_unowned_reused_instance_or_accepts_populated_descen
 
 
 def test_cleanup_stops_only_exact_attempt_and_requires_kernel_empty(validation, monkeypatch):
+    validation.work.mkdir(parents=True)
     validation.launched = {"worker", "broker"}
     validation.invocations = {role: ("c" * 32, pid, 500) for role, pid in validation.pids.items()}
     monkeypatch.setattr(
@@ -650,10 +653,14 @@ def test_bootstrap_is_compileable_stdlib_only_and_key_not_config_or_environment(
     assert "sys.flags.no_site" in supervisor.BROKER_BOOTSTRAP and "SO_PEERCRED" in supervisor.BROKER_BOOTSTRAP
 
 
+@pytest.mark.parametrize("preflight_only", [False, True])
 def test_complete_offline_state_machine_preserves_private_receipt_and_single_key_boundary(
-    validation, monkeypatch
+    validation, monkeypatch, preflight_only
 ):
     """All OS/model witnesses below are explicitly fixtures, never live claims."""
+    validation.preflight_only = preflight_only
+    validation.report["preflight_only"] = preflight_only
+    control_order = []
     validation.invocations = {"broker": ("c" * 32, 654, 102), "worker": ("d" * 32, 321, 101)}
     monkeypatch.setattr(supervisor.sys, "platform", "linux")
     monkeypatch.setattr(supervisor.os, "geteuid", lambda: 0)
@@ -716,7 +723,17 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
             pass
 
     channel.settimeout = lambda timeout: None
-    channel.close = lambda: None
+    channel.close = lambda: control_order.append("channel_close")
+    actual_send = supervisor.send
+
+    def checked_send(channel, message):
+        if message["kind"] in {"result-ack", "preflight-finish"}:
+            assert (validation.work / "network-gate-stop.json").exists()
+            assert validation.report["network_gate_stop_proof_sha256"] is not None
+            control_order.append(message["kind"])
+        actual_send(channel, message)
+
+    monkeypatch.setattr(supervisor, "send", checked_send)
     monkeypatch.setattr(supervisor.socket, "socket", lambda *args: Listener())
     monkeypatch.setattr(validation, "workspace", workspace)
     monkeypatch.setattr(validation, "start", lambda role, *args: {"worker": 321, "broker": 654}[role])
@@ -742,10 +759,21 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
         ]
     )
     monkeypatch.setattr(supervisor, "receive", lambda channel: next(incoming))
-    monkeypatch.setattr(validation, "cleanup", lambda: validation.report.update(units_stopped=True))
+
+    def cleanup():
+        control_order.append("own_cleanup")
+        validation.report.update(units_stopped=True)
+
+    monkeypatch.setattr(validation, "cleanup", cleanup)
     result = validation.execute()
-    assert result["passed"] and result["error_class"] is None and result["stage"] == "complete"
-    assert key_calls == ["once"]
+    assert result["passed"] and result["error_class"] is None
+    assert result["stage"] == ("network_preflight_complete" if preflight_only else "complete")
+    assert key_calls == ([] if preflight_only else ["once"])
+    assert control_order == [
+        "preflight-finish" if preflight_only else "result-ack",
+        "own_cleanup",
+        "channel_close",
+    ]
     assert (
         not result["production_verified"]
         and not result["native_fetch_verified"]
@@ -756,10 +784,13 @@ def test_complete_offline_state_machine_preserves_private_receipt_and_single_key
         stored == result
         and stat.S_IMODE((validation.work / "validation-result.json").stat().st_mode) == 0o600
     )
-    permit = json.loads((validation.work / "root-allow.json").read_bytes())
-    assert permit["binding"] == validation.binding and permit["kernel"] == kernel
-    assert permit["witness"]["checked_at"] <= permit["allowed_at"]
-    assert stat.S_IMODE((validation.work / "root-allow.json").stat().st_mode) == 0o444
+    if preflight_only:
+        assert not (validation.work / "root-allow.json").exists()
+    else:
+        permit = json.loads((validation.work / "root-allow.json").read_bytes())
+        assert permit["binding"] == validation.binding and permit["kernel"] == kernel
+        assert permit["witness"]["checked_at"] <= permit["allowed_at"]
+        assert stat.S_IMODE((validation.work / "root-allow.json").stat().st_mode) == 0o444
     assert "public-synthetic-key-only" not in json.dumps(validation.test_log) + json.dumps(result)
 
 

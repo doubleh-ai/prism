@@ -76,8 +76,9 @@ INTEGRATION_PROBES = {
 }
 MARKET_INTEGRATION_HELPERS = {
     "market_live_probe.py": "904617183a1d9c1c99dca2a07d38a26c4165246385979fc038dfb61a0b0ebbab",
-    "market_live_validation.py": "a68e11d8e3805d00201d4e1ff77462a2460f14fc03fe200383ef7e4af42a665b",
-    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
+    "market_live_validation.py": "298ff2992bc8c3d9a87a22a956af3c8c8d4373269873c1124ab5ccf09ae6b41f",
+    "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
+    "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }
 MARKET_WORKER_SHA256 = "ef6d587b97f9c8a6ad9c532a20c0ddf56baa46b64774326c09ed689eab86d7cc"
 MARKET_BOUNDARIES = {
@@ -92,6 +93,115 @@ MARKET_BOUNDARIES = {
     "market_network_permit",
 }
 NETWORK_EXTRA_NEGATIVES = {"ipv6_loopback", "ipv4_mapped_public", "udp_provider", "udp6_loopback"}
+NETWORK_DIAGNOSTIC_STAGES = frozenset(
+    {
+        "not_started",
+        "construct",
+        "open_cgroup",
+        "identity",
+        "query_direct",
+        "query_effective",
+        "load",
+        "info",
+        "attach",
+        "verify",
+        "prepare_stop",
+        "stop_identity",
+        "offline_query",
+        "detach",
+        "close_owned",
+        "object_release",
+        "partial_cleanup",
+        "complete",
+        "unknown",
+    }
+)
+UNIT_REFERENCE_ERRORS = frozenset(
+    {
+        "reference_platform_rejected",
+        "reference_library_rejected",
+        "reference_bus_rejected",
+        "reference_identity_rejected",
+        "reference_refs_rejected",
+        "reference_state_rejected",
+        "reference_call_failed",
+        "reference_close_failed",
+    }
+)
+NETWORK_CLEANUP_FIELDS = {
+    "network_gate_diagnostic",
+    "network_gate_stop_proof_sha256",
+    "network_gate_cleanup_proof_sha256",
+    "network_gate_cleanup_mode",
+    "network_gate_objects_released",
+    "unit_reference_acquire_sha256",
+    "unit_reference_stop_sha256",
+    "unit_reference_release_sha256",
+    "unit_reference_released",
+    "unit_reference_error_class",
+}
+
+
+def valid_network_cleanup_record(value):
+    """Finite safe evidence only; private kernel proofs remain in the workdir."""
+    diagnostic = value.get("network_gate_diagnostic")
+    if (
+        type(diagnostic) is not dict
+        or set(diagnostic) != {"stage", "command", "errno"}
+        or type(diagnostic["stage"]) is not str
+        or diagnostic["stage"] not in NETWORK_DIAGNOSTIC_STAGES
+        or diagnostic["command"] is not None
+        and (type(diagnostic["command"]) is not int or diagnostic["command"] not in {5, 8, 9, 13, 15, 16})
+        or diagnostic["errno"] is not None
+        and (type(diagnostic["errno"]) is not int or not 0 <= diagnostic["errno"] <= 4095)
+        or type(value.get("network_gate_objects_released")) is not bool
+    ):
+        return False
+    stop, cleanup = (value.get("network_gate_" + name + "_proof_sha256") for name in ("stop", "cleanup"))
+    if any(
+        item is not None and (type(item) is not str or not DIGEST.fullmatch(item)) for item in (stop, cleanup)
+    ):
+        return False
+    mode = value.get("network_gate_cleanup_mode")
+    if mode is not None and (
+        type(mode) is not str or mode not in {"retained_empty", "collected_offline", "partial_closed"}
+    ):
+        return False
+    reference = [value.get("unit_reference_" + name + "_sha256") for name in ("acquire", "stop", "release")]
+    if (
+        type(value.get("unit_reference_released")) is not bool
+        or value.get("unit_reference_error_class") is not None
+        and (
+            type(value["unit_reference_error_class"]) is not str
+            or value["unit_reference_error_class"] not in UNIT_REFERENCE_ERRORS
+        )
+        or any(
+            item is not None and (type(item) is not str or not DIGEST.fullmatch(item)) for item in reference
+        )
+        or reference[1] is not None
+        and reference[0] is None
+        or reference[2] is not None
+        and any(item is None for item in reference[:2])
+        or value["unit_reference_released"] is not (reference[2] is not None)
+    ):
+        return False
+    released = value["network_gate_objects_released"]
+    positive = mode in {"retained_empty", "collected_offline"}
+    return (
+        (cleanup is None) == (mode is None)
+        and (not released or positive and stop is not None and cleanup is not None)
+        and value.get("network_gate_cleaned")
+        is (
+            released
+            and positive
+            and stop is not None
+            and cleanup is not None
+            and value["unit_reference_released"]
+            and value["unit_reference_error_class"] is None
+        )
+    )
+
+
 NETWORK_RUNTIME_PROPERTIES = "MainPID,InvocationID,WorkingDirectory,ExecStart"
 MARKET_CHECKS = {
     "unauthenticated_api_denied",
@@ -118,11 +228,12 @@ MARKET_BOOT_CHECKS = {
 }
 MARKET_UNIT_PROPERTIES = "MainPID,ExecMainPID,InvocationID,ActiveState,ExecMainStatus,Result,User,Group,ControlGroup,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateNetwork,KillMode,RuntimeMaxUSec,IPAddressDeny,IPAddressAllow,LimitCORE"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "1f491336c6301a164bf09586e62cf4c0f713659a1f5780d27298d5e48241684f",
+    "live_integration_validation.py": "a5dbd65258475ca4107d2f3ce98b814057f231633622b5b1caaf663d9c76e2af",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "e92bf2120df61b9b14aeea1b1e147bf11218785f54ab50d84f7e12a33cc80e76",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
-    "cgroup_network_gate.py": "7a0cf487d6456d73412a873c89d1e08c2a4a5643c663529b2c22ae5341f4c22c",
+    "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
+    "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }
 LIVE_RESOLVE_CODE = 'import json,socket;print(json.dumps(sorted({row[4][0] for row in socket.getaddrinfo("api.deepseek.com",443,type=socket.SOCK_STREAM)})))'
 LIVE_RESOLVE_COMMAND = ["/usr/bin/python3", "-I", "-B", "-S", "-c", LIVE_RESOLVE_CODE]
@@ -2706,6 +2817,8 @@ class RemoteRelease:
             or module.SAFE_ERRORS != LIVE_ERRORS
             or module.RESOLVE_CODE != LIVE_RESOLVE_CODE
             or LIVE_INTEGRATION_HELPERS["cgroup_network_gate.py"] != module.NETWORK_GATE_SHA256
+            or LIVE_INTEGRATION_HELPERS["systemd_unit_reference.py"] != module.UNIT_REFERENCE_SHA256
+            or module.UNIT_REFERENCE_ERRORS != UNIT_REFERENCE_ERRORS
             or module.EXTRA_NEGATIVES != NETWORK_EXTRA_NEGATIVES
         ):
             raise ReleaseError("live_helper_source_rejected")
@@ -3046,6 +3159,7 @@ class RemoteRelease:
             "production_verified",
         }
         final = {
+            *NETWORK_CLEANUP_FIELDS,
             "schema",
             "action",
             "candidate",
@@ -3121,6 +3235,8 @@ class RemoteRelease:
             "network_gate_cleaned",
             "key_acquisition_attempted",
         }
+        if not valid_network_cleanup_record(value):
+            raise ReleaseError("live_safe_record_rejected")
         requests = value.get("requests")
         errno = value.get("broker_negative_errno")
         filesystem = value.get("broker_filesystem_checks")
@@ -3734,6 +3850,8 @@ class RemoteRelease:
             or module.BOOT_CHECKS != MARKET_BOOT_CHECKS
             or {"qt.gtimg.cn", "money.finance.sina.com.cn"} != module.HOSTS
             or MARKET_INTEGRATION_HELPERS["cgroup_network_gate.py"] != module.NETWORK_GATE_SHA256
+            or MARKET_INTEGRATION_HELPERS["systemd_unit_reference.py"] != module.UNIT_REFERENCE_SHA256
+            or module.UNIT_REFERENCE_ERRORS != UNIT_REFERENCE_ERRORS
             or module.EXTRA_NEGATIVES != NETWORK_EXTRA_NEGATIVES
         ):
             raise ReleaseError("market_helper_source_rejected")
@@ -3804,6 +3922,7 @@ class RemoteRelease:
         }
         required = {
             *fixed,
+            *NETWORK_CLEANUP_FIELDS,
             "candidate",
             "release_id",
             "started_at",
@@ -3853,6 +3972,8 @@ class RemoteRelease:
             or value["error_class"] not in module.ERRORS | {None}
             or value["cleanup_error_class"] not in {None, "cleanup_failed"}
         ):
+            rejected()
+        if not valid_network_cleanup_record(value):
             rejected()
         for name, keys in (
             (

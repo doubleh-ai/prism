@@ -10,7 +10,7 @@ import pytest
 import test_live_integration_controller as live_tests
 import test_market_controller_candidate as market_tests
 import test_release_controller as existing
-from test_network_gate_wiring import MemoryKernel, Proxy, root_metadata
+from test_network_gate_wiring import MemoryKernel, ProofReference, Proxy, root_metadata
 
 NOW, COMMIT = existing.NOW, existing.COMMIT
 live_prepared, market_prepared = live_tests.prepared, market_tests.prepared
@@ -177,6 +177,26 @@ def install_driver(context, monkeypatch, *, mutation=None, cleanup_failure=False
                 gate = gate_module.OwnedNetworkGate(desc, _kernel=kernel)
                 value.network_gate, value.network_programs = gate, gate.install()
                 assert gate.verify() == value.network_programs
+                value.reference_roles = ("broker", "worker") if context.role == "live" else ("market",)
+                value.reference_identities = {}
+                value.reference_unique_names = {}
+                value.unit_references = {}
+                for role in value.reference_roles:
+                    identity = {
+                        "unit": desc.unit,
+                        **{
+                            name: getattr(desc, name)
+                            for name in ("invocation_id", "pid", "startticks", "uid")
+                        },
+                    }
+                    if role == "worker":
+                        identity["unit"] = desc.unit.replace("-broker-", "-worker-")
+                        identity["pid"] = 321
+                        identity["uid"] = 2001
+                    value.reference_identities[role] = identity
+                    value.reference_unique_names[role] = ":1.234"
+                    value.unit_references[role] = ProofReference(identity)
+                value.report["unit_reference_acquire_sha256"] = "a" * 64
                 events.append("permit_after_attach")
                 value.work = context.engine.operations / "integration" / context.attempt / context.role
                 value.candidate = context.engine.release
@@ -280,6 +300,8 @@ def install_driver(context, monkeypatch, *, mutation=None, cleanup_failure=False
                             ["/usr/bin/systemctl", "show", "--property=Environment", "stock-app.service"],
                             timeout=5,
                         )
+                value.work.mkdir(parents=True, exist_ok=True)
+                value.prepare_network_stop()
                 for unit in units:
                     if cancel_cleanup:
                         properties = (
@@ -309,9 +331,24 @@ def install_driver(context, monkeypatch, *, mutation=None, cleanup_failure=False
                     with pytest.raises(gate_module.GateError, match="network_gate_cleanup_failed"):
                         gate.cleanup()
                 else:
-                    gate.cleanup()
+                    value.cleanup_network_gate()
+                    if context.role == "live":
+                        value.release_unit_reference("worker")
                     assert gate.state == "cleaned"
                 result = safe_result(context, module)
+                for name in (
+                    "network_gate_diagnostic",
+                    "network_gate_stop_proof_sha256",
+                    "network_gate_cleanup_proof_sha256",
+                    "network_gate_cleanup_mode",
+                    "network_gate_objects_released",
+                    "unit_reference_acquire_sha256",
+                    "unit_reference_stop_sha256",
+                    "unit_reference_release_sha256",
+                    "unit_reference_released",
+                    "unit_reference_error_class",
+                ):
+                    result[name] = value.report[name]
                 if cancel_cleanup:
                     result.update(passed=False, error_class="operator_stop")
                 if cleanup_failure:
@@ -321,6 +358,7 @@ def install_driver(context, monkeypatch, *, mutation=None, cleanup_failure=False
                         cleanup_error_class="cleanup_failed",
                         network_gate_cleaned=False,
                         network_gate_verified=False,
+                        network_gate_objects_released=False,
                     )
                 value.record(result)
                 holder["result"] = result
@@ -510,6 +548,7 @@ def test_a_verified_flag_requires_strict_denials_even_on_a_failed_business_resul
             cleanup_error_class="cleanup_failed",
             network_gate_verified=False,
             network_gate_cleaned=False,
+            network_gate_objects_released=False,
         )
         key = "broker_negative_errno" if context.role == "live" else "negative_errno"
         result[key][next(iter(result[key]))] = 11
@@ -534,6 +573,52 @@ def test_preflight_cannot_relabel_network_proof_as_business_acceptance(context):
         else:
             result["market_provider_verified"] = True
             with pytest.raises(context.remote.ReleaseError, match="market_safe_record_rejected"):
+                context.engine.market_safe_record(
+                    result, context.attempt, module, context.engine.network_original_state()
+                )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "raw_diagnostic",
+        "bool_errno",
+        "unknown_stage",
+        "unknown_command",
+        "missing_stop",
+        "missing_cleanup",
+        "unreleased",
+        "partial",
+        "bad_mode",
+    ],
+)
+def test_safe_journal_rejects_inconsistent_network_cleanup_evidence(context, change):
+    with getattr(context.engine, context.role + "_module")(
+        getattr(context.engine, context.role + "_helper_sources")()
+    ) as module:
+        result = safe_result(context, module)
+        if change == "raw_diagnostic":
+            result["network_gate_diagnostic"]["raw"] = "synthetic unsafe detail"
+        elif change == "bool_errno":
+            result["network_gate_diagnostic"]["errno"] = True
+        elif change == "unknown_stage":
+            result["network_gate_diagnostic"]["stage"] = "unbounded"
+        elif change == "unknown_command":
+            result["network_gate_diagnostic"]["command"] = 4
+        elif change == "missing_stop":
+            result["network_gate_stop_proof_sha256"] = None
+        elif change == "missing_cleanup":
+            result["network_gate_cleanup_proof_sha256"] = None
+        elif change == "unreleased":
+            result["network_gate_objects_released"] = False
+        elif change == "partial":
+            result["network_gate_cleanup_mode"] = "partial_closed"
+        else:
+            result["network_gate_cleanup_mode"] = []
+        with pytest.raises(context.remote.ReleaseError, match=context.role + "_safe_record_rejected"):
+            if context.role == "live":
+                context.engine.live_safe_record(result, context.attempt)
+            else:
                 context.engine.market_safe_record(
                     result, context.attempt, module, context.engine.network_original_state()
                 )

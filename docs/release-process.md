@@ -175,7 +175,11 @@ worker 使用全新 HOME、空合成数据库和私有网络命名空间，只�
 
 发布工具提供两个单独的无凭证动作 `integration_live_network_preflight`、`integration_market_network_preflight`。它们使用独立的系统元数据基线和记录目录，严格不调用生产 HTTP readiness、不读取模型环境或凭证、不发送模型或行情 HTTP 请求，只完成固定 DNS、证书校验的 TLS 握手和实际隔离检查。候选、源码、进程 PID/start ticks/InvocationID、四个受控 cgroup hook 和保留的程序 FD 必须相互绑定；不接收调用者提供的地址、路径、命令、FD 或字节码。原 systemd 包过滤和独立 worker 网络命名空间继续保留。负例只接受实际 EPERM/EACCES；EAGAIN、超时或缺失事实不能通过。
 
-预检通过不代表真实模型、原生搜索、行情提供器或生产发布通过。只有独立业务验收才能设置相应标志。受控单元停止后的 cgroup 若已被系统回收，当前 helper 仍拒绝宣称清理成功，必须先通过真实无凭证实验解决这一生命周期问题，不能将路径消失当作已完成 detach。超时或操作者 STOP 后，只允许核验并收束本次确已拥有的单元；禁止新建工作、重新解析地址或操作其它单元。
+预检通过不代表真实模型、原生搜索、行情提供器或生产发布通过。只有独立业务验收才能设置相应标志。网络 helper 明确区分 Linux 6.8 与保留的 5.15 源码审查配置：直接查询要求本地附加标志为 2，effective 查询分别要求 0 与 2，不宽收两种值。当前改动只通过源码核对和离线回归，真实 Linux 无凭证验收仍待执行。
+
+清理前必须在原进程仍活动时核验四个 hook、程序 ID 和元数据，并在允许其自然退出或发出本次单元停止指令前保存私有证明。已回收 cgroup 只有在同一 InvocationID/ExecMainPID、原 PID 确实不存在、路径实际 ENOENT、保留 FD 仍匹配原 cgroup2，以及八次直接/effective 查询均实际返回 ENOENT 时，才能进入专用清理分支。核验并关闭本次程序 FD 后，仅对四个已知 ID 有界查询、逐次关闭临时 FD；全部实际返回 ENOENT 才记录对象已不可取得。该事实不表示执行过 detach，也不表示 RCU 内存已同步释放。部分安装、ID 重现、身份漂移、其它错误码或超时保留失败，不用“路径消失”或 JSON 布尔值补全证明。单元在停止后若被卸载而丢失身份，仍拒绝通过，不能将缺失字段默认为旧值。超时或操作者 STOP 后，只允许核验并收束本次确已拥有的单元；禁止新建工作、重新解析地址或操作其它单元。
+
+网络预检和真实联调还须显式提供 `--systemd-unit-reference-sha256`，与固定网络 helper 一起双端核验并封存。标准库监督器使用固定系统 libsystemd 和本机 system bus，在同次合成 unit 已加载、活动、PID/startticks/InvocationID 实际匹配后，仅建立一次 `RefUnit`；不启动或重新加载单位，不增加 Wants/observer。持久连接的 typed `Refs` 必须始终恰为本连接唯一名，连接贯穿停止、cgroup 查询和四个已知 BPF ID 释放证明，随后才对本次 unit 同连接 `UnrefUnit` 并关闭。断连、额外引用、身份变化或释放不明均保留失败，不在停止后补建引用。私有证明仅公开摘要及有限错误类别；离线 ctypes/协议测试不等于已完成真实 Linux 预检。
 
 第 004 次合成实验在 observer 校验阶段拒绝，尚未发出停止指令。已只读确认主单元和 observer 均自然退出成功、Job 为空且实际 cgroup 不存在；两份保留单元及原 failed/cleanup=false 记录不修改。后续新 attempt 必须严格核验原六条事件、001–003 引用和全部文件摘要，逐项重建两条公开 ExecStart，并在每个操作边界重新核对状态。PrivateTmp 在该系统中自动附加的唯一 tmp.mount 弱依赖，仅在同轮实际 PrivateTmp=yes、固定 mount 单元 not-found/inactive/dead/Where 为空及内核无独立 /tmp 挂载事实均一致时接受；任何额外或重复依赖仍拒绝。旧 observer 的读取例外不会赋予停止、删除或重用它的权限。
 
