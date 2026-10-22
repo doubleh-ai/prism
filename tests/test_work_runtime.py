@@ -549,7 +549,7 @@ async def test_authenticated_json_frame_rejects_ambiguous_payload(manager, monke
 
 async def listen_fixture(value, tmp_path, monkeypatch):
     # AF_UNIX has a short kernel pathname limit; pytest's descriptive path is longer.
-    root = Path(tempfile.mkdtemp(prefix="u", dir=os.environ["TMPDIR"]))
+    root = Path(tempfile.mkdtemp(prefix="u", dir=os.environ.get("TMPDIR") or tempfile.gettempdir()))
     monkeypatch.setattr(runtime, "_RUN", root)
     directory = root / ("prism-work-" + BINDING["nonce"])
     directory.mkdir(mode=0o700)
