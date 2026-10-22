@@ -184,6 +184,7 @@ RETIREMENT_PRESTART_REVIEWED = {
         "receipt_sha256": "4d40e1aa368bdbbb682a6fcd29de39d4fba125e7514901b7d731467cadc273a1",
         "events_sha256": "1e6f4629f625e5a812ea7d210995379c3052671564fe180e3fcec97efb567ea4",
         "identity_sha256": "604cc660df068813ec45cba9df6d244b5d41512e7c74800d3657fa28b107b016",
+        "prestart_reconciliation_attempts": (RETIREMENT_PRESTART_ATTEMPT,),
     },
 }
 RETIREMENT_BASE_ENV_SHA256 = "a395e2170c27c264e5c8f3503902732aec06a8905baf8653908abb6b45b5b072"
@@ -5013,7 +5014,10 @@ class RemoteRelease:
         reconciled = []
         if not parent.exists():
             return reconciled
-        for previous in parent.iterdir():
+        # The second reviewed record contains the first reconciliation. Replay
+        # dependencies before comparing that exact identity, regardless of the
+        # filesystem's directory enumeration order.
+        for previous in sorted(parent.iterdir(), key=lambda path: path.name):
             try:
                 receipt, receipt_sha = self.retirement_private_record(previous / "receipt.json")
                 if (
@@ -5039,6 +5043,11 @@ class RemoteRelease:
                     "signal_proof": proof,
                     "system_python_sha256": RETIREMENT_SYSTEM_PYTHON_SHA256,
                 }
+                if "prestart_reconciliation_attempts" in reviewed:
+                    prior = {item["attempt"]: item for item in reconciled}
+                    expected_identity["prestart_reconciliations"] = [
+                        prior[name] for name in reviewed["prestart_reconciliation_attempts"]
+                    ]
                 keys = {
                     "attempt",
                     "signal_proof",

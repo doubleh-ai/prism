@@ -895,9 +895,28 @@ def test_new_stop_requires_durable_typed_arrays_before_any_stop_intent(prepared,
 def approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch):
     attempt = "prism-20261022-stop-e2e-002"
     approved = copy.deepcopy(remote.RETIREMENT_PRESTART_REVIEWED)
+    first = prepared.engine.record / "legacy-stop" / remote.RETIREMENT_PRESTART_ATTEMPT
+    if not first.exists():
+        seed_reviewed_prestart(prepared, data, baseline)
     path = seed_reviewed_prestart(
         prepared, data, baseline, attempt=attempt, helper_sha=approved[attempt]["helper_sha256"]
     )
+    # Reproduce the reviewed 002 writer's extra identity field using independent
+    # hashes of the first private record, not the reconciliation under test.
+    first_receipt = json.loads((first / "receipt.json").read_bytes())
+    prior = {
+        "attempt": first.name,
+        "identity_sha256": remote.digest((first / "identity.json").read_bytes()),
+        "receipt_sha256": remote.digest((first / "receipt.json").read_bytes()),
+        "events_sha256": remote.digest((first / "events.jsonl").read_bytes()),
+        "last_event_sha256": first_receipt["last_event_sha256"],
+        "no_synthetic_actuation": True,
+        "baseline_verified_after": True,
+        "reason": "retirement_stop_systemd_properties_rejected",
+    }
+    identity = json.loads((path / "identity.json").read_bytes())
+    identity["prestart_reconciliations"] = [prior]
+    (path / "identity.json").write_bytes(remote.encoded(identity))
     for name in ("identity", "events", "receipt"):
         approved[attempt][name + "_sha256"] = remote.digest(
             (path / (name + (".jsonl" if name == "events" else ".json"))).read_bytes()
@@ -921,6 +940,97 @@ def test_two_exact_reviewed_no_actuation_failures_are_reconciled_read_only(prepa
     )
     assert {row["attempt"] for row in accepted["records"]} == {first.name, second.name}
     assert all(row["no_synthetic_actuation"] is True for row in accepted["records"])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing-first",
+        "first-chain",
+        "first-start",
+        "missing-field",
+        "empty-list",
+        "extra-row",
+        "row-attempt",
+        "row-identity",
+        "row-receipt",
+        "row-events",
+        "row-tail",
+        "row-cleanup",
+        "row-actuation",
+        "row-reason",
+        "extra-identity",
+    ],
+)
+def test_second_reviewed_identity_requires_complete_independent_first_reconciliation(
+    prepared, monkeypatch, change
+):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    second = approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch)
+    first = second.parent / remote.RETIREMENT_PRESTART_ATTEMPT
+    identity = json.loads((second / "identity.json").read_bytes())
+    if change == "missing-first":
+        # Absence must fail even though the 002 row and its pinned bytes survive.
+        for file in first.iterdir():
+            file.unlink()
+        first.rmdir()
+    elif change in {"first-chain", "first-start"}:
+        rows = (first / "events.jsonl").read_bytes().splitlines(keepends=True)
+        row = json.loads(rows[0])
+        if change == "first-chain":
+            row["previous_sha256"] = "f" * 64
+        else:
+            row.update(event="synthetic_start_intent", details={"case_id": "int-executor", "nonce": NONCE})
+        rows[0] = remote.encoded(row) + b"\n"
+        (first / "events.jsonl").write_bytes(b"".join(rows))
+        identity["prestart_reconciliations"][0]["events_sha256"] = remote.digest(b"".join(rows))
+    elif change == "missing-field":
+        del identity["prestart_reconciliations"]
+    elif change == "empty-list":
+        identity["prestart_reconciliations"] = []
+    elif change == "extra-row":
+        identity["prestart_reconciliations"] *= 2
+    elif change == "extra-identity":
+        identity["unreviewed"] = True
+    else:
+        key, value = {
+            "row-attempt": ("attempt", second.name),
+            "row-identity": ("identity_sha256", "f" * 64),
+            "row-receipt": ("receipt_sha256", "f" * 64),
+            "row-events": ("events_sha256", "f" * 64),
+            "row-tail": ("last_event_sha256", "f" * 64),
+            "row-cleanup": ("baseline_verified_after", False),
+            "row-actuation": ("no_synthetic_actuation", False),
+            "row-reason": ("reason", "retirement_stop_uncertain_dispatch"),
+        }[change]
+        identity["prestart_reconciliations"][0][key] = value
+    (second / "identity.json").write_bytes(remote.encoded(identity))
+    # Re-pin synthetic bytes so rejection exercises semantic/private-chain
+    # validation rather than merely failing the immutable reviewed-byte digest.
+    approved = copy.deepcopy(remote.RETIREMENT_PRESTART_REVIEWED)
+    approved[second.name]["identity_sha256"] = remote.digest((second / "identity.json").read_bytes())
+    monkeypatch.setattr(remote, "RETIREMENT_PRESTART_REVIEWED", approved)
+    before = {str(p): p.read_bytes() for d in (first, second) if d.exists() for p in d.iterdir()}
+    with pytest.raises(remote.ReleaseError, match="^retirement_previous_stop_unreconciled$"):
+        prepared.engine.execute(data)
+    assert {str(p): p.read_bytes() for d in (first, second) if d.exists() for p in d.iterdir()} == before
+    assert not (second.parent / ATTEMPT).exists()
+    assert not any(argv[:2] == ["/usr/bin/systemctl", "stop"] for argv, _ in prepared.commands)
+
+
+def test_reconciliation_is_independent_of_filesystem_directory_order(prepared, monkeypatch):
+    data, baseline, _, _ = wire(prepared, monkeypatch)
+    second = approve_synthetic_second_prestart(prepared, data, baseline, monkeypatch)
+    original = type(second).iterdir
+
+    def reversed_entries(path):
+        rows = list(original(path))
+        return iter(sorted(rows, key=lambda item: item.name, reverse=True))
+
+    monkeypatch.setattr(type(second), "iterdir", reversed_entries)
+    assert prepared.engine.execute(data)["legacy_stop"]["passed"] is True
+    result = json.loads((second.parent / ATTEMPT / "prestart-reconciliation.json").read_bytes())
+    assert [row["attempt"] for row in result["records"]] == [remote.RETIREMENT_PRESTART_ATTEMPT, second.name]
 
 
 @pytest.mark.parametrize("file", ["identity.json", "receipt.json", "events.jsonl"])
