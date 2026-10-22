@@ -229,6 +229,11 @@ class KernelFixture:
             raise gate.GateError("identity_rejected")
         return "retained_empty" if stopped else "running"
 
+    def check_closed_identity(self, config, *, previous_mode):
+        assert 40 in self.closed and self.stopped and self.identity_ok
+        self.events.append(("closed_identity", previous_mode))
+        return previous_mode
+
     def query(self, fd, hook, *, effective):
         assert fd == 40
         ids = self.attached.get(hook, ())
@@ -659,7 +664,7 @@ def test_release_timeout_changed_object_or_unexpected_errno_is_unknown_and_not_r
         instance.cleanup()
     assert instance.state == "failed"
     assert all(fd in kernel.closed for fd in kernel.lookup_fds)
-    assert 40 not in kernel.closed
+    assert 40 in kernel.closed
     before = list(kernel.closed)
     with pytest.raises(gate.GateError):
         instance.cleanup()
@@ -841,7 +846,7 @@ def test_known_id_cannot_reappear_after_enoent_even_with_identical_metadata(monk
     with pytest.raises(gate.GateError, match="cleanup_failed"):
         instance.cleanup()
     assert all(fd in kernel.closed for fd in kernel.lookup_fds)
-    assert instance.state == "failed" and 40 not in kernel.closed
+    assert instance.state == "failed" and 40 in kernel.closed
 
 
 @pytest.mark.parametrize(
@@ -896,3 +901,225 @@ def test_even_all_enoent_must_arrive_within_the_release_deadline(monkeypatch):
     with pytest.raises(gate.GateError, match="cleanup_failed"):
         instance.cleanup()
     assert not kernel.lookup_counts and instance.diagnostic()["stage"] == "object_release"
+
+
+def test_release_dependent_on_last_owned_cgroup_fd_requires_close_before_known_id_wait(monkeypatch):
+    class CgroupHeldKernel(CollectedKernel):
+        def open_program(self, identifier):
+            if 40 not in self.closed:
+                self.release_delay = 1000
+            else:
+                self.release_delay = 0
+            return super().open_program(identifier)
+
+    kernel = CgroupHeldKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    monkeypatch.setattr(gate, "_RELEASE_ROUNDS", 2)
+    monkeypatch.setattr(gate.time, "sleep", lambda _: None)
+    result = instance.cleanup()
+    assert result["objects_released"] is True
+    assert kernel.events.index(("close", 40)) < next(
+        index for index, event in enumerate(kernel.events) if event[0] == "get_known_id"
+    )
+    assert set(kernel.lookup_counts) == {500, 501, 502, 503}
+    assert result["preclose_mode"] == result["terminal_mode"] == "collected_offline"
+    assert len(result["offline_queries"]) == 8 and result["hook_empty_queries"] == []
+
+
+def test_retained_to_collected_preserves_real_preclose_empty_queries_without_invented_enoent():
+    kernel = KernelFixture()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    kernel.check_closed_identity = lambda config, *, previous_mode: "collected_offline"
+    result = instance.cleanup()
+    assert result["mode"] == result["preclose_mode"] == "retained_empty"
+    assert result["terminal_mode"] == "collected_offline"
+    assert result["offline_queries"] == []
+    assert result["hook_empty_queries"] == [
+        {"hook": hook, "effective": effective, "flags": 0, "program_ids": []}
+        for hook in (10, 11, 14, 15)
+        for effective in (False, True)
+    ]
+    assert result["detached_hooks"] == [10, 11, 14, 15]
+
+
+def test_cgroup_close_uncertainty_stops_before_any_lookup_and_is_never_retried():
+    kernel = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    original_close = kernel.close
+    close_attempts = []
+
+    def close(fd):
+        close_attempts.append(fd)
+        if fd == 40:
+            raise gate.GateError("synthetic_close_uncertain")
+        original_close(fd)
+
+    kernel.close = close
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert instance._cgroup_fd is None and kernel.lookup_counts == {}
+    assert instance.diagnostic()["stage"] == "close_owned"
+    before = list(close_attempts)
+    with pytest.raises(gate.GateError):
+        instance.cleanup()
+    assert close_attempts == before and close_attempts.count(40) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "invocation",
+        "unit",
+        "uid",
+        "exec_pid",
+        "main_pid",
+        "live_pid",
+        "inode",
+        "fd_inode",
+        "populated",
+        "members",
+        "path_permission",
+        "recreated",
+    ],
+)
+@pytest.mark.parametrize("mode", ["retained_empty", "collected_offline"])
+def test_closed_identity_requires_original_stopped_instance_and_never_holds_fd_across_return(
+    monkeypatch, mutation, mode
+):
+    config = descriptor()
+    kernel = object.__new__(gate._LinuxKernel)
+    opened, closed = [], []
+    filesystem = types.SimpleNamespace(
+        st_mode=16877, st_uid=0, st_ino=config.cgroup_inode, st_dev=config.cgroup_device
+    )
+    replacement = types.SimpleNamespace(
+        st_mode=16877, st_uid=0, st_ino=config.cgroup_inode + 1, st_dev=config.cgroup_device
+    )
+
+    def statfs(fd, buffer):
+        assert fd == 40
+        ctypes.memmove(buffer, struct.pack("<q", 1667723888), 8)
+        return 0
+
+    kernel.libc = types.SimpleNamespace(fstatfs=statfs)
+
+    def actual_stat(path, *, follow_symlinks):
+        assert follow_symlinks is False
+        if path == "/proc/" + str(config.pid):
+            if mutation == "live_pid":
+                return filesystem
+            raise FileNotFoundError(2, "synthetic")
+        assert path == config.path
+        if mutation == "path_permission":
+            raise PermissionError(13, "synthetic")
+        if mode == "collected_offline" and mutation != "recreated":
+            raise FileNotFoundError(2, "synthetic")
+        return replacement if mutation == "inode" else filesystem
+
+    monkeypatch.setattr(
+        gate,
+        "os",
+        types.SimpleNamespace(
+            stat=actual_stat, fstat=lambda fd: replacement if mutation == "fd_inode" else filesystem
+        ),
+    )
+    monkeypatch.setattr(
+        gate,
+        "pwd",
+        types.SimpleNamespace(
+            getpwnam=lambda name: types.SimpleNamespace(pw_uid=config.uid + int(mutation == "uid"))
+        ),
+    )
+    state = {
+        "Id": config.unit,
+        "InvocationID": config.invocation_id,
+        "MainPID": "0",
+        "ExecMainPID": str(config.pid),
+        "ControlGroup": config.cgroup if mode == "retained_empty" or mutation == "recreated" else "",
+        "ActiveState": "inactive",
+        "User": config.account,
+    }
+    replacements = {
+        "invocation": ("InvocationID", "d" * 32),
+        "unit": ("Id", "other.service"),
+        "exec_pid": ("ExecMainPID", "9999"),
+        "main_pid": ("MainPID", str(config.pid)),
+    }
+    if mutation in replacements:
+        key, value = replacements[mutation]
+        state[key] = value
+    monkeypatch.setattr(
+        gate,
+        "subprocess",
+        types.SimpleNamespace(
+            run=lambda *args, **kwargs: types.SimpleNamespace(
+                stdout="".join(f"{key}={value}\n" for key, value in state.items()).encode(), stderr=b""
+            )
+        ),
+    )
+    kernel.open_cgroup = lambda expected: opened.append(40) or 40
+    kernel.close = lambda fd: closed.append(fd)
+    kernel._read_at = lambda fd, name: (
+        ("populated 1\n" if mutation == "populated" else "populated 0\n")
+        if name == "cgroup.events"
+        else ("123\n" if mutation == "members" else "")
+    )
+    invalid = (
+        mutation in {"invocation", "unit", "uid", "exec_pid", "main_pid", "live_pid", "path_permission"}
+        or (mode == "retained_empty" and mutation in {"inode", "fd_inode", "populated", "members"})
+        or (mode == "collected_offline" and mutation == "recreated")
+    )
+    if invalid:
+        with pytest.raises(gate.GateError):
+            kernel.check_closed_identity(config, previous_mode=mode)
+    else:
+        assert kernel.check_closed_identity(config, previous_mode=mode) == mode
+    assert closed == opened
+    if mode == "collected_offline":
+        assert opened == []
+
+
+def test_closed_identity_temporary_fd_close_failure_is_propagated_once(monkeypatch):
+    kernel = object.__new__(gate._LinuxKernel)
+    config = descriptor()
+    filesystem = types.SimpleNamespace(
+        st_mode=16877, st_uid=0, st_ino=config.cgroup_inode, st_dev=config.cgroup_device
+    )
+    kernel._unit_state = lambda expected, *, stopped: {"ControlGroup": config.cgroup}
+    monkeypatch.setattr(gate, "os", types.SimpleNamespace(stat=lambda *args, **kwargs: filesystem))
+    kernel.open_cgroup = lambda expected: 900
+    kernel.check_identity = lambda fd, expected, *, stopped: "retained_empty"
+    closes = []
+
+    def close(fd):
+        closes.append(fd)
+        raise gate.GateError("synthetic_temporary_close_uncertain")
+
+    kernel.close = close
+    with pytest.raises(gate.GateError, match="temporary_close_uncertain"):
+        kernel.check_closed_identity(config, previous_mode="retained_empty")
+    assert closes == [900]
+
+
+def test_collected_identity_cannot_reappear_after_owned_close_or_id_release():
+    kernel = CollectedKernel()
+    instance = gate.OwnedNetworkGate(descriptor(), _kernel=kernel)
+    instance.install()
+    instance.prepare_stop()
+    kernel.stopped = True
+    modes = iter(("collected_offline", "retained_empty"))
+    kernel.check_closed_identity = lambda config, *, previous_mode: next(modes)
+    with pytest.raises(gate.GateError, match="cleanup_failed"):
+        instance.cleanup()
+    assert instance.state == "failed" and 40 in kernel.closed
+    assert instance.diagnostic()["stage"] == "stop_identity"

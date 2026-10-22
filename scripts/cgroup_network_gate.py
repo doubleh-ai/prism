@@ -384,8 +384,7 @@ class _LinuxKernel:
         # A live original or a reused PID is unknown, never proof of shutdown.
         raise GateError("network_gate_rejected")
 
-    def check_identity(self, fd, descriptor, *, stopped):
-        self._check_cgroup(fd, descriptor)
+    def _unit_state(self, descriptor, *, stopped):
         account = pwd.getpwnam(descriptor.account)
         _require(account.pw_uid == descriptor.uid and account.pw_uid != 0)
         result = subprocess.run(
@@ -418,6 +417,11 @@ class _LinuxKernel:
         if stopped:
             _require(state["ActiveState"] in {"inactive", "failed"} and state["MainPID"] == "0")
             self._process_absent(descriptor)
+        return state
+
+    def check_identity(self, fd, descriptor, *, stopped):
+        self._check_cgroup(fd, descriptor)
+        state = self._unit_state(descriptor, stopped=stopped)
         try:
             current = os.stat(descriptor.path, follow_symlinks=False)
         except OSError as error:
@@ -450,6 +454,32 @@ class _LinuxKernel:
         finally:
             os.close(process)
         return "running"
+
+    def check_closed_identity(self, descriptor, *, previous_mode):
+        """No cgroup FD survives this check; never reopen a collected identity."""
+        _require(previous_mode in {"retained_empty", "collected_offline"})
+        state = self._unit_state(descriptor, stopped=True)
+        try:
+            current = os.stat(descriptor.path, follow_symlinks=False)
+        except OSError as error:
+            _require(error.errno == errno.ENOENT and state["ControlGroup"] == "")
+            self._process_absent(descriptor)
+            return "collected_offline"
+        _require(previous_mode == "retained_empty")
+        _require(
+            stat.S_ISDIR(current.st_mode)
+            and current.st_uid == 0
+            and (current.st_dev, current.st_ino) == (descriptor.cgroup_device, descriptor.cgroup_inode)
+            and state["ControlGroup"] == descriptor.cgroup
+        )
+        fd = self.open_cgroup(descriptor)
+        try:
+            mode = self.check_identity(fd, descriptor, stopped=True)
+            _require(mode in {"retained_empty", "collected_offline"})
+        finally:
+            self.close(fd)
+        self._process_absent(descriptor)
+        return mode
 
     def open_program(self, identifier):
         _require(type(identifier) is int and 0 < identifier < 2**32)
@@ -665,6 +695,24 @@ class OwnedNetworkGate:
                     raise GateError("network_gate_offline_query_rejected")
         return results
 
+    def _empty_queries(self):
+        results = []
+        for hook in _HOOKS:
+            for effective in (False, True):
+                self._mark("query_effective" if effective else "query_direct")
+                flags, identifiers = self._kernel.query(self._cgroup_fd, hook, effective=effective)
+                _require(type(flags) is int and flags == 0 and identifiers == ())
+                results.append({"hook": hook, "effective": effective, "flags": flags, "program_ids": []})
+        return results
+
+    def _closed_identity(self, previous_mode):
+        self._mark("stop_identity")
+        _require(self._cgroup_fd is None)
+        mode = self._kernel.check_closed_identity(self.descriptor, previous_mode=previous_mode)
+        _require(mode in {"retained_empty", "collected_offline"})
+        _require(previous_mode != "collected_offline" or mode == "collected_offline")
+        return mode
+
     def _objects_released(self, records):
         """Only these immutable known IDs. ENOENT is not an RCU memory-free claim."""
         deadline, seen_gone = time.monotonic() + _RELEASE_SECONDS, set()
@@ -702,6 +750,9 @@ class OwnedNetworkGate:
             return {
                 "schema": 1,
                 "mode": "partial_closed",
+                "preclose_mode": None,
+                "terminal_mode": None,
+                "hook_empty_queries": [],
                 "complete": False,
                 "objects_released": False,
                 "program_count": 0,
@@ -774,21 +825,26 @@ class OwnedNetworkGate:
             if final_mode == "collected_offline" and not offline:
                 offline = self._offline_queries()
             _require(mode != "collected_offline" or final_mode == "collected_offline")
-            released = self._objects_released(records) if complete else False
-            after_release = self._identity(stopped=True)
-            if after_release == "collected_offline" and not offline:
-                offline = self._offline_queries()
-            _require(final_mode != "collected_offline" or after_release == "collected_offline")
+            empty = self._empty_queries() if complete and final_mode == "retained_empty" else []
+            # The original FD-bound identity and policy absence proof are complete.
+            # Close our final cgroup reference before waiting for these exact IDs.
             self._mark("close_owned")
             fd = self._cgroup_fd
             self._cgroup_fd = None
             self._kernel.close(fd)
+            closed_mode = self._closed_identity(final_mode)
+            released = self._objects_released(records) if complete else False
+            after_release = self._closed_identity(closed_mode)
+            _require(closed_mode != "collected_offline" or after_release == "collected_offline")
             self._close_error = False
             self.state = "cleaned" if complete and released else "failed"
             self._mark("complete" if complete and released else "partial_cleanup")
             return {
                 "schema": 1,
-                "mode": after_release if complete else "partial_closed",
+                "mode": final_mode if complete else "partial_closed",
+                "preclose_mode": final_mode,
+                "terminal_mode": after_release,
+                "hook_empty_queries": empty,
                 "complete": complete,
                 "objects_released": released,
                 "program_count": len(records),

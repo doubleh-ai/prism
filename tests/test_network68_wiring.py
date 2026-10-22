@@ -78,7 +78,7 @@ def test_cleanup_requires_typed_actual_gate_proof_not_mock_success(context, bad)
     elif bad == "partial_released":
         proof["complete"] = False
     elif bad == "incomplete_four":
-        proof.update(complete=False, objects_released=False, mode="partial_closed")
+        proof.update(complete=False, objects_released=False, mode="partial_closed", hook_empty_queries=[])
     elif bad == "different_stop":
         proof["stop_verified_at_ns"] += 1
     else:
@@ -187,6 +187,10 @@ def safe_cleanup():
         "network_gate_stop_proof_sha256": "a" * 64,
         "network_gate_cleanup_proof_sha256": "b" * 64,
         "network_gate_cleanup_mode": "collected_offline",
+        "network_gate_cleanup_preclose_mode": "collected_offline",
+        "network_gate_cleanup_terminal_mode": "collected_offline",
+        "network_gate_cleanup_hook_empty_query_count": 0,
+        "network_gate_cleanup_offline_query_count": 8,
         "network_gate_objects_released": True,
         "unit_reference_acquire_sha256": "c" * 64,
         "unit_reference_stop_sha256": "d" * 64,

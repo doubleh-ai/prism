@@ -194,3 +194,14 @@ broker 的无凭证启动失败另有私有诊断文件 `broker/preflight-failur
 受控实例通过 root 所有的固定绑定和私有 Unix socket 接受有界状态协议，普通 HTTP 不提供排空或发布授权。控制器须独立核对真实源码、进程出生身份、单元和递归 cgroup；应用返回的摘要和计数不能自证这些事实。fence 只阻止新业务，不取消已有工作；seal 需要完整登记、实际资源完成、最终保存及新鲜内核观察。封存后的所有 HTTP（含 readiness）只返回不访问数据库的维护 503。需要用户旅程时必须在外部入口仍受控的条件下显式 resume，验后再次 fence/drain/seal，不能把封存状态的 503 改成健康证明。
 
 首次升级仍有独立限制：原生产版本没有等价任务账本，部分结果仅在内存，状态完成也可能早于后续保存；Vibe 读取还能继续派生工作。新代码、旧数据库、进程列表或新版本的通过实验都不能反推旧实例已排空。`first_upgrade_quiescent=false` 时继续拒绝生产停止/切换，不得以新 adapter 或合成实验代替旧实例证据。开发模式的正常 drain/close 只用于本机和独立候选，不签发 Linux 或生产许可。
+
+
+### Closing owned cgroup references before waiting for object release
+
+Gate cleanup first preserves a fresh exact stop witness, the stopped unit invocation and UID, absence of the original PID, and the original cgroup device/inode. Before closing the last owned cgroup FD, a collected cgroup must return real ENOENT for all four direct and four effective queries. A retained empty cgroup permits detaching only the four exact owned programs, followed by four direct and four effective queries proving empty hooks. All owned program FDs and the owned cgroup FD close before polling the same four immutable program IDs. A close uncertainty fails closed and is never retried on a possibly reused descriptor. The five-second bound remains unchanged; a timeout cannot become a successful release.
+
+The private cleanup proof distinguishes `preclose_mode`, `terminal_mode`, `hook_empty_queries`, and `offline_queries`. `mode` describes the preclose proof branch. A cgroup collected after closure does not imply that eight postclosure ENOENT queries occurred. Before and after ID polling, the controller rechecks the same stopped unit/invocation/UID/ExecMainPID and original PID absence. If the original path remains, its device/inode and empty membership must match through a temporary verified FD that closes before the check returns; a previously collected cgroup may not reappear. No cgroup FD remains held across object polling.
+
+Unit references remain held until gate-owned references have closed and all four known IDs return ENOENT. Only actual successful unref and release proofs count as reference release. A gate failure blocks that step and is not relabeled as an independent reference-state failure. Live and market validators and the external controller require the same bounded typed cleanup fields.
+
+These source and synthetic-test controls do not prove Linux cleanup acceptance. Attempt `prism-20261022-net-live-003` remains a failed cleanup receipt despite its successful credential-free DNS/TLS preflight and later read-only absence observations. A new immutable public tool revision, matching CI, and a separate controlled attempt are required for actual acceptance.

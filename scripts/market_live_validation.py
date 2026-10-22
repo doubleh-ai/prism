@@ -11,6 +11,7 @@ Offline tests are not real Linux/BPF/market acceptance receipts.
 from __future__ import annotations
 
 import base64
+import errno
 import grp
 import hashlib
 import ipaddress
@@ -26,7 +27,7 @@ import time
 import types
 from pathlib import Path
 
-NETWORK_GATE_SHA256 = "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134"
+NETWORK_GATE_SHA256 = "86d05da9aa2e21a84a788e9e2fe49a9390be1785abad27b13fdd5d6130759c86"
 UNIT_REFERENCE_SHA256 = "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be"
 UNIT_REFERENCE_ERRORS = frozenset(
     {
@@ -505,6 +506,78 @@ def read_private(path, uid):
     return value, hashlib.sha256(raw).hexdigest()
 
 
+def valid_network_cleanup_absence(document, programs):
+    """Typed preclose absence evidence; terminal collection never invents QUERY results."""
+    modes = {"retained_empty", "collected_offline"}
+    if not document["complete"]:
+        preclose, terminal = document["preclose_mode"], document["terminal_mode"]
+        return (
+            document["mode"] == "partial_closed"
+            and type(document["hook_empty_queries"]) is list
+            and document["hook_empty_queries"] == []
+            and (preclose is None or (type(preclose) is str and preclose in modes))
+            and (terminal is None or (type(terminal) is str and terminal in modes))
+            and (preclose != "collected_offline" or terminal == "collected_offline")
+        )
+    if type(document["programs"]) is not list or any(
+        type(row) not in {list, tuple} or len(row) != 3 for row in document["programs"]
+    ):
+        return False
+    if (
+        type(document["preclose_mode"]) is not str
+        or document["preclose_mode"] not in modes
+        or type(document["terminal_mode"]) is not str
+        or document["terminal_mode"] not in modes
+        or document["mode"] != document["preclose_mode"]
+        or (
+            document["preclose_mode"] == "collected_offline"
+            and document["terminal_mode"] != "collected_offline"
+        )
+        or [list(row) for row in document["programs"]]
+        != [[hook, identifier, source] for hook, identifier, _, source in programs]
+    ):
+        return False
+    hooks = [row[0] for row in programs]
+    if document["detached_hooks"] != [hook for hook in hooks if hook in document["detached_hooks"]]:
+        return False
+    empty = document["hook_empty_queries"]
+    offline = document["offline_queries"]
+    if type(empty) is not list or type(offline) is not list:
+        return False
+    for row in empty:
+        if (
+            type(row) is not dict
+            or set(row) != {"hook", "effective", "flags", "program_ids"}
+            or type(row["hook"]) is not int
+            or type(row["effective"]) is not bool
+            or type(row["flags"]) is not int
+            or type(row["program_ids"]) is not list
+        ):
+            return False
+    for row in offline:
+        if (
+            type(row) is not dict
+            or set(row) != {"hook", "effective", "errno"}
+            or type(row["hook"]) is not int
+            or type(row["effective"]) is not bool
+            or type(row["errno"]) is not int
+        ):
+            return False
+    expected_empty = [
+        {"hook": hook, "effective": effective, "flags": 0, "program_ids": []}
+        for hook in hooks
+        for effective in (False, True)
+    ]
+    expected_offline = [
+        {"hook": hook, "effective": effective, "errno": errno.ENOENT}
+        for hook in hooks
+        for effective in (False, True)
+    ]
+    if document["preclose_mode"] == "retained_empty":
+        return empty == expected_empty and offline == []
+    return empty == [] and offline == expected_offline
+
+
 class Validation:
     def __init__(self, request, *, boundary, run, record, network_gate_path=None, preflight_only=False):
         if type(preflight_only) is not bool:
@@ -557,6 +630,10 @@ class Validation:
             "network_gate_stop_proof_sha256": None,
             "network_gate_cleanup_proof_sha256": None,
             "network_gate_cleanup_mode": None,
+            "network_gate_cleanup_preclose_mode": None,
+            "network_gate_cleanup_terminal_mode": None,
+            "network_gate_cleanup_hook_empty_query_count": None,
+            "network_gate_cleanup_offline_query_count": None,
             "network_gate_objects_released": False,
             "unit_reference_acquire_sha256": None,
             "unit_reference_stop_sha256": None,
@@ -1151,14 +1228,13 @@ class Validation:
         )
 
     def release_unit_reference(self, role=None):
+        # A failed gate cleanup is not evidence that a Unit Ref itself failed.
+        if not self.report["network_gate_objects_released"]:
+            raise ValidationError("network_gate_rejected")
         try:
             role = self.reference_roles[0] if role is None else role
             self.verify_unit_reference(stopped=True, role=role)
-            if (
-                not self.report["network_gate_objects_released"]
-                or self.report["unit_reference_stop_sha256"] is None
-                or role in self.reference_releases
-            ):
+            if self.report["unit_reference_stop_sha256"] is None or role in self.reference_releases:
                 raise ValidationError("network_gate_rejected")
             proof = self.reference_proof(self.unit_references[role].release(), "released", role)
             self.write_reference_proof("release-" + role, proof)
@@ -1223,6 +1299,9 @@ class Validation:
                 != {
                     "schema",
                     "mode",
+                    "preclose_mode",
+                    "terminal_mode",
+                    "hook_empty_queries",
                     "complete",
                     "objects_released",
                     "program_count",
@@ -1255,10 +1334,16 @@ class Validation:
                 )
             ):
                 raise ValidationError("network_gate_rejected")
+            if not valid_network_cleanup_absence(document, self.network_programs):
+                raise ValidationError("network_gate_rejected")
             digest = self.network_proof("cleanup", document)
             self.report.update(
                 network_gate_cleanup_proof_sha256=digest,
                 network_gate_cleanup_mode=document["mode"],
+                network_gate_cleanup_preclose_mode=document["preclose_mode"],
+                network_gate_cleanup_terminal_mode=document["terminal_mode"],
+                network_gate_cleanup_hook_empty_query_count=len(document["hook_empty_queries"]),
+                network_gate_cleanup_offline_query_count=len(document["offline_queries"]),
                 network_gate_objects_released=document["objects_released"],
             )
             self.network_diagnostic()

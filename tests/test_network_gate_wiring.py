@@ -101,6 +101,13 @@ class ProofGate:
         return {
             "schema": 1,
             "mode": "retained_empty",
+            "preclose_mode": "retained_empty",
+            "terminal_mode": "retained_empty",
+            "hook_empty_queries": [
+                {"hook": hook, "effective": effective, "flags": 0, "program_ids": []}
+                for hook in (10, 11, 14, 15)
+                for effective in (False, True)
+            ],
             "complete": True,
             "objects_released": True,
             "program_count": 4,
@@ -173,6 +180,7 @@ class MemoryKernel:
     def __init__(self, module, events):
         self.module, self.events = module, events
         self.programs, self.attached = {}, {}
+        self.closed = []
         self.stopped = False
 
     def open_cgroup(self, descriptor):
@@ -183,6 +191,11 @@ class MemoryKernel:
         assert fd == 40 and stopped == self.stopped
         self.events.append("kernel_stopped" if stopped else "kernel_running")
         return "retained_empty" if stopped else None
+
+    def check_closed_identity(self, descriptor, *, previous_mode):
+        assert 40 in self.closed and self.stopped
+        self.events.append("kernel_closed_identity")
+        return previous_mode
 
     def query(self, fd, hook, *, effective):
         identifiers = self.attached.get(hook, ())
@@ -210,6 +223,7 @@ class MemoryKernel:
         raise self.module.GateError("released_program", command=13, error_number=2)
 
     def close(self, fd):
+        self.closed.append(fd)
         self.events.append("close_owned_fd")
 
 
@@ -450,3 +464,72 @@ def test_market_actual_bootstrap_hello_sealed_attach_permit_canaries_tls_then_no
     assert value.report["network_gate_objects_released"] is True
     assert value.report["network_gate_cleanup_mode"] == "retained_empty"
     assert events.index("stop_owned_unit") < events.index("detach_10")
+
+
+@pytest.mark.parametrize("module", [live, market])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "missing_empty",
+        "bad_flag_type",
+        "wrong_id",
+        "duplicate_detach",
+        "collected_recreated",
+        "late_collection",
+        "fake_late_enoent",
+        "partial_unbounded_mode",
+    ],
+)
+def test_cleanup_absence_schema_distinguishes_preclose_and_terminal_evidence(module, mutation):
+    document = ProofGate().cleanup()
+    if mutation == "partial_unbounded_mode":
+        document.update(
+            complete=False, mode="partial_closed", hook_empty_queries=[], preclose_mode=["unbounded"]
+        )
+    elif mutation == "missing_empty":
+        document["hook_empty_queries"].pop()
+    elif mutation == "bad_flag_type":
+        document["hook_empty_queries"][0]["flags"] = False
+    elif mutation == "wrong_id":
+        document["programs"][0][1] += 1
+    elif mutation == "duplicate_detach":
+        document["detached_hooks"].append(document["detached_hooks"][0])
+    elif mutation == "collected_recreated":
+        document.update(
+            mode="collected_offline",
+            preclose_mode="collected_offline",
+            terminal_mode="retained_empty",
+            hook_empty_queries=[],
+        )
+    elif mutation == "late_collection":
+        document["terminal_mode"] = "collected_offline"
+    elif mutation == "fake_late_enoent":
+        document["terminal_mode"] = "collected_offline"
+        document["offline_queries"] = [
+            {"hook": hook, "effective": effective, "errno": 2}
+            for hook in (10, 11, 14, 15)
+            for effective in (False, True)
+        ]
+    assert module.valid_network_cleanup_absence(document, ProofGate.programs) is (
+        mutation in {None, "late_collection"}
+    )
+
+
+@pytest.mark.parametrize("module", [live, market])
+def test_gate_failure_does_not_invent_a_reference_state_error_or_release_proof(module):
+    validation = object.__new__(module.Validation)
+    validation.report = {
+        "network_gate_objects_released": False,
+        "unit_reference_error_class": None,
+        "unit_reference_release_sha256": None,
+        "unit_reference_released": False,
+    }
+    validation.verify_unit_reference = lambda **kwargs: pytest.fail(
+        "no reference action after failed prerequisite"
+    )
+    with pytest.raises(module.ValidationError):
+        validation.release_unit_reference("worker")
+    assert validation.report["unit_reference_error_class"] is None
+    assert validation.report["unit_reference_release_sha256"] is None
+    assert validation.report["unit_reference_released"] is False

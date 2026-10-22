@@ -336,18 +336,7 @@ def install_driver(context, monkeypatch, *, mutation=None, cleanup_failure=False
                         value.release_unit_reference("worker")
                     assert gate.state == "cleaned"
                 result = safe_result(context, module)
-                for name in (
-                    "network_gate_diagnostic",
-                    "network_gate_stop_proof_sha256",
-                    "network_gate_cleanup_proof_sha256",
-                    "network_gate_cleanup_mode",
-                    "network_gate_objects_released",
-                    "unit_reference_acquire_sha256",
-                    "unit_reference_stop_sha256",
-                    "unit_reference_release_sha256",
-                    "unit_reference_released",
-                    "unit_reference_error_class",
-                ):
+                for name in context.remote.NETWORK_CLEANUP_FIELDS:
                     result[name] = value.report[name]
                 if cancel_cleanup:
                     result.update(passed=False, error_class="operator_stop")

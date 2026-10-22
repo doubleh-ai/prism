@@ -61,8 +61,8 @@ RETIREMENT_HELPERS = {
 }
 MARKET_INTEGRATION_HELPERS = {
     "market_live_probe.py": "491551b608ce264350bf3d736e23127c2d02418e0cf01ddcb0cc6c1380f53325",
-    "market_live_validation.py": "e877a0f6a540c8ddc76c33b812b2f65c5291060450814b0e655eefb8a0d6fc11",
-    "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
+    "market_live_validation.py": "b0ac8bab7772ed20b5c504612905b999fc3d6fd74032c23d7c3b2651472d1f60",
+    "cgroup_network_gate.py": "86d05da9aa2e21a84a788e9e2fe49a9390be1785abad27b13fdd5d6130759c86",
     "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }
 RETIREMENT_STOP_HELPERS = {
@@ -71,11 +71,11 @@ RETIREMENT_STOP_HELPERS = {
 }
 RETIREMENT_SYSTEM_PYTHON_SHA256 = "e1efa562c2cc2e35521a5c9c9b9939921001ff8ca9708a13ef15ace68cc2ccd7"
 LIVE_INTEGRATION_HELPERS = {
-    "live_integration_validation.py": "160d7b7fa07badda4ce200d90beeb35c22eeaafe5b1fed9be783af78b8ed7f22",
+    "live_integration_validation.py": "3862159ba83ad3b9faa9984f14955d943120c8bd057748695d66c3b1b1ac4827",
     "live_integration_worker.py": "f7f21d576417d45195c8fcf91f25f181728dafb7f30acea1077d4c75f75a75a4",
     "live_integration_transport.py": "cb84a80b2a5a14300fdb74deef06e06df96441a66ea11b72f29c9d0884ea9f55",
     "live_integration_policy.py": "c6fa205466800636fe6fbe557eb8f625785567a129b405ebb4935b7b65e325d9",
-    "cgroup_network_gate.py": "da13fbd0110493c4746126fa00fc45f7393ee77a773b5c27a642eaec124f7134",
+    "cgroup_network_gate.py": "86d05da9aa2e21a84a788e9e2fe49a9390be1785abad27b13fdd5d6130759c86",
     "systemd_unit_reference.py": "b160660e92a3cd98e11b37dc21855b9292150b137752c9300f0c234d5a78a4be",
 }
 
