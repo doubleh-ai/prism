@@ -31,6 +31,7 @@ from .services.claude_runner import (
     respond_to_question,
     run_claude_stream,
 )
+from .source_urls import redact_source_text, source_display_payload
 
 log = logging.getLogger("stock-app")
 
@@ -183,7 +184,7 @@ async def chat_stream(request: Request):
         return JSONResponse({"error": "空问题"}, status_code=400)
 
     t0 = time.time()
-    log.info(f"[{user}] Q({skill_name}): {question[:80]}...")
+    log.info(f"[{user}] Q({skill_name}): {redact_source_text(question[:80])}...")
 
     # Validate ownership before reading session history, writing, or starting an engine.
     resume_session_id = None
@@ -214,14 +215,15 @@ async def chat_stream(request: Request):
             ).fetchone():
                 return JSONResponse({"error": "对话不存在"}, status_code=404)
             db.execute(
-                "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)", [conv_id, "user", question]
+                "INSERT INTO messages (conv_id, role, content) VALUES (?,?,?)",
+                [conv_id, "user", redact_source_text(question)],
             )
             db.execute(
                 "UPDATE conversations SET title=? WHERE id=? AND username=? AND title='新对话'",
-                [question[:40], conv_id, user],
+                [redact_source_text(question)[:40], conv_id, user],
             )
     research = build_research_context(engine="chat")
-    create_research_run(user, conv_id, question, research)
+    create_research_run(user, conv_id, redact_source_text(question), research)
     research["ledger_available"] = True
     research["status"] = "queued"
     progress = {"text": "", "finished": False}
@@ -251,7 +253,7 @@ async def chat_stream(request: Request):
                 # Preserve paragraph boundaries when the client appends text;
                 # apply the same artifact filter without trimming the edges.
                 clean["text"] = _clean_object_artifacts(event["text"], strip_edges=False)
-            return f"data: {json.dumps(clean, ensure_ascii=False)}\n\n"
+            return f"data: {json.dumps(source_display_payload(clean), ensure_ascii=False)}\n\n"
 
         full_text = ""
         step_num = 0
@@ -325,7 +327,7 @@ async def chat_stream(request: Request):
                 name = tool.get("name", "?")
                 inp = tool.get("input", {})
                 step_num += 1
-                live_chunks.append({"t": "tool", "c": name, "d": _content_to_text(inp)})
+                live_chunks.append({"t": "tool", "c": name, "d": redact_source_text(_content_to_text(inp))})
                 if name == "AskUserQuestion":
                     yield _emit(
                         {
@@ -343,8 +345,21 @@ async def chat_stream(request: Request):
             elif t == "assistant":
                 for b in ev.get("message", {}).get("content", []):
                     bt = b.get("type", "")
-                    if bt == "text":
-                        txt = _content_to_text(b.get("text", ""))
+                    if bt == "server_tool_use":
+                        evidence.record_server_call(b)
+                    elif bt == "web_search_tool_result":
+                        normalized = evidence.record_server_result(
+                            b, retrieved_at=build_research_context()["as_of"]
+                        )
+                        if normalized:
+                            call, result_block, refs = normalized
+                            refs = ingest_tool_result(user, research["run_id"], call, result_block, refs)
+                            for ref in refs:
+                                collected_refs.append(ref)
+                                live_chunks.append({"t": "ref", **ref})
+                                yield _emit({"ref": ref})
+                    elif bt == "text":
+                        txt = redact_source_text(_content_to_text(b.get("text", "")))
                         if not txt:
                             continue
                         full_text += txt
@@ -356,7 +371,9 @@ async def chat_stream(request: Request):
                         step_num += 1
                         name = b.get("name", "?")
                         inp = b.get("input", {})
-                        live_chunks.append({"t": "tool", "c": name, "d": _content_to_text(inp)})
+                        live_chunks.append(
+                            {"t": "tool", "c": name, "d": redact_source_text(_content_to_text(inp))}
+                        )
                         if name == "AskUserQuestion":
                             yield _emit(
                                 {
@@ -370,7 +387,7 @@ async def chat_stream(request: Request):
                             detail = _content_to_text(list(inp.values())[:1]) if inp else ""
                             yield _emit({"tool": name, "n": step_num, "d": detail})
                     elif bt == "thinking":
-                        thought = _content_to_text(b.get("thinking", ""))
+                        thought = redact_source_text(_content_to_text(b.get("thinking", "")))
                         if thought:
                             live_chunks.append({"t": "think", "c": thought})
                             yield _emit({"think": thought})
@@ -389,7 +406,7 @@ async def chat_stream(request: Request):
                 yield _emit({"status": message})
 
             elif t == "error":
-                stream_error = _content_to_text(ev.get("message")) or "AI引擎异常"
+                stream_error = redact_source_text(_content_to_text(ev.get("message"))) or "AI引擎异常"
                 log.error(f"[{user}] Claude error: {stream_error}")
                 yield _emit({"error": stream_error})
 
@@ -400,7 +417,7 @@ async def chat_stream(request: Request):
                 log.info(
                     f"[{user}] Claude done: {ev.get('duration_ms', 0)}ms stop={ev.get('stop_reason', '')}"
                 )
-                terminal_text = _result_payload_text(ev)
+                terminal_text = redact_source_text(_result_payload_text(ev))
                 if terminal_text and terminal_text not in full_text:
                     if full_text and terminal_text.startswith(full_text):
                         terminal_text = terminal_text[len(full_text) :]
@@ -452,7 +469,7 @@ async def chat_stream(request: Request):
                 from .reports import save_report_snapshot
 
                 clean_text = " ".join(report_text.split())
-                title = question[:80] + ("..." if len(question) > 80 else "")
+                title = redact_source_text(question)[:80] + ("..." if len(question) > 80 else "")
                 save_report_snapshot(
                     user,
                     {
@@ -462,7 +479,7 @@ async def chat_stream(request: Request):
                         "title": title or "Chat report",
                         "summary": clean_text[:240],
                         "report": {
-                            "question": question,
+                            "question": redact_source_text(question),
                             "final_decision": report_text,
                             "status": report_status,
                             "model": model_id,
@@ -481,15 +498,17 @@ async def chat_stream(request: Request):
         if conv_id:
             live_chunks.extend({"t": "platform_call", "call": call} for call in platform_calls.values())
             payload = json.dumps(
-                {
-                    "text": full_text,
-                    "chunks": live_chunks,
-                    "refs": collected_refs,
-                    "research": research,
-                    "history_anchor": history_anchor,
-                    "report_status": report_status,
-                    "report_files": delivery_reports[:5],
-                },
+                source_display_payload(
+                    {
+                        "text": full_text,
+                        "chunks": live_chunks,
+                        "refs": collected_refs,
+                        "research": research,
+                        "history_anchor": history_anchor,
+                        "report_status": report_status,
+                        "report_files": delivery_reports[:5],
+                    }
+                ),
                 ensure_ascii=False,
             )
             with get_db() as db:

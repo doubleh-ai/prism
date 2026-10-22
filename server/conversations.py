@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 from .auth import require_auth
 from .database import get_db
 from .research_context import parse_claude_jsonl_events
+from .source_urls import redact_source_text, source_display_payload
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
@@ -18,7 +19,7 @@ def _clean_object_artifacts(text: str) -> str:
     """Remove JavaScript object-stringification artifacts from Claude CLI output."""
     if not text:
         return ""
-    cleaned = str(text).replace("[object Object]", "")
+    cleaned = redact_source_text(str(text)).replace("[object Object]", "")
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -77,13 +78,12 @@ def _sanitize_stored_content(content: str) -> str:
     """Clean legacy DB messages that predate renderer-side artifact stripping."""
     if not isinstance(content, str):
         return _content_to_text(content)
-    text = _clean_object_artifacts(content)
-    if not text.startswith("{"):
-        return text
+    if not content.lstrip().startswith("{"):
+        return _clean_object_artifacts(content)
     try:
-        payload = json.loads(text)
+        payload = json.loads(content)
     except (TypeError, json.JSONDecodeError):
-        return text
+        return _clean_object_artifacts(content)
     cleaned = _sanitize_json_value(payload)
     return json.dumps(cleaned, ensure_ascii=False)
 
@@ -194,7 +194,7 @@ def list_convs(request: Request) -> list[dict]:
             if user_content:
                 c["title"] = user_content[:40]
         result.append(c)
-    return result
+    return source_display_payload(result)
 
 
 def get_conv(cid: str, request: Request) -> dict:
@@ -220,12 +220,14 @@ def get_conv(cid: str, request: Request) -> dict:
         ]
         messages = _merge_saved_turns(messages, stored)
 
-    return {
-        "id": cid,
-        "title": conv["title"],
-        "skill": conv["skill"],
-        "messages": messages,
-    }
+    return source_display_payload(
+        {
+            "id": cid,
+            "title": conv["title"],
+            "skill": conv["skill"],
+            "messages": messages,
+        }
+    )
 
 
 def delete_conv(cid: str, request: Request) -> dict:
@@ -295,9 +297,12 @@ def list_trash(request: Request) -> list[dict]:
             "WHERE username=? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
             [u],
         ).fetchall()
-    return [
-        {"id": r["id"], "title": r["title"], "skill": r["skill"], "deleted_at": r["deleted_at"]} for r in rows
-    ]
+    return source_display_payload(
+        [
+            {"id": r["id"], "title": r["title"], "skill": r["skill"], "deleted_at": r["deleted_at"]}
+            for r in rows
+        ]
+    )
 
 
 async def update_skill(cid: str, request: Request) -> dict:

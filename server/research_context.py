@@ -7,30 +7,12 @@ import re
 import uuid
 from datetime import datetime
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
+
+from .source_urls import public_source_url, redact_source_text, source_display_payload
 
 RESEARCH_TIMEZONE = "Asia/Shanghai"
 _TZ = ZoneInfo(RESEARCH_TIMEZONE)
-_CREDENTIAL_PARAMETERS = {
-    "apikey",
-    "token",
-    "accesstoken",
-    "refreshtoken",
-    "idtoken",
-    "authtoken",
-    "authorization",
-    "password",
-    "passwd",
-    "secret",
-    "clientsecret",
-    "signature",
-    "sig",
-    "xamzsignature",
-    "xamzcredential",
-    "xgoogsignature",
-    "xgoogcredential",
-}
 
 
 def build_research_context(
@@ -109,26 +91,7 @@ def content_text(value: Any) -> str:
 
 
 def _safe_url(url: Any) -> str | None:
-    if not isinstance(url, str) or len(url) > 4000 or any(ord(char) < 32 for char in url):
-        return None
-    try:
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-        ):
-            return None
-        # OAuth fragments and signed query parameters are credentials too. A
-        # fragment may be a client-side route followed by its own query string.
-        for parameters in (parsed.query, parsed.fragment, parsed.fragment.partition("?")[2]):
-            names = parse_qs(parameters, keep_blank_values=True)
-            if any(re.sub(r"[-_\s]", "", name).casefold() in _CREDENTIAL_PARAMETERS for name in names):
-                return None
-    except ValueError:
-        return None
-    return url
+    return public_source_url(url)
 
 
 def _failed_tool_payload(text: str) -> bool:
@@ -181,8 +144,8 @@ def extract_web_refs(text: str) -> list[dict]:
         refs.append(
             {
                 "url": url,
-                "title": str(title or url),
-                "snippet": snippet[:120],
+                "title": redact_source_text(str(title or url)),
+                "snippet": redact_source_text(snippet[:120]),
                 "snippet_truncated": len(snippet) > 120,
                 "published_at": published_at if isinstance(published_at, str) else None,
             }
@@ -231,12 +194,91 @@ class EvidenceTracker:
         self.run_id = run_id
         self.calls: dict[str, dict] = {}
         self.completed: set[str] = set()
+        self.server_calls: dict[str, dict] = {}
         self.seen: set[tuple[str, str]] = set()
 
     def record_call(self, call: dict) -> None:
         call_id = call.get("id") or call.get("tool_use_id")
         if call_id and isinstance(call.get("name"), str):
             self.calls[str(call_id)] = call
+
+    def record_server_call(self, block: dict) -> None:
+        """Normalize documented server search; real CLI transport remains unverified."""
+        call_id, inputs = block.get("id"), block.get("input")
+        if (
+            block.get("type") != "server_tool_use"
+            or block.get("name") != "web_search"
+            or not isinstance(call_id, str)
+            or not 0 < len(call_id) <= 200
+            or call_id in self.calls
+            or not isinstance(inputs, dict)
+            or not isinstance(inputs.get("query"), str)
+        ):
+            return
+        self.record_call(
+            {
+                "type": "tool_use",
+                "id": call_id,
+                "name": "WebSearch",
+                "input": {"query": inputs["query"][:2000]},
+            }
+        )
+        self.server_calls[call_id] = self.calls[call_id]
+
+    def record_server_result(self, block: dict, *, retrieved_at: str | None = None):
+        """Record URL metadata only; ciphertext/page_age is never article/publication evidence."""
+        call_id = str(block.get("tool_use_id") or "")
+        if (
+            block.get("type") != "web_search_tool_result"
+            or call_id not in self.server_calls
+            or call_id in self.completed
+            or self.calls.get(call_id) is not self.server_calls[call_id]
+        ):
+            return None
+        content = block.get("content")
+        if (
+            block.get("is_error")
+            or not isinstance(content, list)
+            or not content
+            or any(not isinstance(row, dict) or row.get("type") != "web_search_result" for row in content)
+        ):
+            self.completed.add(call_id)
+            return None
+        self.completed.add(call_id)
+        rows, refs = [], []
+        for row in content[:100]:
+            url = _safe_url(row.get("url"))
+            key = (call_id, url)
+            if not url or key in self.seen:
+                continue
+            self.seen.add(key)
+            title = row.get("title")
+            title = redact_source_text(title[:500]) if isinstance(title, str) else url
+            rows.append({"url": url, "title": title})
+            refs.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "snippet": "",
+                    "snippet_truncated": False,
+                    "published_at": None,
+                    "run_id": self.run_id,
+                    "tool": "WebSearch",
+                    "tool_call_id": call_id,
+                    "source_kind": "external_web",
+                    "evidence_status": "retrieved",
+                    "retrieval_type": "tool_result",
+                    "retrieved_at": retrieved_at,
+                    "provider_transport": "server_tool_use",
+                    "content_scope": "search_metadata_only",
+                }
+            )
+        normalized = {
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": json.dumps({"results": rows}, ensure_ascii=False),
+        }
+        return self.calls[call_id], normalized, refs
 
     def record_result(self, block: dict, *, retrieved_at: str | None = None) -> list[dict]:
         call_id = str(block.get("tool_use_id") or "")
@@ -334,6 +376,15 @@ def parse_claude_jsonl_events(events: list[dict], *, session_id: str = "") -> li
                     text = content_text(block.get(typ))
                     if text:
                         chunks.append({"t": "text" if typ == "text" else "think", "c": text})
+                elif typ == "server_tool_use":
+                    tracker.record_server_call(block)
+                elif typ == "web_search_tool_result":
+                    normalized = tracker.record_server_result(
+                        block, retrieved_at=source_timestamp(event.get("timestamp"))
+                    )
+                    if normalized:
+                        for ref in normalized[2]:
+                            chunks.append({"t": "ref", **ref})
                 elif typ == "tool_use":
                     tracker.record_call(block)
                     inp = block.get("input") or {}
@@ -341,4 +392,4 @@ def parse_claude_jsonl_events(events: list[dict], *, session_id: str = "") -> li
                         {"t": "tool", "c": block.get("name", "?"), "d": content_text(list(inp.values())[:1])}
                     )
     flush()
-    return messages
+    return source_display_payload(messages)

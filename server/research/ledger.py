@@ -26,6 +26,7 @@ from ..research_context import (
     content_text,
     source_timestamp,
 )
+from ..source_urls import redact_source_text, source_display_payload
 
 TERMINAL = {"completed", "partial", "failed", "cancelled"}
 STAGES = {"queued", "discovering", "collecting", "extracting", "checking", "synthesizing"}
@@ -43,7 +44,9 @@ BLOCKS = (
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        source_display_payload(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def _hash(text):
@@ -261,7 +264,7 @@ def ingest_tool_result(username: str, run_id: str, call: dict, block: dict, refs
     """
     call_id = str(call.get("id") or call.get("tool_use_id") or "")
     tool = call.get("name")
-    text = content_text(block.get("content"))
+    text = redact_source_text(content_text(block.get("content")))
     if (
         not call_id
         or str(block.get("tool_use_id") or "") != call_id
@@ -314,7 +317,7 @@ def ingest_tool_result(username: str, run_id: str, call: dict, block: dict, refs
                     "url": url,
                     "canonical_url": _canonical_url(url),
                     "final_url": None,
-                    "title": str(ref.get("title") or url)[:500],
+                    "title": redact_source_text(str(ref.get("title") or url)[:500]),
                     "publisher": None,
                     "observed_host": urlsplit(url).hostname,
                     "document_number": None,
@@ -322,7 +325,7 @@ def ingest_tool_result(username: str, run_id: str, call: dict, block: dict, refs
                     "access_method": tool,
                     "tool_call_id": call_id,
                     "request": {
-                        key: value[:2000]
+                        key: redact_source_text(value[:2000])
                         for key, value in (call.get("input") or {}).items()
                         if key in {"query", "url"}
                         and isinstance(value, str)
@@ -413,15 +416,17 @@ def read_research_run(username: str, run_id: str) -> dict:
     init_research_db()
     with get_db() as db:
         run = _owned(db, username, run_id)
-        return {
-            "run": run,
-            "documents": _records(db, "research_documents", run_id),
-            "passages": _records(db, "research_passages", run_id),
-            "claims": _records(db, "research_claims", run_id),
-            "report_revisions": _records(db, "research_revisions", run_id),
-            "relations": _records(db, "research_relations", run_id),
-            "gaps": run["gaps"],
-        }
+        return source_display_payload(
+            {
+                "run": run,
+                "documents": _records(db, "research_documents", run_id),
+                "passages": _records(db, "research_passages", run_id),
+                "claims": _records(db, "research_claims", run_id),
+                "report_revisions": _records(db, "research_revisions", run_id),
+                "relations": _records(db, "research_relations", run_id),
+                "gaps": run["gaps"],
+            }
+        )
 
 
 def list_research_runs(username: str) -> list[dict]:
@@ -434,7 +439,7 @@ def list_research_runs(username: str) -> list[dict]:
             "ORDER BY r.created_at DESC, r.rowid DESC LIMIT 100",
             [username],
         ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return source_display_payload([json.loads(row[0]) for row in rows])
 
 
 def _short(value, limit=500):

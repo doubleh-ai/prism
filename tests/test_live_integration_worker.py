@@ -375,9 +375,13 @@ async def test_actual_runner_builds_two_bounded_cli_calls_and_actual_owned_candi
     )
     assert all(phase["model_completed"] and phase["server_clock_verified"] for phase in result["phases"])
     assert result["phases"][0]["model_date_echo_verified"]
-    assert result["phases"][1]["source_ledger_persisted"] is (not server_frames)
-    assert result["phases"][1]["chat_sse_ledger_match"] is (not server_frames)
-    assert result["phases"][1]["server_search_unhandled_by_candidate"] is server_frames
+    assert result["phases"][1]["source_ledger_persisted"] is True
+    assert result["phases"][1]["chat_sse_ledger_match"] is True
+    assert result["phases"][1]["server_search_unhandled_by_candidate"] is False
+    if server_frames:
+        saved = ledger.read_research_run(gateway.owner, result["phases"][1]["run_id"])
+        assert len(saved["documents"]) == 1 and saved["passages"] == []
+        assert saved["documents"][0]["published_at"] is None
     assert result["phases"][1]["search_call_count"] == 1
     assert result["phases"][1]["official_source_urls"] == ["https://www.sse.com.cn/disclosure/public"]
     for index, (argv, kwargs) in enumerate(launches):

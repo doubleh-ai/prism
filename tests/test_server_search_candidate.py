@@ -1,4 +1,4 @@
-"""Apply a dormant patch ONLY to temp copies; synthetic official-schema fixtures.
+"""Exercise shipped runtime in temp copies; synthetic official-schema fixtures.
 
 These tests do not claim that fixed CLI 2.1.177 emits these DeepSeek frames.
 No provider requests, user history, credentials or fetched article text are used.
@@ -7,7 +7,6 @@ No provider requests, user history, credentials or fetched article text are used
 import copy
 import hashlib
 import json
-import subprocess
 import types
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,16 +26,6 @@ def candidate(tmp_path):
     for path, content in originals.items():
         (tmp_path / path).parent.mkdir(exist_ok=True)
         (tmp_path / path).write_bytes(content)
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": str(tmp_path),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-    }
-    for option in ["--check", None]:
-        argv = ["/usr/bin/git", "apply"] + ([option] if option else []) + [str(PATCH)]
-        subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, check=True)
     modules = {}
     for path in paths:
         module = types.ModuleType("server._dormant_" + Path(path).stem)
