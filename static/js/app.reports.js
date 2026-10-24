@@ -79,7 +79,7 @@ Object.assign(App, {
         return '<div class="reports-lib-card" onclick="App._openSavedReport(\'' + escAttr(rep.id) + '\')">' +
           '<div class="reports-lib-card-hd"><span>' + esc(rep.ticker || 'REPORT') + '</span><em class="' + cls + '">' + esc(sig) + '</em></div>' +
           '<h3>' + esc(self._reportText(rep.title || rep.name || rep.ticker || 'Untitled Report')) + '</h3>' +
-          '<p>' + esc(self._reportText(rep.summary || '暂无摘要')) + '</p>' +
+          '<p>' + esc(self._reportSummaryText(rep.summary || '暂无摘要')) + '</p>' +
           '<div class="reports-lib-card-ft">' + esc(self._fmtDate(rep.updated_at || rep.created_at)) + '</div>' +
           '</div>';
       }).join('') + '</div></div>';
@@ -165,7 +165,7 @@ Object.assign(App, {
           this._safeReportMarkdown(finalDecision) + '</div></details>';
       }
     } else if (deliveredDecision || finalDecision) {
-      body += '<div class="reports-lib-section"><h4>最终决策</h4><div class="reports-lib-md">' +
+      body += '<div class="reports-lib-section"><h4>研究观点</h4><div class="reports-lib-md">' +
         this._safeReportMarkdown(deliveredDecision || finalDecision) + '</div></div>';
     }
     var traderPlan = this._reportText(report.trader_plan || report.trade_plan || report.plan || '');
@@ -298,10 +298,29 @@ Object.assign(App, {
     if (!text) return '';
     var html = '';
     try {
-      if (typeof ChatRender !== 'undefined' && ChatRender.renderContent) html = ChatRender.renderContent(text);
-      else if (typeof render === 'function') html = render(text);
-      else if (this._renderMarkdown) html = this._renderMarkdown(text);
-      else html = sanitizeHtml(marked.parse(escapeAllGt(text)));
+      // Saved documents use standard Markdown. The chat renderer deliberately
+      // escapes every > and balances unfinished streaming input; applying that
+      // policy here makes report quotations appear as stray Markdown markers.
+      // Pass a local renderer so this does not change chat/streaming behavior.
+      if (typeof marked !== 'undefined' && marked.Renderer && marked.parse) {
+        var renderer = new marked.Renderer();
+        var link = renderer.link.bind(renderer);
+        var image = renderer.image.bind(renderer);
+        var table = renderer.table.bind(renderer);
+        renderer.link = function(token) {
+          return link(Object.assign({}, token, {href: safeUrl(token.href) || '#'}));
+        };
+        renderer.image = function(token) {
+          return image(Object.assign({}, token, {href: safeUrl(token.href)}));
+        };
+        // Reports are Markdown documents, not executable HTML. Show embedded
+        // HTML as source text; the separate HTML-report viewer remains sandboxed.
+        renderer.html = function(token) { return esc(token.text || ''); };
+        renderer.table = function(token) {
+          return '<div class="reports-lib-table-scroll" role="region" aria-label="报告表格" tabindex="0">' + table(token) + '</div>';
+        };
+        html = marked.parse(text, {renderer: renderer, gfm: true, breaks: true, async: false});
+      }
     } catch(e) {
       html = '';
     }
@@ -313,7 +332,7 @@ Object.assign(App, {
     if (value && typeof value === 'object' && typeof value.html === 'string') value = value.html;
     if (typeof value !== 'string') return '';
     value = value.replace(/\[object Object\]/g, '').trim();
-    return typeof sanitizeHtml === 'function' ? sanitizeHtml(value) : value;
+    return typeof sanitizeHtml === 'function' ? sanitizeHtml(value) : '';
   },
 
   _reportDeliveredText: function(value) {
@@ -340,7 +359,8 @@ Object.assign(App, {
     return text.replace(/```[\s\S]*?```/g, ' ')
       .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
       .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-      .replace(/^[#>*+\-\d.\s]+/gm, '')
+      .replace(/^\s{0,3}(?:>\s*)+/gm, '')
+      .replace(/^\s{0,3}(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)/gm, '')
       .replace(/[*_`~]/g, '')
       .replace(/\s+/g, ' ')
       .trim()

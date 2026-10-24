@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -12,8 +13,13 @@ def test_report_library_static_contract():
 
     assert 'data-mode="reports"' in template
     assert "reportsPanel" in template
-    assert "app.reports.js?v=83" in template
-    assert "app.chat-render.js?v=83" in template
+    asset_version = re.search(r"app\.css\?v=(\d+)", template)
+    assert asset_version is not None
+    version = asset_version.group(1)
+    assert f"app.reports.js?v={version}" in template
+    assert f"app.chat-render.js?v={version}" in template
+    assert f"prism-workbench-v{version}" in sw
+    assert f"path + '?v={version}'" in sw
     assert "/api/reports/library" in reports_js
     assert "/save-report" in reports_js
     assert "_reportText: function(value)" in reports_js

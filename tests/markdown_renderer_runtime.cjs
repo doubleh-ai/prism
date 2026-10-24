@@ -44,8 +44,11 @@ assert.strictEqual(
   true,
 );
 
-context.ChatRender.renderContent = () => ({ html: '<p>真实报告</p>' });
-assert.strictEqual(context.App._safeReportMarkdown('报告'), '<p>真实报告</p>');
+const chatRenderer = context.ChatRender.renderContent;
+context.ChatRender.renderContent = () => ({ html: '<p>聊天流内容</p>' });
+assert.strictEqual(context.App._safeReportMarkdown('报告'), '<p>报告</p>');
+assert.strictEqual(context.App._reportHtmlString({ html: '<p>真实报告</p>' }), '<p>真实报告</p>');
+context.ChatRender.renderContent = chatRenderer;
 
 const analysisMarkdown = [
   'Aggressive Analyst: # 激进风险分析师反击',
