@@ -151,12 +151,23 @@ def _merge_saved_turns(history: list[dict], stored: list[dict]) -> list[dict]:
             payload = json.loads(item["content"])
         except (TypeError, ValueError):
             continue
-        if isinstance(payload, dict) and payload.get("research") and payload.get("history_anchor"):
+        if (
+            isinstance(payload, dict)
+            and (payload.get("research") or payload.get("native_agent"))
+            and payload.get("history_anchor")
+        ):
             anchor = payload["history_anchor"]
             break
     if anchor is None:
         return history or [{"role": m["role"], "content": m["content"]} for m in stored]
     boundary = int(anchor.get("db_message_id") or 0)
+    if anchor.get("native_db_takeover") is True:
+        # Legacy files are a read-only prefix. New native turns live only in
+        # Prism's database, without creating/resuming a Claude project session.
+        prefix = history or [
+            {"role": m["role"], "content": m["content"]} for m in stored if m["id"] <= boundary
+        ]
+        return prefix + [{"role": m["role"], "content": m["content"]} for m in stored if m["id"] > boundary]
     prefix = []
     if history:
         users = 0
@@ -218,6 +229,58 @@ def get_conv(cid: str, request: Request) -> dict:
             {"id": m["id"], "role": m["role"], "content": _sanitize_stored_content(m["content"])}
             for m in msgs
         ]
+        # A browser refresh can show persisted progress even before the final
+        # assistant message exists, including a run interrupted by a restart.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_dialogues'").fetchone():
+            pending = db.execute(
+                "SELECT d.*,r.status FROM native_agent_dialogues d JOIN native_agent_runs r ON r.run_id=d.run_id "
+                "WHERE d.conv_id=? AND d.username=? AND d.assistant_message_id IS NULL ORDER BY d.user_message_id",
+                [cid, u],
+            ).fetchall()
+            for run in pending:
+                chunks, text, refs, research = [], "", [], None
+                for event in db.execute(
+                    "SELECT payload FROM native_agent_events WHERE run_id=? ORDER BY seq LIMIT 4000",
+                    [run["run_id"]],
+                ):
+                    item = json.loads(event[0]).get("ui", {})
+                    if item.get("text"):
+                        text += item["text"]
+                        chunks.append({"t": "text", "c": item["text"]})
+                    if item.get("ref"):
+                        refs.append(item["ref"])
+                        chunks.append({"t": "ref", **item["ref"]})
+                    if item.get("status"):
+                        chunks.append({"t": "status", "c": item["status"]})
+                    if item.get("research"):
+                        research = item["research"]
+                    if item.get("platform_call"):
+                        chunks.append({"t": "platform_call", "call": item["platform_call"]})
+                    if item.get("error"):
+                        error_text = ("\n\n" if text else "") + "⚠ " + item["error"]
+                        text += error_text
+                        chunks.append({"t": "text", "c": error_text})
+                payload = {
+                    "text": text,
+                    "chunks": chunks,
+                    "refs": refs,
+                    "research": research,
+                    "native_agent": {
+                        "run_id": run["run_id"],
+                        "status": run["status"],
+                        "engine": "prism-native",
+                    },
+                    "history_anchor": json.loads(run["history_anchor_json"]),
+                    "report_status": run["status"],
+                }
+                stored.append(
+                    {
+                        "id": run["user_message_id"] + 0.5,
+                        "role": "assistant",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    }
+                )
+            stored.sort(key=lambda item: item["id"])
         messages = _merge_saved_turns(messages, stored)
 
     return source_display_payload(
@@ -283,6 +346,18 @@ def permanent_delete_conv(cid: str, request: Request) -> dict:
             raise HTTPException(404, "对话不存在")
         if row["deleted_at"] is None:
             raise HTTPException(409, "请先将对话移入回收站")
+        # Native event replay and input anchors are conversation data as well.
+        # A still-running owner observes the missing conversation and retires;
+        # it must never recreate these records after permanent deletion.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_runs'").fetchone():
+            db.execute(
+                "DELETE FROM native_agent_events WHERE run_id IN "
+                "(SELECT run_id FROM native_agent_runs WHERE conv_id=? AND username=?)",
+                [cid, u],
+            )
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_dialogues'").fetchone():
+                db.execute("DELETE FROM native_agent_dialogues WHERE conv_id=? AND username=?", [cid, u])
+            db.execute("DELETE FROM native_agent_runs WHERE conv_id=? AND username=?", [cid, u])
         db.execute("DELETE FROM conversations WHERE id=? AND username=?", [cid, u])
         db.execute("DELETE FROM messages WHERE conv_id=?", [cid])
     return {"ok": True}

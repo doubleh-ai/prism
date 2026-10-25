@@ -1,207 +1,73 @@
 # 发布观察与受控上线流程
 
-仓库已实现独立的固定目标发布执行器，并保留只读管理控制台。执行器的本地模拟测试通过不代表 Linux 隔离验收、生产切换或回退演练已经完成；这些事实必须由对应实际回执和阶段记录证明。CI、候选构建、本实例健康和生产发布记录分别展示，不能互相代替。
+Prism 开源仓库保存应用、通用交付规范和离线测试。具体环境的运维源码、地址、服务映射、访问配置、许可与验收回执由私有运维仓库及私有存储管理；凭证、用户数据、日志、备份及旧私有 Git 历史不进入 Git 仓库或公开构建产物。
 
-## 当前能力和证据边界
+本文是可移植的发布规范，不包含环境特定的执行步骤。不能根据本文、一次绿色 CI 或网页上的环境标签自行执行生产切换。
 
-- 管理员发布页读取真实 GitHub 工作流、开放 PR 与固定执行器的脱敏记录。GitHub 快照最多缓存 180 秒，实时日志在对应 GitHub 页面；失败、过期和未知不会变成成功。页面不执行部署、重启或回滚。
-- `scripts/release_candidate.py` 只从指定 Git 提交构建和核验源码候选；`release_controller.py` 在操作者 Mac 上控制单个明确阶段，`remote_release.py` 在固定 Linux 目标执行已审查动作。默认仅输出计划，必须显式执行。
-- 发布期间的独立操作记录是 [GitHub issue #9](https://github.com/doubleh-ai/prism/issues/9)。关闭此 issue 会阻止受控流程继续进入后续边界；GitHub 检查工作流的取消按钮只取消该工作流，不是生产回滚按钮。
-- 控制台仅在取得有效执行器记录时显示已接入该受控流程。它不能证明其他人或其他工具没有手工修改生产。
-- `/health/ready` 的 200 只证明该实例的基础就绪检查通过。完整修订号、登录、核心用户旅程、真实模型和数据接入需要分别核验。未知修订号不能补造。
+## 已实现的能力与证据边界
 
-## GitHub Actions 保留与精简
+- CI 检查格式、回归、覆盖率和依赖漏洞。候选打包流程从完整提交构建源码清单和摘要，不访问生产，也不执行候选应用。
+- 应用管理员控制台可读取 PR、工作流和脱敏发布记录。控制台为观察入口，不承担部署、重启或回滚操作；独立发布记录必须在应用不可用时仍能访问。
+- 受控发布执行器按已审查阶段工作。实现、离线测试、实际隔离验收、真实模型验收和生产发布是不同证据，不能互相代替。
+- 就绪接口仅证明本实例的基础检查通过。完整提交、来源清单、登录、核心用户旅程、模型和数据源必须分别验证。
+- 原生 Agent 分支增加 `agent` 持久化任务类型、直接模型连接、研究事件和结果保存。发布该分支须重新验收停止、真实后台工作归属、事件持久化、单实例重启与兼容回退。旧 CLI 候选的回执不适用于原生 Agent。
 
-网站运行本身不依赖 GitHub Actions。当前保留两套用于交付的工作流：`CI` 检查格式、回归、覆盖率与依赖漏洞；`Release candidate (not deployment)` 固定候选源码与摘要，产物保留 7 天，不访问生产。Actions 列表中的多条记录是这两套流程的历次运行，不是每条都对应一套独立工作流。
+## GitHub Actions
 
-额外的 Codecov 上传已移除，覆盖率仍在 CI 中计算并执行门禁。同一 PR 的新提交会取消过时的 CI 检查，避免重复消耗。历史失败记录保留用于追溯；它们不会自行继续运行。删历史记录、取消检查与生产回退是不同操作。
+网站运行本身不依赖 Actions。保留 `CI` 和 `Release candidate (not deployment)` 两套工作流；列表中的多条记录是历史运行，不等于多套独立流程。候选产物保留期限和触发分支以工作流文件为准，产物不包含凭证或运行数据。
 
-## 冻结候选
+同一 PR 可以取消过时 CI，以减少重复消耗。生产写操作另行串行化，不能通过取消旧工作流来假定旧生产操作已停止。历史失败和中断记录应保留用于追溯。
 
-`Release candidate (not deployment)` 工作流与本地打包器不访问 SSH、不安装依赖、不导入应用、不发布 GitHub Release。它们读取完整提交的 Git 对象，生成源码压缩包、逐文件 SHA-256 清单和归档摘要。
+## 固定候选
 
-本地 `build` 必须提供 `--repo`、40 位小写 `--commit` 和 Git 工作区外的 `--output-dir`。使用 `verify --archive ... --manifest ... --repo ... --commit ...` 将候选与同一提交重新比对。工作区未提交内容不会进入候选。GitHub 分支、事件限制与保留期限以 `.github/workflows/release-candidate.yml` 为准。
+使用完整 Git 提交生成候选源码包、逐文件清单和归档摘要，并将产物放在 Git 工作区之外。候选只能来自该提交，工作区未提交文件不进入候选。
 
-生产控制器还要求固定、已审查的执行器与候选验证器源码摘要，直接执行已校验字节；不能仅凭任意 PR 自己运行的绿色检查晋级。候选拒绝路径穿越、软链接、重复文件、清单外文件和摘要差异。敏感内容扫描不能保证发现所有秘密，公开候选仍需审查范围；旧 Git 历史、凭证、数据和运行日志不得进入候选。
+验证必须比对同一提交的实际对象，拒绝路径穿越、软链接、重复条目、清单外文件和摘要差异。依赖锁、额外继承包、外部引擎及工具需要各自真实清单；核心依赖锁不能代表整个部署环境。
 
-## 单阶段执行和固定边界
+PR 自己运行的绿色检查属于开发证据。生产晋级还需独立受信任的验证器、固定执行器与真实环境回执，不允许候选自己授权自己。
 
-控制器固定连接 `ubuntu@124.223.168.224:22`，保留 SSH 主机密钥校验，并复用本机已认证的 `/tmp/prism-release-ssh-%C` 连接。它不保存 GitHub token、SSH 密钥或应用凭证。每次调用只执行下表中的一个动作，下一阶段必须重新核对记录和停止条件。
+## 阶段和停止保护
 
-远端仅以小型 `-I -B -S` 标准库启动器接收执行器源码，避免超过 Linux 单个命令参数的 128 KiB 上限。Mac 先核已审查的执行器摘要，再将该固定摘要放入小参数；标准输入依次发送源码长度/摘要、源码、原请求和操作许可。启动器限制源码不超过 512 KiB，并在执行任何源码前核完整长度、边界和摘要；只在内存中执行，不写远端临时文件。原请求与许可继续使用同一个缓冲输入流，传输改变不替代任何发布门禁。
-
-| 阶段 | 实际作用与门禁 |
+| 阶段 | 要求 |
 |---|---|
-| `inspect` | 只读观察实际 systemd 工作目录、执行入口和进程映射。旧实例没有新就绪接口时，保留修订号未知，以审核过的实际配置和源码清单建立基线。 |
-| `prepare` | 要求加密备份/恢复、兼容性和来源回执；校验磁盘余量与内容，写入独立、root 所有的候选和依赖环境，不覆盖在线目录。 |
-| `diagnose_build` | 仅对有真实失败记录、尚未准备或启动且未切流的候选，在原级别隔离内运行固定 `pip check` 与离线安装 dry-run；收集安全诊断，不安装或表示准备通过。 |
-| `quarantine_failed_prepare` | 核原生产仍运行、候选未获准且专用 UID 无进程后，将绑定的失败候选和构建输入原子移入私有失败区，保留全部失败记录，供同身份重新准备。 |
-| `stage` | 复制一致数据库并撤销副本会话/工具令牌，在独立用户、私有网络和数据路径中启动候选，供真实隔离与功能验收。 |
-| `finish_stage` | 仅停止已实际验收的固定合成 stage unit，核对其 PID、UID、工作目录和独立 cgroup 后确认该组为空；保留目录、数据库与回执，不影响其他 stage 或生产。 |
-| `quiesce` | 接受候选及安全恢复候选的验收后，停止对应隔离服务，向两个固定 Nginx 站点插入固定 `/api/` 维护响应。配置检查和真实域名/IP 探测均须通过。 |
-| `switch` | 再次确认维护配置与探测、原实际运行映射、源码清单和零活动任务；写固定 systemd drop-in，然后分别经过停止门禁再加载配置和重启服务。 |
-| `verify` | 核对候选源码/环境/外部引擎、服务完整 SHA 和操作者提供的真实用户旅程回执。这时 API 仍被维护入口拦截，仅表示服务内部验收。 |
-| `rollback` | 仅切到已单独验收且与当前数据库兼容的安全候选。坏版本没有 PID 或不就绪也允许受控恢复；取消或失败后只接受本次已记录的切换/恢复配置继续操作。 |
-| `resume` | 候选或恢复版本重新验收通过后，恢复精确原 Nginx 配置并重新加载。只有正常候选验收且恢复入口成功、没有发生回退，才标记该次 `production_verified`。 |
+| 现场核对 | 记录实际服务、进程、完整修订号与源码来源；未知项保持未知，先保护未同步成果。 |
+| 准备 | 在独立代码与依赖位置准备固定候选，确认加密备份、恢复验证、数据库兼容和可用恢复版本。 |
+| 隔离验收 | 使用独立身份、数据副本、私有网络与资源限制，撤销副本会话，建立合成账号。验证实际进程、文件和网络隔离。 |
+| 维护与排空 | 关闭新任务入口，核对所有生产者与实际任务均已排空；已受理工作的生命周期和持久化必须可证明。 |
+| 切换 | 再次核对停止保护、当前现场指纹、已接受的候选和恢复证据，执行单个受控切换阶段。 |
+| 内部验证 | 核对实际运行修订号、源码/依赖身份、就绪、鉴权和核心用户旅程。维护仍生效时仅是内部验收。 |
+| 恢复入口 | 内部验收通过后恢复访问并复核外部入口，完成独立发布记录。 |
+| 回退 | 只切回已实际验收、与当前数据兼容的代码与环境；保留失败与回退记录。 |
 
-Nginx 操作只允许 `stock-analyzer`、`stock-app` 的固定 enabled→available 目标。配置必须符合受支持结构并与原摘要一致；原内容私有保存，先 `nginx -t` 再 reload。测试失败恢复原字节，恢复入口失败则保留维护状态或明确要求核对，不能假报成功。进入维护前可以长时间准备隔离候选；维护窗口只用于最后排空、切换、验收和恢复入口。
+每个受控边界前重新检查独立停止入口、许可和实际状态。停止入口关闭、不可访问或状态未知时不得进入下一边界。用户可在不依赖 Prism 本身的独立记录和停止入口介入。
 
-原 `/home/ubuntu/stock-analyzer` 不覆盖。代码放在 `/opt/prism/releases/<完整提交>`，数据和日志保留原路径，凭证继续由原 EnvironmentFile 提供。修改服务只使用固定 drop-in，不改原 unit，不在原虚拟环境中升级包，也不自动恢复数据库。
+取消会阻止后续阶段，不能证明已经完成的动作被撤销。连接断开时对账同一操作的私有记录和实际现场，不能把断开连接当作远端停止。诊断失败保留失败事实，不可转写为准备或发布成功。
 
-## 依赖和隔离验收
+## 备份、恢复与数据
 
-受信任系统 Python 创建新虚拟环境；旧 site-packages 只作为数据复制。复制的实际字节逐文件绑定已审查清单，复制后再次检查源环境是否变化。旧 `sitecustomize`、`usercustomize`、`patch_ssl`、`.pth` 和旧字节码缓存不继承；特别不能保留关闭 TLS 证书校验的旧启动钩子。
+备份覆盖应用现场、运行数据、环境依赖和离线来源，凭证采用独立受限保存。备份需加密、验证完整性，并在隔离位置实际恢复验证；仅创建压缩包或文件存在不构成可恢复证明。
 
-核心升级使用与候选 `requirements.lock` 相同摘要的完整哈希锁和离线 wheelhouse，执行 `pip check`。安装和候选导入都使用受限 `prism-stage` 用户，不以 root 执行旧环境代码。继承环境中额外的 Astock 依赖有独立摘要，不能声称核心锁覆盖整个环境。
+代码、配置、数据和日志保持独立。候选不得导入或迁移生产数据来做开发检查。复制的数据先撤销会话和短期工具授权，使用合成身份验收，不把真实用户历史用于模型测试。
 
-2026-10-22 的第二次实际准备在隔离安装启动阶段失败，已观察到 `226/NAMESPACE`；未生成 `prepared.json`，生产未改变。真实 `/usr/bin/true` 矩阵中，原 `/run` 屏蔽、去掉可选 staging 屏蔽及仅屏蔽运行时端点均返回 226；只读私有 `/run` 和基本命名空间返回 0，所有诊断 unit 已停止。构建、stage 与规范诊断因此将 `InaccessiblePaths=/run` 改为 `TemporaryFileSystem=/run:ro`；原 PrivateNetwork、ProtectHome、ProtectProc、NoNewPrivileges、严格文件系统与资源限制保留，构建/诊断仍屏蔽 staging 目录。该事实只证明固定诊断能启动，尚不代表候选获准。
+程序回退不自动恢复数据库。任何破坏性数据恢复需要单独明确授权、影响范围和可能丢失的数据窗口，不能为恢复旧程序静默丢弃新写入。
 
-固定 `diagnose_build` 保留这些失败，先以 `/usr/bin/true` 和当前规范构建沙盒（含候选写路径）检测命名空间设置，失败即跳过 pip。报告将规范运行时策略标记为 `read_only_private_run`。预检通过后，两条只读 pip 命令均无外网、HOME、其他隔离数据库或候选写权限。合并输出流在内存中限 256 KiB，超限或超时只终止该诊断 unit；限定 unit 的近期 journal 同样限长读取，只保存固定类别、已清点包名/版本、候选相对路径和固定系统挂载路径，原始异常与输出不落盘。非零退出码作为诊断事实返回，不能转换成准备成功。
+## 原生 Agent 的额外验收
 
-原组合失败后，可继续执行固定的四项 `/usr/bin/true` 诊断矩阵：去掉可选 staging 屏蔽、使用只读私有 `/run` 并保留 staging 屏蔽、仅屏蔽运行时 dbus/systemd 路径、去掉运行时路径屏蔽的基本命名空间。四项都保留独立 UID、PrivateNetwork、ProtectHome、ProtectProc、NoNewPrivileges、PrivateTmp、严格文件系统与资源限制，每项使用独立 unit/随机数、许可和 60 秒上限；不运行候选或 Python。每项安全结果及时保存在私有回执，便于中断后追溯。任一变体成功都仅用于定位配置冲突，不能允许 pip、宣称隔离已验收或准备成功；只有原组合预检成功才进入 pip 诊断。
+[原生 Agent 架构](native-agent-framework.md)说明当前实现与尚未迁移的能力。原生研究对话默认不需要 Claude CLI 或外部 Skill；其他工作区仍有原引擎依赖，必须按实际启用范围分别验收。
 
-失败候选隔离动作拒绝已准备、已 stage、已切流或恢复候选；生产实际工作目录必须仍是原目录，`prism-stage` 不得有残留进程。进程检查只读取内核 `/proc/<pid>/status` 的四个 `Uid`，任一匹配均拒绝，无法读取或解析则停止；不能用可能属于 root 的 `/proc` 目录所有者替代。它仅将候选 rename 到 `/opt/prism/failed/<提交>-<随机数>`，依赖输入移到 root 私有失败 attempt 目录；跨设备 rename 失败时不回退复制/删除。每个 rename 都重新取得固定边界许可，然后复核实际运行目录、残留进程及 inode/设备；断线后只能核对同一意图续做。旧失败 journal 不改写，共享引擎/CLI 不改；完成后原身份可重新执行 `prepare`。
+- 相同请求复用与原子认领，不重复发起未知用量的模型调用。
+- 浏览器断开只结束读者；事件可以回放，任务结果可以恢复查看。
+- 停止等待模型连接和已归属后台工作真实结束，再确认终态。
+- 维护排空包含 `agent` 及其派生工作，不能沿用缺少该类型的旧资格记录。
+- 重启后保留中断和未知用量，不自动重新发送原模型请求。
+- 账号、会话删除与停用不会泄露历史或重建已删除内容。
+- 研究日期、来源时间、证据缺口和未核验结论真实保留。
+- 新增数据结构支持已实际接受的恢复版本；恢复验证须与本候选匹配。
 
-Astock 源码按固定来源的真实清单复制到 `/opt/prism/engines/astock/<清单摘要>`；只复制允许的执行源码和资源，校验字节并规范目标权限。原可写开发目录不作为新生产引擎路径。外部源码、准备后的环境及候选在后续阶段重复核验。
+真实模型验收使用新获准的有限合成请求，明确目的地、内容、次数、用量与时间边界；凭证只用于相应提供方认证。离线模拟通过不表示真实 API 兼容、研究质量或生产上线已经通过。
 
-Claude CLI 从已审查的固定本机官方安装路径读取；摘要、链接、文件类型与复制前后身份必须一致。受控准备仅按数据复制到 root 所有的 `/opt/prism/tools/claude/<摘要>/claude`，不会以 root 执行二进制；服务在实际启动命令固定此路径，避免配置文件覆盖。候选 `.cli-revision` 与私有准备回执绑定，验收和恢复再次核验。实际模型子进程强制禁用安装/自动更新，CLI 帮助或版本检查不能代替模型、检索和抓取验收。
+## 发布完成的判定
 
-官方源文件允许已有硬链接；固定路径、ELF、权限、摘要以及打开的文件描述符和路径的完整身份（含链接数）在读取前后都必须稳定。目标必须是新复制的独立 inode、只有一个硬链接并由 root 锁定，不能直接链接源文件。2026-10-22 的实际 `prepare` 曾因官方源文件的链接数为 2 被旧规则拒绝；失败 journal 保留，当时仅完成外部引擎复制，CLI 目标和应用候选尚未创建，生产未改变。审核修复后的执行器摘要后可对同一固定候选重试；已存在的外部引擎须重新校验后复用。
+独立记录应显示固定提交、产物摘要、环境、操作者、阶段、开始/结束时间、停止状态和各类验收证据。公开内容仅保留必要的脱敏状态。
 
-隔离候选使用独立系统用户、PrivateNetwork、ProtectHome、ProtectProc、私有临时目录和受限写目录，只通过受控 Unix socket 提供访问。它没有真实模型凭证，CLI/Vibe/Astock 的在线执行入口禁用。构建与隔离服务均有内存、任务、CPU 和运行时间限制；构建不能读取先前的隔离数据库副本。
-
-隔离数据库复制完成后，只在副本中建立两个随机验收账号及合成历史，不复用真实密码或会话。固定 Unix socket HTTP 检查实际提交、登录、所属历史、越权拒绝、会话注销，以及新版本临时会话读写或恢复版本写入拒绝。结果记录布尔、状态码与实际提交，凭证仅留 root 私有记录；失败不产生阶段成功标记。这不证明真实模型或市场数据可用。
-
-真正的 Linux 验收必须用无秘密哨兵证明不能读取生产用户的进程、HOME/临时文件，也不能连接生产 8088/8899；随后对隔离副本验证迁移、鉴权、历史和核心功能。单元测试里出现隔离参数不等于内核已执行隔离。真实外部模型和行情另做有范围的验收，不能用模拟结果替代。
-
-阶段启动器在加载候选和第三方包之前，实际尝试打开生产配置与生产进程环境，并尝试连接固定生产端口；只记录拒绝结果，不读取内容。证明绑定提交、随机数、进程及时间，父进程另外核对实际用户和网络命名空间；任何不符均停止。阶段通信 socket 的权限操作固定到已打开的同一 inode，拒绝链接及路径替换。上述实现仍须真实 Linux 验收。生产和恢复入口显式使用单个 worker，并启用 `NoNewPrivileges`，避免继承环境改变进程模型或让应用取得 sudo 权限。
-
-stage 启动器还会以随机数命名的独占 canary 检查 `/run` 写入被拒绝，不读取文件内容。父进程从已验证 PID 的 `/proc/<pid>/root/run` 打开实际目录并核对 inode/设备、root 所有权及 `statvfs` 只读标记，要求它不同于主机 `/run`，随后重新核 PID、用户和网络。只有实际检查通过才记录 `read_only_private_runtime_mount=true`；配置参数或导入前 canary 单独都不能替代此证据。
-
-## 备份、恢复和私有回执
-
-`scripts/secure_backup.py` 在操作者 Mac 创建加密 APFS 镜像，密码只从 Keychain 进入内存和标准输入。文件、私有 Git 历史、数据库、服务配置和依赖环境保全在 Git 之外。当前状态补充包与原始全量包是不同恢复材料，必须绑定各自报告摘要、归档摘要和加密镜像文件清单，不能只信“已验证”文字或目录名。
-
-SQLite 使用在线一致备份，恢复后实际执行完整性检查。文件归档逐项核对内容、权限和链接；源码或配置在捕获期间变化会阻止晋级。镜像卸载后以只读方式重新打开复验，并确认最终卸载。原始全量包中的 Git bundle、已恢复 Git 对象、refs、HEAD 和提交数量应独立验证；Git bundle 不包含未跟踪工作区文件，不能代替文件归档或数据库。
-
-`verify_backup_boot.py` 从已校验归档恢复允许的源码及数据库副本，在加密卷内进行 Mac 隔离启动、鉴权和空会话 CRUD 演练。它不启动真实模型，不证明 Linux 依赖、Astock、Vibe 或所有用户研究已经恢复；这些需要独立 Linux 验收。旧全量镜像和不同历史补充镜像可能使用不同的标准输入密码终止格式，应按私有回执处理，不能修改已有 Keychain 值来试错。
-
-`verify_database_compatibility.py` 在另一个加密验收卷中，从指定 Git 对象逐字节导出候选与恢复源码，将已验证数据库复制后执行“新版本→安全恢复版本→新版本”。它检查真实登录与所属历史、增量研究记录、账号退役保护和旧表数据保持；复制的会话及工具授权先撤销。网络、原数据和源码写入均被沙盒拒绝，详细行摘要及日志留在加密卷内。失败保留独立回执，成功也只代表 Mac 上本次指定字节的兼容性，不能代替 Linux 或生产验收。
-
-恢复启动 helper 的沙箱必须由父流程显式传入原工作区和整个源挂载目录；不得用封存 helper 所在路径推测工作区。源镜像位于 OPS 时仍须拒读原归档、恢复数据库与其他源挂载文件，同时允许读取加密演练区中的独立副本。兼容工具和备份工具在导入恢复 helper 前核对固定摘要；直接执行 `secure_backup.py --verify-boot --execute` 还必须提供显式 `--workspace`。这些参数不授权读取或修改生产数据。
-
-Mac 新版本→恢复版本→新版本兼容通过，不能代替独立的原始应用启动恢复。若后者仍失败，总门槛继续失败；合成沙箱 canary 通过只证明该路径策略，不是新的实际恢复回执。修复后应使用新的工具摘要和独立运行目录重做完整演练，保留旧失败报告与原时间戳。旧完整 capture 仍只是兼容夹具，不能作为新鲜生产备份。
-
-文件/数据库完整性、应用启动恢复和发布准入分别记录。请求应用恢复而实际失败时，备份工具保留加密材料与失败回执并返回失败，不能凭外层文件校验成功继续发布。
-
-回执位于 Git 外，绑定完整候选提交、归档摘要和具体测试证据。普通 JSON 中的 `verified: true` 不是独立签名或测试事实；操作者须审核实际输出、时间和摘要。私有回执、数据库、提示词、配置值及旧历史不进入公开 issue 或管理接口。
-
-旧生产目录不天然是安全回退点。已知存在安全问题的旧版本不能仅因能启动就获准回退；必须准备单独修复并验收的兼容候选。程序回退不撤销迁移、不丢弃新数据。恢复数据库需另行明确授权，并说明恢复点与数据损失窗口。
-
-## 停止、断线和记录
-
-控制器使用无凭证、无代理、无重定向的固定 GitHub issue 查询；关闭、未知或查询失败均停止继续。它还检查本机停止文件与远端固定 STOP，并在配置写入、reload、restart 等边界要求新的许可。单写锁防止并行发布。取消不会撤销已执行的步骤，断线也不证明远端已停止；必须核对私有 journal 和实际 systemd/Nginx 状态后再操作。
-
-root 私有阶段记录保留失败、取消和恢复；`/var/lib/prism-operations/status.json` 仅提供脱敏摘要，供管理页读取。独立 GitHub issue 镜像记录确保应用失联时仍可查看进度。不能把这些操作伪装成从未运行过的 GitHub Actions 部署。
-
-私有 journal 和私有状态保留受限格式的失败码，不记录任意异常文本或参数。Mac 控制器仅转发 1–96 位小写字母、数字和下划线组成的远端错误码，其他错误统一显示通用失败；历史失败记录不会被重试改写。
-
-控制台的生产完成标记仅来自实际 `resume` 完成且存在服务验收、没有回退的记录。处于维护窗口中的 `verify` 只证明内部服务通过，尚未恢复对外访问。恢复后的真实域名/IP和关键用户旅程仍应由操作者复核并留存结果。
-
-## 不作为发布入口的方式
-
-不要执行未审查的 `/tmp/prism-deploy-p2.sh`，不要覆盖在线目录或原地升级依赖。`install.sh` 是初始安装工具，`scripts/verify.sh` 会写测试状态并可能调用真实模型，均不能冒充只读检查或绕过本流程。Docker 的基础 `healthy` 状态同样不能代替完整研究功能和生产发布验收。
-
-## 无真实凭证的集成分项验收
-
-`integration_astock` 与 `integration_cli` 是两个独立动作，不启动生产、不接通真实模型或行情。Mac 必须同时提供本次已审查执行器摘要与对应探针的固定已批准摘要；控制器从本机脚本读出字节并核对，远端再与内置批准摘要核对，不能从候选目录动态取脚本并自行信任。它们复核已准备候选、环境、封存引擎及 CLI，原生产 PID/工作目录保持不变。
-
-每项以独立 `prism-integration` 系统账号运行，UID/GID 不同于生产和 `prism-stage`，从而不能读取已有 stage 数据库副本或进程。工作目录固定在 `/var/lib/prism-operations/integration/<attempt>/astock` 或 `cli-protocol`；根目录和探针由 root 锁定，只有 output/home/tmp/data 四个初始空子目录可写，均为专用账号 0700。PrivateNetwork、ProtectHome、ProtectProc、严格文件系统、只读私有 `/run`、staging 目录屏蔽及 60 秒运行上限保留；环境由 `env -i` 重建，不提供真实凭证。默认 attempt 为 release-id；失败保留目录和回执，不能覆盖重跑，后续若有经过审查的修复只能明确指定新的 `--integration-attempt`。
-
-第三方或候选代码导入前，受信任标准库探针实际尝试打开生产 `.env` 与生产进程环境（不读取内容），连接 8088/8899，写候选独占 canary，并打开 staging 目录。六项必须拒绝，证明绑定当前 PID、候选、引擎、源码摘要、随机数与有效期。root 父控制器另外读取内核四个 Uid，核实际 MainPID、与生产及 stage 不同的网络命名空间，再从该 PID 的真实 `/run` 核只读独立 mount。重新取得操作许可并复核身份和证明后，才写 root 所有 0444 的允许文件。仅有配置 flags、其他进程的证明或过期允许文件不能放行。
-
-Astock 探针自行完成上述导入前握手，随后仅导入固定来源并以本地自签 TLS 端点验证 urllib/requests/httpx 拒绝无效证书。CLI 使用已审查的标准库启动器生成握手，得到允许后在**同一 PID** 编译执行固定探针；后者调用封存官方 CLI 和实际应用 runner，通过仅 loopback 的合成协议服务验证新会话、恢复会话及辅助调用。协议测试有意覆盖模型配置，仅使用合成鉴权，`live_model_verified`、原生搜索/抓取及行情仍为 false。失败类别和布尔检查可进入私有安全回执，原始输出只在专用私有目录；每项最终停止自己的 unit 并核专用 UID 已无进程，保留全部文件，不停止其他 stage。
-
-上述分项实现与离线回归不能代替真实 Linux 运行回执，更不能代替有范围的真实模型、搜索、抓取、行情和研究质量验收。只有实际执行且内核身份、握手、结果及停止检查均通过，才可将对应分项标记通过；它们不会标记生产发布成功。
-
-生产 drop-in 的固定非秘密约束（CLI、数据/日志路径、内部 API、封存 Astock 引擎、单 worker、production 环境和禁写 bytecode）统一放在最终 `ExecStart=/usr/bin/env` 参数中。systemd 的 EnvironmentFile 可以覆盖 Environment，故不再依赖 Environment 来绑定这些路径；原 EnvironmentFile 仅继承配置与凭证。固定路径拒绝空白、引号、反斜线、百分号、美元符和其他 systemd 特殊字符，避免参数展开或分词；不读出配置值。离线测试用冲突的合成环境实际执行 `/usr/bin/env` 验证优先级；实际执行 integration 时还会在独立 root 工作根生成无凭证的冲突合成 EnvironmentFile 与 service 片段，用固定 `systemd-analyze verify` 仅解析启动命令，真实 `.env` 路径已替换且不会读取，不启动该合成 unit。Mac 回归不宣称已完成 Linux systemd 解析或生产启动验收。
-
-## 旧执行器的独立合成退役验证
-
-`validate_legacy_retirement` 只验证已绑定旧依赖下的合成信号协议，不停止生产，不证明真实任务已排空。它要求与既有候选相同的备份、兼容性与单写许可，重新核对原生产运行指纹、源码清单和完整旧环境摘要，测试后再次核对。独立 attempt 的 root 私有记录不可覆盖；发生失败或取消仍保留事件、结果和自然清理状态，新 attempt 也不能绕过尚存的合成工作负载。
-
-Mac 必须提供两个已批准的公开 helper 的固定摘要；远端再次核内置摘要，只把这两份字节装入 `/opt/prism/validation/helpers/<批准源码映射摘要>/scripts/`，目录 0555、文件 0444、root 所有、无链接、无清单外文件。以受信任系统 Python 在内存建立固定包命名空间并编译实际封存文件，不添加候选或旧环境到 root 的导入路径。旧依赖只按固定公开清单作为数据复制；它们仅在独立 DynamicUser 的合成服务内导入。
-
-固定 helper 使用 7 个随机合成 unit，分别观察 executor、后处理、嵌套线程及异步任务、daemon、子进程和 SIGTERM 的边界。每个真实事件经过严格安全字段验证，追加到私有 `events.jsonl` 并 fsync 后才继续，序号和摘要链保留事件次序；返回结果必须与最后一条持久 summary 完全一致。每个启动/信号边界都重新核操作许可和生产运行指纹；只有固定随机合成 unit 可以接收一次信号，生产 unit 仅允许只读身份检查。
-
-合成服务有 45 秒自然退出期限，子任务有固定自然期限，父控制器最多观察 55 秒清理；失败不强杀、不重试信号、不向生产发信号。仅在 MainPID 为零且递归 cgroup 已空后停止该空合成 unit。未观察到清理完成会阻止成功，不能将 SSH 断开或一次退出码视为已清理。
-
-即便 7 项全部通过，回执仍明确 `production_quiescence_proven=false`、`systemctl_stop_end_to_end_proven=false`、`task_census_still_required=true`。通过的反例表示已实际观察到相应任务可能丢失，不表示允许直接退役生产。此动作不写 admission、不更改 switch 门禁，也不证明真实会话或研究已安全完成；生产任务排空必须使用另行审查的实际清点和状态机。
-
-实际 Linux 首轮合成服务因不存在的必需屏蔽子目录，在 Python 启动前以 226/NAMESPACE 失败。后续描述符改用实际存在的 `/var/lib` 与 `/etc` 祖先遮罩，限制更严格，不创建那些生产目录。命名空间启动失败只有在原 Invocation/ExecMainPID、退出码 226、无存活 PID、空运行目录及空或不存在的递归 cgroup 一致时，才可记录无工作负载；原失败 unit 与回执保留，不发送清理信号，也不将失败改成通过。
-
-### 合成 systemctl stop 端到端验收
-
-`validate_legacy_stop` 是独立实验动作，接线及禁网测试不能替代实际 Linux 停止回执。它只覆盖 `int-executor`、`int-post` 两个合成服务及其空 observer，不停止 `stock-app.service`、Vibe 或 staging。必须显式提供新的 `--retirement-stop-attempt`、既有成功信号实验的 `--retirement-proof-attempt` 和三个固定摘要：`--retirement-probe-sha256`、`--retirement-validation-sha256`、`--retirement-stop-sha256`。私有 receipts 还须绑定已审核系统 Python 的 `system_python_sha256`；helper 实际复核系统 Python 字节与 3.12.3 版本，不接受候选自行声明。
-
-前置证明只从同一 release 的 root 私有控制器记录读取，核完整 identity、候选、原生产源码/运行指纹/旧环境、当前两 helper pin、事件链和最后 summary，并要求七个不同 case 均通过、清理和事后基线复核成功。三个正例与四个预期反例分别核对；反例通过只表示已观察到其限制。缺记录、摘要链变化、旧 pin 或基线漂移均拒绝。三个 helper 由 Mac 与远端双重固定摘要校验后封存 root 0555/0444，root 不导入候选或旧包。
-
-停止意图、身份和单次提交先追加到 `legacy-stop/<attempt>/events.jsonl`，逐条 fsync 并保留序号/摘要链。执行器只允许本次完整随机数下两服务和 observer 的精确启动、show、单次 `stop --no-block`、固定库存查询与版本查询；拒绝 kill、restart、其他 Python 和生产停止。每个受控边界重新取得 Issue #9/STOP 许可，并核完整生产源码、原 PID 和运行指纹，空 observer 释放也有独立许可。完整旧环境在实验开始与结束各扫描一次；活任务只执行另行封存的固定公开依赖，不能在 20 秒工作窗口中反复扫描约 1GB 旧环境，也不延长任务窗口。未确认的派发不重试；失败或部分记录保持原样，并阻止新 nonce 自动继续。成功必须有实际退出、递归 cgroup 空和持久结果证据。`systemctl_stop_end_to_end_proven` 只表示合成实验；`production_quiescence_proven`、`all_production_memory_persisted`、`production_verified` 仍为 false，真实任务清点仍必须完成。
-
-Astock 显式初始化 site 时禁止系统及用户启动钩子和任何 .pth 执行，结束后恢复 site 函数。来源核验只额外接受封存引擎内六个实际存在的 PEP 420 命名空间包：必须具有真正的 NamespaceLoader，唯一搜索目录与 spec 一致，且该目录为无链接、root 锁定的预期路径。混合路径、引擎外目录、任意无文件模块均拒绝。安全结果只增加固定枚举 error_detail，绝不记录原异常文本、模块名称或配置；真实 Linux 通过仍须单独取得新 attempt 的实际回执。
-
-停止实验对合成 case 和 observer 同时核验固定 `systemctl show --all` 字段与独立 D-Bus 类型化事实。空的 `ExecStop`、`ExecStopPost` 必须由实际 `a(sasbttttuii)` 空数组证明；任务状态必须由实际 `Unit.Job` 的 `(uo)` 值证明，无任务时精确为 ID 0 和路径 `/`。不能从 show 缺字段、空字符串或等待超时推定这些事实。停止事件与独立 observer 的 Job 事实均进入持久事件链并在接收端重放。
-
-已知 `prism-20261022-stop-e2e-001`、`002` 的原失败保持不变，只在完整身份、原 helper、引用关系、两条事件链、零启动和停止派发、清理及事后基线均通过时，允许新 attempt 保存严格只读对账后继续。`003` 已有一次合成启动，必须走独立对账：精确核验原三份文件及三条事件、001/002 引用、公开参数重建的 ExecStart、原 Invocation/PID、自然退出状态、类型化空 Job、实际 cgroup 不存在和 observer 不存在，并在每个后续操作边界重新核验稳定事实。原 `failed`、`cleanup=false` 回执和保留的 exited 单元不覆盖、不停止、不删除。其他不确定状态仍阻断继续。
-
-## 有界真实模型与搜索联调
-
-本动作的 attempt 限 8–40 个 ASCII 小写字母、数字或连字符，避免固定 Unix socket 路径超限。worker 激活 site 时临时禁用系统和用户启动钩子、拒绝任何 .pth，并在 finally 恢复三个 site 函数，预加载的启动模块也拒绝。broker 在本次自身进程实际设置并回读 `RLIMIT_CORE=0` 和 `PR_SET_DUMPABLE=0` 后，才发出可信 preflight 的 `broker_memory_sealed=true`；root 将它绑定到当前允许文件，root reader 和 transport 均须核验。不能只依赖 core 管道处理器遵守大小限制。上述更改不操作主机 core 配置或生产进程。
-
-固定 `integration_live` 动作已实现接线和禁网回归，真实 Linux 运行仍须独立回执。Mac 必须显式给出新的 `--integration-attempt` 和四个已审查摘要：`--live-validation-sha256`、`--live-worker-sha256`、`--live-transport-sha256`、`--live-policy-sha256`。远端再次核固定摘要，将公开 helper 字节封存在 root 锁定目录；root 只编译标准库监督器，候选、模型 CLI 及第三方包在独立 UID 内执行。它不执行切流、生产重启或部署。
-
-根执行器只为已冻结的固定 DeepSeek DNS 解析命令和两个完整随机数 unit 的精确库存查询捕获公开元数据输出，解析源码同时与监督器核对；其他 Python 或任意 unit 查询不会因此获得输出通道。此连接修复本身不证明已发出模型请求或读取了凭证。
-
-生产非隐藏源码清单继续保持原遍历规则，`.env` 不进入源码清单或公开产物。新私有 receipts 使用 `model_environment` 的精确三个字段 `sha256`、`size`、`mode` 绑定原配置，值不得公开。摘要应来自已验证加密备份并与当前只读配置核对；当前 mode 绑定不能冒充旧备份 mode 已比对。读取器不执行 shell、dotenv 替换或配置代码，只选现有 `DEEPSEEK_API_KEY`；该项缺失时才允许旧 `LLM_API_KEY` fallback，不选其他供应商的 key。
-
-worker 使用全新 HOME、空合成数据库和私有网络命名空间，只能通过 loopback→Unix socket 桥访问独立 broker。broker 使用另一专用 UID，仅允许固定 DeepSeek HTTPS、实际解析的公开地址及精确 DNS resolver 地址；不允许宽泛 loopback 网段、重定向、重试或 CONNECT。两 unit 均限制 180 秒、资源和 core dump，父控制器核实际 `LimitCORE=0` 及 `/proc/<pid>/limits` 的 core soft/hard 都为零。root 执行器也只对本次自身进程设置并回读 `RLIMIT_CORE=0` 和 `PR_SET_DUMPABLE=0`，失败则不打开配置，不调整生产进程或主机全局设置。模型消息最多 6 次、计数请求最多 2 次，请求与响应总字节也有硬限；金额只是估算，不能称为硬金额上限。
-
-发出真实请求前，broker 先做无 key 的实际 DNS/TLS 连接与文件访问负控；对生产 8088、Vibe 8899、metadata、私网和禁止的公共地址，实际连接必须返回权限拒绝，连接不存在或被拒绝不能替代该证据。root 再核四个 Uid、真实 PID/startticks、InvocationID、cgroup、网络命名空间、只读独立 `/run`、固定源码及 worker 的 11 项导入前证明，才写 root 所有 0444 的允许文件。读取配置前还要再次核同一允许文件、worker 证明与实际进程、原生产源码和运行指纹。配置的单一打开 FD、摘要、大小、mode 和路径身份保持到读取后复核结束；允许文件缺失、过期或身份变化时，连配置打开都不允许。key 只通过 peer 绑定的 Unix socket 在内存交给 broker，worker 只拿合成 token。
-
-联调使用两个固定公开问题，走候选真实 `/api/chat/stream`、CLI、流式显示协议和研究记录路径，分别核模型完成、原生搜索的上交所官网出处及记录、上海服务端时间、所属 `indicator_list`/`research_read` 工具往返和外部账号 404。原生抓取、行情供应商、研究质量、生产发布始终分项保持 false，不能由模型或搜索成功推导。原模型帧和用户可见响应仅在合成私有目录留存，事件和回执只允许固定安全字段、布尔、计数和摘要，不收任意异常、正文或凭证。
-
-每个 attempt 的事件链、最终结果及失败保留，旧目录存在即拒绝覆盖。停止或失败后，仅处理本次完整随机数命名且 InvocationID、ExecMainPID、startticks 一致的两个合成 unit；未取得自身实例证据时不操作未知实例。只有退出结果及 cgroup 的聚合 `populated=0` 和空进程列表均实际核对后，才算清理完成。操作许可在等待和密钥释放前后持续复核，原生产与既有 staging 服务不停止。
-
-模型联调失败的预检证据只保留固定目标对应的整数 errno（0–4095）、三个固定布尔事实 `broker_preflight_facts`、四个文件访问布尔及公开 peer 数量；必须先通过精确字段与类型检查，才可写入安全回执，不保存地址、正文或任意异常。诊断值如超时、连接拒绝或 false 仍使预检失败；只有每个网络负控实际返回 EPERM/EACCES（1/13）、全部事实与文件访问检查为 true，才可继续允许文件和凭证门禁。记录失败原因不表示放宽网络限制，也不证明已发出请求。
-
-
-## 固定网络预检与保留的失败记录
-
-发布工具提供两个单独的无凭证动作 `integration_live_network_preflight`、`integration_market_network_preflight`。它们使用独立的系统元数据基线和记录目录，严格不调用生产 HTTP readiness、不读取模型环境或凭证、不发送模型或行情 HTTP 请求，只完成固定 DNS、证书校验的 TLS 握手和实际隔离检查。候选、源码、进程 PID/start ticks/InvocationID、四个受控 cgroup hook 和保留的程序 FD 必须相互绑定；不接收调用者提供的地址、路径、命令、FD 或字节码。原 systemd 包过滤和独立 worker 网络命名空间继续保留。负例只接受实际 EPERM/EACCES；EAGAIN、超时或缺失事实不能通过。
-
-预检通过不代表真实模型、原生搜索、行情提供器或生产发布通过。只有独立业务验收才能设置相应标志。网络 helper 明确区分 Linux 6.8 与保留的 5.15 源码审查配置：直接查询要求本地附加标志为 2，effective 查询分别要求 0 与 2，不宽收两种值。当前改动只通过源码核对和离线回归，真实 Linux 无凭证验收仍待执行。
-
-清理前必须在原进程仍活动时核验四个 hook、程序 ID 和元数据，并在允许其自然退出或发出本次单元停止指令前保存私有证明。已回收 cgroup 只有在同一 InvocationID/ExecMainPID、原 PID 确实不存在、路径实际 ENOENT、保留 FD 仍匹配原 cgroup2，以及八次直接/effective 查询均实际返回 ENOENT 时，才能进入专用清理分支。核验并关闭本次程序 FD 后，仅对四个已知 ID 有界查询、逐次关闭临时 FD；全部实际返回 ENOENT 才记录对象已不可取得。该事实不表示执行过 detach，也不表示 RCU 内存已同步释放。部分安装、ID 重现、身份漂移、其它错误码或超时保留失败，不用“路径消失”或 JSON 布尔值补全证明。单元在停止后若被卸载而丢失身份，仍拒绝通过，不能将缺失字段默认为旧值。超时或操作者 STOP 后，只允许核验并收束本次确已拥有的单元；禁止新建工作、重新解析地址或操作其它单元。
-
-网络预检和真实联调还须显式提供 `--systemd-unit-reference-sha256`，与固定网络 helper 一起双端核验并封存。标准库监督器使用固定系统 libsystemd 和本机 system bus，在同次合成 unit 已加载、活动、PID/startticks/InvocationID 实际匹配后，仅建立一次 `RefUnit`；不启动或重新加载单位，不增加 Wants/observer。持久连接的 typed `Refs` 必须始终恰为本连接唯一名，连接贯穿停止、cgroup 查询和四个已知 BPF ID 释放证明，随后才对本次 unit 同连接 `UnrefUnit` 并关闭。断连、额外引用、身份变化或释放不明均保留失败，不在停止后补建引用。私有证明仅公开摘要及有限错误类别；离线 ctypes/协议测试不等于已完成真实 Linux 预检。
-
-第 004 次合成实验在 observer 校验阶段拒绝，尚未发出停止指令。已只读确认主单元和 observer 均自然退出成功、Job 为空且实际 cgroup 不存在；两份保留单元及原 failed/cleanup=false 记录不修改。后续新 attempt 必须严格核验原六条事件、001–003 引用和全部文件摘要，逐项重建两条公开 ExecStart，并在每个操作边界重新核对状态。PrivateTmp 在该系统中自动附加的唯一 tmp.mount 弱依赖，仅在同轮实际 PrivateTmp=yes、固定 mount 单元 not-found/inactive/dead/Where 为空及内核无独立 /tmp 挂载事实均一致时接受；任何额外或重复依赖仍拒绝。旧 observer 的读取例外不会赋予停止、删除或重用它的权限。
-
-broker 的无凭证启动失败另有私有诊断文件 `broker/preflight-failure.json`，只保留固定阶段、安全错误类别及代码、有界 errno/TLS 校验码、时间，以及本次原始 DNS 选择的数量和与父快照是否一致。它不记录地址、原异常、请求、响应或凭证；不额外解析 DNS，也不改变所选地址、网络白名单或连接行为。通道关闭前先独占写入并 fsync，写入失败仍按原失败退出。root 复核本次身份、来源摘要、私有文件权限和精确类型后，仅将九项有限事实及文件摘要加入失败回执；缺失保持未知，坏文件只标记拒绝，不能授权 key 或将失败改成通过。原 `live002` 失败及未完成清理记录继续保留；新增离线诊断测试不代表该故障已定位或真实 Linux 运行通过。
-
-统一任务生命周期已在独立应用源码中接线，详见 [任务归属与排空](work-lifecycle.md)；它尚未取得真实 Linux 全生产者验收。原始线程 future、真实进程 wait、扫描器协作取消、共用市场请求、问答/能力最终保存及整个 HTTP/Activity 收尾均有明确归属。恢复入口只启用 request、market；新主应用也不启用 Vibe 执行。历史 analysis-only 实验、惰性打包、离线测试和数据库兼容结果不能替代全部生产者的真实验收。
-
-受控实例通过 root 所有的固定绑定和私有 Unix socket 接受有界状态协议，普通 HTTP 不提供排空或发布授权。控制器须独立核对真实源码、进程出生身份、单元和递归 cgroup；应用返回的摘要和计数不能自证这些事实。fence 只阻止新业务，不取消已有工作；seal 需要完整登记、实际资源完成、最终保存及新鲜内核观察。封存后的所有 HTTP（含 readiness）只返回不访问数据库的维护 503。需要用户旅程时必须在外部入口仍受控的条件下显式 resume，验后再次 fence/drain/seal，不能把封存状态的 503 改成健康证明。
-
-首次升级仍有独立限制：原生产版本没有等价任务账本，部分结果仅在内存，状态完成也可能早于后续保存；Vibe 读取还能继续派生工作。新代码、旧数据库、进程列表或新版本的通过实验都不能反推旧实例已排空。`first_upgrade_quiescent=false` 时继续拒绝生产停止/切换，不得以新 adapter 或合成实验代替旧实例证据。开发模式的正常 drain/close 只用于本机和独立候选，不签发 Linux 或生产许可。
-
-
-### Closing owned cgroup references before waiting for object release
-
-Gate cleanup first preserves a fresh exact stop witness, the stopped unit invocation and UID, absence of the original PID, and the original cgroup device/inode. Before closing the last owned cgroup FD, a collected cgroup must return real ENOENT for all four direct and four effective queries. A retained empty cgroup permits detaching only the four exact owned programs, followed by four direct and four effective queries proving empty hooks. All owned program FDs and the owned cgroup FD close before polling the same four immutable program IDs. A close uncertainty fails closed and is never retried on a possibly reused descriptor. The five-second bound remains unchanged; a timeout cannot become a successful release.
-
-The private cleanup proof distinguishes `preclose_mode`, `terminal_mode`, `hook_empty_queries`, and `offline_queries`. `mode` describes the preclose proof branch. A cgroup collected after closure does not imply that eight postclosure ENOENT queries occurred. Before and after ID polling, the controller rechecks the same stopped unit/invocation/UID/ExecMainPID and original PID absence. If the original path remains, its device/inode and empty membership must match through a temporary verified FD that closes before the check returns; a previously collected cgroup may not reappear. No cgroup FD remains held across object polling.
-
-Unit references remain held until gate-owned references have closed and all four known IDs return ENOENT. Only actual successful unref and release proofs count as reference release. A gate failure blocks that step and is not relabeled as an independent reference-state failure. Live and market validators and the external controller require the same bounded typed cleanup fields.
-
-These source and synthetic-test controls do not prove Linux cleanup acceptance. Attempt `prism-20261022-net-live-003` remains a failed cleanup receipt despite its successful credential-free DNS/TLS preflight and later read-only absence observations. A new immutable public tool revision, matching CI, and a separate controlled attempt are required for actual acceptance.
+仅在固定候选通过实际验证、正常恢复访问且本轮没有回退后，标记本轮生产验证成功。失败、取消、未知和回退分别呈现，不能覆盖为绿色成功。后续部署执行细节及私有环境清单以私有运维仓库为准。

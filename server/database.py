@@ -464,6 +464,8 @@ def init_db():
             "owned_report_files",
             "user_watchlist",
             "research_runs",
+            "native_agent_runs",
+            "native_agent_dialogues",
         ):
             if not conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]

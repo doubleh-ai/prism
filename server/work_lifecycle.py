@@ -21,9 +21,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 KINDS = frozenset(
-    {"request", "analysis", "scan", "market", "cli", "auxiliary", "capability", "vibe", "diagnostic"}
+    {"request", "agent", "analysis", "scan", "market", "cli", "auxiliary", "capability", "vibe", "diagnostic"}
 )
-DURABLE_KINDS = frozenset({"analysis", "scan", "capability", "vibe"})
+DURABLE_KINDS = frozenset({"agent", "analysis", "scan", "capability", "vibe"})
 OS_FRESH_NS = 10_000_000_000
 _CURRENT = contextvars.ContextVar("prism_work_lease", default=None)
 _SCOPE_MANAGER = contextvars.ContextVar("prism_work_scope_manager", default=None)

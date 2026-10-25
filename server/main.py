@@ -14,6 +14,10 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
 
 from .activity import ActivityMiddleware
+from .agent.api import cancel as native_chat_cancel
+from .agent.api import chat_stream as native_chat_stream
+from .agent.api import router as native_agent_router
+from .agent.runtime import init_runtime_db
 from .analysis_engine import _sse as _analysis_sse
 from .analysis_engine import _store, get_analysis_record, start_analysis, stream_events
 from .analysis_graph import router as graph_router
@@ -91,6 +95,7 @@ log = configure_logging(str(LOG_PATH), level=log_level)
 # ── Init ──
 init_db()
 init_research_db()
+init_runtime_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -127,6 +132,12 @@ async def lifespan(application):
     try:
         bind_manager(application, runtime.manager)
         application.state.work_runtime = runtime
+        if runtime.controlled and os.environ.get("PRISM_SINGLE_WORKER") == "1":
+            from .agent.store import recover_interrupted_runs as recover_native_runs
+
+            # The private control listener has been exclusively acquired before
+            # classifying old runs; ordinary reads never replay/recover execution.
+            recover_native_runs(exclusive_startup=True)
         yield
     finally:
         await runtime.aclose()
@@ -555,22 +566,32 @@ async def api_skills():
 
 @app.post("/api/chat/stream")
 async def api_chat_stream(request: Request):
-    return await chat_stream(request)
+    from . import config
+
+    return await (chat_stream(request) if config.LEGACY_CHAT_ENABLED else native_chat_stream(request))
 
 
 @app.post("/api/chat/respond")
 async def api_chat_respond(request: Request):
+    from . import config
+
+    if not config.LEGACY_CHAT_ENABLED:
+        require_auth(request)
+        return JSONResponse({"error": "请在当前对话中发送补充信息，继续本次研究"}, status_code=409)
     return await chat_respond(request)
 
 
 @app.post("/api/chat/cancel")
 async def api_chat_cancel(request: Request):
-    return await chat_cancel(request)
+    from . import config
+
+    return await (chat_cancel(request) if config.LEGACY_CHAT_ENABLED else native_chat_cancel(request))
 
 
 # ── Market data (v0.6) ──
 
 app.include_router(market_router)
+app.include_router(native_agent_router)
 app.include_router(capabilities_router)
 app.include_router(graph_router)
 app.include_router(industry_router)

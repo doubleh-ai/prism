@@ -95,13 +95,13 @@ var _idb = (function() {
 })();
 
 var App = {
-  user: '', skill: '', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
+  user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
   _activeReader: null,    // AbortController for stop button
   _bulkMode: false,       // Bulk select mode — true when checkboxes are visible
   _bulkChecked: {},       // {convId: true} for checked items
-  _activeSkills: new Set(['cn']), // Multi-select skills; 'cn' (force-chinese) always pre-selected
+  _activeSkills: new Set(['prism-research']), // One native research workflow.
   _telemetryRecent: {},
 
   /* ═══ Init ═══ */
@@ -377,7 +377,7 @@ var App = {
 
   newConv: async function(skipWelcome) {
     var requestId = this._convRequestId = (this._convRequestId || 0) + 1;
-    var skillForNew = this.skill || 'prism-research';
+    var skillForNew = ['prism-research','bottleneck-hunter','serenity'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
     var r = await this.api('/api/convs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({skill: skillForNew})});
     if (!r.ok) return false; var c = await r.json();
     if (requestId !== this._convRequestId) return false;
@@ -496,7 +496,10 @@ var App = {
   },
 
   /* ═══ Skill ═══ */
-  setSkill: function(s) { this.skill = s; },
+  setSkill: function(s) {
+    this.skill = ['prism-research','bottleneck-hunter','serenity'].indexOf(s) >= 0 ? s : 'prism-research';
+    this._activeSkills = new Set([this.skill]);
+  },
 
   /* ═══ Smart Scroll ═══ */
   logout: async function() {

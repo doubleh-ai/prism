@@ -53,7 +53,7 @@
     _loadCapabilities: async function() {
       this._capabilityError = '';
       try {
-        var response = await this.api('/api/capabilities');
+        var response = await this.api('/api/agent/tools');
         if (!response.ok) throw new Error('capability unavailable');
         var data = await response.json();
         this._capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];

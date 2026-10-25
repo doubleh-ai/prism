@@ -543,6 +543,47 @@ def revoke_run_token(run_id: str) -> None:
         db.execute("UPDATE capability_runs SET revoked=1 WHERE run_id=?", [run_id])
 
 
+@contextmanager
+def native_run_context(username: str, conv_id: str, run_id: str, *, parent_lease):
+    """Bind only a real in-process Agent owner; no bridge credential is issued.
+
+    The ordinary dispatcher still enforces schemas, audit, idempotency and child
+    ownership. A browser-supplied context or serialized parent cannot grant work.
+    """
+    _owned_conversation(username, conv_id)
+    if type(parent_lease) is not Lease or parent_lease.kind != "agent":
+        raise HTTPException(503, "当前研究任务不可用")
+    probe = parent_lease.manager.admit("request", parent=parent_lease, persist_required=False)
+    probe.release()
+    now = int(time.time())
+    with get_db() as db:
+        if not db.execute(
+            "SELECT 1 FROM research_runs WHERE run_id=? AND username=? AND conv_id=?",
+            [run_id, username, conv_id],
+        ).fetchone():
+            raise HTTPException(404, "研究不存在或不可访问")
+        db.execute(
+            "INSERT INTO capability_runs(run_id,username,conv_id,token_hash,expires_at,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            [
+                run_id,
+                username,
+                conv_id,
+                hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
+                now + CAPABILITY_TOKEN_TTL,
+                now,
+            ],
+        )
+    with _run_binding_lock:
+        if run_id in _run_bindings:
+            raise HTTPException(409, "研究任务已经绑定")
+        _run_bindings[run_id] = _RunBinding(parent_lease, username, conv_id, now + CAPABILITY_TOKEN_TTL)
+    try:
+        yield {"username": username, "conv_id": conv_id, "run_id": run_id}
+    finally:
+        revoke_run_token(run_id)
+
+
 def recover_interrupted_calls() -> None:
     """Single-worker startup only: old subprocess grants never survive restart."""
     with _run_binding_lock:

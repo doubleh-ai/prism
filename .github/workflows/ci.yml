@@ -9,7 +9,7 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench, codex/prism-release-control, codex/prism-evolution-v0.20.0]
+    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench, codex/prism-release-control, codex/prism-evolution-v0.20.0, codex/prism-ui-report-readability]
 
 permissions:
   contents: read

@@ -9,13 +9,13 @@
 > AI-powered investment research platform for the Chinese A-share market.
 > Multi-agent analysis, live market data, industry graph — all in one self-hosted app.
 
-Prism combines **7-agent LangGraph debate pipelines**, **market data** (quotes, K-line, fundamentals), **industry chain knowledge graphs**, and **technical indicators** in an authenticated research workspace with per-user records.
+Prism combines an owned **Native Agent research runtime**, **market data** (quotes, K-line, fundamentals), **industry chain knowledge graphs**, and **technical indicators** in an authenticated research workspace with per-user records. Existing Astock and Vibe workspaces remain available during migration.
 
 ## Research Workbench（开发中）
 
 研究对话是统一入口，行情、个股分析、深度研究、产业关系、指标、全市场选股和网页研报仍有独立工作区。顶部“平台能力”展示后端实际提供的工具；Agent 的真实调用会在回复中形成结果卡，并保存到会话和对应工作区的“调用记录”。点击卡片打开已有记录，可以返回原会话继续讨论；打开后台任务不会重新启动一份研究。网页是主要研报阅读方式，已有导出功能仍可选用。
 
-新会话默认使用仓库内置的 `prism-research` 研究方法，不要求本机安装外部 `bottleneck-hunter` 技能。既有会话保留原技能；技能缺失时会明确提示回退到内置方法。内置方法并不替代真实模型、Claude CLI、行情提供方、Astock 或 Vibe 引擎；相应依赖不可用时，能力会返回失败记录，不以示例结果替代。
+研究对话默认使用 **Prism Native Agent v1**：直接模型 API、仓库拥有的研究循环、持久化事件、受限工具和账号内历史检索，不使用 Claude Code CLI 或外部股票 Skill。网页报告随研究保存，不要求生成 PDF。原有 Astock、Vibe 及其他工作区尚在逐步迁移；第一版原生工具不会隐式启动这些旧引擎。架构、实现范围、配置和验收边界见 [原生 Agent 框架](docs/native-agent-framework.md)。
 
 每轮研究保存实际请求时间、`Asia/Shanghai` 时区和 `run_id`。界面将**研究截至**、来源**发布时间**、**采集时间**与行情本身的数据时间分开展示；未知时间不会用当前时间补造。来源“已采集”仅说明工具成功取得内容，不代表事实已经核验；外部网页、平台数据和历史研究分别标注。旧记录没有可靠时间或来源信息时保留“未提供 / 待核验”，产业关系也不能仅凭连接数或种子数据认定为真实供货或瓶颈。
 
@@ -35,6 +35,11 @@ Browser (Vanilla JS + ECharts + SSE)
    │    ├── baostock (local TCP)     │
    │    └── tencent (fallback)       │
    │    │                            │
+   │    ├── Prism Native Agent       │
+   │    │   ├── Direct model API     │
+   │    │   ├── Owned tool registry  │
+   │    │   └── Durable events       │
+   │    │                            │
    │    ├── Astock Engine            │
    │    │   └── TradingAgentsGraph   │
    │    │       7-agent LangGraph    │
@@ -48,9 +53,9 @@ Browser (Vanilla JS + ECharts + SSE)
 
 - **Frontend** — Vanilla JS (modular: 9 files, ~3,500 lines), CSS custom-property dark/light themes, ECharts K-line + force-graph, SSE streaming, sessionStorage persistence, Service Worker offline cache
 - **Backend** — FastAPI + SQLite WAL, bcrypt auth, Pydantic validation, CSRF/CSP/XSS defense, rate limiting, LRU caches, GZip + Cache-Control
-- **AI Engine** — 7-agent LangGraph debate pipeline (Market/Social/News/Fundamentals/Policy/HotMoney/Lockup analysts → Bull/Bear debate → Research → Trader → Risk → Decision)
+- **Research Agent** — Owned model/tool loop, event replay, cancellation, research evidence and historical retrieval; no external CLI/Skill dependency for research chat. Existing specialized Astock/Vibe engines are migrated separately.
 - **Market Data** — Pluggable provider chain (akshare → baostock → tencent) with SQLite TTL cache + stale-data fallback, quote/K-line/fundamentals/search
-- **Deploy** — Nginx reverse proxy + systemd on Ubuntu, one-script deploy
+- **Deploy** — Separate private operations configuration and controlled release stages; backups, recovery validation and stop protection are retained.
 
 ## Quick Start
 

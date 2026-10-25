@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const crypto = require('node:crypto').webcrypto;
 const markedModule = require('../static/lib/marked.min.js');
 // Exercise Shanghai market dates from a browser whose local timezone is UTC.
 process.env.TZ = 'UTC';
@@ -20,7 +21,7 @@ function environment() {
   const elements = new Map();
   const listeners={};
   const doc={cookie:'csrf_token=test-csrf',addEventListener(type,callback){(listeners[type]||(listeners[type]=[])).push(callback);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,documentElement:element(),getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
-  const context={console,document:doc,marked:markedModule.marked,TextDecoder,TextEncoder,URL,Intl,Set,Map,Date,JSON,Promise,
+  const context={console,document:doc,marked:markedModule.marked,crypto,AbortController,TextDecoder,TextEncoder,URL,Intl,Set,Map,Date,JSON,Promise,
     location:{href:''},navigator:{},localStorage:{getItem(){return null;},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;},setItem(){},removeItem(){}},
     addEventListener(){},matchMedia(){return {matches:false};},requestAnimationFrame(){return 1;},cancelAnimationFrame(){},setInterval(){return 1;},clearInterval(){},setTimeout,clearTimeout,
     fetch(){throw Error('Unexpected network attempt');},NodeFilter:{SHOW_TEXT:4}};
@@ -85,7 +86,7 @@ async function backgroundEvents() {
   const research={run_id:'run-A',as_of:'2026-10-21T11:42:00+08:00',timezone:'Asia/Shanghai'};
   const ref={url:'https://example.com/a',title:'A source',run_id:'run-A',source_kind:'external_web',evidence_status:'retrieved',retrieved_at:'2026-10-21T11:43:00+08:00'};
   const call={call_id:'call-A',conv_id:'A',status:'completed',target:{view:'market',ticker:'600000'}};
-  const payload=[{research},{text:'A answer'},{ref},{platform_call:call}].map(e=>'data: '+JSON.stringify(e)+'\n').join('')+'data: [DONE]\n';let reads=0;
+  const payload=[{research},{text:'A answer'},{ref},{platform_call:call}].map((e,index)=>'data: '+JSON.stringify({...e,agent:{run_id:'run-A',seq:index+1,status:index===3?'completed':'running',engine:'prism-native',workflow:'prism-research'}})+'\n').join('')+'data: [DONE]\n';let reads=0;
   resolve({ok:true,status:200,body:{getReader:()=>({read:async()=>reads++?{done:true}:{done:false,value:new TextEncoder().encode(payload)},cancel:async()=>{}})}});await pending;
   assert.equal(app.msgs[0].content,'B contents');assert.equal(app.msgs[0]._refs.length,0);
   assert.equal(aMessages[1].research.run_id,'run-A');assert.equal(aMessages[1]._refs[0].retrieved_at,ref.retrieved_at);
@@ -159,10 +160,10 @@ function hostileSourcesAndOptionsRemainData() {
   const malicious="\\');globalThis.__probe=true;//<img src=x onerror=probe>";
   const html=context.ChatRender.renderChunk({t:'ask',q:'question',opts:[malicious]});
   assert(!html.includes('onclick='));assert(!html.includes('<img'));assert(html.includes('data-ask-answer='));
-  let answer;app.answerAsk=value=>{answer=value;};app._bindGlossClicks();
+  app._bindGlossClicks();
   const option={disabled:false,dataset:{askAnswer:malicious}};
   listeners.click.at(-1)({target:{closest(selector){return selector==='.ask-opt[data-ask-answer]'?option:null;}},preventDefault(){}});
-  assert.equal(answer,malicious,'untrusted option must reach the API as literal data');assert.equal(context.__probe,undefined);
+  assert.equal(context.document.getElementById('input').value,malicious,'untrusted option must populate the next user message as literal data, without an API call');assert.equal(context.__probe,undefined);
 }
 function timeFormatsPreserveMeaning() {
   const {context}=environment();const fmt=context.ChatRender.formatTime;

@@ -46,7 +46,13 @@ def produces_work(method, path):
         # The call route authenticates and attaches to its existing run lease.
         return False
     if method not in {"GET", "HEAD", "OPTIONS"}:
-        return path not in {"/api/login", "/api/logout", "/api/chat/respond", "/api/chat/cancel"}
+        return path not in {
+            "/api/login",
+            "/api/logout",
+            "/api/chat/respond",
+            "/api/chat/cancel",
+            "/api/agent/chat/cancel",
+        }
     return path.startswith(("/api/quote/", "/api/fundamentals/", "/api/indicators/universe/")) or path in {
         "/api/quotes",
         "/api/search",

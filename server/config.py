@@ -107,6 +107,12 @@ RATE_EXPLAIN_PER_MIN = int(os.environ.get("RATE_EXPLAIN_PER_MIN", "10"))
 CHAT_STREAM_HEARTBEAT_SECONDS = int(os.environ.get("PRISM_CHAT_STREAM_HEARTBEAT", "20"))
 CHAT_STREAM_IDLE_TIMEOUT_SECONDS = int(os.environ.get("PRISM_CHAT_STREAM_IDLE_TIMEOUT", "300"))
 
+# Explicit compatibility for old API clients; native failures never enable CLI.
+LEGACY_CHAT_ENABLED = os.environ.get("PRISM_LEGACY_CHAT_ENABLED", "0") == "1"
+RESEARCH_SOURCE_HOSTS = tuple(
+    h.strip().lower() for h in os.environ.get("PRISM_RESEARCH_SOURCE_HOSTS", "").split(",") if h.strip()
+)
+
 # ── Admin ──
 # Comma-separated list of admin usernames (e.g. "admin,alice").
 # Default is strict: only ADMIN_USER (or "admin" when unset) can access

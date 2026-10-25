@@ -4,19 +4,31 @@
 
 Object.assign(App, {
   loadSkills: async function() {
-    var r = await fetch('/api/skills');
-    if (r.ok) { this.skills = await r.json(); this.renderSkillsBar(); }
+    try {
+      var r = await this.api('/api/agent/workflows');
+      if (!r.ok) throw new Error('workflows unavailable');
+      var data = await r.json();
+      this.skills = (Array.isArray(data) ? data : []).filter(function(item) {
+        return ['prism-research', 'bottleneck-hunter', 'serenity'].indexOf(item.id) >= 0;
+      });
+      this._workflowsUnavailable = !this.skills.length;
+      this.setSkill(this.skill);
+    } catch(error) {
+      this.skills = []; this._workflowsUnavailable = true;
+      if (this._toast) this._toast('研究方式暂时无法读取，请刷新后重试');
+    }
+    this.renderSkillsBar();
   },
 
   /* ═══ Skills (composer chips + drawer) ═══ */
   renderSkillsBar: function() {
-    // v0.8: 已选工具渲染为 composer 顶部 chip（非默认 'cn'）；抽屉里增删。
     var box = document.getElementById('composerChips');
     if (!box) return;
     if (!this.skills.length) { box.innerHTML = ''; return; }
     var self = this;
-    box.innerHTML = this.skills.filter(function(s){ return self._activeSkills.has(s.id) && s.id !== 'cn'; })
-      .map(function(s){ return '<span class="cmp-chip">'+esc(s.name)+'<span class="cmp-chip__x" onclick="App._toggleSkill(\''+escAttr(s.id)+'\')">×</span></span>'; }).join('');
+    var selected = ['prism-research','bottleneck-hunter','serenity'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
+    box.innerHTML = this.skills.filter(function(s){ return s.id === selected; })
+      .map(function(s){ return '<button type="button" class="cmp-chip" onclick="App._toggleSkillDrawer()" aria-label="切换研究方式">'+esc(s.name)+'</button>'; }).join('');
   },
   _toggleSkillDrawer: function() {
     var d = document.getElementById('skillDrawer');
@@ -34,34 +46,27 @@ Object.assign(App, {
   },
   _renderSkillDrawerItems: function(d) {
     var self = this;
-    d.innerHTML = '<div class="skill-drawer-hd">工具</div>' +
+    var selected = ['prism-research','bottleneck-hunter','serenity'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
+    d.innerHTML = '<div class="skill-drawer-hd">研究方式 · 单选</div>' +
       this.skills.map(function(s){
-        var on = self._activeSkills.has(s.id);
-        var locked = s.id === 'cn';
-        return '<div class="skill-drawer-item' + (on ? ' on' : '') + (locked ? ' locked' : '') + '" onclick="App._toggleSkill(\'' + escAttr(s.id) + '\')">' + esc(s.name) + (locked ? ' ·' : '') + '</div>';
+        var on = selected === s.id;
+        return '<button type="button" class="skill-drawer-item' + (on ? ' on' : '') + '" aria-pressed="'+on+'" onclick="App._toggleSkill(\'' + escAttr(s.id) + '\')">' + esc(s.name) + '</button>';
       }).join('');
   },
   _toggleSkill: function(id) {
-    if (id === 'cn') return; // 强制中文不可关
-    if (this._activeSkills.has(id)) this._activeSkills.delete(id);
-    else this._activeSkills.add(id);
+    if (!this.skills.some(function(item) { return item.id === id; })) return;
+    this.setSkill(id);
     this.renderSkillsBar();
     var d = document.getElementById('skillDrawer');
-    if (d && d.style.display === 'block') this._renderSkillDrawerItems(d);
+    if (d) d.style.display = 'none';
   },
 
   selectSkillChip: function(skillId) {
-    if (skillId === 'cn') return; // force-chinese cannot be toggled off
-    if (this._activeSkills.has(skillId)) {
-      this._activeSkills.delete(skillId);
-    } else {
-      this._activeSkills.add(skillId);
-    }
-    this.renderSkillsBar();
+    this._toggleSkill(skillId);
   },
 
   clearSkill: function() {
-    this._activeSkills = new Set(['cn']); // Keep cn, clear others
+    this.setSkill('prism-research');
     this.renderSkillsBar();
   },
 
@@ -874,20 +879,16 @@ Object.assign(App, {
   /* ═══ Send & Stream ═══ */
   quickAsk: function(q) { document.getElementById('input').value = q; this.send(); },
   answerAsk: async function(answer) {
-    // Send answer back to the Claude subprocess via the backend,
-    // then disable all ask buttons so the user can't double-click.
+    // Native research continues as an explicit new user message.
     var cards = document.querySelectorAll('.ask-card');
     for (var ci = 0; ci < cards.length; ci++) {
       cards[ci].classList.add('ask-answered');
       var btns = cards[ci].querySelectorAll('.ask-opt');
       for (var bi = 0; bi < btns.length; bi++) btns[bi].disabled = true;
     }
-    // Write answer to Claude's stdin so it resumes streaming
-    await this.api('/api/chat/respond', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({conv_id: this.convId, answer: answer})
-    });
+    var input = document.getElementById('input');
+    input.value = answer; input.focus();
+    if (this._toast) this._toast('补充内容已填入输入框，请发送以继续研究');
   },
 
   showAC: function() {
@@ -901,7 +902,7 @@ Object.assign(App, {
       this._renderAC(dd, inp); return;
     }
     var items = this.skills.filter(function(s) {
-      return s.id.toLowerCase().indexOf(query)>=0 || s.name.indexOf(query)>=0 || s.shortcut.indexOf(query)>=0;
+      return s.id.toLowerCase().indexOf(query)>=0 || s.name.indexOf(query)>=0 || String(s.shortcut || '').indexOf(query)>=0;
     });
     if (!items.length) { dd.style.display = 'none'; return; }
     this.acIdx = -1; this.acItems = items;
@@ -909,7 +910,7 @@ Object.assign(App, {
   },
   _renderAC: function(dd, inp) {
     var self = this;
-    dd.innerHTML = '<div class="ac-header"><span>Function</span><span class="ac-header-hint">⇥ select · ↓↑ nav</span></div>' +
+    dd.innerHTML = '<div class="ac-header"><span>研究方式</span><span class="ac-header-hint">⇥ select · ↓↑ nav</span></div>' +
       this.acItems.map(function(s, i) {
         return '<div class="ac-item' + (i === self.acIdx ? ' sel' : '') + '" onclick="App.selectSkill(\'' + s.id + '\')">' +
           '<span class="ac-name">' + esc(s.name) + '</span>' +
@@ -924,7 +925,119 @@ Object.assign(App, {
   hideAC: function() { document.getElementById('acDropdown').style.display = 'none'; this.acIdx = -1; },
   moveAC: function(dir) { if (document.getElementById('acDropdown').style.display === 'none') return; this.acIdx = (this.acIdx+dir+this.acItems.length)%this.acItems.length; document.getElementById('acDropdown').querySelectorAll('.ac-item').forEach(function(item,i){item.className='ac-item'+(i===App.acIdx?' sel':'')}); },
   selectAC: function() { if (document.getElementById('acDropdown').style.display!=='none'&&this.acIdx>=0&&this.acItems[this.acIdx]){this.selectSkill(this.acItems[this.acIdx].id);return true}return false; },
-  selectSkill: function(id) { var inp = document.getElementById('input'), val = inp.value, pos = inp.selectionStart, before = val.substring(0,pos), after = val.substring(pos); before = before.replace(/\/\S*$/, ''); inp.value = before.trim()?before.trim()+' '+after:after; this.setSkill(id); if (id !== 'cn') this._activeSkills.add(id); this.renderSkillsBar(); this.hideAC(); inp.focus(); },
+  selectSkill: function(id) { var inp = document.getElementById('input'), val = inp.value, pos = inp.selectionStart, before = val.substring(0,pos), after = val.substring(pos); before = before.replace(/\/\S*$/, ''); inp.value = before.trim()?before.trim()+' '+after:after; this.setSkill(id); this.renderSkillsBar(); this.hideAC(); inp.focus(); },
+
+  _newAgentRequestId: function() {
+    if (globalThis.crypto && globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
+    if (globalThis.crypto && globalThis.crypto.getRandomValues) {
+      var bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+      return Array.from(bytes, function(value) { return value.toString(16).padStart(2, '0'); }).join('');
+    }
+    throw new Error('当前浏览器无法建立研究请求标识，请更新浏览器后重试');
+  },
+
+  _nativeStatusLabel: function(status) {
+    return {queued:'Prism 正在准备研究',running:'Prism 正在研究',awaiting_user:'等待补充研究信息',completed:'研究已保存',done:'研究已保存',partial:'已保存已有结果，研究尚未完整完成',failed:'研究未完成，已有记录已保留',cancelled:'研究已停止，已有记录已保留'}[status] || ChatRender.clean(status);
+  },
+
+  _acceptNativeFrame: function(stream, frame) {
+    var agent = frame.agent;
+    if (!agent) {
+      if (frame.pulse) return true;
+      throw new Error('研究事件缺少运行记录，正在尝试恢复已保存进度');
+    }
+    if (typeof agent.run_id !== 'string' || !agent.run_id || agent.run_id.length > 128 || agent.engine !== 'prism-native' || !Number.isSafeInteger(agent.seq) || agent.seq < 1) {
+      throw new Error('研究事件格式无效，正在尝试恢复已保存进度');
+    }
+    if (stream.runId && stream.runId !== agent.run_id) {
+      var mismatch = new Error('研究记录不匹配，请重新打开原会话核对');
+      mismatch.stopReplay = true; throw mismatch;
+    }
+    stream.runId = agent.run_id;
+    var last = stream.lastSeq || 0;
+    if (agent.seq <= last) return false;
+    if (agent.seq !== last + 1) throw new Error('研究事件暂不连续，正在恢复已保存进度');
+    stream.lastSeq = agent.seq;
+    stream.agentStatusChanged = stream.agentStatus !== agent.status;
+    stream.agentStatus = agent.status;
+    stream.terminal = ['completed','partial','failed','cancelled','done'].indexOf(agent.status) >= 0;
+    var message = stream.msgs && stream.msgs[stream.msgIdx];
+    if (message) message.agent = Object.assign({}, agent);
+    return true;
+  },
+
+  _readNativeStream: async function(stream, initialResponse, receive) {
+    var self = this, response = initialResponse, failure = null, reconnects = 0;
+    var interrupted = function() { return new Error('连接中断，已保留收到的内容。请重新打开原会话查看已保存进度；不会重复提交研究。'); };
+    while (!stream.cancelled) {
+      var reader = null, guard = null;
+      try {
+        if (!response) throw failure || interrupted();
+        if (!response.ok || !response.body) {
+          var unavailable = new Error('无法读取原研究记录（'+response.status+'），请重新打开原会话核对');
+          unavailable.stopReplay = [401,403,404,409].indexOf(response.status) >= 0;
+          if (response.status === 401) window.location.href = '/login';
+          throw unavailable;
+        }
+        reader = response.body.getReader(); stream.reader = reader;
+        if (App.convId === stream.convId) self._activeReader = reader;
+        failure = null;
+        var decoder = new TextDecoder(), buffer = '', lastStreamEventAt = Date.now(), streamTimedOut = false;
+        var line = function(value) {
+          value = value.replace(/\r$/, '');
+          if (!value.startsWith('data:')) return;
+          var data = value.slice(5).trim();
+          if (data === '[DONE]') { stream.doneReceived = true; return; }
+          if (!data) return;
+          var frame;
+          try { frame = JSON.parse(data); }
+          catch(error) { throw new Error('研究记录读取中断，请重新打开原会话核对已保存进度'); }
+          if (self._acceptNativeFrame(stream, frame)) receive(frame);
+        };
+        guard = setInterval(function() {
+          if (Date.now() - lastStreamEventAt > 7 * 60 * 1000) {
+            streamTimedOut = true;
+            try { reader.cancel(); } catch(error) { /* The replay path handles EOF. */ }
+          }
+        }, 15000);
+        while (!stream.cancelled && !stream.doneReceived && !stream.terminal) {
+          var chunk = await reader.read();
+          if (stream.cancelled) break;
+          if (chunk.done) {
+            buffer += decoder.decode();
+            if (buffer.trim()) line(buffer);
+            break;
+          }
+          lastStreamEventAt = Date.now();
+          buffer += decoder.decode(chunk.value, {stream:true});
+          var lines = buffer.split('\n'); buffer = lines.pop() || '';
+          for (var i = 0; i < lines.length && !stream.doneReceived && !stream.terminal; i++) line(lines[i]);
+        }
+        if (streamTimedOut) failure = new Error('超过 7 分钟没有收到新内容，已尝试恢复原研究记录；不会重复提交研究。');
+      } catch(error) { failure = error; }
+      finally {
+        if (guard) clearInterval(guard);
+        if (reader) {
+          try { await reader.cancel(); } catch(error) { /* Already closed. */ }
+          if (reader.releaseLock) { try { reader.releaseLock(); } catch(error) {} }
+          if (stream.reader === reader) stream.reader = null;
+          if (self._activeReader === reader) self._activeReader = null;
+        }
+      }
+      if (stream.cancelled || stream.terminal || stream.doneReceived) return;
+      if (!stream.runId || reconnects >= 3 || (failure && failure.stopReplay)) throw failure || interrupted();
+      reconnects += 1; stream.reconnects = reconnects;
+      // Read only the original durable run. A transport failure never repeats POST.
+      stream.transportController = new AbortController();
+      try {
+        response = await fetch('/api/agent/runs/'+encodeURIComponent(stream.runId)+'/stream?after_seq='+(stream.lastSeq || 0), {
+          method:'GET', credentials:'same-origin',
+          headers:{'Accept':'text/event-stream','X-Requested-With':'XMLHttpRequest'},
+          signal:stream.transportController.signal
+        });
+      } catch(error) { response = null; failure = error; }
+    }
+  },
 
   send: async function() {
     if (this._sendStarting || (Streams[this.convId] && Streams[this.convId].active)) {
@@ -939,22 +1052,16 @@ Object.assign(App, {
       var cmd = m[1].toLowerCase();
       var found = this.skills.filter(function(s) { return s.shortcut === '/' + cmd || s.id === cmd || s.name === cmd; })[0];
       if (found) {
-        this._activeSkills.add(found.id); this.renderSkillsBar();
-        this.setSkill(found.id);
-        if (this.convId) await this.api('/api/convs/'+this.convId+'/skill',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({skill:found.id})});
+        this.setSkill(found.id); this.renderSkillsBar();
+        q = m[2] || ''; inp.value = q; if (!q.trim()) return;
       }
-      q = m[2] || ''; inp.value = q; if (!q.trim()) return;
     }
-    // Determine primary skill: first non-cn active skill, or default
-    var primary = null;
-    var extra = [];
+    if (this._workflowsUnavailable) { this._toast('研究方式暂不可用，请刷新后重试'); return; }
     var self = this;
-    this._activeSkills.forEach(function(sid) {
-      if (sid !== 'cn' && !primary) primary = sid;
-      else if (sid !== primary) extra.push(sid);
-    });
-    var skillForReq = primary || this.skill || 'prism-research';
-    var extraSkills = extra.length ? extra : null;
+    var skillForReq = ['prism-research','bottleneck-hunter','serenity'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
+    var requestId;
+    try { requestId = this._newAgentRequestId(); }
+    catch(error) { this._toast(error.message); return; }
     var wasNew = !this.convId;
     if (!this.convId) {
       this._sendStarting = true;
@@ -992,21 +1099,23 @@ Object.assign(App, {
     // Keep ownership attached to the original message array across navigation.
     var _runStream = async function(_full, _chunks) {
       full = _full; chunks = _chunks;
-      var stream = {msgs: requestMessages, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, active: true};
+      var stream = {msgs: requestMessages, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, convId: sid, requestId: requestId, lastSeq: 0, active: true};
       requestStream = stream;
       Streams[sid] = stream;
       stream.msgs[msgIdx]._displayLen = 0;
       if (!_full) self._startTypewriter();
 
       try {
-      var resp = await fetch('/api/chat/stream', {
+      stream.transportController = new AbortController();
+      var resp = await fetch('/api/agent/chat/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
           'X-CSRF-Token': self._getCookie('csrf_token'),
         },
-        body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: requestModel, extra_skills: extraSkills})
+        body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: requestModel, request_id: requestId}),
+        signal: stream.transportController.signal
       });
       if (resp.status===401){window.location.href='/login'; delete Streams[sid]; self._streamDone(sid, btn); return;}
       if (!resp.ok){
@@ -1014,29 +1123,7 @@ Object.assign(App, {
         try { var eb = await resp.json(); errText = eb.error || errText; } catch(e) {}
         stream.msgs[msgIdx].content = errText; if (App.convId === sid) self.renderAll(); delete Streams[sid]; self._streamDone(sid, btn); return;
       }
-      var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
-      if (stream.cancelled) { await reader.cancel(); return; }
-      var lastStreamEventAt = Date.now(), streamTimedOut = false, streamGuard = null;
-      stream.reader = reader;
-      if (App.convId === sid) self._activeReader = reader;
-      try {
-      streamGuard = setInterval(function() {
-        if (!Streams[sid]) return;
-        if (Date.now() - lastStreamEventAt > 7 * 60 * 1000) {
-          streamTimedOut = true;
-          try { reader.cancel(); } catch(e) {}
-        }
-      }, 15000);
-      while (true) {
-        var ck = await reader.read(); if (ck.done) break;
-        if (stream.cancelled) break;
-        lastStreamEventAt = Date.now();
-        buf += dec.decode(ck.value,{stream:true});
-        var lines = buf.split('\n'); buf = lines.pop()||'';
-        for (var i = 0; i < lines.length; i++) {
-          var l = lines[i]; if (!l.startsWith('data: ')) continue;
-          var d = l.slice(6); if (d==='[DONE]') continue;
-          try { var p = JSON.parse(d);
+      await self._readNativeStream(stream, resp, function(p) {
             if (p.error) {
               var streamError = '⚠ ' + ChatRender.clean(p.error);
               full += (full ? '\n\n' : '') + streamError;
@@ -1044,7 +1131,8 @@ Object.assign(App, {
               stream.error = streamError;
             }
             if (p.pulse) { /* loading pulse */ }
-            if (p.status) chunks.push({t:'status', c:ChatRender.clean(p.status)});
+            if (p.status) chunks.push({t:'status', c:self._nativeStatusLabel(p.status)});
+            else if (p.agent && stream.agentStatusChanged) chunks.push({t:'status', c:self._nativeStatusLabel(p.agent.status)});
             if (p.tool) {
               var toolName = ChatRender.clean(p.tool || '');
               if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
@@ -1079,38 +1167,24 @@ Object.assign(App, {
               stream.msgs[msgIdx]._reportStatus = p.report_status;
               stream.msgs[msgIdx]._reportFiles = p.report_files || [];
             }
-          } catch(e) { /* skip malformed JSON */ }
-        }
         stream.msgs[msgIdx].content = String(full||''); stream.msgs[msgIdx]._chunks = chunks;
         stream.full = full; stream.chunks = chunks;
         if (App.convId === sid) {
           var curMsgIdx = App.msgs.length - 1;
           if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') App.renderOne(curMsgIdx);
         }
-      }
-      } finally {
-        if (streamGuard) clearInterval(streamGuard);
-      }
-      if (streamTimedOut) {
-        var stalledMsg = '生成中断：超过 7 分钟没有收到新内容，已自动停止。';
-        full = full ? full + '\n\n' + stalledMsg : stalledMsg;
-        var lastTextChunk = chunks[chunks.length - 1];
-        if (lastTextChunk && lastTextChunk.t === 'text') lastTextChunk.c += '\n\n' + stalledMsg;
-        else chunks.push({t:'text',c:stalledMsg});
-        stream.msgs[msgIdx].content = String(full||''); stream.msgs[msgIdx]._chunks = chunks;
-        stream.full = full; stream.chunks = chunks;
-        if (App.convId === sid) App.renderAll();
-      }
+      });
     } catch(e) {
-      var errorMsg = '网络异常';
+      var errorMsg = '连接中断，请重新打开原会话核对已保存进度；本次不会重复提交研究。';
+      if (stream.cancelled) return;
       if (e.name === 'AbortError') {
-        errorMsg = '已停止生成';
+        errorMsg = '连接已中断，请重新打开原会话核对研究状态';
       } else if (e.name === 'TypeError') {
         // A POST may already be running on the server. Never resubmit a paid
         // research job automatically after an ambiguous transport failure.
         errorMsg = '网络连接失败或中断。请重新打开本会话核对已保存内容；本次不会自动重复提交研究。';
-      } else if (e.message && e.message.indexOf('timeout') >= 0) {
-        errorMsg = '⚠ 响应超时，请重试';
+      } else if (e.message) {
+        errorMsg = ChatRender.clean(e.message);
       }
       stream.msgs[msgIdx].content = full + (full ? '\n\n' : '') + errorMsg;
       chunks.push({t:'text', c:(full ? '\n\n' : '') + errorMsg});
@@ -1170,14 +1244,17 @@ Object.assign(App, {
   stopStream: async function() {
     var sid = this.convId;
     var activeStream = Streams[sid];
-    if (activeStream) activeStream.cancelled = true;
+    if (activeStream) {
+      activeStream.cancelled = true;
+      if (activeStream.transportController) activeStream.transportController.abort();
+    }
     var reader = activeStream && activeStream.reader;
     if (reader) { try { await reader.cancel(); } catch(e) {} }
     if (this.convId === sid) this._activeReader = null;
     if (sid) {
       try {
-        var response = await this.api('/api/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:sid})});
-        if (!response.ok) throw new Error('Cancellation failed');
+        var response = await this.api('/api/agent/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:sid, run_id:activeStream && activeStream.runId || undefined})});
+        if (!response.ok || (await response.json()).ok !== true) throw new Error('Cancellation failed');
       } catch(error) {
         if (this._toast) this._toast('显示已停止，但未确认后台取消成功。请查看原会话状态');
       }
