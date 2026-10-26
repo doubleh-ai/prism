@@ -4,6 +4,16 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [v0.21.1] - 2026-10-27
+
+### 个股研究接口配置
+- Astock 使用自身提供方 SDK 的地址和启动认证配置，停止隐式继承研究对话的 Anthropic 兼容地址。
+- 显式配置的 SDK 基地址保留原路径，不再自动追加 `/v1`；未设置时使用对应提供方默认地址。
+- DeepSeek 的 Astock 配置误用 `/anthropic` 路径时，在构造分析图及发送模型请求前明确拒绝，保留所属研究的错误记录。
+- 移除上游图不会读取的 `ASTOCK_LLM_API_KEY` 假配置；使用提供方 SDK 实际支持的认证变量，不在研究线程中改写进程环境。
+- 依照真实提供方声明区分 Linux 与非 Linux 的 MiniRacer 分发，避免两个包覆盖同名源码；完整运行环境仍需额外闭包、源码和隔离验收。
+- 本条描述源码修复，实际部署及业务验收状态由独立发布记录证明。
+
 ## [v0.21.0] - 2026-10-26
 
 ### 原生研究 Agent

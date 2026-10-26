@@ -798,7 +798,9 @@ lxml==6.1.3 \
     --hash=sha256:febd35ef45f603c2d74b74655efdbf45e14f55fc0aef4ac82b663ca829b283e0 \
     --hash=sha256:ff88a92cafde90888511242d1c54afcc1a8adbb6dc0a88fa7f87e29e92400d4a
 
-mini-racer==0.14.1 \
+# akshare selects this distribution only outside Linux. Installing it together
+# with Linux's py-mini-racer overwrites two shared Python source files.
+mini-racer==0.14.1 ; platform_system != "Linux" \
     --hash=sha256:0df25889b7c4e753520324a1687d85e41f9f64984efa81963339ed400f004d49 \
     --hash=sha256:440bef1269655b1da94b550612b50669de9881c3d88b805c139f7f1b5ec8ae7b \
     --hash=sha256:4abd58c62c9955988dbc0cbf5a798914334fe570d2b192f8890bec20135ab6d1 \
@@ -808,6 +810,10 @@ mini-racer==0.14.1 \
     --hash=sha256:a401ecdf5f73d4714b76dc3a4c9b5780059cf4c59a5b64cff7497dc6c219d5a0 \
     --hash=sha256:ad4b5c15993caab571fac3d67e0d55157b358bd439e629e0fef26c45a12c8bab \
     --hash=sha256:cdf3a088e1363f16a695288f882abf76b3705b8e1df21418208b87ed010037a4
+
+# Linux x86_64 wheel used by akshare and mootdx; keep their namespace singular.
+py-mini-racer==0.6.0 ; platform_system == "Linux" \
+    --hash=sha256:42896c24968481dd953eeeb11de331f6870917811961c9b26ba09071e07180e2
 
 numpy==2.2.6 \
     --hash=sha256:038613e9fb8c72b0a41f025a7e4c3f0b7a1b5d768ece4796b674c8f3fe13efff \

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import unquote, urlsplit
 
 from . import config as app_config
 from .config import (
@@ -42,6 +43,16 @@ log = logging.getLogger("prism.analysis")
 
 # Lazy-import astock so the module loads even if astock isn't installed yet.
 _astock_imported = False
+
+
+class AnalysisConfigurationError(ValueError):
+    """Finite protocol errors, without configured URLs or credential values."""
+
+    def __init__(self, code: str):
+        if code not in {"astock_transport_invalid", "astock_transport_mismatch"}:
+            raise ValueError("analysis_configuration_code_invalid")
+        self.code = code
+        super().__init__(code)
 
 
 def _ensure_astock():
@@ -251,6 +262,22 @@ def _analysis_directories(analysis_id: str) -> dict[str, str]:
     return {"results_dir": str(results), "data_cache_dir": str(cache)}
 
 
+def _astock_backend_url() -> str | None:
+    """Keep an explicit SDK base URL intact; None selects the provider default."""
+    base = ASTOCK_LLM_BASE_URL.strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        path = unquote(urlsplit(base).path).casefold().split("/")
+    except ValueError:
+        raise AnalysisConfigurationError("astock_transport_invalid") from None
+    # This upstream DeepSeek adapter speaks OpenAI chat completions. Native's
+    # /anthropic endpoint cannot be made compatible by appending another /v1.
+    if ASTOCK_LLM_PROVIDER.strip().casefold() == "deepseek" and "anthropic" in path:
+        raise AnalysisConfigurationError("astock_transport_mismatch")
+    return base
+
+
 def _build_config(mode: str = "deep", *, analysis_id: str | None = None) -> dict:
     """Build astock DEFAULT_CONFIG overrides from Prism config."""
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -260,8 +287,10 @@ def _build_config(mode: str = "deep", *, analysis_id: str | None = None) -> dict
     cfg["llm_provider"] = ASTOCK_LLM_PROVIDER
     cfg["deep_think_llm"] = ASTOCK_LLM_DEEP
     cfg["quick_think_llm"] = ASTOCK_LLM_QUICK
-    if ASTOCK_LLM_BASE_URL:
-        cfg["backend_url"] = ASTOCK_LLM_BASE_URL.rstrip("/") + "/v1"
+    # Always override: a changed provider must not inherit upstream's old base.
+    # The provider SDK owns its default path; custom /v1 or gateway paths are
+    # already complete and must not be rewritten.
+    cfg["backend_url"] = _astock_backend_url()
     # Upstream Graph does not forward a config API-key field. Its provider SDK
     # reads the service's startup environment. Never mutate that shared process
     # environment from one research thread or pretend an ignored key works.
@@ -587,12 +616,15 @@ async def start_analysis(
         except Exception as exc:
             log.error("Analysis %s failed (%s)", aid, type(exc).__name__)
             _store[aid]["status"] = "error"
-            code = "engine_timeout" if isinstance(exc, TimeoutError) else "engine_unavailable"
-            message = (
-                "研究引擎超时，已保留现有记录"
-                if code == "engine_timeout"
-                else "研究引擎暂不可用，已保留现有记录；请联系管理员核查配置"
-            )
+            if isinstance(exc, AnalysisConfigurationError):
+                code = exc.code
+                message = "个股分析模型接口配置不匹配，未发送模型请求；请联系管理员核查配置"
+            elif isinstance(exc, TimeoutError):
+                code = "engine_timeout"
+                message = "研究引擎超时，已保留现有记录"
+            else:
+                code = "engine_unavailable"
+                message = "研究引擎暂不可用，已保留现有记录；请联系管理员核查配置"
             _store[aid]["error"] = message
             _persist_analysis(_store[aid])
             _emit("error", code=code, message=message)

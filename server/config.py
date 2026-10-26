@@ -152,8 +152,11 @@ ASTOCK_PROJECT = os.environ.get("PRISM_ASTOCK_PROJECT", str(PROJECT_ROOT.parent 
 ASTOCK_LLM_QUICK = os.environ.get("ASTOCK_LLM_QUICK", "deepseek-chat")
 ASTOCK_LLM_DEEP = os.environ.get("ASTOCK_LLM_DEEP", "deepseek-chat")
 ASTOCK_LLM_PROVIDER = os.environ.get("ASTOCK_LLM_PROVIDER", "deepseek")
-ASTOCK_LLM_BASE_URL = os.environ.get("ASTOCK_LLM_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", ""))
-ASTOCK_LLM_API_KEY = os.environ.get("ASTOCK_LLM_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
+# This independent engine uses its provider SDK's protocol and startup key
+# variable (for example DEEPSEEK_API_KEY), not Native's Anthropic-compatible URL.
+# The upstream graph ignores a config API-key field, so do not expose a pretend
+# ASTOCK_LLM_API_KEY setting or copy another protocol's credentials into it.
+ASTOCK_LLM_BASE_URL = os.environ.get("ASTOCK_LLM_BASE_URL", "")
 ASTOCK_DATA_VENDOR = os.environ.get("ASTOCK_DATA_VENDOR", "a_stock")
 ASTOCK_MAX_DEBATE_ROUNDS = int(os.environ.get("ASTOCK_MAX_DEBATE_ROUNDS", "1"))
 ASTOCK_OUTPUT_LANGUAGE = os.environ.get("ASTOCK_OUTPUT_LANGUAGE", "Chinese")
