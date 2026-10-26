@@ -2070,3 +2070,27 @@ body::after{display:none}
 .market-kline-facts p span { display: block; margin-bottom: 3px; color: var(--text3); }
 .market-kline-facts a { color: var(--accent); }
 .market-kline-note { margin: 8px 0 0; line-height: 1.6; color: var(--text3); }
+
+/* Feedback is always available, with a private progress record for its author. */
+.feedback-entry{border:1px solid var(--accent);border-radius:7px;background:var(--accent-bg);color:var(--accent);padding:7px 11px;font:inherit;font-size:12px;white-space:nowrap;cursor:pointer;flex-shrink:0}
+.feedback-entry:hover{background:var(--bg3)}
+.feedback-error-hint{display:flex;align-items:center;gap:12px;padding:8px 24px;background:var(--warn-bg);color:var(--text);font-size:12px;border-bottom:1px solid var(--border);flex-shrink:0}
+.feedback-error-hint[hidden],.feedback-dialog [hidden]{display:none!important}
+.feedback-error-hint>span{flex:1}.feedback-error-hint>button{border:0;background:transparent;color:var(--accent);cursor:pointer;padding:4px;font:inherit}
+.feedback-dialog{max-width:780px}.feedback-dialog .workbench-dialog-body{max-height:65dvh;overflow:auto}
+.feedback-form{display:grid;gap:10px;color:var(--text);font-size:13px}
+.feedback-form>label{margin-top:6px;color:var(--text2)}
+.feedback-form input,.feedback-form textarea,.feedback-form select,.feedback-queue-head select{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;padding:10px;font:inherit;min-width:0}
+.feedback-form textarea{resize:vertical;line-height:1.7}.feedback-form textarea:focus-visible{outline:2px solid var(--accent)}
+.feedback-privacy,.feedback-empty{font-size:12px;color:var(--text2);line-height:1.8;overflow-wrap:anywhere}
+.feedback-form-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;color:var(--text2);margin-top:8px}
+.feedback-form button,.feedback-more{border:1px solid var(--accent);border-radius:6px;background:var(--accent-bg);color:var(--accent);padding:9px 14px;font:inherit;cursor:pointer}
+.feedback-form button:disabled{opacity:.6;cursor:wait}.feedback-message{font-size:13px;line-height:1.8;color:var(--accent);margin:12px 0;overflow-wrap:anywhere}
+.feedback-list{display:grid;gap:12px;margin-top:16px}.feedback-list>button{text-align:left;display:grid;gap:8px;width:100%;padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);color:var(--text);cursor:pointer;font:inherit;overflow-wrap:anywhere}
+.feedback-list>button:hover{border-color:var(--accent)}.feedback-list>button>div{display:flex;align-items:center;justify-content:space-between;gap:12px}.feedback-list strong{font-size:14px;font-weight:550}.feedback-list small{color:var(--text2);font-size:11px}.feedback-list p{font-size:12px;white-space:pre-wrap}
+.feedback-status{font-size:12px;color:var(--accent)}.feedback-queue-head{display:grid;gap:12px;font-size:12px;color:var(--text2)}.feedback-queue-head label{max-width:240px}
+.feedback-more{margin-top:16px}.feedback-back{background:transparent;color:var(--accent);border:0;cursor:pointer;padding:5px 0;font:inherit;font-size:12px}
+.feedback-detail{margin-top:15px;overflow-wrap:anywhere}.feedback-detail h3{font-size:18px;margin:12px 0}.feedback-detail h4{margin:24px 0 12px;font-size:14px}.feedback-description{font-size:14px;line-height:1.9;white-space:pre-wrap;margin-bottom:15px}.feedback-detail blockquote{border-left:3px solid var(--accent);padding:10px 14px;background:var(--bg2);white-space:pre-wrap;font-size:13px;margin:18px 0}
+.feedback-timeline{list-style:none;padding:0}.feedback-timeline li{padding:12px 0;border-top:1px solid var(--border);font-size:12px}.feedback-timeline strong{font-size:12px}.feedback-timeline small{display:block;color:var(--text2)}.feedback-timeline p{white-space:pre-wrap;margin-top:8px}
+.feedback-review-form{border-top:1px solid var(--border);margin-top:24px;padding-top:18px}.feedback-review-form h3{font-size:15px}
+@media(max-width:760px){.feedback-entry{padding:6px 8px;font-size:11px}.feedback-dialog{width:calc(100% - 16px)}.feedback-dialog .workbench-dialog-body{padding:18px;max-height:70dvh}.feedback-error-hint{padding:8px 12px;gap:5px}.feedback-error-hint>span{font-size:11px}.feedback-form-actions{align-items:flex-start;flex-direction:column}.feedback-form button{min-height:42px}.feedback-list>button>div{align-items:flex-start;flex-direction:column;gap:5px}}

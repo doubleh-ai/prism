@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 研究工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=85">
+  <link rel="stylesheet" href="/static/css/app.css?v=86">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%233b5d8a'/><stop offset='100%' stop-color='%236b95c8'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='%231c1a16'/><circle cx='16' cy='16' r='9' fill='none' stroke='url(%23g)' stroke-width='1.8'/><circle cx='16' cy='16' r='3.5' fill='url(%23g)' opacity='.9'/></svg>">
 </head>
 <body>
@@ -127,7 +127,7 @@
     <div class="sidebar-foot">
       <span class="foot-user-name" id="userBadge"></span>
       <span class="conv-badge" id="convBadge"></span>
-      <span class="foot-ver" id="versionTag" title="更新日志">v0.19.7</span>
+      <span class="foot-ver" id="versionTag" title="更新日志">__APP_VERSION__</span>
       <a class="trash-link footer-icon-link" id="trashLink" onclick="App.openTrash()" style="display:none" title="回收站" aria-label="回收站"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M10 11v6M14 11v6M8 7l1-3h6l1 3M7 7l1 13h8l1-13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
       <a class="trash-link footer-icon-link" id="graphLink" onclick="App.openGraph()" style="display:none" title="分析关系图" aria-label="分析关系图"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="6" cy="7" r="2.4" stroke="currentColor" stroke-width="1.6"/><circle cx="18" cy="7" r="2.4" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="17" r="2.4" stroke="currentColor" stroke-width="1.6"/><path d="M8.2 8.4l2.8 6.2M15.8 8.4L13 14.6M8.4 7h7.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></a>
       <button class="admin-foot-btn" id="adminEntry" data-mode="admin" onclick="App.switchMode('admin')" title="管理" style="display:none">管理</button>
@@ -142,8 +142,11 @@
       <div class="workbench-page-title"><span>PRISM / WORKSPACE</span><h1 id="workbenchPageTitle">研究对话</h1></div><button class="workbench-tools-btn" onclick="App._openWorkbenchPanel('capabilities')">平台能力</button><span class="sep"></span>
       <button class="tb" onclick="App.toggleWidth()" title="宽窄切换"><svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M2 4.5l-2 3 2 3M13 4.5l2 3-2 3M5 2.5l-2 10M10 2.5l2 10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <button class="tb" onclick="App.toggleTheme()" title="主题"><svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M7.5 2a5.5 5.5 0 000 11V2z" fill="currentColor" opacity=".35"/></svg></button>
+      <button type="button" class="feedback-entry" id="feedbackEntry" onclick="App._openFeedback()">反馈与建议</button>
       <button class="tb" onclick="App._toggleTour()" title="操作指引">?</button>
     </div>
+
+    <div class="feedback-error-hint" id="feedbackErrorHint" hidden role="status"><span>遇到问题？可以提交反馈并跟踪处理进度。</span><button type="button" onclick="App._openFeedback('bug')">反馈此问题</button><button type="button" onclick="document.getElementById('feedbackErrorHint').hidden=true" aria-label="关闭反馈提示">×</button></div>
 
     <section class="workbench-context" id="workbenchContext" aria-label="能力调用记录">
       <div><strong id="workbenchContextTitle">从对话开始研究</strong><span id="workbenchContextDescription">能力调用、研究时间与来源会随本轮对话保留。</span></div>
@@ -329,26 +332,42 @@
   <nav id="researchTabs" class="workbench-dialog-tabs" role="tablist" aria-label="研究视图"><button role="tab" data-research-tab="overview">研究概览</button><button role="tab" data-research-tab="report">网页研报</button><button role="tab" data-research-tab="evidence">来源证据</button><button role="tab" data-research-tab="industry">产业关系</button></nav>
   <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
 </dialog>
-<script src="/static/lib/marked.min.js?v=85"></script>
-<script src="/static/lib/echarts.min.js?v=85"></script>
-<script src="/static/js/app.util.js?v=85"></script>
-<script src="/static/js/app.chat-render.js?v=85"></script>
-<script src="/static/js/app.core.js?v=85"></script>
-<script src="/static/js/app.diagnostics.js?v=85"></script>
-<script src="/static/js/app.chat.js?v=85"></script>
-<script src="/static/js/app.market.js?v=85"></script>
-<script src="/static/js/app.vibe.js?v=85"></script>
-<script src="/static/js/app.analysis.js?v=85"></script>
-<script src="/static/js/app.reports.js?v=85"></script>
-<script src="/static/js/app.industry.js?v=85"></script>
-<script src="/static/js/app.indicators.js?v=85"></script>
-<script src="/static/js/app.screener.js?v=85"></script>
-<script src="/static/js/app.indicator-chart.js?v=85"></script>
-<script src="/static/js/app.admin.js?v=85"></script>
-<script src="/static/js/app.release.js?v=85"></script>
-<script src="/static/js/app.tour.js?v=85"></script>
-<script src="/static/js/app.workbench.js?v=85"></script>
-<script src="/static/js/app.research.js?v=85"></script>
-<script src="/static/js/app.operations.js?v=85"></script>
+<dialog id="feedbackDialog" class="workbench-dialog feedback-dialog" aria-labelledby="feedbackTitle">
+  <header><div><span class="workbench-kicker">FEEDBACK</span><h2 id="feedbackTitle">反馈与建议</h2></div><button type="button" onclick="document.getElementById('feedbackDialog').close()" aria-label="关闭反馈">×</button></header>
+  <nav class="workbench-dialog-tabs" aria-label="反馈视图"><button type="button" onclick="App._feedbackView('new')">提交反馈</button><button type="button" onclick="App._feedbackView('mine')">我的反馈与进度</button><button type="button" id="feedbackReviewEntry" hidden onclick="App._feedbackView('admin')">反馈评审</button></nav>
+  <div class="workbench-dialog-body">
+    <form id="feedbackForm" class="feedback-form" onsubmit="App._submitFeedback(event)">
+      <label for="feedbackCategory">反馈类型</label><select id="feedbackCategory"><option value="bug">功能异常 · 优先排查</option><option value="suggestion">改进建议 · 每日评审</option></select>
+      <label for="feedbackSummary">用一句话描述</label><input id="feedbackSummary" required maxlength="120" placeholder="例如：报告表格在手机上被截断">
+      <label for="feedbackDescription">发生了什么？你希望怎样？</label><textarea id="feedbackDescription" required maxlength="6000" rows="5" placeholder="异常请写操作步骤、实际结果和预期结果；建议请写使用场景和想改进的地方。"></textarea>
+      <p class="feedback-privacy">反馈用于排查和评审，可由自动流程辅助处理。仅附带当前页面和版本，不自动上传对话、研报或截图。请勿填写密码、密钥及其他敏感信息。</p>
+      <div class="feedback-form-actions"><span id="feedbackPage"></span><button type="submit" id="feedbackSubmit">提交并跟踪进度</button></div>
+    </form>
+    <p id="feedbackMessage" class="feedback-message" role="status" aria-live="polite"></p>
+    <div id="feedbackContent" hidden></div>
+  </div>
+</dialog>
+<script src="/static/lib/marked.min.js?v=86"></script>
+<script src="/static/lib/echarts.min.js?v=86"></script>
+<script src="/static/js/app.util.js?v=86"></script>
+<script src="/static/js/app.chat-render.js?v=86"></script>
+<script src="/static/js/app.core.js?v=86"></script>
+<script src="/static/js/app.diagnostics.js?v=86"></script>
+<script src="/static/js/app.feedback.js?v=86"></script>
+<script src="/static/js/app.chat.js?v=86"></script>
+<script src="/static/js/app.market.js?v=86"></script>
+<script src="/static/js/app.vibe.js?v=86"></script>
+<script src="/static/js/app.analysis.js?v=86"></script>
+<script src="/static/js/app.reports.js?v=86"></script>
+<script src="/static/js/app.industry.js?v=86"></script>
+<script src="/static/js/app.indicators.js?v=86"></script>
+<script src="/static/js/app.screener.js?v=86"></script>
+<script src="/static/js/app.indicator-chart.js?v=86"></script>
+<script src="/static/js/app.admin.js?v=86"></script>
+<script src="/static/js/app.release.js?v=86"></script>
+<script src="/static/js/app.tour.js?v=86"></script>
+<script src="/static/js/app.workbench.js?v=86"></script>
+<script src="/static/js/app.research.js?v=86"></script>
+<script src="/static/js/app.operations.js?v=86"></script>
 </body>
 </html>

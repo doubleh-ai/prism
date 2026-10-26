@@ -595,7 +595,7 @@ Object.assign(App, {
   _renderAdminTabs: function() {
     var tabs = [
       ['overview', '概览'], ['operations', '发布控制台'], ['features', '功能分析'], ['activity', '用户行为'],
-      ['diagnostics', '异常诊断'], ['accounts', '账号管理'], ['health', '系统健康']
+      ['diagnostics', '异常诊断'], ['feedback', '反馈评审'], ['accounts', '账号管理'], ['health', '系统健康']
     ];
     return '<div class="admin-tabs" role="tablist">' + tabs.map(function(tab) {
       return '<button role="tab" aria-selected="' + (App._adminTab === tab[0] ? 'true' : 'false') + '" class="admin-tab ' + (App._adminTab === tab[0] ? 'active' : '') + '" onclick="App._adminSetTab(\'' + tab[0] + '\')">' + tab[1] + '</button>';
@@ -632,9 +632,9 @@ Object.assign(App, {
     var stats = payload.stats || {};
     var events = payload.events || [];
     var cards = [
-      ['未处理异常', events.length, '累计出现 ' + this._adminFmtNum(stats.occurrences || 0) + ' 次'],
+      ['待核对记录', events.length, '含历史记录，累计出现 ' + this._adminFmtNum(stats.occurrences || 0) + ' 次'],
       ['严重', stats.critical || 0, '需要优先处理'],
-      ['错误', stats.error || 0, '影响功能使用'],
+      ['错误', stats.error || 0, '按版本与复现结果判定影响'],
       ['警告', stats.warning || 0, '可能的退化或空白状态']
     ].map(function(item) {
       return '<div class="admin-stat-card"><span>' + esc(item[0]) + '</span><strong>' + esc(String(item[1])) + '</strong><em>' + esc(item[2]) + '</em></div>';
@@ -646,14 +646,14 @@ Object.assign(App, {
       return '<tr>' +
         '<td>' + esc(App._adminFormatDate(item.last_seen)) + '<em>首次 ' + esc(App._adminFormatDate(item.first_seen)) + '</em></td>' +
         '<td><span class="admin-pill ' + (item.severity === 'critical' || item.severity === 'error' ? 'off' : '') + '">' + esc(item.severity || 'error') + '</span><em>' + esc(item.kind || '') + '</em></td>' +
-        '<td><b>' + esc(item.component || '-') + '</b><em>' + esc(item.page || '-') + '</em></td>' +
+        '<td><b>' + esc(item.component || '-') + '</b><em>' + esc(item.page || '-') + '</em><em>' + esc(item.version || '版本未记录') + ' · ' + esc(({current_version:'当前版本',historical_version:'历史版本，待复测',unattributed:'版本未知，待核对'})[item.version_scope] || '待核对') + '</em></td>' +
         '<td><details class="admin-diagnostic-detail"><summary>' + esc(item.message || '异常') + '</summary><pre>' + esc(detail) + '</pre></details></td>' +
         '<td>' + esc(String(item.occurrences || 1)) + '</td>' +
-        '<td><button class="admin-btn" onclick="App._adminResolveDiagnostic(' + Number(item.id) + ')">标记已处理</button></td>' +
+        '<td><button class="admin-btn" onclick="App._adminResolveDiagnostic(' + Number(item.id) + ')">归档记录</button></td>' +
       '</tr>';
     }).join('');
     return '<section class="admin-tab-section">' +
-      '<div class="admin-section-row admin-tab-heading"><div><div class="admin-section-title">异常诊断</div><p>自动汇总浏览器渲染、未处理异常和 API 5xx；不采集对话正文、密码、Cookie 或模型密钥</p></div>' +
+      '<div class="admin-section-row admin-tab-heading"><div><div class="admin-section-title">异常诊断</div><p>区分当前、历史和版本未知记录。历史记录需复测；归档不代表修复完成。匿名 401/403 与未匹配路径请求在诊断包中单独分类。</p></div>' +
       '<button class="admin-btn primary" onclick="App._adminCopyDiagnosticBundle()">复制 Codex 诊断包</button></div>' +
       '<div class="admin-stat-grid">' + cards + '</div>' +
       (rows ? '<div class="admin-table-wrap admin-scroll-table"><table class="admin-table admin-diagnostic-table"><thead><tr><th>时间</th><th>级别</th><th>组件</th><th>异常</th><th>次数</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="admin-empty">当前没有未处理异常</div>') +
@@ -722,6 +722,7 @@ Object.assign(App, {
     else if (this._adminTab === 'features') content = this._renderAdminFeaturesTab();
     else if (this._adminTab === 'activity') content = this._renderAdminActivityTab();
     else if (this._adminTab === 'diagnostics') content = this._renderAdminDiagnosticsTab();
+    else if (this._adminTab === 'feedback') content = '<section class="admin-tab-section"><h3>反馈评审</h3><p>异常优先排查，建议每日集中评审；答复和验证结果对提交者可见。</p><button class="admin-btn primary" onclick="App._openFeedback();App._feedbackView(\'admin\')">打开反馈队列</button></section>';
     else if (this._adminTab === 'accounts') content = this._renderAdminAccounts(this._adminCurrentUser);
     else if (this._adminTab === 'health') content = this._renderAdminHealth();
     else { this._adminTab = 'overview'; content = this._renderAdminStats() + this._renderAdminAnalytics(); }

@@ -1,290 +1,55 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/Prism-AI%20Research-3b5d8a?style=flat" alt="Prism">
-  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/python-3.12+-blue" alt="Python">
-</p>
+# Prism · 研究工作台
 
-# Prism
+Prism 是可自行部署的开源投资研究工作台。你可以在对话中提出问题，查看行情、指标、产业关系、研究证据和历史报告，并回到对应页面查看当时的调用记录。
 
-> AI-powered investment research platform for the Chinese A-share market.
-> Multi-agent analysis, live market data, industry graph — all in one self-hosted app.
+项目正在从依赖外部研究 CLI / Skill 的旧链路，迁移到 **Prism 自有的 Native Agent**：由本项目管理模型请求、工具权限、执行预算、停止、事件回放和结果保存。它直接调用模型 API，不训练基础模型，也不会在失败时悄悄转回旧 CLI。
 
-Prism combines an owned **Native Agent research runtime**, **market data** (quotes, K-line, fundamentals), **industry chain knowledge graphs**, and **technical indicators** in an authenticated research workspace with per-user records. Existing Astock and Vibe workspaces remain available during migration.
+## 先从哪里看
 
-## Research Workbench（开发中）
-
-研究对话是统一入口，行情、个股分析、深度研究、产业关系、指标、全市场选股和网页研报仍有独立工作区。顶部“平台能力”展示后端实际提供的工具；Agent 的真实调用会在回复中形成结果卡，并保存到会话和对应工作区的“调用记录”。点击卡片打开已有记录，可以返回原会话继续讨论；打开后台任务不会重新启动一份研究。网页是主要研报阅读方式，已有导出功能仍可选用。
-
-研究对话默认使用 **Prism Native Agent v1**：直接模型 API、仓库拥有的研究循环、持久化事件、受限工具和账号内历史检索，不使用 Claude Code CLI 或外部股票 Skill。网页报告随研究保存，不要求生成 PDF。原有 Astock、Vibe 及其他工作区尚在逐步迁移；第一版原生工具不会隐式启动这些旧引擎。架构、实现范围、配置和验收边界见 [原生 Agent 框架](docs/native-agent-framework.md)。
-
-每轮研究保存实际请求时间、`Asia/Shanghai` 时区和 `run_id`。界面将**研究截至**、来源**发布时间**、**采集时间**与行情本身的数据时间分开展示；未知时间不会用当前时间补造。来源“已采集”仅说明工具成功取得内容，不代表事实已经核验；外部网页、平台数据和历史研究分别标注。旧记录没有可靠时间或来源信息时保留“未提供 / 待核验”，产业关系也不能仅凭连接数或种子数据认定为真实供货或瓶颈。
-
-能力目录及历史接口见 [API Reference](docs/API.md#platform-capabilities-and-call-history)。
-
----
-
-## Architecture
-
-```
-Browser (Vanilla JS + ECharts + SSE)
-        │
-   FastAPI (Python 3.12)
-   ┌────┼────────────────────────────┐
-   │    │  Market Providers          │
-   │    ├── akshare (Sina/EE)        │
-   │    ├── baostock (local TCP)     │
-   │    └── tencent (fallback)       │
-   │    │                            │
-   │    ├── Prism Native Agent       │
-   │    │   ├── Direct model API     │
-   │    │   ├── Owned tool registry  │
-   │    │   └── Durable events       │
-   │    │                            │
-   │    ├── Astock Engine            │
-   │    │   └── TradingAgentsGraph   │
-   │    │       7-agent LangGraph    │
-   │    │                            │
-   │    ├── Indicators Engine        │
-   │    │   └── pandas-ta + DSL      │
-   │    │                            │
-   │    └── SQLite (WAL, mmap)       │
-   └─────────────────────────────────┘
-```
-
-- **Frontend** — Vanilla JS (modular: 9 files, ~3,500 lines), CSS custom-property dark/light themes, ECharts K-line + force-graph, SSE streaming, sessionStorage persistence, Service Worker offline cache
-- **Backend** — FastAPI + SQLite WAL, bcrypt auth, Pydantic validation, CSRF/CSP/XSS defense, rate limiting, LRU caches, GZip + Cache-Control
-- **Research Agent** — Owned model/tool loop, event replay, cancellation, research evidence and historical retrieval; no external CLI/Skill dependency for research chat. Existing specialized Astock/Vibe engines are migrated separately.
-- **Market Data** — Pluggable provider chain (akshare → baostock → tencent) with SQLite TTL cache + stale-data fallback, quote/K-line/fundamentals/search
-- **Deploy** — Separate private operations configuration and controlled release stages; backups, recovery validation and stop protection are retained.
-
-## Quick Start
-
-```bash
-# Clone
-git clone https://github.com/doubleh-ai/prism.git /home/ubuntu/prism
-cd /home/ubuntu/prism
-
-# Install
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# Optional: market data + astock analysis deps
-pip install -r requirements-extra.txt
-
-# Configure
-cp .env.example .env
-# → Edit .env with your API keys
-
-# Deploy
-ADMIN_USER=admin ADMIN_PASS=your-password bash install.sh
-```
-
-### Environment Variables
-
-| Variable | Description |
+| 你想了解什么 | 阅读入口 |
 |---|---|
-| `DEEPSEEK_API_KEY` | DeepSeek platform API key |
-| `MINIMAX_API_KEY` | MiniMax platform API key |
-| `LLM_API_KEY` | Legacy fallback (used if per‑provider keys are unset) |
-| `STOCK_DATA_DIR` | Data directory (default: `./data`) |
-| `RATE_CHAT_PER_MIN` | Chat rate limit (default: 20) |
-| `PRISM_INTERNAL_API_URL` | Agent 工具桥访问同一 Prism 服务的内部地址，默认 `http://127.0.0.1:8088`；必须为带端口的数字回环 HTTP 地址 |
+| 我不熟悉项目，先了解能做什么、怎么用 | [项目指南：5 分钟概览、功能和限制](docs/PROJECT_GUIDE.md) |
+| 在本机运行、测试或增加一个能力 | [本地开发与扩展](docs/PROJECT_GUIDE.md#本地开发) |
+| 对话怎样变成模型、工具、证据和报告 | [架构与代码阅读路线](docs/ARCHITECTURE.md) |
+| 为什么不用旧 Skill 强制生成 PDF，知识如何复用 | [关键设计决定](docs/DECISIONS.md) |
+| 原生 Agent 的具体协议、预算和接口 | [Native Agent v1](docs/native-agent-framework.md) |
+| 提交异常或建议、查看处理与验证进度 | [反馈、修复与每日评审](docs/FEEDBACK.md) |
+| 发布、停止和回退如何进行 | [交付与介入入口](docs/PROJECT_GUIDE.md#发布停止与回退) · [发布规范](docs/release-process.md) |
 
-Full list in `.env.example`.
+## 版本与上线状态
 
-Agent 工具桥通过回环地址调用本实例，并按本轮用户、会话和能力范围执行校验。默认端口为 `8088`；若实际服务使用其他端口，必须同时配置 `PRISM_INTERNAL_API_URL`。例如本地服务使用 `9000`：
+以下是文档整理时的状态，**Git 分支、版本号和绿色 CI 都不能单独证明线上运行了哪个版本**。
 
-```bash
-PRISM_INTERNAL_API_URL=http://127.0.0.1:9000 \
-  .venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 9000
-```
-
-systemd 部署时，将相同配置放入该服务的环境配置。此地址不是公网域名、反向代理入口或 Vibe sidecar 地址；不接受外部主机或重定向。短期调用认证由服务生成，无需在浏览器或仓库中放置认证值。
-
----
-
-## Features
-
-### 📊 Market Data (v0.6–v0.7)
-
-- **Real-time quotes** — price, change%, OHLCV from akshare/baostock/tencent
-- **K-line charts** — ECharts candlestick + volume, support 1d/1w/1m periods, drag-zoom
-- **Fundamentals** — PE/PB/ROE/market-cap from akshare
-- **Stock search** — fuzzy match by ticker or name
-- **Watchlist** — localStorage-persisted, auto-refresh every 60s
-- **`[[quote:TICKER]]` chips** — inline price cards in AI chat, click to jump to market panel
-
-### 🧠 AI Analysis (v0.10 astock)
-
-- **7-agent LangGraph pipeline** — Market/Social/News/Fundamentals/Policy/HotMoney/Lockup analysts → Bull/Bear debate → Research Manager → Trader → Risk debate (Aggressive/Conservative/Neutral) → Portfolio Manager decision
-- **Real-time progress** — SSE streaming with stage timeline + agent grid + progress bar
-- **Persistent state** — analysis survives page refresh via sessionStorage, auto-reconnects SSE
-- **Structured report** — rating badge, analyst reports (foldable), debate summary, trading plan, risk assessment
-- **Copy to chat** — one-click "add to conversation" pastes the final decision into the composer
-
-### 🔗 Industry Chain Graph (v0.10 Phase 6)
-
-- **Knowledge graph** — nodes (companies/technologies/resources) + edges (supplies/competes/depends_on)
-- **Geo distribution** — 12-country seed data with key industries and policy summaries
-- **Ticker chain** — upstream/downstream traversal for any stock
-- **Search** — fuzzy search across all industry nodes
-- **Accumulates over time** — each analysis can feed new nodes/edges into the graph
-
-### 📈 Technical Indicators (v0.10)
-
-- **TA-Lib-free** — powered by pandas-ta, computed server-side
-- **30+ indicators** — SMA/EMA/MACD/RSI/BOLL/KDJ/ATR/OBV + more
-- **DSL query** — `GET /api/indicators/{ticker}?expr=macd(12,26,9)|rsi(14)`
-- **Cached** — results cached per-ticker for 60s
-
-### 🛡️ Security (v0.8.2)
-
-- CSRF double-submit cookie + `X-Requested-With` header
-- CSP headers (script-src/style-src/img-src)
-- XSS sanitization (HTML escape + `sanitizeHtml()` strip scripts/on* handlers/javascript: URLs)
-- Path traversal prevention (resolve + relative_to)
-- Rate limiting (chat 20/min, login 10/min, explain 10/min)
-- Request ID correlation on every request
-
----
-
-## Project Structure
-
-```
-prism/
-├── server/
-│   ├── main.py              # FastAPI app + middleware + all routes
-│   ├── config.py            # App config, models, API keys
-│   ├── database.py          # SQLite WAL + thread-local + migrations + seed
-│   ├── auth.py              # Login, sessions, CSRF
-│   ├── chat.py              # SSE chat stream + Claude CLI runner
-│   ├── conversations.py     # CRUD + recycle bin
-│   ├── middleware.py         # Request ID, error handlers, logging
-│   ├── models.py            # Pydantic request/response schemas
-│   ├── proxy.py             # Provider-aware LLM proxy
-│   ├── analysis_engine.py   # 7-agent astock LangGraph wrapper
-│   ├── analysis_graph.py    # Analysis node/edge persistence
-│   ├── industry_router.py   # Industry chain graph API (Phase 6)
-│   ├── industry_seed.py     # Industry seed data
-│   ├── market/              # Market data layer
-│   │   ├── router.py        # /api/quote|kline|fundamentals|search endpoints
-│   │   ├── provider.py      # Abstract provider interface
-│   │   ├── factory.py       # Provider chain builder
-│   │   ├── cache.py         # SQLite TTL cache
-│   │   ├── chain.py         # Failover chain logic
-│   │   ├── models.py        # Market Pydantic models
-│   │   ├── akshare_provider.py
-│   │   ├── baostock_provider.py
-│   │   └── tencent_provider.py
-│   └── indicators/          # Technical indicators
-│       ├── router.py        # /api/indicators endpoint
-│       ├── dsl.py           # Expression parser (macd(12,26,9)|rsi(14))
-│       ├── translator.py    # DSL → pandas-ta calls
-│       └── models.py
-├── static/
-│   ├── css/app.css          # ~1800 lines CSS custom-property themes
-│   ├── js/                  # Modular JS (~3,500 lines total)
-│   │   ├── app.util.js      # escHtml, safeUrl, debounce, api wrapper
-│   │   ├── app.core.js      # App init, mode switch, theme, sidebar
-│   │   ├── app.chat.js      # Chat streaming, message rendering, skills
-│   │   ├── app.chat-render.js # Markdown + quote-chip rendering
-│   │   ├── app.market.js    # Market panel, watchlist, quote cards
-│   │   ├── app.analysis.js  # Astock analysis UI (progress + report)
-│   │   ├── app.industry.js  # Industry graph visualization
-│   │   ├── app.indicators.js # Technical indicator charts
-│   │   └── app.tour.js      # Onboarding tour
-│   ├── lib/
-│   │   ├── echarts.min.js   # ECharts 5 (CDN fallback: self-hosted)
-│   │   ├── marked.min.js    # Markdown parser
-│   │   └── world.json       # GeoJSON world map for geo-distribution
-│   └── sw.js                # Service Worker (offline cache)
-├── templates/
-│   ├── app.html             # Main SPA shell
-│   └── login.html           # Login page
-├── tests/                   # 297 tests (pytest)
-├── skills/CLAUDE.md         # Skill dependency declarations
-├── config/
-│   ├── stock-analyzer.service  # systemd unit
-│   ├── nginx-site.conf         # Nginx reverse proxy config
-│   └── claude-settings.example.json
-├── scripts/
-│   ├── create_user.py       # Admin user creation
-│   └── verify.sh            # Health-check script
-├── docs/
-│   ├── API.md               # Full API reference
-│   └── superpowers/         # Design specs + plans (historical)
-├── requirements.txt         # Core dependencies
-├── requirements-extra.txt   # Market data + astock deps
-├── install.sh               # One-command production deploy
-├── Makefile                 # test, lint, format, type-check, run-dev
-├── Dockerfile               # Containerized deployment
-├── pyproject.toml           # ruff + mypy config
-└── .github/workflows/ci.yml # CI pipeline
-```
-
-## API Endpoints
-
-| Group | Endpoints |
+| 对象 | 状态 |
 |---|---|
-| **Auth** | `POST /api/login`, `POST /api/logout`, `GET /api/me` |
-| **Conversations** | `GET/POST /api/convs`, `GET/DELETE /api/convs/{id}`, `POST restore`, `DELETE permanent`, `PUT skill`, `POST batch-delete`, `GET /api/trash` |
-| **Chat** | `POST /api/chat/stream` (SSE), `POST /api/chat/respond`, `POST /api/chat/cancel` |
-| **Analysis** | `POST /api/analysis/start`, `GET /api/analysis/{id}/stream` (SSE), `GET /api/analysis/{id}/report` |
-| **Market** | `GET /api/quote/{ticker}`, `GET /api/quote/{ticker}/kline`, `GET /api/fundamentals/{ticker}`, `GET /api/search`, `GET /api/data-providers` |
-| **Industry** | `GET /api/industry/graph`, `GET /api/industry/geo`, `GET /api/industry/search`, `GET /api/industry/ticker/{ticker}/chain` |
-| **Indicators** | `GET /api/indicators/{ticker}?expr=macd(12,26,9)\|rsi(14)` |
-| **Reports** | `GET /api/convs/{id}/reports`, `GET /api/reports/{id}/{filename}` |
-| **Utility** | `GET /api/models`, `GET /api/skills`, `POST /api/explain-term` |
+| `c997bcf` 界面与报告可读性修复 | 已上线基线 |
+| v0.21.0 Native Agent 与刷新接续、停止确认修复 | 当前代码候选，待完成对应的实际验收与受控上线 |
+| `master` | 开源代码主线；同步代码本身不会部署或重启服务 |
 
-Full API reference: [`docs/API.md`](docs/API.md)
+实际发布进度、完整提交、验收和恢复结果以[私有发布看板](https://github.com/doubleh-ai/prism-ops/issues/2)为准，需要仓库访问权限。发布完成后维护者应更新本表；历史设计文档不作为当前生产状态。
 
-## Development
+## 主要能力
 
-```bash
-# Run tests (297 tests)
-make test
+- **研究对话**：综合研究、产业链研究、公司研究三种内置方法；原生任务可保存进度、按事件回放，并确认后台停止结果。
+- **行情与指标**：查询行情、基本面、K 线、自选和已配置指标；保留来源及数据时间。
+- **产业关系**：查看已有图谱，在研究中登记关系候选、支持与反方证据；背景连线不等于真实供货关系。
+- **研究与报告**：网页阅读、证据和版本回看、账号内历史检索；PDF 不再是每轮问答的必需交付物。
+- **独立工作区**：个股分析、深度研究、扫描等旧能力仍按各自状态运行，尚未全部纳入原生 Agent。
 
-# Run with coverage
-make test-cov
+来源取得成功不等于事实已核验。研究时间、来源发布时间、采集时间和行情时间分别记录；历史观点不会因为被反复引用就自动变成事实。具体支持范围见[功能与当前限制](docs/PROJECT_GUIDE.md#功能与当前限制)。
 
-# Lint + format
-make lint
-make format
+## 本地开发
 
-# Type check
-make type-check
+需要 Python 3.12；完整前端回归还需要 Node.js。先使用独立开发数据目录，安装核心依赖，再启动仅监听本机的单进程服务。**没有模型凭证也可以启动和查看界面**，新研究会明确提示模型未配置。
 
-# Dev server (port 8088)
-make run-dev
-```
+完整的启动、账号初始化、可选依赖和离线测试步骤见[项目指南](docs/PROJECT_GUIDE.md#本地开发)。配置由进程环境读取，复制一份 `.env` 文件并不会让应用自动加载它。
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development guide.
+## 开源与运维边界
 
-## Deployment
+本仓库保存应用源码、通用文档和测试。环境专属运维源码与配置放在私有 `prism-ops`；密码、私钥、API Key、会话、运行数据库、用户对话、日志和备份不进入任何 Git 仓库。旧私有 Git 历史继续离线保留。
 
-The current release workflow is **candidate-only**: prepare and check a
-specific revision, then inspect actual GitHub workflow results in the admin
-operations view. It does not publish to production, restart services, or
-perform rollback. Unavailable or stale observations are shown explicitly;
-a passing candidate is not evidence that production has changed.
-
-`GET /health/ready` is a public, read-only application/database readiness
-probe (200 or 503). It exposes only basic status, version/revision metadata,
-and observation time. It does not verify model calls, live market data, or
-deployment acceptance. The Docker healthcheck uses this endpoint.
-
-Do not use the former `/tmp/prism-deploy-p2.sh`, recursive copies into the
-live directory, `install.sh`, or `scripts/verify.sh` as a release executor.
-The installer is for initial setup; the verification script can change
-state and invoke external services. A GitHub workflow cancellation link
-stops that workflow only when GitHub confirms cancellation; it does not
-roll back production.
-
-See [the release process and emergency-control boundaries](docs/release-process.md)
-for what is available now and the required gates before production can be
-connected. Existing Docker packaging also needs a separate full-feature
-acceptance check before it can be used as a production artifact.
+GitHub Actions 的 `CI` 与 `Release candidate (not deployment)` 用于检查和候选打包，不自动发布生产。生产变更必须使用已审查的私有流程，保留独立停止入口、任务排空、加密备份和实际恢复检查。
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE)
+Apache 2.0，见 [LICENSE](LICENSE)。

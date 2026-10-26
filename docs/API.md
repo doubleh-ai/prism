@@ -1,9 +1,76 @@
 # Prism API Reference
 
+## Native research chat (v0.21 candidate)
+
+The default research chat is Prism's owned runtime. The retained CLI/MCP adapters are compatibility features; native errors never automatically enable them. Implementation and migration limits are in [Native Agent](native-agent-framework.md) and [Project Guide](PROJECT_GUIDE.md).
+
+- `GET /api/agent/workflows` and `GET /api/agent/tools`: authenticated native method/tool catalogs.
+- `POST /api/agent/chat/stream`: authenticated, CSRF-protected research start. Provide `question` and an existing owned `conv_id`; a stable `request_id` deduplicates the same input. Optional `model` and one `workflow` select the configured model and method. Reusing an identifier with different input returns 409.
+- `GET /api/agent/runs/{run_id}` and `/events?after_seq=N`: owned status and ordered persisted events.
+- `GET /api/agent/runs/{run_id}/stream?after_seq=N`: observe/replay only; this does not start or repeat model work.
+- `POST /api/agent/chat/cancel`: provide owned `conv_id` and optional `run_id`. `cancel_requested` is intent; `stopped` is true only after a terminal state.
+
+SSE frames carry `agent.run_id`, `agent.seq`, `agent.status` and `agent.event`. Readers deduplicate sequence numbers and reconnect with GET. Browser refresh checks owned history before attaching to the existing run. Execution `completed` is distinct from research `unreviewed`; collection and historical reuse do not certify facts. `/api/chat/stream` and `/api/chat/cancel` alias native behavior by default; `PRISM_LEGACY_CHAT_ENABLED=1` explicitly selects the older alias adapter only.
+
 Endpoints are JSON over HTTP unless a stream or file is documented.
 Authentication is via a session
 cookie (`token`) issued by `/api/login`. The cookie is `HttpOnly`
 and (in production) `Secure`; `SameSite=strict` by default.
+
+## Feedback (candidate)
+
+Private user feedback and administrator review, not an execution/deployment API.
+Usage, status meanings and scheduling limits are in [Feedback](FEEDBACK.md).
+All writes require the existing authenticated CSRF protections; unknown JSON
+fields and duplicate keys are rejected, with a 32 KiB request-body limit.
+
+| Endpoint | Access and behavior |
+|---|---|
+| `POST /api/feedback` | Signed-in user; `category` (`bug` / `suggestion`), `title` (1–120), `description` (1–6000), optional local `page`, closed-enum `feature` and UUID `request_id`. Returns `ok`, `reused`, `feedback`. |
+| `GET /api/feedback` | Own records only; optional `category`, `status`, `feature`, `before_id`, `limit` (default 50, capped at 100). Returns `items`, `next_before_id`. |
+| `GET /api/feedback/{id}` | Own detail and user-visible update history, or 404. |
+| `GET /api/admin/feedback` | Administrator queue; same filters plus Shanghai `review_batch_date` (`YYYY-MM-DD`). |
+| `GET /api/admin/feedback/{id}` | Administrator detail, including owner and review actors. |
+| `POST /api/admin/feedback/{id}/update` | Administrator; `status`, nonempty `public_reply`, optional `verification`, `target_version`, full-40-hex `target_revision`, `expected_revision`. Appends history; stale expected revision returns 409. |
+
+Bug submissions start at `triaging`; suggestions at `pending_review` with a
+Shanghai-day batch. Category-specific status sets are defined in
+`server/feedback.py`. `fixed` requires at least 12 characters of verification
+and a version such as `v0.21.0`; this records the maintainer's claim, not proof
+of deployment. Replies are visible to the submitting user, not a public issue.
+
+Stored page context contains only the site path, without query/fragment.
+Fixed credential patterns are redacted and common private-key blocks rejected;
+this is not exhaustive secret detection. No conversation body or attachment
+is collected automatically. Creation is limited to six requests/minute/user;
+administrator updates to 60/minute. Same owner, UUID and cleaned content reuse
+one record; conflicting content returns 409 without replacing the original.
+Feedback content never grants tool, code execution or release authority.
+
+### Restricted feedback worker
+
+These candidate endpoints are disabled unless a dedicated
+`PRISM_FEEDBACK_WORKER_TOKEN` is configured. They authenticate only the bounded
+`X-Prism-Feedback-Token` header; browser cookies and administrator sessions do
+not grant this identity. Keep its value out of source, prompts and logs.
+
+- `GET /api/internal/feedback`: queue filters as above, plus `review_batch_date`;
+  owner and request identifiers are removed.
+- `GET /api/internal/feedback/{id}`: limited detail/history, with review actors
+  represented as worker or administrator rather than account names.
+- `GET /api/internal/feedback/diagnostics`: finite derived diagnostic fields;
+  no raw messages, stacks, account names or request context.
+- `POST /api/internal/feedback/{id}/update`: same bounded update fields, mandatory
+  `expected_revision` and fixed actor `system:feedback-worker`. `fixed` also
+  requires `target_version` to equal the running `APP_VERSION` and
+  `target_revision` to equal its full deployed revision, plus verification text.
+
+Only the exact numeric-ID worker POST route uses this dedicated authentication
+instead of browser CSRF. Authentication is rechecked after reading the body;
+rotation/disable during a request rejects its write. The worker cannot access
+other APIs, execute a repair or deploy a release. Matching release fields are
+not proof of real verification; task activation and production acceptance are
+separate from implementing these endpoints.
 
 ## Cross-cutting
 

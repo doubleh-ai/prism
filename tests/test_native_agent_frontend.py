@@ -107,11 +107,61 @@ async function ownershipErrorsAndMalformedFrames() {
   assert.equal(replays,3);assert.equal(b.lastSeq,1);
 }
 async function cancelUsesNativeOwnerAndRun() {
-  const {app,context,notices}=environment(),s=stream();s.runId='native-run';let aborted=false,readCancelled=false,request;
+  const {app,context,notices}=environment(),s=stream();s.runId='native-run';s.active=true;let aborted=false,readCancelled=false,request,confirm,historyReads=0;
   s.transportController={abort(){aborted=true;}};s.reader={async cancel(){readCancelled=true;}};context.Streams.conv=s;
-  app.api=async(url,options)=>{request={url,body:JSON.parse(options.body)};return {ok:true,json:async()=>({ok:true})};};
-  await app.stopStream();assert(aborted&&readCancelled);assert.equal(request.url,'/api/agent/chat/cancel');assert.deepEqual(request.body,{conv_id:'conv',run_id:'native-run'});assert.equal(notices.length,0);
-  context.Streams.conv=stream();app.api=async()=>({ok:true,json:async()=>({ok:false})});await app.stopStream();assert.match(notices.at(-1),/未确认后台取消成功/);
+  app.openConv=async id=>{assert.equal(id,'conv');historyReads++;};
+  app.api=async(url,options)=>{
+    if(url.endsWith('/cancel')){request={url,body:JSON.parse(options.body)};return {ok:true,json:async()=>({ok:true,run_id:'native-run',status:'running'})};}
+    assert.equal(url,'/api/agent/runs/native-run');return new Promise(resolve=>{confirm=resolve;});
+  };
+  const pending=app.stopStream();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(aborted,false);assert.equal(readCancelled,false);assert.equal(context.Streams.conv,s);assert.equal(s.stopping,true);assert.equal(historyReads,0);
+  confirm({ok:true,json:async()=>({run:{run_id:'native-run',status:'cancelled'}})});await pending;
+  assert(aborted&&readCancelled);assert.equal(request.url,'/api/agent/chat/cancel');assert.deepEqual(request.body,{conv_id:'conv',run_id:'native-run'});assert.equal(notices.length,0);assert.equal(historyReads,1);assert.equal(context.Streams.conv,undefined);
+  const unknown=stream();unknown.active=true;context.Streams.conv=unknown;let unknownAborted=false;unknown.transportController={abort(){unknownAborted=true;}};
+  app.api=async()=>({ok:true,json:async()=>({ok:false})});await app.stopStream();assert.match(notices.at(-1),/未确认后台取消成功/);assert.equal(context.Streams.conv,unknown);assert.equal(unknownAborted,false);assert.equal(historyReads,1);
+  app.api=async()=>({ok:true,json:async()=>({ok:true,run_id:'discovered-run',status:'cancelled'})});await app.stopStream();assert.equal(unknown.runId,'discovered-run');assert.equal(context.Streams.conv,undefined);assert.equal(historyReads,2);
+}
+function historyPayload(status='running') {
+  const call={call_id:'history-call',status:'completed',label:'指标',conv_id:'conv',target:{view:'indicators'}};
+  const ref={url:'https://www.sse.com.cn/qa',title:'合成公开来源'};
+  return {call,ref,payload:{text:'保存的进度',chunks:[{t:'text',c:'保存的进度'},{t:'platform_call',call},{t:'ref',...ref}],refs:[ref],research:{as_of:'2026-10-25'},native_agent:{run_id:'history-run',status,engine:'prism-native'}}};
+}
+async function refreshRestoresGetOnlyAndRebuildsCardsOnce() {
+  const {app,context,document}=environment(),{call,ref,payload}=historyPayload();let deliver;const urls=[];
+  app.api=async url=>{assert.equal(url,'/api/convs/conv');return {ok:true,json:async()=>({messages:[{role:'user',content:'原问题'},{role:'assistant',content:JSON.stringify(payload)}]})};};
+  context.fetch=(url,options)=>{urls.push({url,method:options.method});return new Promise(resolve=>{deliver=resolve;});};
+  await app.openConv('conv');const restored=context.Streams.conv;
+  assert(restored&&restored.active);assert.equal(restored.runId,'history-run');assert.equal(document.getElementById('sendBtn').title,'停止生成');
+  document.getElementById('input').value='不要重复支付';await app.send();assert.equal(urls.length,1);
+  deliver(response([frame(1,{},'queued','history-run'),frame(2,{platform_call:call},'running','history-run'),frame(3,{text:'保存的进度'},'running','history-run'),frame(4,{ref},'running','history-run'),frame(5,{report_status:'unreviewed',report_files:['qa.html']},'completed','history-run')]));
+  await restored.promise;
+  assert.deepEqual(urls,[{url:'/api/agent/runs/history-run/stream?after_seq=0',method:'GET'}]);
+  assert.equal(app.msgs[1].content,'保存的进度');assert.equal(app.msgs[1]._chunks.filter(c=>c.t==='platform_call').length,1);assert.equal(app.msgs[1]._refs.length,1);assert.deepEqual(Array.from(app.msgs[1]._reportFiles),['qa.html']);assert.equal(context.Streams.conv,undefined);assert.equal(document.getElementById('sendBtn').title,'发送 (Enter)');
+}
+async function restoredOfflineRetainsProgressAndReopensSameCursor() {
+  const {app,context,document}=environment(),{payload}=historyPayload();app.msgs=[{role:'assistant',content:JSON.stringify(payload)}];let requests=[];
+  context.fetch=async(url,options)=>{requests.push({url,method:options.method});return response([frame(1,{},'queued','history-run')]);};
+  assert.equal(app._restoreNativeStream('conv'),true);const restored=context.Streams.conv;await restored.promise;
+  assert.equal(requests.length,4);assert.equal(restored.lastSeq,1);assert.equal(restored.active,true);assert.equal(restored.offline,true);assert.equal(app.msgs[0].content,'保存的进度');assert.equal(document.getElementById('sendBtn').title,'停止生成');
+  // Reopening the same conversation attaches only to the original run/cursor.
+  context.fetch=async(url,options)=>{requests.push({url,method:options.method});return response([frame(2,{text:'保存的进度'},'running','history-run'),frame(3,{text:'后续'},'completed','history-run')]);};
+  await app.openConv('conv');await restored.promise;
+  assert.equal(requests.at(-1).url,'/api/agent/runs/history-run/stream?after_seq=1');assert(requests.every(r=>r.method==='GET'));assert.equal(app.msgs[0].content,'保存的进度后续');assert.equal(context.Streams.conv,undefined);
+}
+async function restoredRunDoesNotRenderIntoAnotherConversation() {
+  const {app,context}=environment(),{payload}=historyPayload();app.msgs=[{role:'assistant',content:JSON.stringify(payload)}];let finish,renders=0;
+  context.fetch=()=>new Promise(resolve=>{finish=resolve;});app._restoreNativeStream('conv');const restored=context.Streams.conv;
+  const other=[{role:'assistant',content:'另一个会话'}];app.convId='other';app.msgs=other;app.renderOne=()=>{renders++;};
+  finish(response([frame(1,{text:'原会话完成'},'completed','history-run')]));await restored.promise;
+  assert.equal(other[0].content,'另一个会话');assert.equal(renders,0);assert.equal(restored.msgs[0].content,'原会话完成');assert.equal(context.Streams.conv,undefined);
+  app.convId='conv';app.msgs=[{role:'assistant',content:JSON.stringify(historyPayload('completed').payload)}];assert.equal(app._restoreNativeStream('conv'),false);
+}
+async function disconnectedSendStillOwnsStopControl() {
+  const {app,context,document}=environment();let gets=0;
+  context.fetch=async(url,options)=>{if(options.method==='POST')return response([frame(1,{text:'已有进度'})]);gets++;return response([]);};
+  document.getElementById('input').value='保留真实后台状态';await app.send();
+  assert.equal(gets,3);assert.equal(context.Streams.conv.active,true);assert.equal(document.getElementById('sendBtn').title,'停止生成');
 }
 async function workflowsAreSingleAndNative() {
   const {app,document}=environment();let url;app.api=async(u)=>{url=u;return {ok:true,json:async()=>app.skills};};
@@ -150,7 +200,8 @@ async function unknownWorkflowCommandRemainsUserText() {
 (async()=>{
   await onePostReplayAndDedupe();await readerAndGetFailuresOnlyReplayOriginalRun();await exhaustedReplayIsBounded();await unknownRunNeverRetries();
   await sequenceGapRecoversWithoutSkipping();await terminalAndDoneDoNotReconnect();await ownershipErrorsAndMalformedFrames();await cancelUsesNativeOwnerAndRun();await workflowsAreSingleAndNative();await nextQuestionHasDifferentRequestId();await doubleSendAndWorkflowShortcutDoNotCreateTwoRuns();await cancellationDiscardsLateTransportFrames();await unknownWorkflowCommandRemainsUserText();
-  console.log('native frontend runtime ok: 13 scenarios');
+  await refreshRestoresGetOnlyAndRebuildsCardsOnce();await restoredOfflineRetainsProgressAndReopensSameCursor();await restoredRunDoesNotRenderIntoAnotherConversation();await disconnectedSendStillOwnsStopControl();
+  console.log('native frontend runtime ok: 17 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
 
@@ -168,7 +219,7 @@ def test_native_frontend_replay_cancel_and_workflows():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "native frontend runtime ok: 13 scenarios" in result.stdout
+    assert "native frontend runtime ok: 17 scenarios" in result.stdout
 
 
 def test_native_entry_and_catalog_are_explicit():

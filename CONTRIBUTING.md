@@ -1,5 +1,9 @@
 # Contributing to Prism
 
+> Current Native Agent development instructions are in [Project Guide](docs/PROJECT_GUIDE.md).
+> Research chat uses Prism's direct API runtime; the Claude CLI instructions below apply to retained legacy adapters.
+> CI, tags and candidate packages do not deploy production. Use the reviewed private release process and its actual evidence.
+
 Thanks for your interest in improving Prism! This document covers the
 basics: how to set up a dev environment, run tests, and submit changes.
 

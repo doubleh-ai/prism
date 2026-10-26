@@ -1,5 +1,7 @@
 # 对话中的平台能力
 
+> 本文记录 **旧 CLI / MCP 桥适配器** 的协议与兼容边界，不是 Native Agent 的默认执行链路。当前原生能力白名单、直接进程内调度与限制见 [Native Agent v1](native-agent-framework.md)、[功能指南](PROJECT_GUIDE.md#功能与当前限制)和[架构地图](ARCHITECTURE.md)。下文出现的 Skill、子进程凭证及回环 HTTP 仅适用于旧适配器，不能据此判断原生对话需要安装 CLI 或外部股票 Skill。
+
 Prism 对话使用内置 `prism-research` 方法。已安装的外部研究技能仍可提供方法指导；选择了未安装的旧技能时，会明确告知并回退内置方法。未知技能不执行。
 
 新研究进程只提供 `WebSearch`、`WebFetch`、`AskUserQuestion` 与明确列出的 Prism MCP 工具。没有任意 shell、本地文件读写、SQL、任意 HTTP、管理员、删除或部署工具。历史研究报告仍可按当前用户权限读取。

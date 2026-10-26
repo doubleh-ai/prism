@@ -353,3 +353,56 @@ async def test_real_protocol_adapter_tool_roundtrip_to_saved_answer_offline(nati
     assert completed[-1]["usage"]["input_tokens"] == 24
     assert completed[-1]["usage"]["output_tokens"] == 30
     assert completed[-1]["usage"]["usage_complete"] is True
+
+
+async def test_failed_dialogue_initialization_does_not_strand_admission(native, monkeypatch):
+    manager, user, Request = native
+
+    def unavailable(*args):
+        raise HTTPException(409, "旧历史暂无法核对")
+
+    monkeypatch.setattr(api, "ensure_dialogue", unavailable)
+    with pytest.raises(HTTPException) as error:
+        await api.chat_stream(Request(body()))
+    assert error.value.status_code == 409
+    failed = store.list_runs(user)[0]
+    assert failed["status"] == "failed"
+    assert store.list_events(user, failed["run_id"])[-1]["type"] == "run_finished"
+    retry = store.create_run(
+        user, "native-conv", "different input", "mock", "research", exclusive_conversation=True
+    )
+    assert retry["status"] == "queued"
+    await wait_empty(manager)
+
+
+async def test_failed_initialization_does_not_finish_another_executor(native, monkeypatch):
+    manager, user, Request = native
+
+    def claimed_elsewhere(_user, run):
+        assert store.claim_run(user, run["run_id"], "other-owned-executor")
+        raise HTTPException(409, "synthetic race")
+
+    monkeypatch.setattr(api, "ensure_dialogue", claimed_elsewhere)
+    with pytest.raises(HTTPException):
+        await api.chat_stream(Request(body()))
+    assert store.list_runs(user)[0]["status"] == "running"
+    await wait_empty(manager)
+
+
+async def test_owner_removed_during_initialization_retires_unstarted_run(native, monkeypatch):
+    manager, user, Request = native
+
+    def removed_owner(*args):
+        with get_db() as db:
+            db.execute("UPDATE conversations SET deleted_at=1 WHERE id='native-conv'")
+        raise HTTPException(404, "removed")
+
+    monkeypatch.setattr(api, "ensure_dialogue", removed_owner)
+    with pytest.raises(HTTPException):
+        await api.chat_stream(Request(body()))
+    with get_db() as db:
+        assert (
+            db.execute("SELECT status FROM native_agent_runs WHERE username=?", [user]).fetchone()[0]
+            == "cancelled"
+        )
+    await wait_empty(manager)

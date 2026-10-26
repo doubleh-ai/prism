@@ -105,8 +105,8 @@ async def login(request: Request):
     from .logger import Event
     from .models import LoginRequest, validation_error_message
 
-    body = await request.json()
     try:
+        body = await request.json()
         req = LoginRequest(**(body or {}))
     except Exception as e:
         raise HTTPException(422, validation_error_message(e))

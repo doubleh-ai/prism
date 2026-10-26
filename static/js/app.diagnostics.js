@@ -16,6 +16,7 @@ Object.assign(App, {
     });
     window.addEventListener('unhandledrejection', function(event) {
       var reason = event.reason || {};
+      if (self._expectedRequestCancellations && self._expectedRequestCancellations.has(reason)) return;
       self._captureDiagnostic('promise_rejection', reason.message || 'Unhandled promise rejection', {
         severity:'error', component:'promise', stack:reason.stack || ''
       });
@@ -38,9 +39,12 @@ Object.assign(App, {
     var now = Date.now();
     if (now - Number(this._diagnosticRecent[key] || 0) < 10 * 60 * 1000) return;
     this._diagnosticRecent[key] = now;
+    if (this._feedbackProblemDetected) this._feedbackProblemDetected();
     var context = Object.assign({
       mode:this._mode || 'chat',
       route:location.pathname,
+      client_asset_version:this._clientAssetVersion || 'unknown',
+      server_revision:(this._releaseData && this._releaseData.deployed_revision) || '',
       viewport:window.innerWidth + 'x' + window.innerHeight
     }, options.context || {});
     var csrf = this._getCookie('csrf_token');

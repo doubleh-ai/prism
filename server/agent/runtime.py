@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
+import stat
 import time
 import weakref
 from collections.abc import Awaitable
@@ -73,13 +75,91 @@ class Active:
 
 
 def init_runtime_db():
+    # All native tables and the old-version-compatible delete trigger are one
+    # additive schema transaction, including on a first interrupted startup.
     store.init_agent_db()
-    with get_db() as db:
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS native_agent_dialogues (run_id TEXT PRIMARY KEY, "
-            "username TEXT NOT NULL,conv_id TEXT NOT NULL,user_message_id INTEGER NOT NULL,"
-            "assistant_message_id INTEGER,history_anchor_json TEXT NOT NULL)"
+
+
+def _legacy_prefix_count(session_id, project_dir):
+    """Count UI-visible old user turns; never return history to the model.
+
+    Only a bounded existing JSONL file below the configured UI-history root is
+    read, through no-follow directory descriptors. Unknown is never invented
+    as zero. This discovers no skills, instructions, keys or arbitrary paths.
+    """
+    if not session_id and not project_dir:
+        return 0
+    if (
+        not isinstance(session_id, str)
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id) is None
+        or not isinstance(project_dir, str)
+        or project_dir in {".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9_.-]{1,240}", project_dir) is None
+    ):
+        return None
+    from ..conversations import CLAUDE_PROJECTS
+    from ..research_context import parse_claude_jsonl_events
+
+    descriptors = []
+    try:
+        root = os.open(CLAUDE_PROJECTS, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptors.append(root)
+        project = os.open(
+            project_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root
         )
+        descriptors.append(project)
+        name = session_id + ".jsonl"
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=project)
+        descriptors.append(fd)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 16 * 1024 * 1024:
+            return None
+        chunks, remaining = [], before.st_size + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        after = os.fstat(fd)
+        named = os.stat(name, dir_fd=project, follow_symlinks=False)
+        if len(raw) != before.st_size or any(
+            getattr(before, key) != getattr(after, key) or getattr(before, key) != getattr(named, key)
+            for key in fields
+        ):
+            return None
+        # Match the existing UI parser's handling of malformed JSON lines.
+        lines = raw.decode("utf-8").splitlines()
+        if len(lines) > 20000 or any(len(line) > 512 * 1024 for line in lines):
+            return None
+        events = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                return None
+            events.append(event)
+        messages = parse_claude_jsonl_events(events, session_id=session_id)
+        return sum(message.get("role") == "user" for message in messages)
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+        return None
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
 
 
 def ensure_dialogue(user: str, run: dict) -> dict:
@@ -88,11 +168,12 @@ def ensure_dialogue(user: str, run: dict) -> dict:
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            if not db.execute(
-                "SELECT 1 FROM conversations c JOIN users u ON u.username=c.username "
+            conversation = db.execute(
+                "SELECT c.session_id,c.project_dir FROM conversations c JOIN users u ON u.username=c.username "
                 "WHERE c.id=? AND c.username=? AND c.deleted_at IS NULL AND u.disabled_at IS NULL",
                 [run["conv_id"], user],
-            ).fetchone():
+            ).fetchone()
+            if not conversation:
                 raise HTTPException(404, "对话不存在或不可访问")
             existing = db.execute(
                 "SELECT history_anchor_json FROM native_agent_dialogues WHERE run_id=? AND username=?",
@@ -101,10 +182,17 @@ def ensure_dialogue(user: str, run: dict) -> dict:
             if existing:
                 anchor = json.loads(existing[0])
             else:
+                legacy_count = _legacy_prefix_count(conversation["session_id"], conversation["project_dir"])
+                if legacy_count is None:
+                    raise HTTPException(409, "旧对话历史暂无法核对；请新建对话继续研究。原历史保持不变。")
                 boundary = db.execute(
                     "SELECT COALESCE(MAX(id),0) FROM messages WHERE conv_id=?", [run["conv_id"]]
                 ).fetchone()[0]
-                anchor = {"db_message_id": boundary, "native_db_takeover": True}
+                anchor = {
+                    "db_message_id": boundary,
+                    "native_db_takeover": True,
+                    "jsonl_user_turns": legacy_count,
+                }
                 cursor = db.execute(
                     "INSERT INTO messages(conv_id,role,content) VALUES(?, 'user', ?)",
                     [run["conv_id"], run["question"]],

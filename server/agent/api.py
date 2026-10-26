@@ -151,7 +151,22 @@ async def chat_stream(request: Request):
             request_id=req.request_id,
             exclusive_conversation=True,
         )
-        ensure_dialogue(user, run)
+        try:
+            ensure_dialogue(user, run)
+        except Exception:
+            # A failed initial history check must not strand an unclaimed run
+            # in the conversation/user admission quota. Never finish a reused
+            # or already-claimed run on behalf of its actual executor.
+            if run["created"]:
+                try:
+                    store.fail_unclaimed_run(user, run["run_id"])
+                except HTTPException as cleanup_error:
+                    if cleanup_error.status_code != 404:
+                        raise
+                    from .runtime import Outcome, _retire_removed_owner
+
+                    _retire_removed_owner(Outcome(user, run["run_id"], "unclaimed-http", "cancelled"))
+            raise
         # Duplicate running or terminal requests only replay. An unclaimed queued
         # request may be scheduled again; the transaction claim prevents execution twice.
         if run["status"] == "queued":

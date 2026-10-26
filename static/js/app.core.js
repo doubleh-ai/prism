@@ -95,6 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
+  _clientAssetVersion: '86',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -186,7 +187,12 @@ var App = {
       r = await fetch(url, opts);
     } catch (error) {
       if (expired) error = new Error('请求超时，执行结果尚未确认。请刷新相关历史后再决定是否重试。');
-      if (this._captureDiagnostic && String(url).indexOf('/api/diagnostics/') < 0) {
+      var expectedCancel = upstream && upstream.aborted && !expired;
+      if (expectedCancel && error && typeof error === 'object') {
+        if (!this._expectedRequestCancellations) this._expectedRequestCancellations = new WeakSet();
+        this._expectedRequestCancellations.add(error);
+      }
+      if (!expectedCancel && this._captureDiagnostic && String(url).indexOf('/api/diagnostics/') < 0) {
         this._captureDiagnostic('api_network_error', error.message || 'API network error', {
           severity:'warning', component:'api', stack:error.stack || '',
           context:{route:String(url).split('?')[0], method:method}
@@ -444,6 +450,7 @@ var App = {
     this._refreshReportsButton();
     this._closeMobileSidebar();
     if (this._loadConversationCalls) this._loadConversationCalls(id);
+    if (this._restoreNativeStream) this._restoreNativeStream(id);
   },
 
   /* Show/hide the reports button in the input zone based on what reports

@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from .auth import require_admin, require_auth
 from .database import check_rate_limit, get_db
 from .models import DiagnosticEventRequest, validation_error_message
-from .release import release_payload
+from .release import APP_VERSION, release_payload
 
 router = APIRouter()
 
@@ -29,6 +29,8 @@ _ALLOWED_CONTEXT_KEYS = {
     "line",
     "column",
     "viewport",
+    "client_asset_version",
+    "server_revision",
 }
 _TOKEN_RE = re.compile(
     r"(?i)(?:bearer\s+)?(?:sk-[A-Za-z0-9_-]{8,}|(?:api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+)"
@@ -68,6 +70,8 @@ def record_diagnostic(
     context: dict | None = None,
 ) -> int:
     now = int(time.time())
+    if kind.startswith("server_") and not version:
+        version = APP_VERSION
     clean_message = _redact(message, 2000) or "Unknown anomaly"
     clean_stack = _redact(stack, 8000)
     clean_context = _safe_context(context)
@@ -146,6 +150,31 @@ def _diagnostic_rows(status: str = "open", limit: int = 100) -> list[dict[str, A
     return out
 
 
+def _release_identity() -> dict[str, str]:
+    release = release_payload()
+    return {
+        "version": release["version"],
+        "deployed_revision": release["deployed_revision"],
+    }
+
+
+def _version_scope(event: dict, current_version: str) -> str:
+    if not event.get("version"):
+        return "unattributed"
+    return "current_version" if event["version"] == current_version else "historical_version"
+
+
+def _request_classification(item: dict) -> str:
+    status = item.get("meta", {}).get("status_code")
+    if status in (401, 403) and not item.get("username"):
+        return "anonymous_access_denied"
+    if status == 404 and not item.get("username"):
+        return "anonymous_not_found"
+    if isinstance(status, int) and status >= 500:
+        return "server_failure"
+    return "needs_review"
+
+
 @router.post("/api/diagnostics/client")
 async def capture_client_diagnostic(request: Request):
     username = require_auth(request)
@@ -173,13 +202,16 @@ async def capture_client_diagnostic(request: Request):
 async def list_diagnostics(request: Request, status: str = "open", limit: int = 100):
     require_admin(request)
     rows = _diagnostic_rows(status, limit)
+    identity = _release_identity()
+    for row in rows:
+        row["version_scope"] = _version_scope(row, identity["version"])
     stats = {"critical": 0, "error": 0, "warning": 0, "occurrences": 0}
     for row in rows:
         severity = row.get("severity") or "error"
         if severity in stats:
             stats[severity] += 1
         stats["occurrences"] += int(row.get("occurrences") or 1)
-    return {"status": status, "events": rows, "stats": stats}
+    return {"status": status, "events": rows, "stats": stats, "release": identity}
 
 
 @router.post("/api/admin/diagnostics/{event_id}/resolve")
@@ -213,12 +245,35 @@ async def diagnostic_bundle(request: Request, limit: int = 100):
         except (TypeError, ValueError):
             item["meta"] = {}
             item.pop("meta_json", None)
+        if not isinstance(item["meta"], dict):
+            item["meta"] = {}
+        item["classification"] = _request_classification(item)
         failed_requests.append(item)
+    identity = _release_identity()
+    anomalies = _diagnostic_rows("open", limit)
+    scopes = {"current_version": 0, "historical_version": 0, "unattributed": 0}
+    request_counts: dict[str, int] = {}
+    for item in anomalies:
+        item["version_scope"] = _version_scope(item, identity["version"])
+        scopes[item["version_scope"]] += 1
+    for item in failed_requests:
+        label = item["classification"]
+        request_counts[label] = request_counts.get(label, 0) + 1
     return {
         "schema": "prism-codex-diagnostics-v1",
         "generated_at": int(time.time()),
-        "release": release_payload(),
+        "release": identity,
         "privacy": "No prompts, passwords, API keys, cookies, or request bodies are collected.",
-        "open_anomalies": _diagnostic_rows("open", limit),
+        "triage": {
+            "anomaly_version_counts": scopes,
+            "recent_request_counts": request_counts,
+            "request_sample_limit": 80,
+            "notes": [
+                "Anonymous 401/403 are access denials; anonymous 404 need context, not automatic bug fixes.",
+                "Historical or unattributed anomalies require retesting; absence of recurrence is not a verified fix.",
+                "Version scope compares version labels, not exact revision identity.",
+            ],
+        },
+        "open_anomalies": anomalies,
         "recent_failed_requests": failed_requests,
     }

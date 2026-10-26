@@ -66,13 +66,15 @@ from .database import (
     user_exists,
 )
 from .diagnostics import router as diagnostics_router
+from .feedback import init_feedback_db, is_worker_update_path
+from .feedback import router as feedback_router
 from .health import admin_health_payload, readiness_payload
 from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
 from .operations import router as operations_router
-from .release import release_payload
+from .release import APP_VERSION, release_payload
 from .report_files import REPORT_CSP, list_report_files, read_report_file
 from .reports import list_saved_reports_for_conv
 from .reports import router as reports_router
@@ -96,6 +98,7 @@ log = configure_logging(str(LOG_PATH), level=log_level)
 init_db()
 init_research_db()
 init_runtime_db()
+init_feedback_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -239,6 +242,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if (
             request.method.upper() in ("POST", "PUT", "DELETE", "PATCH")
             and request.url.path not in self._EXEMPT_PATHS
+            and not (request.method.upper() == "POST" and is_worker_update_path(request.url.path))
         ):
             try:
                 verify_csrf(request)
@@ -266,7 +270,7 @@ def render_template(name: str) -> str:
     """Read and return a template file."""
     path = TEMPLATE_DIR / name
     if path.exists():
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
     return ""
 
 
@@ -601,6 +605,7 @@ app.include_router(vibe_router)
 app.include_router(watchlist_router)
 app.include_router(research_router)
 app.include_router(diagnostics_router)
+app.include_router(feedback_router)
 app.include_router(operations_router)
 
 

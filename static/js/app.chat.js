@@ -186,7 +186,7 @@ Object.assign(App, {
       if (s && s.active) {
         anyActive = true;
         var m = s.msgs[s.msgIdx];
-        if (m && m.role === 'assistant') {
+        if (m && m.role === 'assistant' && !s.restored) {
           if (m._displayLen === undefined) m._displayLen = 0;
           // Calculate total text length from chunks
           var total = 0;
@@ -238,17 +238,18 @@ Object.assign(App, {
       if (m && m.role === 'assistant' && m._chunks) {
         this.renderOne(this.msgs.length - 1);
       }
+      if (s.offline && !s.following && s.runId) this._followNativeStream(s);
     }
-    if (!this._twTimer) this._startTypewriter();
+    if (!this._twTimer && !(s && s.restored)) this._startTypewriter();
   },
 
   _syncChatStreamControls: function() {
     var stream = Streams[this.convId], running = !!(stream && stream.active);
     var button = document.getElementById('sendBtn');
     if (button) {
-      button.disabled = false; button.classList.toggle('stop-mode', running);
+      button.disabled = !!(stream && stream.stopping); button.classList.toggle('stop-mode', running);
       button.onclick = running ? function() { App.stopStream(); } : function() { App.send(); };
-      button.title = running ? '停止生成' : '发送 (Enter)';
+      button.title = running ? (stream.stopping ? '正在确认停止…' : '停止生成') : '发送 (Enter)';
     }
     var bar = document.getElementById('loadingBar'); if (bar) bar.classList.toggle('active', running);
     this._activeReader = running ? stream.reader || null : null;
@@ -927,6 +928,125 @@ Object.assign(App, {
   selectAC: function() { if (document.getElementById('acDropdown').style.display!=='none'&&this.acIdx>=0&&this.acItems[this.acIdx]){this.selectSkill(this.acItems[this.acIdx].id);return true}return false; },
   selectSkill: function(id) { var inp = document.getElementById('input'), val = inp.value, pos = inp.selectionStart, before = val.substring(0,pos), after = val.substring(pos); before = before.replace(/\/\S*$/, ''); inp.value = before.trim()?before.trim()+' '+after:after; this.setSkill(id); this.renderSkillsBar(); this.hideAC(); inp.focus(); },
 
+  _restoreNativeStream: function(sid) {
+    if (this.convId !== sid || (Streams[sid] && Streams[sid].active)) return false;
+    var messages = this.msgs, index = -1, payload, native;
+    for (var i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role !== 'assistant') continue;
+      try { payload = JSON.parse(messages[i].content); } catch(error) { continue; }
+      native = payload && payload.native_agent;
+      if (native && native.engine === 'prism-native' && ['queued','running','awaiting_user'].indexOf(native.status) >= 0 && typeof native.run_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(native.run_id)) {
+        index = i; break;
+      }
+    }
+    if (index < 0) return false;
+    // A history snapshot has no event cursor. Rebuild this one message from
+    // sequence zero, rather than appending a replay onto its existing text/cards.
+    var message = messages[index];
+    var snapshot = {text:payload.text || '',chunks:payload.chunks || [],refs:payload.refs || []};
+    message._reportStatus = '';
+    message.content = ''; message._chunks = []; message._refs = [];
+    message._displayLen = undefined; message._lastSig = null;
+    message.research = payload.research; message._reportFiles = [];
+    var stream = {msgs:messages,msgIdx:index,convId:sid,runId:native.run_id,lastSeq:0,
+      full:'',chunks:[],skill:this.skill,active:true,following:true,restored:true,snapshot:snapshot};
+    Streams[sid] = stream;
+    this._syncChatStreamControls();
+    this._followNativeStream(stream, snapshot);
+    return true;
+  },
+
+  _followNativeStream: function(stream, snapshot) {
+    if (stream.promise && stream.following) return stream.promise;
+    var self = this, sid = stream.convId, messages = stream.msgs, index = stream.msgIdx;
+    var message = messages[index];
+    snapshot = snapshot || stream.snapshot;
+    stream.following = true; stream.offline = false;
+    stream.promise = (async function() {
+      try {
+        stream.transportController = new AbortController();
+        var response = await fetch('/api/agent/runs/'+encodeURIComponent(stream.runId)+'/stream?after_seq='+(stream.lastSeq || 0), {
+          method:'GET',credentials:'same-origin',headers:{'Accept':'text/event-stream','X-Requested-With':'XMLHttpRequest'},
+          signal:stream.transportController.signal
+        });
+        await self._readNativeStream(stream, response, function(frame) { self._applyNativeFrame(stream, frame); });
+      } catch(error) {
+        if (!stream.cancelled && !stream.terminal) {
+          stream.offline = true;
+          var displayChunks = stream.chunks.slice();
+          if (snapshot && snapshot.text.length > stream.full.length && snapshot.text.indexOf(stream.full) === 0) {
+            // The snapshot can be ahead of the last replayed event. Keep it as
+            // a display fallback without advancing the durable replay buffer.
+            displayChunks = snapshot.chunks.slice();
+            message.content = snapshot.text; message._refs = snapshot.refs.slice();
+          }
+          displayChunks.push({t:'status',c:'连接暂时中断，已保留研究记录。仍可请求停止；本次不会重复提交研究。'});
+          message._chunks = displayChunks;
+        }
+      } finally {
+        stream.following = false;
+        message._displayLen = undefined; message._lastSig = null;
+        if ((stream.terminal || stream.doneReceived || stream.cancelled) && Streams[sid] === stream) {
+          delete Streams[sid]; self._streamDone(sid, document.getElementById('sendBtn'));
+        } else if (self.convId === sid) self._syncChatStreamControls();
+        if (self.convId === sid && self.msgs === messages) self.renderOne(index);
+        self._refreshReportsButton();
+      }
+    })();
+    return stream.promise;
+  },
+
+  _applyNativeFrame: function(stream, p) {
+    var self = this, msgIdx = stream.msgIdx, sid = stream.convId;
+    var full = stream.full || '', chunks = stream.chunks || [];
+            if (p.error) {
+              var streamError = '⚠ ' + ChatRender.clean(p.error);
+              full += (full ? '\n\n' : '') + streamError;
+              chunks.push({t:'text', c:(full && chunks.length ? '\n\n' : '') + streamError});
+              stream.error = streamError;
+            }
+            if (p.pulse) { /* loading pulse */ }
+            if (p.status) chunks.push({t:'status', c:self._nativeStatusLabel(p.status)});
+            else if (p.agent && stream.agentStatusChanged) chunks.push({t:'status', c:self._nativeStatusLabel(p.agent.status)});
+            if (p.tool) {
+              var toolName = ChatRender.clean(p.tool || '');
+              if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
+              else { var td = ChatRender.clean(p.d || ''); chunks.push({t:'tool',c:toolName,n:ChatRender.stringify(p.n||''),d:td}); }
+            }
+            if (p.think) { var tc = ChatRender.clean(p.think || ''); if (tc) chunks.push({t:'think',c:tc}); }
+            if (p.text) {
+              var pt = fixPunct(ChatRender.stringify(p.text || ''));
+              if (pt) {
+                full += pt;
+                var last = chunks[chunks.length-1];
+                if (last&&last.t==='text') last.c+=pt; else chunks.push({t:'text',c:pt});
+              }
+            }
+            if (p.ref) {
+              // Reference citation from WebSearch/WebFetch tool results
+              chunks.push(Object.assign({}, p.ref, {t:'ref'}));
+              stream.msgs[msgIdx]._refs = ChatRender.collectRefs(stream.msgs[msgIdx]._refs || [], [{t:'ref', ...p.ref}]);
+            }
+            if (p.research && typeof p.research === 'object') {
+              stream.msgs[msgIdx].research = p.research;
+              chunks.push({t:'research', research:p.research});
+            }
+            if (p.platform_call && p.platform_call.call_id) {
+              chunks.push({t:'platform_call', call:p.platform_call});
+              stream.msgs[msgIdx]._lastSig = null;
+              if (self._receivePlatformCall) self._receivePlatformCall(p.platform_call);
+            }
+            if (p.report_status) {
+              stream.reportStatus = p.report_status;
+              stream.reportFiles = p.report_files || [];
+              stream.msgs[msgIdx]._reportStatus = p.report_status;
+              stream.msgs[msgIdx]._reportFiles = p.report_files || [];
+            }
+        stream.msgs[msgIdx].content = String(full||''); stream.msgs[msgIdx]._chunks = chunks;
+        stream.full = full; stream.chunks = chunks;
+        if (self.convId === sid && self.msgs === stream.msgs) self.renderOne(msgIdx);
+  },
+
   _newAgentRequestId: function() {
     if (globalThis.crypto && globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
     if (globalThis.crypto && globalThis.crypto.getRandomValues) {
@@ -1099,7 +1219,7 @@ Object.assign(App, {
     // Keep ownership attached to the original message array across navigation.
     var _runStream = async function(_full, _chunks) {
       full = _full; chunks = _chunks;
-      var stream = {msgs: requestMessages, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, convId: sid, requestId: requestId, lastSeq: 0, active: true};
+      var stream = {msgs: requestMessages, msgIdx: msgIdx, chunks: chunks, full: full, skill: skillForReq, convId: sid, requestId: requestId, lastSeq: 0, following: true, active: true};
       requestStream = stream;
       Streams[sid] = stream;
       stream.msgs[msgIdx]._displayLen = 0;
@@ -1124,55 +1244,7 @@ Object.assign(App, {
         stream.msgs[msgIdx].content = errText; if (App.convId === sid) self.renderAll(); delete Streams[sid]; self._streamDone(sid, btn); return;
       }
       await self._readNativeStream(stream, resp, function(p) {
-            if (p.error) {
-              var streamError = '⚠ ' + ChatRender.clean(p.error);
-              full += (full ? '\n\n' : '') + streamError;
-              chunks.push({t:'text', c:(full && chunks.length ? '\n\n' : '') + streamError});
-              stream.error = streamError;
-            }
-            if (p.pulse) { /* loading pulse */ }
-            if (p.status) chunks.push({t:'status', c:self._nativeStatusLabel(p.status)});
-            else if (p.agent && stream.agentStatusChanged) chunks.push({t:'status', c:self._nativeStatusLabel(p.agent.status)});
-            if (p.tool) {
-              var toolName = ChatRender.clean(p.tool || '');
-              if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
-              else { var td = ChatRender.clean(p.d || ''); chunks.push({t:'tool',c:toolName,n:ChatRender.stringify(p.n||''),d:td}); }
-            }
-            if (p.think) { var tc = ChatRender.clean(p.think || ''); if (tc) chunks.push({t:'think',c:tc}); }
-            if (p.text) {
-              var pt = fixPunct(ChatRender.stringify(p.text || ''));
-              if (pt) {
-                full += pt;
-                var last = chunks[chunks.length-1];
-                if (last&&last.t==='text') last.c+=pt; else chunks.push({t:'text',c:pt});
-              }
-            }
-            if (p.ref) {
-              // Reference citation from WebSearch/WebFetch tool results
-              chunks.push(Object.assign({}, p.ref, {t:'ref'}));
-              stream.msgs[msgIdx]._refs = ChatRender.collectRefs(stream.msgs[msgIdx]._refs || [], [{t:'ref', ...p.ref}]);
-            }
-            if (p.research && typeof p.research === 'object') {
-              stream.msgs[msgIdx].research = p.research;
-              chunks.push({t:'research', research:p.research});
-            }
-            if (p.platform_call && p.platform_call.call_id) {
-              chunks.push({t:'platform_call', call:p.platform_call});
-              stream.msgs[msgIdx]._lastSig = null;
-              if (self._receivePlatformCall) self._receivePlatformCall(p.platform_call);
-            }
-            if (p.report_status) {
-              stream.reportStatus = p.report_status;
-              stream.reportFiles = p.report_files || [];
-              stream.msgs[msgIdx]._reportStatus = p.report_status;
-              stream.msgs[msgIdx]._reportFiles = p.report_files || [];
-            }
-        stream.msgs[msgIdx].content = String(full||''); stream.msgs[msgIdx]._chunks = chunks;
-        stream.full = full; stream.chunks = chunks;
-        if (App.convId === sid) {
-          var curMsgIdx = App.msgs.length - 1;
-          if (curMsgIdx >= 0 && App.msgs[curMsgIdx].role === 'assistant') App.renderOne(curMsgIdx);
-        }
+        self._applyNativeFrame(stream, p); full = stream.full; chunks = stream.chunks;
       });
     } catch(e) {
       var errorMsg = '连接中断，请重新打开原会话核对已保存进度；本次不会重复提交研究。';
@@ -1191,6 +1263,7 @@ Object.assign(App, {
       stream.msgs[msgIdx]._chunks = chunks;
       if (App.convId === sid) App.renderAll();
     }
+    stream.following = false;
   }; // end _runStream
 
   await _runStream('', []);
@@ -1205,8 +1278,16 @@ Object.assign(App, {
     s.msgs[s.msgIdx]._lastSig = null;
   }
   if (Streams[sid] === requestStream) {
-    delete Streams[sid];
-    self._streamDone(sid, btn);
+    if (requestStream.terminal || requestStream.doneReceived || requestStream.cancelled) {
+      delete Streams[sid];
+      self._streamDone(sid, btn);
+    } else {
+      // A lost transport does not prove the durable background run stopped.
+      // Keep its stop control and block another paid turn until it is checked.
+      requestStream.offline = true;
+      self._stopTypewriter(sid);
+      if (self.convId === sid) self._syncChatStreamControls();
+    }
   }
     if (App.convId === sid) {
       App._buildTOC();
@@ -1242,42 +1323,58 @@ Object.assign(App, {
 
   /* ═══ Stop Generation ═══ */
   stopStream: async function() {
-    var sid = this.convId;
-    var activeStream = Streams[sid];
-    if (activeStream) {
-      activeStream.cancelled = true;
-      if (activeStream.transportController) activeStream.transportController.abort();
-    }
-    var reader = activeStream && activeStream.reader;
-    if (reader) { try { await reader.cancel(); } catch(e) {} }
-    if (this.convId === sid) this._activeReader = null;
-    if (sid) {
-      try {
-        var response = await this.api('/api/agent/chat/cancel', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conv_id:sid, run_id:activeStream && activeStream.runId || undefined})});
-        if (!response.ok || (await response.json()).ok !== true) throw new Error('Cancellation failed');
-      } catch(error) {
-        if (this._toast) this._toast('显示已停止，但未确认后台取消成功。请查看原会话状态');
+    var sid = this.convId, activeStream = Streams[sid];
+    if (!sid || (activeStream && activeStream.stopping)) return;
+    if (activeStream) activeStream.stopping = true;
+    this._syncChatStreamControls();
+    var controller = new AbortController();
+    var timer = setTimeout(function() { controller.abort(); }, 5000);
+    var confirmed = false;
+    try {
+      var response = await this.api('/api/agent/chat/cancel', {
+        method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,
+        body:JSON.stringify({conv_id:sid,run_id:activeStream && activeStream.runId || undefined})
+      });
+      if (!response.ok) throw new Error('Cancellation failed');
+      var result = await response.json();
+      if (result.ok !== true) throw new Error('Cancellation failed');
+      var runId = activeStream && activeStream.runId || result.run_id;
+      if (activeStream && activeStream.runId && result.run_id && result.run_id !== activeStream.runId) throw new Error('Cancellation run mismatch');
+      if (activeStream && !activeStream.runId && typeof runId === 'string') activeStream.runId = runId;
+      var terminal = ['completed','partial','failed','cancelled','done'];
+      confirmed = terminal.indexOf(result.status) >= 0 || !!(activeStream && activeStream.terminal);
+      var end = Date.now() + 4000;
+      // An accepted cancellation is intent. Keep the reader and ownership until
+      // the actual persisted terminal status confirms transport/tool cleanup.
+      while (!confirmed && runId && Date.now() < end) {
+        var state = await this.api('/api/agent/runs/'+encodeURIComponent(runId), {signal:controller.signal});
+        if (!state.ok) throw new Error('Cancellation state unavailable');
+        var current = (await state.json()).run;
+        if (!current || current.run_id !== runId) throw new Error('Cancellation state mismatch');
+        confirmed = terminal.indexOf(current.status) >= 0 || !!(activeStream && activeStream.terminal);
+        if (!confirmed) await new Promise(function(resolve) { setTimeout(resolve, 200); });
       }
+      if (!confirmed) throw new Error('Cancellation terminal not confirmed');
+      if (activeStream) {
+        activeStream.terminal = true; activeStream.cancelled = true;
+        if (activeStream.transportController) activeStream.transportController.abort();
+        if (activeStream.reader) { try { await activeStream.reader.cancel(); } catch(error) {} }
+      }
+      if (Streams[sid] === activeStream) delete Streams[sid];
+      if (!Streams[sid]) this._stopTypewriter(sid);
+      if (this.convId === sid && !Streams[sid]) {
+        this._syncChatStreamControls();
+        // Read the final owned message/report, rather than declaring the live
+        // partial buffer a completed cancellation or creating a second turn.
+        await this.openConv(sid);
+      }
+    } catch(error) {
+      if (this._toast) this._toast('停止已请求，但未确认后台取消成功。已有进度保留，请稍后再核对或重新请求停止。');
+    } finally {
+      clearTimeout(timer);
+      if (activeStream) activeStream.stopping = false;
+      if (this.convId === sid) this._syncChatStreamControls();
     }
-    // Clear _displayLen on the stopped stream so the final render shows the
-    // full text we already have, not whatever the typewriter had reached.
-    if (activeStream && activeStream.msgs && activeStream.msgIdx != null) {
-      activeStream.msgs[activeStream.msgIdx]._displayLen = undefined;
-    }
-    if (Streams[sid] === activeStream) delete Streams[sid];
-    this._stopTypewriter(sid);
-    if (this.convId !== sid || Streams[sid]) return;
-    // Re-render the message that was being generated.
-    if (this.msgs.length) {
-      var lastIdx = this.msgs.length - 1;
-      if (this.msgs[lastIdx] && this.msgs[lastIdx].role === 'assistant') this.renderOne(lastIdx);
-    }
-    var btn = document.getElementById('sendBtn');
-    btn.disabled = false; btn.classList.remove('stop-mode'); btn.onclick = function() { App.send(); }; btn.title = '发送 (Enter)';
-    var loadingBar = document.getElementById('loadingBar');
-    if (loadingBar) loadingBar.classList.remove('active');
-    this.loadConvs();
-    this._refreshReportsButton();
   },
 
   /* ═══ Logout ═══ */

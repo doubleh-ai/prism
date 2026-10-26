@@ -158,9 +158,17 @@ def _event_payload(event):
 
 
 def init_agent_db():
-    """Additive and idempotent; no import-time migration or startup replay."""
+    """Atomically add native tables and rollback-safe conversation cleanup.
+
+    The persistent trigger also runs when an older application deletes a
+    conversation. No caller transaction may be implicitly committed by DDL.
+    """
     with get_db() as db:
-        db.executescript("""
+        if db.in_transaction:
+            raise RuntimeError("native schema initialization requires its own transaction")
+        try:
+            db.executescript("""
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS native_agent_runs (
                 run_id TEXT PRIMARY KEY, username TEXT NOT NULL, conv_id TEXT,
                 question TEXT NOT NULL, model_id TEXT NOT NULL, workflow TEXT NOT NULL,
@@ -182,7 +190,27 @@ def init_agent_db():
                 run_id TEXT NOT NULL, seq INTEGER NOT NULL, created_at REAL NOT NULL,
                 payload TEXT NOT NULL, PRIMARY KEY (run_id, seq)
             );
-        """)
+            CREATE TABLE IF NOT EXISTS native_agent_dialogues (
+                run_id TEXT PRIMARY KEY, username TEXT NOT NULL, conv_id TEXT NOT NULL,
+                user_message_id INTEGER NOT NULL, assistant_message_id INTEGER,
+                history_anchor_json TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS native_agent_conversation_delete
+            AFTER DELETE ON conversations
+            BEGIN
+                DELETE FROM native_agent_events WHERE run_id IN (
+                    SELECT run_id FROM native_agent_runs
+                    WHERE conv_id=OLD.id AND username=OLD.username
+                );
+                DELETE FROM native_agent_dialogues WHERE conv_id=OLD.id AND username=OLD.username;
+                DELETE FROM native_agent_runs WHERE conv_id=OLD.id AND username=OLD.username;
+            END;
+            COMMIT;
+            """)
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
 
 
 @contextmanager
@@ -413,6 +441,29 @@ def request_cancel(user, run_id):
         if row["status"] not in TERMINAL and not row["cancel_requested"]:
             db.execute("UPDATE native_agent_runs SET cancel_requested=1 WHERE run_id=?", [run_id])
             _insert_event(db, row, {"type": "cancel_requested", "external_stop_confirmed": False})
+        return _public_run(_owned(db, user, run_id))
+
+
+def fail_unclaimed_run(user, run_id, error_code="dialogue_initialization_failed"):
+    """Atomically retire a failed admission without racing an executor claim."""
+    if not isinstance(error_code, str) or not _ERROR_CODE.fullmatch(error_code):
+        _reject()
+    with _transaction() as db:
+        row = _owned(db, user, run_id)
+        if row["status"] != "queued" or row["claimed_by"] is not None:
+            return _public_run(row)
+        cancelled = bool(row["cancel_requested"])
+        status = "cancelled" if cancelled else "failed"
+        summary = (
+            "本轮在执行前已取消。" if cancelled else "本轮尚未开始执行，初始化未完成；可以重新发起研究。"
+        )
+        code = "cancelled_before_execution" if cancelled else error_code
+        now = time.time()
+        db.execute(
+            "UPDATE native_agent_runs SET status=?,summary=?,error_code=?,finished_at=?,updated_at=? WHERE run_id=?",
+            [status, summary, code, now, now, run_id],
+        )
+        _insert_event(db, row, {"type": "run_finished", "status": status, "error_code": code})
         return _public_run(_owned(db, user, run_id))
 
 
