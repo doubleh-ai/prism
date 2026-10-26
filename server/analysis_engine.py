@@ -6,6 +6,7 @@ without consuming each other's events or blocking the event loop.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from urllib.parse import unquote, urlsplit
 
@@ -264,18 +266,59 @@ def _analysis_directories(analysis_id: str) -> dict[str, str]:
 
 def _astock_backend_url() -> str | None:
     """Keep an explicit SDK base URL intact; None selects the provider default."""
-    base = ASTOCK_LLM_BASE_URL.strip().rstrip("/")
+    base = ASTOCK_LLM_BASE_URL
     if not base:
         return None
     try:
-        path = unquote(urlsplit(base).path).casefold().split("/")
-    except ValueError:
+        # urlsplit silently removes some controls. Inspect the original value
+        # first, and reject even empty query/fragment delimiters rather than
+        # changing the address an operator configured.
+        if any(char.isspace() or unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in base):
+            raise ValueError
+        if "?" in base or "#" in base:
+            raise ValueError
+        parsed = urlsplit(base)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError
+        host = parsed.hostname
+        if not host:
+            raise ValueError
+        if parsed.netloc.startswith("["):
+            address, scoped, zone = host.partition("%")
+            ipaddress.IPv6Address(address)
+            if scoped and (
+                not zone.startswith("25")
+                or not re.fullmatch(r"(?:[A-Za-z0-9_.~-]|%[0-9A-Fa-f]{2})+", zone[2:])
+            ):
+                raise ValueError
+            port_text = parsed.netloc[parsed.netloc.index("]") + 1 :]
+        else:
+            # Retain IDNA and local service names, without accepting characters
+            # that HTTP clients reinterpret as an authority or path separator.
+            ascii_host = host.encode("idna").decode("ascii").removesuffix(".")
+            if len(ascii_host) > 253 or any(
+                not re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", label)
+                for label in ascii_host.split(".")
+            ):
+                raise ValueError
+            if re.fullmatch(r"[0-9.]+", ascii_host) and "." in ascii_host:
+                ipaddress.IPv4Address(ascii_host)
+            _, separator, port_value = parsed.netloc.partition(":")
+            port_text = separator + port_value
+        if port_text and not re.fullmatch(r":[0-9]+", port_text):
+            raise ValueError
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError
+        path = unquote(parsed.path).casefold().split("/")
+    except (ValueError, UnicodeError):
         raise AnalysisConfigurationError("astock_transport_invalid") from None
     # This upstream DeepSeek adapter speaks OpenAI chat completions. Native's
     # /anthropic endpoint cannot be made compatible by appending another /v1.
     if ASTOCK_LLM_PROVIDER.strip().casefold() == "deepseek" and "anthropic" in path:
         raise AnalysisConfigurationError("astock_transport_mismatch")
-    return base
+    return base.rstrip("/")
 
 
 def _build_config(mode: str = "deep", *, analysis_id: str | None = None) -> dict:

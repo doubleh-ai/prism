@@ -4,6 +4,14 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [v0.21.2] - 2026-10-27
+
+### 个股研究地址校验
+- Astock 自定义基地址在创建分析图和模型请求前校验 HTTP(S)、主机及端口；拒绝相对地址、无主机地址、地址内凭证、原始空白与控制符、查询及片段（包括空 `?` / `#`）。
+- 合法网关路径、显式本机 HTTP 验收代理和提供方默认地址继续可用；只规范原有尾斜杠，不自动补路径或改写地址。
+- 配置错误只保留固定错误码和安全提示，不向用户、事件流或日志输出配置地址及凭证；现有研究归属、缓存和历史记录不变。
+- v0.21.1 的固定源码继续作为独立恢复候选；本条只记录新源码变化，实际验收和部署以各自独立发布记录为准。
+
 ## [v0.21.1] - 2026-10-27
 
 ### 个股研究接口配置
