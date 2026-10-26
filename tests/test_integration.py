@@ -65,16 +65,19 @@ class TestErrorHandling:
     async def test_rate_limit_enforced(self, client, auth_cookies):
         """Rate limiter kicks in after too many requests."""
 
-        key = "chat:testuser"
+        from server.config import RATE_CHAT_PER_MIN
         from server.database import check_rate_limit
 
+        created = await client.post("/api/convs", cookies=auth_cookies, json={})
         # Exhaust rate limit
-        for _ in range(20):
-            check_rate_limit(key, max_req=20, window=60)
+        for _ in range(RATE_CHAT_PER_MIN):
+            assert check_rate_limit("native-chat:testuser", max_req=RATE_CHAT_PER_MIN, window=60)
 
         # Next request should be rate limited
         r = await client.post(
-            "/api/chat/stream", cookies=auth_cookies, json={"question": "测试", "skill": "bottleneck-hunter"}
+            "/api/chat/stream",
+            cookies=auth_cookies,
+            json={"question": "测试", "conv_id": created.json()["id"], "workflow": "industry"},
         )
         assert r.status_code == 429
 
@@ -168,7 +171,10 @@ class TestImportSanity:
 
         assert hasattr(server.config, "PROJECT_ROOT")
         assert hasattr(server.config, "MODELS")
-        assert hasattr(server.config, "SKILL_MAP")
+        assert all(
+            not hasattr(server.config, name)
+            for name in ("SKILL_MAP", "SKILLS_HOME", "CLAUDE_BIN", "LEGACY_CHAT_ENABLED")
+        )
 
     def test_import_database(self):
         import server.database
@@ -191,17 +197,22 @@ class TestImportSanity:
         assert hasattr(server.conversations, "restore_conv")
         assert hasattr(server.conversations, "permanent_delete_conv")
         assert hasattr(server.conversations, "list_trash")
-        assert hasattr(server.conversations, "_read_jsonl_messages")
+        assert not hasattr(server.conversations, "_read_jsonl_messages")
+
+        from server.legacy_history import import_staged_history, read_legacy_history
+
+        assert callable(import_staged_history)
+        assert callable(read_legacy_history)
 
     def test_import_chat(self):
         import server.chat
+        from server.agent import api
 
-        assert hasattr(server.chat, "chat_stream")
+        assert server.chat.chat_stream is api.chat_stream
         assert hasattr(server.chat, "chat_respond")
-        assert hasattr(server.chat, "chat_cancel")
-        assert hasattr(server.chat, "_cwd_to_project_dir")
-        assert hasattr(server.chat, "_read_jsonl_messages")
-        assert hasattr(server.chat, "_extract_refs_from_tool_result")
+        assert server.chat.chat_cancel is api.cancel
+        assert not hasattr(server.chat, "_cwd_to_project_dir")
+        assert not hasattr(server.chat, "_read_jsonl_messages")
 
     def test_import_proxy(self):
         import server.proxy
@@ -209,23 +220,12 @@ class TestImportSanity:
         assert hasattr(server.proxy, "get_proxy_config")
         assert hasattr(server.proxy, "clear_proxy_cache")
 
-    def test_import_claude_runner(self):
-        from server.services.claude_runner import cancel_process, respond_to_question, run_claude_stream
+    def test_native_methods_registered(self):
+        from server.agent.prompts import workflow_catalog
 
-        assert run_claude_stream is not None
-        assert respond_to_question is not None
-        assert cancel_process is not None
-
-    def test_skills_registered(self):
-        """Core skills (serenity family) must be in SKILL_MAP."""
-        import server.config
-
-        assert "bottleneck-hunter" in server.config.SKILL_MAP
-        assert "serenity" in server.config.SKILL_MAP
-        for key in ["bottleneck-hunter", "serenity"]:
-            skill = server.config.SKILL_MAP[key]
-            assert "dir" in skill
-            assert "name" in skill
+        methods = workflow_catalog()
+        assert {row["workflow"] for row in methods} == {"research", "industry", "company"}
+        assert all("dir" not in row for row in methods)
 
     def test_all_models_have_required_fields(self):
         """Every model entry must have name, base_url, api_key, model."""
@@ -259,17 +259,17 @@ class TestImportSanity:
 
 
 class TestReferenceExtraction:
-    """Test the URL/ref extraction from WebSearch tool results."""
+    """Test the shared returned-link parser used by evidence ingestion."""
 
     def test_extract_simple_markdown_links(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         text = """
         Search results:
         1. [Example Site](https://example.com/article) - A great article
         2. [Another Site](https://another.com/page) - More info
         """
-        refs = _extract_refs_from_tool_result(text)
+        refs = extract_web_refs(text)
         assert len(refs) == 2
         assert refs[0]["url"] == "https://example.com/article"
         assert refs[0]["title"] == "Example Site"
@@ -278,27 +278,27 @@ class TestReferenceExtraction:
         assert refs[1]["title"] == "Another Site"
 
     def test_extract_dedup_urls(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         text = """
         1. [Same Site](https://example.com) - First mention
         2. [Same Site Again](https://example.com) - Duplicate
         3. [Different](https://other.com) - Unique
         """
-        refs = _extract_refs_from_tool_result(text)
+        refs = extract_web_refs(text)
         assert len(refs) == 2  # Duplicate URL removed
 
     def test_extract_no_links(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         text = "No links here, just plain text."
-        refs = _extract_refs_from_tool_result(text)
+        refs = extract_web_refs(text)
         assert refs == []
 
     def test_extract_skips_internal_links(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         text = "[Internal](#section) and [Real](https://real.com)"
-        refs = _extract_refs_from_tool_result(text)
+        refs = extract_web_refs(text)
         assert len(refs) == 1
         assert refs[0]["url"] == "https://real.com"

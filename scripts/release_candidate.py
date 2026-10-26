@@ -34,7 +34,8 @@ SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 TOP_FILES = {"requirements.txt", "requirements-extra.txt", "requirements.lock", "CHANGELOG.md", "LICENSE"}
-BUILTIN_FILES = {"skills/prism-research/CLAUDE.md", "skills/force-chinese/CLAUDE.md"}
+BUILTIN_FILES: set[str] = set()
+RETIRED_RUNTIME_FILES = {"server/services/claude_runner.py"}
 REQUIRED_FILES = {
     "server/main.py",
     "server/config.py",
@@ -43,7 +44,10 @@ REQUIRED_FILES = {
     "templates/app.html",
     "templates/login.html",
     "static/js/app.core.js",
-    "skills/prism-research/CLAUDE.md",
+    "server/agent/runtime.py",
+    "server/agent/provider.py",
+    "server/agent/prompts.py",
+    "server/services/auxiliary_model.py",
     "requirements.txt",
     "requirements-extra.txt",
 }
@@ -284,6 +288,8 @@ def collect_candidate(
             path = raw_path.decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             raise CandidateError("Unsupported Git tree entry") from None
+        if path in RETIRED_RUNTIME_FILES:
+            raise CandidateError("Candidate contains a retired external agent executor")
         if not allowed_path(path):
             continue
         if kind != b"blob" or mode not in {b"100644", b"100755"}:

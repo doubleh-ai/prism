@@ -48,12 +48,6 @@ class Event:
         return Event("tool_call").who(user).what(name=name, detail=detail[:100])
 
     @staticmethod
-    def claude(user: str, pid: int, duration: float, tokens: int, chunks: int):
-        return (
-            Event("claude_done").who(user).what(pid=pid, duration_ms=duration, tokens=tokens, chunks=chunks)
-        )
-
-    @staticmethod
     def auth(user: str, result: str):
         return Event("auth").who(user).what(result=result)
 

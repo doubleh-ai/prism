@@ -245,7 +245,7 @@ async def test_persistence_cannot_run_before_owned_children_finish(manager):
 
 @pytest.mark.asyncio
 async def test_actual_subprocess_wait_survives_cancel_and_still_needs_recursive_os_evidence(manager):
-    lease = manager.admit("cli")
+    lease = manager.admit("diagnostic")
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", "import time; time.sleep(0.3)"],
         stdin=subprocess.DEVNULL,
@@ -454,7 +454,7 @@ async def test_owner_release_cannot_hide_a_still_running_owned_async_task(manage
 
 @pytest.mark.asyncio
 async def test_real_asyncio_process_is_reaped_after_waiter_disconnect(manager):
-    lease = manager.admit("cli")
+    lease = manager.admit("diagnostic")
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",

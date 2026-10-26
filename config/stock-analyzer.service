@@ -1,14 +1,15 @@
 [Unit]
-Description=Stock Analysis Assistant
+Description=Prism research workspace (generic template)
 After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/stock-analyzer
-Environment="PATH=/home/ubuntu/.npm-global/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=-/home/ubuntu/stock-analyzer/.env
-ExecStart=/home/ubuntu/stock-venv/bin/python -m uvicorn server.main:app --host 127.0.0.1 --port 8088
+User=prism
+Group=prism
+WorkingDirectory=/opt/prism/current
+Environment="PATH=/opt/prism/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/prism/runtime.env
+ExecStart=/opt/prism/venv/bin/python -m uvicorn server.main:app --host 127.0.0.1 --port 8088
 Restart=on-failure
 RestartSec=3
 

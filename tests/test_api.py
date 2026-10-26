@@ -7,23 +7,6 @@ import pytest
 from server.release import APP_VERSION
 
 
-def test_chat_report_protocol_cleanup_and_file_priority():
-    from server.chat import _clean_object_artifacts, _prioritize_report_files
-
-    cleaned = _clean_object_artifacts('主题：液冷产能。 ">供应链上游瓶颈')
-    assert cleaned == "主题：液冷产能。 供应链上游瓶颈"
-    files = _prioritize_report_files(
-        [
-            "prices.csv",
-            "audit.json",
-            "完整报告.html",
-            "摘要.md",
-            "附录.pdf",
-        ]
-    )
-    assert files == ["完整报告.html", "附录.pdf", "摘要.md", "prices.csv", "audit.json"]
-
-
 class TestPublicEndpoints:
     """Endpoints that don't require auth"""
 
@@ -161,7 +144,10 @@ class TestConversationCRUD:
         payload = json.loads(r.json()["messages"][0]["content"])
         assert payload["text"] == "answer  done"
         assert all(c.get("c") for c in payload["chunks"])
-        assert "visible thought" in raw
+        assert "visible thought" not in raw
+        assert all(c["t"] == "text" for c in payload["chunks"])
+        with get_db() as db:
+            assert db.execute("SELECT content FROM messages WHERE conv_id=?", [cid]).fetchone()[0] == dirty
 
     async def test_delete_conv_soft(self, client, auth_cookies):
         """DELETE now soft-deletes (moves to trash). GET returns 404 for trashed items."""
@@ -254,84 +240,44 @@ class TestRecycleBin:
 class TestChatControl:
     """Chat respond and cancel endpoints"""
 
-    async def test_chat_respond_missing_fields(self, client, auth_cookies):
+    async def test_chat_respond_requires_native_followup(self, client, auth_cookies):
         r = await client.post("/api/chat/respond", cookies=auth_cookies, json={})
-        assert r.status_code == 422
+        assert r.status_code == 409
+        assert "当前对话" in r.json()["error"]
 
     async def test_chat_cancel_missing_fields(self, client, auth_cookies):
         r = await client.post("/api/chat/cancel", cookies=auth_cookies, json={})
         assert r.status_code == 422
 
-    async def test_chat_cancel_no_process(self, client, auth_cookies):
-        """An owned active conversation can be cancelled when no process is running."""
+    async def test_chat_cancel_without_run(self, client, auth_cookies):
+        """A conversation without a native run has no cancellable task."""
         created = await client.post("/api/convs", cookies=auth_cookies, json={})
         r = await client.post(
             "/api/chat/cancel", cookies=auth_cookies, json={"conv_id": created.json()["id"]}
         )
-        assert r.status_code == 200
-        assert r.json() == {"ok": False}
+        assert r.status_code == 404
 
-    async def test_chat_stream_strips_object_artifacts(self, client, auth_cookies, monkeypatch):
-        """Live SSE chunks should not leak JS object placeholders."""
-        from server import chat as chat_mod
+    async def test_chat_cancel_queued_native_run(self, client, auth_cookies):
+        from server.agent import store
 
-        async def fake_run_claude_stream(*args, **kwargs):
-            yield {
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {"type": "thinking", "thinking": "[object Object]\nvisible thought\n[object Object]"},
-                        {"type": "tool_use", "name": "Bash", "input": {"command": "[object Object]\nls"}},
-                        {"type": "text", "text": "answer [object Object] done"},
-                    ]
-                },
-            }
-            yield {"type": "result", "duration_ms": 1, "stop_reason": "end_turn"}
-
-        monkeypatch.setattr(chat_mod, "run_claude_stream", fake_run_claude_stream)
-
+        created = await client.post("/api/convs", cookies=auth_cookies, json={})
+        cid = created.json()["id"]
+        run = store.create_run("testuser", cid, "待执行问题", "synthetic", "research")
         r = await client.post(
-            "/api/chat/stream",
-            cookies=auth_cookies,
-            json={
-                "question": "hi",
-                "skill": "bottleneck-hunter",
-            },
+            "/api/chat/cancel", cookies=auth_cookies, json={"conv_id": cid, "run_id": run["run_id"]}
         )
         assert r.status_code == 200
-        assert "[object Object]" not in r.text
-        assert "visible thought" in r.text
-        assert "answer  done" in r.text
-        assert "ls" in r.text
-
-    async def test_chat_stream_recovers_terminal_result_text(self, client, auth_cookies, monkeypatch):
-        """Some Claude-compatible providers put the final answer only on result."""
-        from server import chat as chat_mod
-
-        async def fake_run_claude_stream(*args, **kwargs):
-            yield {
-                "type": "result",
-                "duration_ms": 1,
-                "stop_reason": "end_turn",
-                "result": "## 报告已交付\n\n最终结论。",
-            }
-
-        monkeypatch.setattr(chat_mod, "run_claude_stream", fake_run_claude_stream)
-
-        r = await client.post(
-            "/api/chat/stream",
-            cookies=auth_cookies,
-            json={
-                "question": "hi",
-                "skill": "bottleneck-hunter",
-            },
-        )
-
-        assert r.status_code == 200
-        assert "报告已交付" in r.text
-        # Recovering terminal prose is not evidence that its claims were checked.
-        assert '"report_status": "partial"' in r.text
-        assert "structured_claims_missing" in r.text
+        assert r.json() == {
+            "ok": True,
+            "run_id": run["run_id"],
+            "status": "queued",
+            "cancel_requested": True,
+            "stopped": False,
+        }
+        assert store.get_run("testuser", run["run_id"])["cancel_requested"] is True
+        event = store.list_events("testuser", run["run_id"])[-1]
+        assert event["type"] == "cancel_requested"
+        assert event["external_stop_confirmed"] is False
 
     async def test_conv_isolation(self, client, auth_cookies, test_user):
         """Different users can't see each other's conversations."""
@@ -693,8 +639,11 @@ class TestAdminAccountManagement:
         assert data["version"] == APP_VERSION
         assert "checks" in data
         assert "database" in data["checks"]
-        assert "claude_cli" in data["checks"]
-        assert any(s["id"] == "bottleneck-hunter" for s in data["skills"])
+        assert data["checks"]["native_core"] == {"status": "ok", "engine": "prism-native"}
+        assert data["checks"]["tool_catalog"]["count"] > 0
+        assert data["checks"]["provider_configuration"]["live_checked"] is False
+        assert "claude_cli" not in data["checks"]
+        assert data["scope"] == "local_configuration"
         assert "models" in data
 
     async def test_admin_activity_analytics_endpoints(self, client, auth_cookies):

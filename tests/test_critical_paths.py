@@ -1,7 +1,7 @@
 """Critical-path tests: target the gaps found in the coverage report.
 
 Focuses on:
-- chat.py helpers (cwd_to_project_dir, extract_refs, read_jsonl_messages)
+- native workflow selection and shared reference extraction
 - conversations.py (list_trash, get_conv with messages)
 - api_view_report (size cap, missing file, traversal)
 - explain-term (cache behavior, fallback)
@@ -16,53 +16,56 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-# ── chat.py helpers ──
-class TestChatHelpers:
-    def test_cwd_to_project_dir(self):
-        from server.chat import _cwd_to_project_dir
+# ── Native method selection and public reference parsing ──
+class TestNativeResearchHelpers:
+    def test_builtin_method_aliases_resolve_without_skill_directories(self):
+        from server.agent.prompts import workflow_catalog, workflow_id
 
-        out = _cwd_to_project_dir("/home/ubuntu/.claude/skills/foo")
-        assert out == "-home-ubuntu--claude-skills-foo"
+        for row in workflow_catalog():
+            assert workflow_id(row["id"]) == row["workflow"]
+            assert workflow_id(row["workflow"]) == row["workflow"]
+            assert "dir" not in row
 
-    def test_cwd_to_project_dir_strips_leading_slash(self):
-        from server.chat import _cwd_to_project_dir
+    def test_external_skill_paths_cannot_select_a_workflow(self):
+        from server.agent.prompts import workflow_id
 
-        out = _cwd_to_project_dir("relative/path")
-        assert out.startswith("-")
-        assert "/" not in out[1:].replace("-", "", 1) or "-" in out  # converts / to -
+        for path in ("/private/synthetic/skills/foo", "relative/path", "../industry"):
+            with pytest.raises(ValueError, match="unsupported_research_method"):
+                workflow_id(path)
 
     def test_extract_refs_simple(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         content = "Here are results:\n1. [Title One](https://example.com/1) - snippet about one\n2. [Title Two](https://example.com/2) - snippet about two"
-        refs = _extract_refs_from_tool_result(content)
+        refs = extract_web_refs(content)
         assert len(refs) == 2
         assert refs[0]["url"] == "https://example.com/1"
         assert refs[0]["title"] == "Title One"
         assert "snippet about one" in refs[0]["snippet"]
 
     def test_extract_refs_dedupes(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         content = "[A](https://x.com) and [A again](https://x.com)"
-        refs = _extract_refs_from_tool_result(content)
+        refs = extract_web_refs(content)
         assert len(refs) == 1
 
     def test_extract_refs_ignores_non_http(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         content = "[a](file://x) [b](#anchor) [c](https://real.com)"
-        refs = _extract_refs_from_tool_result(content)
+        refs = extract_web_refs(content)
         urls = [r["url"] for r in refs]
         assert urls == ["https://real.com"]
 
     def test_extract_refs_truncates_long_snippet(self):
-        from server.chat import _extract_refs_from_tool_result
+        from server.research_context import extract_web_refs
 
         long_snip = "x" * 200
         content = f"[t](https://x.com) {long_snip}"
-        refs = _extract_refs_from_tool_result(content)
-        assert len(refs[0]["snippet"]) <= 130  # 120 + ellipsis
+        refs = extract_web_refs(content)
+        assert len(refs[0]["snippet"]) == 120
+        assert refs[0]["snippet_truncated"] is True
 
 
 # ── conversations.py: list_trash, get_conv ──
@@ -104,7 +107,7 @@ class TestConversations:
     async def test_permanent_delete_also_removes_messages(self, client, auth_cookies):
         cr = await client.post("/api/convs", cookies=auth_cookies, json={})
         cid = cr.json()["id"]
-        # Add a message via chat_stream is hard without Claude; use the DB directly
+        # Test deletion independently of provider execution.
         from server.database import get_db
 
         with get_db() as db:

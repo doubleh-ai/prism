@@ -30,7 +30,7 @@ def temp_data_dir(monkeypatch):
             },
         )
         # Modules may already hold the configuration dictionary from earlier tests.
-        for module_name in ("server.chat", "server.main", "server.services.claude_runner"):
+        for module_name in ("server.main",):
             module = sys.modules.get(module_name)
             if module is not None:
                 monkeypatch.setattr(module, "MODELS", server.config.MODELS)
@@ -45,6 +45,25 @@ def temp_data_dir(monkeypatch):
         # would be reused.
         server.database.reset_connection()
         server.database.init_db()
+        # Default network transports cannot spend model quota or send test data
+        # outside loopback. Explicit MockTransport and ASGI tests stay real.
+        import httpx
+
+        async_transport = httpx.AsyncHTTPTransport.handle_async_request
+        sync_transport = httpx.HTTPTransport.handle_request
+
+        async def isolated_async_transport(transport, request):
+            if request.url.host not in {"localhost", "127.0.0.1", "::1", "test", "testserver"}:
+                raise AssertionError("external test HTTP requires MockTransport")
+            return await async_transport(transport, request)
+
+        def isolated_sync_transport(transport, request):
+            if request.url.host not in {"localhost", "127.0.0.1", "::1", "test", "testserver"}:
+                raise AssertionError("external test HTTP requires MockTransport")
+            return sync_transport(transport, request)
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", isolated_async_transport)
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", isolated_sync_transport)
         yield td
         # Teardown: close the connection to the temp DB
         server.database.reset_connection()
@@ -76,34 +95,6 @@ def auth_cookies(test_user):
 # CSRF header — every state-changing test request must include this.
 # Mirrors what the real frontend does.
 CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
-
-
-@pytest.fixture(autouse=True)
-def legacy_adapter_contract_tests(request, temp_data_dir, monkeypatch):
-    """Retain explicit legacy CLI contracts while the production default is native.
-
-    Native tests use the real default and mock only the HTTP provider transport;
-    these pre-existing tests deliberately exercise the retained legacy adapter.
-    """
-    legacy_modules = {
-        "test_api.py",
-        "test_research_context.py",
-        "test_integration.py",
-        "test_chat_disconnect_uds.py",
-        "test_research_ledger.py",
-        "test_cli_protocol_probe.py",
-        "test_source_urls.py",
-        "test_server_search_candidate.py",
-        "test_lifecycle_chat_cli.py",
-        "test_live_integration_worker.py",
-        "test_chat_jsonl_async.py",
-        "test_claude_runner.py",
-        "test_capabilities_runner.py",
-    }
-    if request.path.name in legacy_modules:
-        import server.config
-
-        monkeypatch.setattr(server.config, "LEGACY_CHAT_ENABLED", True)
 
 
 @pytest.fixture

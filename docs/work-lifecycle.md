@@ -21,8 +21,10 @@ HTTP 观察本身不授予派生任务权限。维护期间允许的历史读取
 | 类别 | 主应用 | 恢复入口 |
 |---|---|---|
 | request、market | 启用 | 启用 |
-| analysis、scan、cli、auxiliary、capability、diagnostic | 启用 | 禁用 |
+| agent、analysis、scan、auxiliary、capability、diagnostic | 启用 | 禁用 |
 | vibe | 禁用 | 禁用 |
+
+`cli` 生产者已移除；整个应用禁止 Claude Code CLI 与执行回退。表中的恢复入口描述应用协议允许范围，不表示新的 Native-only 恢复候选已经实现或验收。旧发布合同不能为当前候选提供恢复资格。
 
 扫描取消是协作式的：保留正在执行的真实请求并保存部分结果，再进入终态。市场共用请求在一个调用者断开后仍可完成并写缓存；进程全局 Baostock 会话由真实线程锁串行保护。问答的最终文本和引用、能力任务的最终状态和响应必须完成保存，不能由 SSE 结束推断。
 

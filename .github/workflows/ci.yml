@@ -1,8 +1,8 @@
 # Prism — CI
 #
 # Runs on every push and PR. The pipeline is intentionally small:
-# the heavy lifting (running the actual Claude Code CLI, hitting the
-# deployed server) is done manually or in a separate workflow.
+# model/network acceptance and exact served-revision verification require
+# separate real receipts. These offline checks do not establish a release.
 name: CI
 
 on:

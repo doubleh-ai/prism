@@ -142,83 +142,9 @@ def test_shipped_javascript_matches_public_source_rules_and_hides_fallback_text(
     _node_review({"bad": BAD_URLS, "good": GOOD_URLS, "legacy": BAD_URLS[2]})
 
 
-async def test_actual_chat_sse_storage_history_and_javascript_use_same_safe_display(
-    client, auth_cookies, monkeypatch
-):
-    from server import chat
+async def test_legacy_db_and_jsonl_responses_redact_without_rewriting_history(client, auth_cookies, tmp_path):
     from server.database import get_db
-
-    conv = (await client.post("/api/convs", cookies=auth_cookies, json={"skill": "prism-research"})).json()[
-        "id"
-    ]
-    private, secret, public = BAD_URLS[16], BAD_URLS[2], GOOD_URLS[0]
-    question = "Synthetic research request " + secret
-    calls = [
-        {"type": "tool_use", "id": str(i), "name": "WebFetch", "input": {"url": url}}
-        for i, url in enumerate([secret, private, *BAD_URLS[-9:], public])
-    ]
-    before = copy.deepcopy(calls)
-    observed = []
-
-    async def fake_runner(actual_question, *args, **kwargs):
-        assert actual_question == question  # Real CLI request remains unchanged.
-        observed.append(kwargs["research_context"])
-        for index, call in enumerate(calls):
-            # Exercise both live runner frame shapes, including a key that is
-            # not the provider model key and HTML/percent-encoded names.
-            yield _event("assistant", [call]) if index % 2 else call
-            yield _event(
-                "user",
-                [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call["id"],
-                        "content": "Synthetic page with " + secret,
-                    }
-                ],
-            )
-        yield _event("assistant", [{"type": "text", "text": "## 报告已交付\nSynthetic answer " + secret}])
-        yield {"type": "result", "subtype": "success", "is_error": False}
-
-    monkeypatch.setattr(chat, "run_claude_stream", fake_runner)
-    monkeypatch.setattr(chat, "persist_graph", lambda *args: None)
-    response = await client.post(
-        "/api/chat/stream",
-        cookies=auth_cookies,
-        json={"question": question, "conv_id": conv, "skill": "prism-research"},
-    )
-    assert response.status_code == 200 and calls == before
-    assert "SYNTHETIC_OTHER_KEY" not in response.text and private not in response.text
-    events = [
-        json.loads(line[6:])
-        for line in response.text.splitlines()
-        if line.startswith("data: ") and line != "data: [DONE]"
-    ]
-    refs = [event["ref"] for event in events if "ref" in event]
-    assert [ref["url"] for ref in refs] == [public]
-    with get_db() as db:
-        stored = [row[0] for row in db.execute("SELECT content FROM messages WHERE conv_id=?", [conv])]
-        ledger_rows = [
-            row[0]
-            for row in db.execute(
-                "SELECT payload FROM research_documents WHERE run_id=?", [observed[0]["run_id"]]
-            )
-        ]
-    assert "SYNTHETIC_OTHER_KEY" not in json.dumps(stored + ledger_rows)
-    assert private not in json.dumps(stored + ledger_rows)
-    history = (await client.get(f"/api/convs/{conv}", cookies=auth_cookies)).json()
-    research = (await client.get(f"/api/research/runs/{observed[0]['run_id']}", cookies=auth_cookies)).json()
-    assert "SYNTHETIC_OTHER_KEY" not in json.dumps([history, research])
-    assert len(research["documents"]) == 1 and research["documents"][0]["url"] == public
-    assert HIDDEN_SOURCE_URL in research["passages"][0]["excerpt"]
-    _node_review({"bad": BAD_URLS, "good": GOOD_URLS, "events": events, "history": history})
-
-
-async def test_legacy_db_and_jsonl_responses_redact_without_rewriting_history(
-    client, auth_cookies, monkeypatch, tmp_path
-):
-    from server import conversations
-    from server.database import get_db
+    from server.legacy_history import import_staged_history
 
     secret = BAD_URLS[2]
     variants = [secret, BAD_URLS[4], *BAD_URLS[-9:]]
@@ -231,23 +157,44 @@ async def test_legacy_db_and_jsonl_responses_redact_without_rewriting_history(
     )
     events = [
         _event("user", "old question " + secret),
-        _event("assistant", [{"type": "text", "text": "old " + secret}]),
+        _event(
+            "assistant",
+            [
+                {"type": "thinking", "thinking": "PRIVATE_HISTORICAL_REASONING"},
+                {"type": "tool_use", "name": "WebFetch", "input": {"url": secret}},
+                {"type": "text", "text": "old " + secret + " public " + GOOD_URLS[0]},
+            ],
+        ),
     ]
     raw = "\n".join(json.dumps(event) for event in events)
-    (tmp_path / "old.jsonl").write_text(raw)
-    monkeypatch.setattr(conversations, "CLAUDE_PROJECTS", tmp_path)
+    staged = tmp_path.resolve() / "staged-projects"
+    project = staged / "legacy-project"
+    project.mkdir(parents=True)
+    history_path = project / "old.jsonl"
+    history_path.write_text(raw)
     with get_db() as db:
         db.execute("INSERT INTO conversations(id,username,title) VALUES('legacy-url','testuser',?)", [secret])
         db.execute("INSERT INTO messages(conv_id,role,content) VALUES('legacy-url','assistant',?)", [payload])
         db.execute(
-            "INSERT INTO conversations(id,username,session_id,project_dir) VALUES('legacy-jsonl','testuser','old','.')"
+            "INSERT INTO conversations(id,username,session_id,project_dir) "
+            "VALUES('legacy-jsonl','testuser','old','legacy-project')"
         )
+    pending = await client.get("/api/convs/legacy-jsonl", cookies=auth_cookies)
+    assert pending.status_code == 200
+    assert pending.json()["history_migration"]["status"] == "pending_import"
+    assert pending.json()["messages"] == []
+    with get_db() as db:
+        assert import_staged_history(db, staged, username="testuser")["imported"] == 1
     for conv in ("legacy-url", "legacy-jsonl"):
         result = await client.get(f"/api/convs/{conv}", cookies=auth_cookies)
         assert result.status_code == 200 and "SYNTHETIC_OTHER_KEY" not in result.text
         assert HIDDEN_SOURCE_URL in result.text
+        assert "PRIVATE_HISTORICAL_REASONING" not in result.text
         if conv == "legacy-url":
             _node_review({"bad": BAD_URLS, "good": GOOD_URLS, "history": result.json()})
+        else:
+            assert result.json()["history_migration"]["status"] == "imported"
+            assert GOOD_URLS[0] in result.text
     listing = await client.get("/api/convs", cookies=auth_cookies)
     assert "SYNTHETIC_OTHER_KEY" not in listing.text
     await client.delete("/api/convs/legacy-url", cookies=auth_cookies)
@@ -255,7 +202,7 @@ async def test_legacy_db_and_jsonl_responses_redact_without_rewriting_history(
     assert "SYNTHETIC_OTHER_KEY" not in trash.text and HIDDEN_SOURCE_URL in trash.text
     with get_db() as db:
         assert db.execute("SELECT content FROM messages WHERE conv_id='legacy-url'").fetchone()[0] == payload
-    assert (tmp_path / "old.jsonl").read_text() == raw
+    assert history_path.read_text() == raw
 
 
 async def test_legacy_research_list_and_detail_redact_without_rewriting(client, auth_cookies):

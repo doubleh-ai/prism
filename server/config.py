@@ -76,30 +76,6 @@ DEFAULT_MODEL = next(
     "minimax-m3",
 )
 
-# ── Claude Code CLI ──
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN", os.path.expanduser("~/.npm-global/bin/claude"))
-SKILLS_HOME = Path(os.environ.get("CLAUDE_SKILLS_HOME", Path.home() / ".claude" / "skills"))
-
-_DEFAULT_SKILL_FALLBACK_ROOTS = [
-    PROJECT_ROOT / "skills",
-    Path.home() / "skills",
-]
-_ENV_SKILL_FALLBACK_ROOTS = [
-    Path(p.strip()) for p in os.environ.get("CLAUDE_SKILL_FALLBACKS", "").split(os.pathsep) if p.strip()
-]
-SKILL_FALLBACK_ROOTS = []
-for _root in [*_ENV_SKILL_FALLBACK_ROOTS, *_DEFAULT_SKILL_FALLBACK_ROOTS]:
-    if _root not in SKILL_FALLBACK_ROOTS and _root != SKILLS_HOME:
-        SKILL_FALLBACK_ROOTS.append(_root)
-
-# ── Skill 映射（Claude Code 加载时用目录名查找） ──
-SKILL_MAP = {
-    "prism-research": {"dir": "prism-research", "name": "Prism研究"},
-    "bottleneck-hunter": {"dir": "serenity-bottleneck-hunter", "name": "瓶颈猎手"},
-    "serenity": {"dir": "serenity-skill", "name": "Serenity 卡点分析"},
-    "cn": {"dir": "force-chinese", "name": "强制中文输出"},
-}
-
 # ── 速率限制 ──
 RATE_CHAT_PER_MIN = int(os.environ.get("RATE_CHAT_PER_MIN", "20"))
 RATE_LOGIN_PER_MIN = int(os.environ.get("RATE_LOGIN_PER_MIN", "10"))
@@ -107,8 +83,6 @@ RATE_EXPLAIN_PER_MIN = int(os.environ.get("RATE_EXPLAIN_PER_MIN", "10"))
 CHAT_STREAM_HEARTBEAT_SECONDS = int(os.environ.get("PRISM_CHAT_STREAM_HEARTBEAT", "20"))
 CHAT_STREAM_IDLE_TIMEOUT_SECONDS = int(os.environ.get("PRISM_CHAT_STREAM_IDLE_TIMEOUT", "300"))
 
-# Explicit compatibility for old API clients; native failures never enable CLI.
-LEGACY_CHAT_ENABLED = os.environ.get("PRISM_LEGACY_CHAT_ENABLED", "0") == "1"
 RESEARCH_SOURCE_HOSTS = tuple(
     h.strip().lower() for h in os.environ.get("PRISM_RESEARCH_SOURCE_HOSTS", "").split(",") if h.strip()
 )

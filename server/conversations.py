@@ -1,30 +1,28 @@
-"""对话历史 CRUD + 回收站 — Claude Code JSONL 集成"""
+"""Conversation CRUD and trash backed exclusively by platform-owned SQLite."""
 
 import json
 import re
 import secrets
-from pathlib import Path
 
 from fastapi import HTTPException, Request
 
+from .agent.public_text import public_answer_text
 from .auth import require_auth
 from .database import get_db
-from .research_context import parse_claude_jsonl_events
-from .source_urls import redact_source_text, source_display_payload
-
-CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+from .legacy_history import init_legacy_history_db, migration_status, read_legacy_history
+from .source_urls import source_display_payload
 
 
 def _clean_object_artifacts(text: str) -> str:
-    """Remove JavaScript object-stringification artifacts from Claude CLI output."""
+    """Clean public display prose, including pre-native formatting artifacts."""
     if not text:
         return ""
-    cleaned = redact_source_text(str(text)).replace("[object Object]", "")
+    cleaned = public_answer_text(str(text)).replace("[object Object]", "")
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _content_to_text(value) -> str:
-    """Convert Claude content blocks into readable text."""
+    """Project recognized public prose without flattening private blocks."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -34,20 +32,7 @@ def _content_to_text(value) -> str:
     if isinstance(value, list):
         return "\n".join(part for part in (_content_to_text(v) for v in value) if part)
     if isinstance(value, dict):
-        typ = value.get("type", "")
-        if typ == "tool_use":
-            name = value.get("name", "tool")
-            detail = _content_to_text(value.get("input", ""))
-            return f"{name}: {detail}" if detail else str(name)
-        for key in ("text", "thinking", "content", "question", "summary"):
-            if key in value:
-                text = _content_to_text(value.get(key))
-                if text:
-                    return text
-        try:
-            return _clean_object_artifacts(json.dumps(value, ensure_ascii=False))
-        except TypeError:
-            return _clean_object_artifacts(str(value))
+        return public_answer_text(value)
     return _clean_object_artifacts(str(value))
 
 
@@ -67,8 +52,56 @@ def _sanitize_json_value(value):
                 cleaned.append(val)
         return cleaned
     if isinstance(value, dict):
-        cleaned = {str(k): _sanitize_json_value(v) for k, v in value.items()}
-        if cleaned.get("t") in {"think", "text"} and not str(cleaned.get("c", "")).strip():
+        kind = value.get("t", value.get("type", ""))
+        if kind in {
+            "think",
+            "thinking",
+            "reasoning",
+            "analysis",
+            "tool",
+            "tool_use",
+            "tool_result",
+            "server_tool_use",
+        }:
+            return None
+        private = {
+            "thinking",
+            "reasoning",
+            "reasoningcontent",
+            "chainofthought",
+            "signature",
+            "encryptedcontent",
+            "apikey",
+            "authorization",
+            "authentication",
+            "password",
+            "passwd",
+            "secret",
+            "credentials",
+            "cookie",
+            "cookies",
+            "token",
+            "accesstoken",
+            "refreshtoken",
+            "headers",
+            "env",
+            "environment",
+            "raw",
+            "rawrequest",
+            "rawresponse",
+            "rawframe",
+            "rawframes",
+            "stdout",
+            "stderr",
+            "toolinput",
+            "tooloutput",
+        }
+        cleaned = {
+            str(k): _sanitize_json_value(v)
+            for k, v in value.items()
+            if re.sub(r"[^a-z0-9]", "", str(k).casefold()) not in private
+        }
+        if cleaned.get("t") == "text" and not str(cleaned.get("c", "")).strip():
             return None
         return cleaned
     return _clean_object_artifacts(str(value))
@@ -88,61 +121,8 @@ def _sanitize_stored_content(content: str) -> str:
     return json.dumps(cleaned, ensure_ascii=False)
 
 
-def _list_jsonl_sessions(project_dir: str) -> list[str]:
-    """List session IDs from a project directory, sorted by mtime desc."""
-    proj = CLAUDE_PROJECTS / project_dir
-    if not proj.exists():
-        return []
-    files = sorted(proj.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-    return [f.stem for f in files]
-
-
-def _read_jsonl_user_content(jsonl_path: Path) -> str | None:
-    """Extract first user message content from JSONL for title."""
-    if not jsonl_path.exists():
-        return None
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("type") == "user":
-                msg = ev.get("message", "")
-                if isinstance(msg, dict):
-                    content = msg.get("content", "")
-                else:
-                    try:
-                        msg_dict = json.loads(str(msg).replace("'", '"'))
-                        content = msg_dict.get("content", str(msg))
-                    except Exception:
-                        content = str(msg)
-                if (
-                    content
-                    and not str(content).startswith("[{'type':")
-                    and not str(content).startswith("[{'tool_use_id':")
-                ):
-                    return _content_to_text(content)
-    return None
-
-
-def _read_jsonl_messages(session_id: str, project_dir: str) -> list[dict]:
-    """Read historical turns with the same provenance rules as live chat."""
-    jsonl_path = CLAUDE_PROJECTS / project_dir / f"{session_id}.jsonl"
-    if not jsonl_path.exists():
-        return []
-    events = []
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return parse_claude_jsonl_events(events, session_id=session_id)
-
-
 def _merge_saved_turns(history: list[dict], stored: list[dict]) -> list[dict]:
-    """Retain the legacy JSONL prefix; modern DB turns own their research metadata."""
+    """Merge an imported SQLite prefix with saved turns using existing anchors."""
     anchor = None
     for item in stored:
         if item["role"] != "assistant":
@@ -154,16 +134,21 @@ def _merge_saved_turns(history: list[dict], stored: list[dict]) -> list[dict]:
         if (
             isinstance(payload, dict)
             and (payload.get("research") or payload.get("native_agent"))
-            and payload.get("history_anchor")
+            and isinstance(payload.get("history_anchor"), dict)
         ):
             anchor = payload["history_anchor"]
             break
     if anchor is None:
         return history or [{"role": m["role"], "content": m["content"]} for m in stored]
-    boundary = int(anchor.get("db_message_id") or 0)
+    try:
+        boundary = max(0, int(anchor.get("db_message_id") or 0))
+        legacy_turns = max(0, int(anchor.get("jsonl_user_turns") or 0))
+    except (TypeError, ValueError, OverflowError):
+        # An invalid old display anchor cannot discard either stored source.
+        return history + [{"role": m["role"], "content": m["content"]} for m in stored]
     if anchor.get("native_db_takeover") is True:
-        # Legacy files are a read-only prefix. New native turns live only in
-        # Prism's database, without creating/resuming a Claude project session.
+        # Imported legacy turns are an immutable prefix. Native turns live in
+        # platform SQL, and existing message boundaries remain authoritative.
         prefix = history or [
             {"role": m["role"], "content": m["content"]} for m in stored if m["id"] <= boundary
         ]
@@ -173,7 +158,7 @@ def _merge_saved_turns(history: list[dict], stored: list[dict]) -> list[dict]:
         users = 0
         for item in history:
             users += item["role"] == "user"
-            if users > int(anchor.get("jsonl_user_turns") or 0):
+            if users > legacy_turns:
                 break
             prefix.append(item)
     else:
@@ -187,30 +172,33 @@ def _merge_saved_turns(history: list[dict], stored: list[dict]) -> list[dict]:
 
 
 def list_convs(request: Request) -> list[dict]:
-    """GET /api/convs — list active (non-deleted) conversations."""
+    """GET /api/convs — list owned active conversations from platform storage."""
     u = require_auth(request)
+    init_legacy_history_db()
     with get_db() as db:
         rows = db.execute(
-            "SELECT id, title, skill, session_id, project_dir, created_at FROM conversations "
+            "SELECT id,title,skill,session_id,project_dir FROM conversations "
             "WHERE username=? AND deleted_at IS NULL ORDER BY created_at DESC",
             [u],
         ).fetchall()
-
-    result = []
-    for r in rows:
-        c = {"id": r["id"], "title": r["title"], "skill": r["skill"]}
-        if r["session_id"] and r["project_dir"]:
-            jsonl_path = CLAUDE_PROJECTS / r["project_dir"] / f"{r['session_id']}.jsonl"
-            user_content = _read_jsonl_user_content(jsonl_path)
-            if user_content:
-                c["title"] = user_content[:40]
-        result.append(c)
+        result = []
+        for row in rows:
+            imported = read_legacy_history(db, row["id"], u)
+            result.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "skill": row["skill"],
+                    "history_migration": migration_status(row, imported),
+                }
+            )
     return source_display_payload(result)
 
 
 def get_conv(cid: str, request: Request) -> dict:
     """GET /api/convs/{cid} — get a single conversation with messages."""
     u = require_auth(request)
+    init_legacy_history_db()
     with get_db() as db:
         conv = db.execute(
             "SELECT * FROM conversations WHERE id=? AND username=? AND deleted_at IS NULL", [cid, u]
@@ -218,9 +206,8 @@ def get_conv(cid: str, request: Request) -> dict:
         if not conv:
             raise HTTPException(404)
 
-        messages = []
-        if conv["session_id"] and conv["project_dir"]:
-            messages = _read_jsonl_messages(conv["session_id"], conv["project_dir"])
+        imported = read_legacy_history(db, cid, u)
+        messages = imported["messages"] if imported is not None else []
 
         msgs = db.execute(
             "SELECT id, role, content FROM messages WHERE conv_id=? ORDER BY id", [cid]
@@ -289,6 +276,7 @@ def get_conv(cid: str, request: Request) -> dict:
             "title": conv["title"],
             "skill": conv["skill"],
             "messages": messages,
+            "history_migration": migration_status(conv, imported),
         }
     )
 
@@ -338,28 +326,37 @@ def restore_conv(cid: str, request: Request) -> dict:
 def permanent_delete_conv(cid: str, request: Request) -> dict:
     """DELETE /api/convs/{cid}/permanent — permanently delete conversation and messages."""
     u = require_auth(request)
+    init_legacy_history_db()
     with get_db() as db:
-        row = db.execute(
-            "SELECT deleted_at FROM conversations WHERE id=? AND username=?", [cid, u]
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "对话不存在")
-        if row["deleted_at"] is None:
-            raise HTTPException(409, "请先将对话移入回收站")
-        # Native event replay and input anchors are conversation data as well.
-        # A still-running owner observes the missing conversation and retires;
-        # it must never recreate these records after permanent deletion.
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_runs'").fetchone():
-            db.execute(
-                "DELETE FROM native_agent_events WHERE run_id IN "
-                "(SELECT run_id FROM native_agent_runs WHERE conv_id=? AND username=?)",
-                [cid, u],
-            )
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_dialogues'").fetchone():
-                db.execute("DELETE FROM native_agent_dialogues WHERE conv_id=? AND username=?", [cid, u])
-            db.execute("DELETE FROM native_agent_runs WHERE conv_id=? AND username=?", [cid, u])
-        db.execute("DELETE FROM conversations WHERE id=? AND username=?", [cid, u])
-        db.execute("DELETE FROM messages WHERE conv_id=?", [cid])
+        db.execute("SAVEPOINT delete_conversation")
+        try:
+            row = db.execute(
+                "SELECT deleted_at FROM conversations WHERE id=? AND username=?", [cid, u]
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "对话不存在")
+            if row["deleted_at"] is None:
+                raise HTTPException(409, "请先将对话移入回收站")
+            # Native event replay and input anchors are conversation data as well.
+            # A still-running owner observes the missing conversation and retires;
+            # it must never recreate these records after permanent deletion.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_runs'").fetchone():
+                db.execute(
+                    "DELETE FROM native_agent_events WHERE run_id IN "
+                    "(SELECT run_id FROM native_agent_runs WHERE conv_id=? AND username=?)",
+                    [cid, u],
+                )
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='native_agent_dialogues'").fetchone():
+                    db.execute("DELETE FROM native_agent_dialogues WHERE conv_id=? AND username=?", [cid, u])
+                db.execute("DELETE FROM native_agent_runs WHERE conv_id=? AND username=?", [cid, u])
+            db.execute("DELETE FROM conversations WHERE id=? AND username=?", [cid, u])
+            db.execute("DELETE FROM messages WHERE conv_id=?", [cid])
+            db.execute("DELETE FROM legacy_conversation_history WHERE conv_id=? AND username=?", [cid, u])
+            db.execute("RELEASE delete_conversation")
+        except BaseException:
+            db.execute("ROLLBACK TO delete_conversation")
+            db.execute("RELEASE delete_conversation")
+            raise
     return {"ok": True}
 
 

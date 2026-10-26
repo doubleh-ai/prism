@@ -1,3 +1,5 @@
+> Historical record only. CLI/Skill setup and execution paths below are retired and must not be used for the current application, deployment or recovery. See [current Native architecture](../../native-agent-framework.md).
+
 # CapitalLens Architecture Redesign
 
 ## Scope

@@ -506,7 +506,7 @@ def _run_parent(context: dict) -> Lease:
 def issue_run_token(username: str, conv_id: str, run_id: str, *, parent_lease=None) -> str:
     _owned_conversation(username, conv_id)
     parent = parent_lease if parent_lease is not None else current_lease()
-    if type(parent) is not Lease or parent.kind != "cli":
+    if type(parent) is not Lease or parent.kind != "agent":
         raise HTTPException(503, "当前研究进程不可用")
     # A real child admission validates the opaque parent capability against its
     # manager, including a concurrent fence; serialized booleans cannot grant it.

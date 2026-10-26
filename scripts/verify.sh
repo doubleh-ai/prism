@@ -1,37 +1,39 @@
 #!/bin/bash
-# 自验证脚本 — 测试所有端点
-set -e
-BASE="http://127.0.0.1:8088"
-PASS=0; FAIL=0
-check() { if [ $? -eq 0 ]; then PASS=$((PASS+1)); echo "PASS $1"; else FAIL=$((FAIL+1)); echo "FAIL $1"; fi }
+# 只读基础就绪检查；不创建账号、不调用模型，不代表发布或研究能力验收。
+# PRISM_EXPECTED_REVISION 可选：要求服务返回指定的完整提交标识。
+set -euo pipefail
 
-echo "=== 炒股分析助手 自验证 ==="
+BASE="${PRISM_VERIFY_URL:-http://127.0.0.1:8088}"
+PYTHON_BIN="${PRISM_PYTHON:-python3}"
+EXPECTED_REVISION="${PRISM_EXPECTED_REVISION:-}"
 
-# 1. 登录页
-curl -s -o /dev/null -w "%{http_code}" "$BASE/login" | grep -q 200
-check "GET /login → 200"
+if [ -n "$EXPECTED_REVISION" ] && ! [[ "$EXPECTED_REVISION" =~ ^[a-fA-F0-9]{40}$ ]]; then
+    echo "PRISM_EXPECTED_REVISION 必须是完整的 40 位提交标识。" >&2
+    exit 1
+fi
 
-# 2. 创建测试账号并登录
-TEST_USER="vtest"
-TEST_PASS="vpass"
-~/stock-venv/bin/python scripts/create_user.py --username "$TEST_USER" --password "$TEST_PASS" 2>/dev/null || true
-RESP=$(curl -s -X POST "$BASE/api/login" -H "Content-Type: application/json" \
-  -d "{\"username\":\"$TEST_USER\",\"password\":\"$TEST_PASS\"}")
-[ "$RESP" = '{"user":"vtest"}' ]
-check "POST /api/login → user vtest"
+curl --fail --silent --show-error --max-time 5 "${BASE%/}/health/ready" |
+    "$PYTHON_BIN" -c '
+import json
+import re
+import sys
 
-# 3. 未认证重定向
-CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
-[ "$CODE" = "307" ]
-check "GET / (no auth) → 307"
-
-# 4. Claude CLI 可用
-~/.npm-global/bin/claude --version > /dev/null 2>&1
-check "claude --version"
-
-# 5. Claude 可调用
-echo "say hello in one word" | timeout 20 ~/.npm-global/bin/claude -p - --print --output-format stream-json --verbose 2>/dev/null | grep -q "assistant"
-check "claude stream-json works"
-
-echo "=== 通过: $PASS / 失败: $FAIL ==="
-[ $FAIL -eq 0 ]
+try:
+    payload = json.load(sys.stdin)
+    revision = payload.get("deployed_revision")
+    if payload.get("status") != "ready":
+        raise ValueError("unready")
+    if revision != "unknown" and not (
+        isinstance(revision, str) and re.fullmatch(r"[a-f0-9]{40}", revision)
+    ):
+        raise ValueError("invalid_revision")
+    expected = sys.argv[1].lower()
+    if expected and revision != expected:
+        raise ValueError("revision_mismatch")
+except (ValueError, TypeError, AttributeError):
+    print("基础就绪或服务版本检查未通过。", file=sys.stderr)
+    sys.exit(1)
+print("PASS 基础就绪检查")
+print("PASS 服务版本匹配" if expected else "服务版本未与指定候选核对。")
+print("此结果只证明基础数据库就绪；Native 配置、真实研究和发布验收需分别核对。")
+' "$EXPECTED_REVISION"

@@ -2,16 +2,14 @@
 
 import asyncio
 import ctypes
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from server.services import auxiliary_model as auxiliary
 from server.services import process_lease as adapter
-from server.work_lifecycle import Manager
+from server.work_lifecycle import Manager, current_lease
 
 
 def test_actual_child_birth_identity_stable_and_reaped():
@@ -86,19 +84,22 @@ async def test_unknown_identity_keeps_blocked_after_actual_wait(monkeypatch):
         manager._pool.shutdown(wait=True, cancel_futures=False)
 
 
-async def test_cancelled_auxiliary_thread_keeps_real_child_until_actual_exit(monkeypatch):
+async def test_cancelled_worker_keeps_real_child_until_actual_exit():
     manager = Manager(max_workers=2)
     root = manager.admit("request")
+    processes = []
 
-    def invocation(prompt, directory, output_format, model_id):
-        return [sys.executable, "-c", "import time;time.sleep(0.3);print('safe output')"], {
-            "ANTHROPIC_AUTH_TOKEN": "synthetic-key",
-            "PATH": os.environ["PATH"],
-        }
+    def invocation():
+        lease = current_lease()
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import sys;sys.stdin.buffer.read()"], stdin=subprocess.PIPE
+        )
+        processes.append(process)
+        registered = adapter.register_process(lease, process)
+        return adapter.wait_process_sync(lease, process, registered)
 
-    monkeypatch.setattr(auxiliary, "_invocation", invocation)
     with root:
-        task = asyncio.create_task(manager.run_blocking("auxiliary", auxiliary.run_text, "synthetic"))
+        task = asyncio.create_task(manager.run_blocking("diagnostic", invocation))
         await asyncio.sleep(0)  # Child registration precedes releasing the root owner.
     try:
         for _ in range(200):
@@ -112,83 +113,64 @@ async def test_cancelled_auxiliary_thread_keeps_real_child_until_actual_exit(mon
         manager.begin_drain(manager.ticket())
         assert not await manager.wait_drained(timeout=0.01)
         assert manager.observe()["pending_cf"] == manager.observe()["pending_processes"] == 1
+        processes[0].stdin.close()
         assert await manager.wait_drained(timeout=3)
         manager.close_development()
     finally:
+        for process in processes:
+            if not process.stdin.closed:
+                process.stdin.close()
+            process.wait()
         manager._pool.shutdown(wait=True, cancel_futures=False)
 
 
-async def test_async_auxiliary_cancel_keeps_registration_until_real_wait(monkeypatch):
+async def test_cancelled_async_waiter_keeps_registration_until_actual_wait_witness():
     manager = Manager()
-    root = manager.admit("request")
+    lease = manager.admit("diagnostic")
     spawned, release = asyncio.Event(), asyncio.Event()
-    process_box = []
-    real_spawn = asyncio.create_subprocess_exec
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-I", "-c", "import sys;sys.stdin.buffer.read()", stdin=asyncio.subprocess.PIPE
+    )
+    real_wait = process.wait
 
-    def invocation(prompt, directory, output_format, model_id):
-        return [sys.executable, "-c", "import time;time.sleep(10)"], {
-            "ANTHROPIC_AUTH_TOKEN": "synthetic-key",
-            "PATH": os.environ["PATH"],
-        }
+    async def delayed_wait():
+        result = await real_wait()
+        spawned.set()
+        await release.wait()
+        return result
 
-    async def spawn(*args, **kwargs):
-        process = await real_spawn(*args, **kwargs)
-        real_wait = process.wait
-
-        async def delayed_wait():
-            result = await real_wait()
-            spawned.set()
-            await release.wait()
-            return result
-
-        process.wait = delayed_wait
-        process_box.append(process)
-        return process
-
-    monkeypatch.setattr(auxiliary, "_invocation", invocation)
-    monkeypatch.setattr(auxiliary.asyncio, "create_subprocess_exec", spawn)
-    with root:
-        task = asyncio.create_task(auxiliary.run_text_async("synthetic"))
-        await asyncio.sleep(0)  # Child registration precedes releasing the root owner.
+    process.wait = delayed_wait
+    assert adapter.register_process(lease, process)
+    task = asyncio.create_task(adapter.wait_process(lease, process, True))
     try:
-        for _ in range(400):
-            if manager.observe()["pending_processes"]:
-                break
-            if task.done():
-                await task
-            await asyncio.sleep(0.005)
+        await asyncio.sleep(0)
         assert manager.observe()["pending_processes"] == 1
         task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        lease.release()
+        process.stdin.close()
         await asyncio.wait_for(spawned.wait(), 2)
         manager.begin_drain(manager.ticket())
         assert manager.observe()["pending_processes"] == 1
         assert not await manager.wait_drained(timeout=0.01)
         release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
         assert await manager.wait_drained(timeout=2)
         manager.close_development()
     finally:
         release.set()
-        for process in process_box:
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
         manager._pool.shutdown(wait=True, cancel_futures=False)
 
 
 async def test_repeated_cancel_during_spawn_cannot_hide_real_child(monkeypatch):
     manager = Manager()
-    root = manager.admit("request")
+    lease = manager.admit("diagnostic")
     born, return_process = asyncio.Event(), asyncio.Event()
-    processes, owners = [], []
-    real_spawn, real_start = asyncio.create_subprocess_exec, auxiliary.start_process
-
-    def invocation(prompt, directory, output_format, model_id):
-        return [sys.executable, "-c", "import time;time.sleep(10)"], {
-            "ANTHROPIC_AUTH_TOKEN": "synthetic-key",
-            "PATH": os.environ["PATH"],
-        }
+    processes = []
+    real_spawn = asyncio.create_subprocess_exec
 
     async def delayed_spawn(*args, **kwargs):
         process = await real_spawn(*args, **kwargs)
@@ -197,16 +179,9 @@ async def test_repeated_cancel_during_spawn_cannot_hide_real_child(monkeypatch):
         await return_process.wait()
         return process
 
-    def owned_start(lease, *args, **kwargs):
-        owners.append(lease)
-        return real_start(lease, *args, **kwargs)
-
-    monkeypatch.setattr(auxiliary, "_invocation", invocation)
-    monkeypatch.setattr(auxiliary.asyncio, "create_subprocess_exec", delayed_spawn)
-    monkeypatch.setattr(auxiliary, "start_process", owned_start)
-    with root:
-        task = asyncio.create_task(auxiliary.run_text_async("synthetic"))
-        await asyncio.sleep(0)
+    monkeypatch.setattr(adapter.asyncio, "create_subprocess_exec", delayed_spawn)
+    handle = adapter.start_process(lease, sys.executable, "-I", "-c", "import time;time.sleep(10)")
+    task = asyncio.create_task(handle.wait_result())
     try:
         await asyncio.wait_for(born.wait(), 2)
         task.cancel()
@@ -214,6 +189,7 @@ async def test_repeated_cancel_during_spawn_cannot_hide_real_child(monkeypatch):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        lease.release()
         manager.begin_drain(manager.ticket())
         assert manager.observe()["pending_async"] == 1
         assert not await manager.wait_drained(timeout=0.01)
@@ -227,7 +203,7 @@ async def test_repeated_cancel_during_spawn_cannot_hide_real_child(monkeypatch):
         # Explicit test cleanup is an actual wait witness, never a timeout/cancel
         # shortcut. The production drain path does not kill this child for us.
         processes[0].kill()
-        await owners[0].wait_process(processes[0])
+        await lease.wait_process(processes[0])
         assert await manager.wait_drained(timeout=2)
         manager.close_development()
     finally:

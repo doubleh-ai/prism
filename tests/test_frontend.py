@@ -593,7 +593,7 @@ class TestServiceWorkerCachePolicy:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
-        assert "prism-workbench-v86" in sw
+        assert "prism-workbench-v87" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
         assert "client.navigate(client.url)" in sw
@@ -622,7 +622,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     with open("static/sw.js", encoding="utf-8") as f:
         sw = f.read()
 
-    assert "app.indicator-chart.js?v=86" in template
+    assert "app.indicator-chart.js?v=87" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -653,7 +653,7 @@ def test_industry_workbench_static_contract():
         core = f.read()
 
     assert 'data-mode="industry"' in template
-    assert "app.industry.js?v=86" in template
+    assert "app.industry.js?v=87" in template
     assert "/api/industry/overview" in js
     assert "/api/industry/context" in js
     assert "_renderIndustryOverview" in js
@@ -691,7 +691,7 @@ def test_client_diagnostics_and_admin_bundle_static_contract():
     admin = Path("static/js/app.admin.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=86" in template
+    assert "app.diagnostics.js?v=87" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
@@ -755,8 +755,8 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert "app.css?v=86" in login
-    assert "app.css?v=86" in app
+    assert "app.css?v=87" in login
+    assert "app.css?v=87" in app
 
 
 def test_astock_fast_mode_controls_and_metadata_are_wired():
@@ -847,7 +847,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=86" in html
+    assert "app.screener.js?v=87" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener
@@ -974,7 +974,7 @@ def test_chat_inline_report_reader_contract():
     chat = Path("static/js/app.chat.js").read_text(encoding="utf-8")
     renderer = Path("static/js/app.chat-render.js").read_text(encoding="utf-8")
     css = Path("static/css/app.css").read_text(encoding="utf-8")
-    server = Path("server/chat.py").read_text(encoding="utf-8")
+    from server.agent.api import event_payload
 
     assert "_reportFilesForMessage" in chat
     assert "_compactDeliveredReportText" in chat
@@ -987,5 +987,15 @@ def test_chat_inline_report_reader_contract():
     assert "分析过程" in renderer
     assert ".chat-inline-report" in css
     assert ".chat-inline-report-body" in css
-    assert '"report_files": delivery_reports[:5]' in server
-    assert "_prioritize_report_files" in server
+    payload = event_payload(
+        {
+            "type": "research_finalized",
+            "seq": 2,
+            "status": "completed",
+            "ui": {"report_files": [], "report_status": "unreviewed"},
+        },
+        {"run_id": "native-run", "conv_id": "native-conv", "workflow": "research"},
+    )
+    assert payload["report_files"] == []
+    assert payload["report_status"] == "unreviewed"
+    assert payload["agent"]["engine"] == "prism-native"

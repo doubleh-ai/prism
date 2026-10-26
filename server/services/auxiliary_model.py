@@ -1,161 +1,178 @@
-"""Small, stateless model tasks with no research, filesystem or MCP tools."""
+"""Bounded stateless model tasks through the native direct Messages transport.
+
+No tools, subprocesses, sessions, skills, retries or alternate execution backend.
+``json`` returns a single JSON object, without a CLI envelope or Markdown fence.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import os
-import subprocess
-import tempfile
-from pathlib import Path
+import json
+import math
+from contextlib import aclosing, suppress
 
 from .. import config
+from ..agent import provider
 from ..work_lifecycle import get_manager
-from .process_lease import register_process, start_process, wait_process, wait_process_sync
 
 MAX_OUTPUT_BYTES = 256_000
+MAX_TOKENS = 16_384
 
 
 class AuxiliaryModelUnavailable(RuntimeError):
-    """A safe failure that never embeds prompts, credentials or child stderr."""
+    """A safe failure that never embeds prompts, credentials or upstream errors."""
 
 
-def _invocation(prompt: str, directory: str, output_format: str, model_id: str | None):
-    model = config.MODELS.get(model_id or config.DEFAULT_MODEL)
-    if not model or not model.get("api_key") or not model.get("model") or not model.get("base_url"):
+def _model(model_id):
+    if model_id is not None and not isinstance(model_id, str):
         raise AuxiliaryModelUnavailable("辅助模型尚未配置")
-    if output_format not in {"text", "json"}:
-        raise ValueError("unsupported output format")
-    # No user/project settings, saved sessions, hooks, extra MCP servers or
-    # inherited provider/capability credentials. CLI support is pinned at release.
-    cmd = [
-        config.CLAUDE_BIN,
-        "-p",
-        prompt,
-        "--model",
-        model["model"],
-        "--output-format",
-        output_format,
-        "--max-turns",
-        "1",
-        "--tools",
-        "",
-        "--strict-mcp-config",
-        "--mcp-config",
-        '{"mcpServers":{}}',
-        "--disallowedTools",
-        "mcp__*",
-        "--setting-sources",
-        "",
-        "--no-session-persistence",
-    ]
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key
-        in {
-            "PATH",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "TZ",
-            "SystemRoot",
-        }
-    }
-    env.update(
-        {
-            "HOME": directory,
-            "TMPDIR": directory,
-            "TMP": directory,
-            "TEMP": directory,
-            "NO_COLOR": "1",
-            "DISABLE_UPDATES": "1",
-            "DISABLE_AUTOUPDATER": "1",
-            "ANTHROPIC_AUTH_TOKEN": model["api_key"],
-            "ANTHROPIC_BASE_URL": model["base_url"],
-        }
-    )
-    return cmd, env
+    model = config.MODELS.get(model_id or config.DEFAULT_MODEL)
+    if not isinstance(model, dict) or not all(
+        isinstance(model.get(key), str) and model[key] for key in ("api_key", "model", "base_url")
+    ):
+        raise AuxiliaryModelUnavailable("辅助模型尚未配置")
+    return dict(model)
 
 
-def _output(raw: bytes, returncode: int, credential: str) -> str:
-    if returncode != 0 or len(raw) > MAX_OUTPUT_BYTES or credential.encode() in raw:
+def _object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON member")
+        value[key] = item
+    return value
+
+
+def _invalid_constant(_):
+    raise ValueError("nonfinite JSON number")
+
+
+def _output(text, credential, output_format):
+    if (
+        not isinstance(text, str)
+        or not text.strip()
+        or len(text.encode("utf-8")) > MAX_OUTPUT_BYTES
+        or credential in text
+    ):
         raise AuxiliaryModelUnavailable("辅助模型未完成请求")
-    return raw.decode("utf-8", errors="replace").strip()
+    text = text.strip()
+    if output_format == "json":
+        value = json.loads(text, object_pairs_hook=_object, parse_constant=_invalid_constant)
+        normalized = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        if credential in normalized:
+            raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+        if not isinstance(value, dict):
+            raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+    return text
+
+
+async def _consume(prompt, model, output_format, timeout):
+    pieces, byte_count = [], 0
+    system = "Return only the requested final text. Do not call tools."
+    if output_format == "json":
+        system += " Return exactly one valid JSON object, without Markdown fences or surrounding prose."
+    stream = provider.stream(
+        [{"role": "user", "content": prompt}],
+        system=system,
+        tools=[],
+        model_cfg=model,
+        max_tokens=MAX_TOKENS,
+        timeout_seconds=timeout,
+    )
+    async with aclosing(stream):
+        async for event in stream:
+            if not isinstance(event, dict):
+                raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+            kind = event.get("type")
+            if kind == "text_delta":
+                text = event.get("text")
+                if not isinstance(text, str):
+                    raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+                byte_count += len(text.encode("utf-8"))
+                if byte_count > MAX_OUTPUT_BYTES:
+                    raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+                pieces.append(text)
+            elif kind == "done":
+                content = event.get("content")
+                if (
+                    event.get("stop_reason") != "end_turn"
+                    or not isinstance(content, list)
+                    or any(not isinstance(b, dict) or b.get("type") != "text" for b in content)
+                    or any(not isinstance(b.get("text"), str) for b in content)
+                ):
+                    raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+                final = "".join(block["text"] for block in content)
+                if final != "".join(pieces):
+                    raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+                return _output(final, model["api_key"], output_format)
+            elif kind != "usage":
+                # Includes local/server tool calls and server-side tool results.
+                raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+    raise AuxiliaryModelUnavailable("辅助模型未完成请求")
+
+
+async def _owned_request(lease, *args):
+    with lease:
+        return await _consume(*args)
+
+
+async def _cancel_and_close(task):
+    # Cancel the request once. Further caller cancellations cannot interrupt its
+    # transport cleanup or publish an empty work census while HTTP is still open.
+    task.cancel()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    with suppress(BaseException):
+        task.result()
 
 
 def run_text(
     prompt: str, *, timeout: float = 40, output_format: str = "text", model_id: str | None = None
 ) -> str:
-    with tempfile.TemporaryDirectory(prefix="prism-model-") as directory:
-        Path(directory).chmod(0o700)
-        cmd, env = _invocation(prompt, directory, output_format, model_id)
-        lease = get_manager().admit("auxiliary", persist_required=False)
-        with lease:
-            proc, registered = None, False
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=directory,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                )
-                registered = register_process(lease, proc)
-                try:
-                    stdout, _ = proc.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    # Preserve the existing business timeout, including actual reap.
-                    proc.kill()
-                    proc.communicate()
-                    raise
-                return _output(stdout, proc.returncode, env["ANTHROPIC_AUTH_TOKEN"])
-            except (OSError, subprocess.TimeoutExpired):
-                raise AuxiliaryModelUnavailable("辅助模型暂不可用") from None
-            finally:
-                if proc is not None:
-                    wait_process_sync(lease, proc, registered)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise AuxiliaryModelUnavailable("同步辅助模型不能在事件循环中调用")
+    return asyncio.run(
+        run_text_async(prompt, timeout=timeout, output_format=output_format, model_id=model_id)
+    )
 
 
 async def run_text_async(
     prompt: str, *, timeout: float = 15, output_format: str = "text", model_id: str | None = None
 ) -> str:
-    with tempfile.TemporaryDirectory(prefix="prism-model-") as directory:
-        Path(directory).chmod(0o700)
-        cmd, env = _invocation(prompt, directory, output_format, model_id)
+    if output_format not in {"text", "json"}:
+        raise ValueError("unsupported output format")
+    task = lease = None
+    try:
+        if (
+            not isinstance(prompt, str)
+            or not prompt.strip()
+            or type(timeout) not in (int, float)
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= 600
+        ):
+            raise AuxiliaryModelUnavailable("辅助模型暂不可用")
+        model = _model(model_id)
         lease = get_manager().admit("auxiliary", persist_required=False)
-        proc, registered = None, False
-        try:
-            spawning = start_process(
-                lease,
-                *cmd,
-                cwd=directory,
-                env=env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            try:
-                proc, registered = await spawning.wait()
-            except asyncio.CancelledError:
-                proc, registered = await spawning.wait()
-                raise
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return _output(stdout, proc.returncode, env["ANTHROPIC_AUTH_TOKEN"])
-        except (OSError, TimeoutError):
-            raise AuxiliaryModelUnavailable("辅助模型暂不可用") from None
-        finally:
-            try:
-                if proc is not None:
-                    if proc.returncode is None:
-                        with contextlib.suppress(ProcessLookupError):
-                            proc.terminate()
-                        try:
-                            await asyncio.wait_for(proc.wait(), timeout=2)
-                        except TimeoutError:
-                            with contextlib.suppress(ProcessLookupError):
-                                proc.kill()
-                    await wait_process(lease, proc, registered)
-            finally:
-                lease.release()
+        task = asyncio.create_task(_owned_request(lease, prompt, model, output_format, timeout))
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.CancelledError:
+        if task is not None:
+            await _cancel_and_close(task)
+        raise
+    except Exception:
+        if task is not None and not task.done():
+            await _cancel_and_close(task)
+        raise AuxiliaryModelUnavailable("辅助模型暂不可用") from None
+    finally:
+        if lease is not None:
+            # Also handles cancellation before the owned task first runs.
+            lease.release()

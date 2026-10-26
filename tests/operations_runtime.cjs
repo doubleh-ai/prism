@@ -104,10 +104,14 @@ async function operationsTabUsesItsOwnReadOnlyEndpoint() {
   assert.deepEqual(urls,['/api/admin/operations']);assert(document.getElementById('adminPanelInner').innerHTML.includes('发布控制台'));
   assert(document.getElementById('adminPanelInner').innerHTML.includes('App._loadOperations()'));
 }
-function builtInResearchSkillIsTheHealthDefault() {
+function nativeHealthShowsConfigurationWithoutAnExternalExecutor() {
   const {app}=environment();
-  app._adminHealth={ok:true,checks:{},models:[],skills:[{id:'prism-research',status:'ok',path:'builtin/prism-research'},{id:'bottleneck-hunter',status:'missing'}]};
-  const html=app._renderAdminHealth();assert(/<span>默认技能<\/span><strong>正常<\/strong>/.test(html));assert(html.includes('builtin/prism-research'));
+  app._adminHealth={ok:true,checks:{native_core:{status:'ok',engine:'prism-native'},tool_catalog:{status:'ok',count:22},provider_configuration:{status:'ok'}},models:[{id:'synthetic',name:'合成模型',configured:true}]};
+  const html=app._renderAdminHealth();
+  assert(html.includes('Prism Native'));assert(html.includes('22 项'));assert(html.includes('直接 API'));
+  assert(html.includes('配置检查不调用模型'));assert(!/Claude|CLI|默认技能|builtin\//i.test(html));
+  app._adminHealth.checks.native_core.status='error';
+  assert(!/<span>研究运行器<\/span><strong>正常<\/strong>/.test(app._renderAdminHealth()));
 }
 async function stalledRequestHasABoundedDeadline() {
   const {app,timers}=environment();
@@ -121,6 +125,6 @@ async function stalledRequestHasABoundedDeadline() {
   assert.equal(timers.size,1);assert.equal([...timers.values()][0].delay,30000);
 }
 (async()=>{
-  rendersBoundariesAndSafeLinks();validationStagesHaveChineseLabelsWithoutProductionClaims();await adminPermissionClearsSnapshots();await pollsOnlyWhileVisibleWithoutOverlap();await ignoresLateResponsesAfterLeaving();await failuresAndStaleDataStayExplicit();await operationsTabUsesItsOwnReadOnlyEndpoint();builtInResearchSkillIsTheHealthDefault();await stalledRequestHasABoundedDeadline();
+  rendersBoundariesAndSafeLinks();validationStagesHaveChineseLabelsWithoutProductionClaims();await adminPermissionClearsSnapshots();await pollsOnlyWhileVisibleWithoutOverlap();await ignoresLateResponsesAfterLeaving();await failuresAndStaleDataStayExplicit();await operationsTabUsesItsOwnReadOnlyEndpoint();nativeHealthShowsConfigurationWithoutAnExternalExecutor();await stalledRequestHasABoundedDeadline();
   console.log('operations runtime ok: 9 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

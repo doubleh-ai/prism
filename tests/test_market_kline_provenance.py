@@ -283,7 +283,7 @@ async def test_real_protected_http_owned_capability_ledger_and_history_share_met
             db.execute("INSERT INTO conversations(id,username) VALUES(?,?)", [user + "-conv", user])
     owner = runtime.database.create_session("owner")
     other = runtime.database.create_session("other")
-    parent = runtime.capabilities.get_manager().admit("cli")
+    parent = runtime.capabilities.get_manager().admit("agent", persist_required=False)
     request.addfinalizer(parent.release)
     request.addfinalizer(lambda: runtime.capabilities.revoke_run_token("provenance-run"))
     run = runtime.capabilities.issue_run_token("owner", "owner-conv", "provenance-run", parent_lease=parent)

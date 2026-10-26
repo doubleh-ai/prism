@@ -1,8 +1,8 @@
 # Prism API Reference
 
-## Native research chat (v0.21 candidate)
+## Native research chat
 
-The default research chat is Prism's owned runtime. The retained CLI/MCP adapters are compatibility features; native errors never automatically enable them. Implementation and migration limits are in [Native Agent](native-agent-framework.md) and [Project Guide](PROJECT_GUIDE.md).
+Research chat uses Prism's owned direct HTTP runtime. The entire application prohibits Claude Code CLI execution or fallback; external Skills and retired MCP adapters are not execution backends. This reference describes repository source, not an instance's deployment state. Implementation and migration limits are in [Native Agent](native-agent-framework.md) and [Project Guide](PROJECT_GUIDE.md).
 
 - `GET /api/agent/workflows` and `GET /api/agent/tools`: authenticated native method/tool catalogs.
 - `POST /api/agent/chat/stream`: authenticated, CSRF-protected research start. Provide `question` and an existing owned `conv_id`; a stable `request_id` deduplicates the same input. Optional `model` and one `workflow` select the configured model and method. Reusing an identifier with different input returns 409.
@@ -10,12 +10,14 @@ The default research chat is Prism's owned runtime. The retained CLI/MCP adapter
 - `GET /api/agent/runs/{run_id}/stream?after_seq=N`: observe/replay only; this does not start or repeat model work.
 - `POST /api/agent/chat/cancel`: provide owned `conv_id` and optional `run_id`. `cancel_requested` is intent; `stopped` is true only after a terminal state.
 
-SSE frames carry `agent.run_id`, `agent.seq`, `agent.status` and `agent.event`. Readers deduplicate sequence numbers and reconnect with GET. Browser refresh checks owned history before attaching to the existing run. Execution `completed` is distinct from research `unreviewed`; collection and historical reuse do not certify facts. `/api/chat/stream` and `/api/chat/cancel` alias native behavior by default; `PRISM_LEGACY_CHAT_ENABLED=1` explicitly selects the older alias adapter only.
+SSE frames carry `agent.run_id`, `agent.seq`, `agent.status` and `agent.event`. Readers deduplicate sequence numbers and reconnect with GET. Browser refresh checks owned history before attaching to the existing run. Execution `completed` is distinct from research `unreviewed`; collection and historical reuse do not certify facts. `/api/chat/stream` and `/api/chat/cancel` only alias Native behavior. No environment flag enables the old runner. `/api/chat/respond` returns 409 and asks the user to send a new message.
+
+Owned conversation history reads platform SQLite only. `history_migration.status` distinguishes `imported`, `pending_import` and `not_required`; pending import still exposes existing platform messages. The explicit offline importer is not an API or startup job and never restores a CLI runtime dependency. Vibe execution remains disabled with 503; owned saved history remains available.
 
 Endpoints are JSON over HTTP unless a stream or file is documented.
 Authentication is via a session
 cookie (`token`) issued by `/api/login`. The cookie is `HttpOnly`
-and (in production) `Secure`; `SameSite=strict` by default.
+and `Secure` when configured; `SameSite=strict` by default.
 
 ## Feedback (candidate)
 
@@ -97,14 +99,14 @@ check performs `SELECT 1`.
 ```json
 {
   "status": "ready",
-  "version": "v0.19.7",
+  "version": "unknown",
   "deployed_revision": "unknown",
-  "checked_at": 1792540800,
+  "checked_at": 0,
   "tz": "Asia/Shanghai"
 }
 ```
 
-`checked_at` is a Unix timestamp in seconds. The revision is a full
+The example is illustrative, not an observed instance. `checked_at` is a Unix timestamp in seconds. The revision is a full
 40-character hexadecimal commit identifier or `unknown`; missing or
 invalid version metadata is also `unknown`. Unknown deployment identity
 does not imply an unavailable database. Conversely, `ready` does not
@@ -115,12 +117,11 @@ required features. The Docker healthcheck uses this endpoint.
 
 ### `GET /api/admin/health`
 
-Requires an administrator session. Returns the existing on-demand
-diagnostic snapshot, including the database check, CLI version check,
-skill availability, and whether model credentials are configured (not
-their values). The built-in `prism-research` method is required for the
-aggregate result; missing optional legacy methods do not fail it. This
-snapshot is not a real model call or release acceptance test.
+Requires an administrator session. Returns local Native configuration
+checks for the database, Native runtime entry points, tool catalog and
+configured model endpoints/credentials, without their secret values.
+It does not start a model, scan Skills or invoke a CLI. This snapshot is
+not a live integration or release acceptance test.
 
 ### `GET /api/admin/operations`
 
@@ -132,9 +133,8 @@ cached for 180 seconds; failures or stale data must remain visible rather
 than becoming a passing result. No GitHub token is exposed or required by
 the public-repository observer.
 
-The current controller has no production adapter: `can_deploy` and
-`can_rollback` are false, and the local runtime is not verified as
-production. CI and candidate workflow results are not deployment records.
+This observation endpoint cannot authorize a deployment or recovery.
+CI and candidate workflow results are not deployment records.
 GitHub links open the real workflow page; cancellation there requires
 GitHub confirmation and does not roll back any environment. There is no
 deployment, restart, cancellation, or rollback mutation on this endpoint.
@@ -212,7 +212,7 @@ Hard delete — also removes all messages.
 
 ### `PUT /api/convs/{cid}/skill`
 
-Change the active skill for a conversation.
+Change the stored built-in research-method alias for a conversation; this does not load an external Skill.
 
 Body: `{"skill": "serenity"}`
 
@@ -241,11 +241,11 @@ Stream an AI response using Server-Sent Events. A per-run `research` event
 precedes `{"pulse": "start"}`, followed by `text`, `tool`, `think`, `ref`,
 optional `status` and `platform_call` events, and finally `[DONE]`.
 
-Body: `{"question": "...", "skill": "prism-research",
-"conv_id": "...", "model": "minimax-m3", "extra_skills": []}`
+Body: `{"question": "...", "workflow": "prism-research",
+"conv_id": "...", "model": "minimax-m3", "request_id": "stable-request-id"}`
 
 - 200: `Content-Type: text/event-stream`
-- 400: empty question.
+- 422: empty question.
 - 422: malformed body.
 - 429: rate-limited.
 
@@ -268,8 +268,8 @@ the latest response.
 `{"platform_call": record}` reports actual platform tool execution. Updates
 with the same `call_id` replace the previous running state. Persisted chunks
 use `{"t":"platform_call","call":record}`. `{"status":"..."}` carries visible
-operational notices, including fallback from a missing external skill to
-the built-in `prism-research` method; it is not model reasoning.
+operational notices; it is not model reasoning. Methods are versioned built-in
+prompts, with no external Skill loading or execution fallback.
 
 ### Platform capabilities and call history
 
@@ -278,7 +278,7 @@ only records owned by the current user.
 
 | Endpoint | Result |
 |---|---|
-| `GET /api/capabilities` | `{"capabilities":[...]}` — actual Agent tool catalog |
+| `GET /api/capabilities` | `{"capabilities":[...]}` — platform catalog; the Agent allowlist is `/api/agent/tools` |
 | `GET /api/convs/{conv_id}/capability-calls` | `{"calls":[record]}` for an owned conversation |
 | `GET /api/capability-calls?view=market&limit=20` | `{"calls":[record]}` filtered by workspace; `view` is optional |
 
@@ -448,7 +448,7 @@ Results are cached per-ticker for 60s.
 
 ### `GET /api/skills`
 
-- 200: `[{"id": "...", "name": "...", "shortcut": "..."}]`
+Compatibility alias for the built-in Native workflow catalog. It does not scan disk or enumerate external Skills; use `GET /api/agent/workflows` for new clients.
 
 ### `POST /api/explain-term`
 

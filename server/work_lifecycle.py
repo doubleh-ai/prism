@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 KINDS = frozenset(
-    {"request", "agent", "analysis", "scan", "market", "cli", "auxiliary", "capability", "vibe", "diagnostic"}
+    {"request", "agent", "analysis", "scan", "market", "auxiliary", "capability", "vibe", "diagnostic"}
 )
 DURABLE_KINDS = frozenset({"agent", "analysis", "scan", "capability", "vibe"})
 OS_FRESH_NS = 10_000_000_000

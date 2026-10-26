@@ -1,10 +1,6 @@
 """Synthetic/offline market probe regressions; these never certify live I/O."""
 
-import datetime as dt
-import hashlib
 import importlib
-import json
-import time
 import types
 import urllib.request
 
@@ -136,7 +132,7 @@ def test_profile_network_allowlist_and_filesystem_guards(tmp_path):
     assert "(deny network*)" in value
     assert '(remote ip "1.1.1.1:443")' in value and '(remote ip "8.8.4.4:443")' in value
     assert "localhost:*" not in value and 'remote tcp "*:*"' not in value
-    assert "(deny process-fork)" in value and "/Users/huayu/Backups" in value
+    assert "(deny process-fork)" in value and "/Backups" in value
     assert '(regex #"(^|/)[.]env($|[.])")' in value
 
 
@@ -169,7 +165,12 @@ def test_error_diagnostics_only_fixed_categories(error, expected):
     assert probe.safe_error(error) == expected
 
 
-async def test_real_candidate_parser_chain_api_capability_and_cache_with_synthetic_transport(monkeypatch):
+async def test_retired_cli_parent_probe_is_rejected_before_external_io(monkeypatch):
+    # This old probe remains byte-for-byte frozen for historical gate regressions.
+    # It cannot qualify a Native candidate; the real Native HTTP/capability market
+    # coverage lives in test_market_kline_provenance.py instead.
+    from server.work_lifecycle import LifecycleError
+
     modules = {
         name: importlib.import_module(name)
         for name in (
@@ -184,58 +185,12 @@ async def test_real_candidate_parser_chain_api_capability_and_cache_with_synthet
             "httpx",
         )
     }
-    fields = [""] * 40
-    fields[0:7] = ["51", "public synthetic", "600519", "102", "100", "101", "200"]
-    market_tz = dt.timezone(dt.timedelta(hours=8))
-    fields[30] = dt.datetime.fromtimestamp(time.time() - 86400, market_tz).strftime("%Y%m%d%H%M%S")
-    fields[33], fields[34], fields[37] = "103", "99", "20000"
-    quote_body = ('v_sh600519="' + "~".join(fields) + '";').encode("gbk")
-    kline_body = json.dumps(
-        [
-            {"day": "2026-10-19", "open": "100", "high": "105", "low": "99", "close": "102", "volume": "200"},
-            {
-                "day": "2026-10-20",
-                "open": "102",
-                "high": "106",
-                "low": "101",
-                "close": "104",
-                "volume": "300",
-            },
-        ]
-    ).encode()
-
-    class Connection:
-        def __init__(self, host, **kwargs):
-            self.host = host
-
-        def request(self, method, target, headers):
-            assert method == "GET"
-
-        def getresponse(self):
-            body = quote_body if self.host == "qt.gtimg.cn" else kline_body
-            return types.SimpleNamespace(
-                status=200, getheader=lambda *args: "identity", read=lambda count: body
-            )
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(probe.http.client, "HTTPSConnection", Connection)
-    transport = probe.FixedTransport(pins(), connector=lambda *args: object())
-    monkeypatch.setattr(urllib.request, "urlopen", transport.urlopen)
-    result = await probe.exercise(modules, transport)
-    # This local runtime now requires authentication and includes provenance.
-    # Existing sealed f089/Linux receipts retain their original failed scope.
-    assert result["checks"]["unauthenticated_api_denied"] is True
-    assert all(value for key, value in result["checks"].items() if key != "unauthenticated_api_denied")
-    assert result["request_counts"] == {"quote": 1, "kline": 1}
-    assert result["https"]["quote"]["response_sha256"] == hashlib.sha256(quote_body).hexdigest()
-    assert result["https"]["kline"]["response_sha256"] == hashlib.sha256(kline_body).hexdigest()
-    assert result["kline_provenance_missing"] == []
-    assert result["failure_injection_disclosed"] is True
-    cached = result["cached_result_sha256"]
-    assert set(cached) == {"quote", "kline"}
-    assert all(
-        isinstance(value, str) and len(value) == 64 and set(value) <= set("0123456789abcdef")
-        for value in cached.values()
-    )
+    factory = modules["server.market.factory"]
+    previous_chain = factory._chain
+    transport = probe.FixedTransport(pins(), connector=lambda *args: pytest.fail("no external I/O"))
+    try:
+        with pytest.raises(LifecycleError, match="work_kind_rejected"):
+            await probe.exercise(modules, transport)
+    finally:
+        factory._chain = previous_chain
+    assert transport.counts == {"quote": 0, "kline": 0}

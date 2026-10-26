@@ -20,7 +20,7 @@ def run(test_user):
     with get_db() as db:
         db.execute("INSERT INTO conversations(id,username) VALUES('bound-conv',?)", [user])
     manager = Manager()
-    parent = manager.admit("cli")
+    parent = manager.admit("agent", persist_required=False)
     token = cap.issue_run_token(user, "bound-conv", "bound-run", parent_lease=parent)
     context = {"run_id": "bound-run", "username": user, "conv_id": "bound-conv"}
     yield SimpleNamespace(manager=manager, parent=parent, token=token, context=context)
@@ -38,7 +38,7 @@ async def test_fence_allows_existing_authenticated_run_only_and_no_db_grant_afte
     manager = run.manager
     manager.begin_drain(manager.ticket())
     with pytest.raises(LifecycleError):
-        manager.admit("cli")
+        manager.admit("agent", persist_required=False)
     app = FastAPI()
     app.include_router(cap.router)
     headers = {"Authorization": "Bearer " + run.token}
@@ -158,7 +158,7 @@ def test_revoke_and_expiry_remove_memory_binding_without_touching_parent_work(ru
     with pytest.raises(HTTPException):
         cap._run_parent(run.context)
     assert "bound-run" not in cap._run_bindings
-    assert run.manager.observe()["leases"]["cli"] == 1
+    assert run.manager.observe()["leases"]["agent"] == 1
     cap.revoke_run_token("bound-run")
     with get_db() as db:
         assert db.execute("SELECT revoked FROM capability_runs WHERE run_id='bound-run'").fetchone()[0] == 1

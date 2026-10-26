@@ -237,30 +237,29 @@ Object.assign(App, {
     if (!h) return '';
     var checks = h.checks || {};
     var db = checks.database || {};
-    var claude = checks.claude_cli || {};
-    var skills = h.skills || [];
+    var native = checks.native_core || {};
+    var tools = checks.tool_catalog || {};
+    var provider = checks.provider_configuration || {};
     var models = h.models || [];
-    var defaultSkill = skills.filter(function(s){ return s.id === 'prism-research'; })[0] || {};
     var configuredModels = models.filter(function(m){ return !!m.configured; }).length;
     var cards = [
       this._adminStatusPill(!!h.ok, '总览', (h.version || '-') + ' · ' + (h.deployed_revision || '未部署')),
       this._adminStatusPill(db.status === 'ok', '数据库', db.latency_ms != null ? db.latency_ms + ' ms' : (db.error || '-')),
-      this._adminStatusPill(claude.status === 'ok', 'Claude CLI', claude.version || claude.status || '-'),
-      this._adminStatusPill(defaultSkill.status === 'ok', '默认技能', defaultSkill.path || defaultSkill.dir || '-'),
-      this._adminStatusPill(configuredModels > 0, '模型 Key', configuredModels + ' / ' + models.length + ' 已配置'),
+      this._adminStatusPill(native.status === 'ok', '研究运行器', 'Prism Native'),
+      this._adminStatusPill(tools.status === 'ok', '平台能力', (tools.count || 0) + ' 项'),
+      this._adminStatusPill(provider.status === 'ok', '模型配置', configuredModels + ' / ' + models.length + ' 已配置'),
     ].join('');
-    var skillRows = skills.map(function(s) {
+    var modelRows = models.map(function(m) {
       return '<tr>' +
-        '<td>' + esc(s.id) + '</td>' +
-        '<td><span class="admin-pill ' + (s.status === 'ok' ? 'ok' : 'off') + '">' + esc(s.status === 'ok' ? '正常' : '缺失') + '</span></td>' +
-        '<td>' + esc(s.has_claude_md ? '有' : '无') + '</td>' +
-        '<td title="' + escAttr(s.path || (s.checked_paths || []).join(' | ')) + '">' + esc(s.path || s.dir || '-') + '</td>' +
+        '<td>' + esc(m.name || m.id) + '</td>' +
+        '<td><span class="admin-pill ' + (m.configured ? 'ok' : 'off') + '">' + esc(m.configured ? '已配置' : '未配置') + '</span></td>' +
+        '<td>直接 API</td>' +
       '</tr>';
     }).join('');
     return '<section class="admin-health">' +
-      '<div class="admin-section-title">系统健康</div>' +
+      '<div class="admin-section-title">系统健康</div><p>配置检查不调用模型；研究质量与真实接入另行验证。</p>' +
       '<div class="admin-health-grid">' + cards + '</div>' +
-      '<div class="admin-table-wrap admin-health-table"><table class="admin-table"><thead><tr><th style="width:18%">技能</th><th style="width:12%">状态</th><th style="width:12%">CLAUDE.md</th><th>路径</th></tr></thead><tbody>' + skillRows + '</tbody></table></div>' +
+      '<div class="admin-table-wrap admin-health-table"><table class="admin-table"><thead><tr><th>模型</th><th>配置</th><th>接入</th></tr></thead><tbody>' + modelRows + '</tbody></table></div>' +
     '</section>';
   },
 

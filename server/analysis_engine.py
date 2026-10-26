@@ -1016,10 +1016,11 @@ def _node_snippet(state_update, limit=500):
 
 
 def _parse_json_lenient(raw: str):
-    """Parse JSON tolerantly. ``claude -p --output-format json`` returns an
-    envelope like ``{"type":"result","result":"<actual output>",...}``; when
-    our prompt asks for JSON, that inner ``result`` is itself JSON — unwrap it.
-    Also tolerates raw JSON and JSON embedded in prose."""
+    """Parse current JSON and historical report envelopes as data only.
+
+    Native auxiliary tasks return a single object. The legacy envelope reader
+    keeps already-saved reports readable without executing a legacy engine.
+    """
     import json
     import re
 
@@ -1033,7 +1034,7 @@ def _parse_json_lenient(raw: str):
     if isinstance(data, dict):
         inner = data.get("result")
         if isinstance(inner, str):
-            # Unwrap the claude envelope's result field.
+            # Unwrap a historical result envelope.
             try:
                 return json.loads(inner)
             except Exception:

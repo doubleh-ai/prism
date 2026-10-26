@@ -21,7 +21,7 @@ def scoped_run(test_user):
         db.execute("INSERT INTO users(username,password_hash) VALUES('other','unused-test-hash')")
         db.execute("INSERT INTO conversations(id,username) VALUES('other-conv','other')")
     manager = Manager()
-    parent = manager.admit("cli")
+    parent = manager.admit("agent", persist_required=False)
     token = cap.issue_run_token(user, "owned-conv", "test-run", parent_lease=parent)
     yield {
         "username": user,

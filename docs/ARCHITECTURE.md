@@ -1,6 +1,6 @@
 # Prism 架构与代码地图
 
-本文描述当前 Native Agent 候选源码。生产是否运行它，以 [README 状态表](../README.md#版本与上线状态)和实际发布记录为准。预算、协议细节见 [Native Agent v1](native-agent-framework.md)；产品使用见 [项目指南](PROJECT_GUIDE.md)。
+本文描述仓库中的 Native Agent 源码，不记录特定实例的部署状态。版本与部署的区别见 [README](../README.md#版本与上线状态)。预算、协议细节见 [Native Agent v1](native-agent-framework.md)；产品使用见 [项目指南](PROJECT_GUIDE.md)。
 
 ## 一次研究经过哪些边界
 
@@ -25,7 +25,21 @@ flowchart TD
     L -.-> T
 ```
 
-这条链路没有 CLI 子进程、外部 Skill、MCP 客户端或应用对自身的回环 HTTP。模型可以提出工具请求，实际执行权仍由服务端 schema、白名单、账号与本轮任务控制。
+整个应用禁止依赖或回退到 Claude Code CLI。上图中的原生研究通过进程内工具调度，不读取外部 Skill，不使用 MCP 桥或应用对自身的回环 HTTP。模型可以提出工具请求，实际执行权仍由服务端 schema、白名单、账号与本轮任务控制。
+
+### 应用运行组件与入口
+
+| 组件 | 入口 | 当前执行方式 |
+|---|---|---|
+| 研究对话 | `server/agent/api.py` → `runtime.py` | 直接 HTTP 模型协议与有界工具循环 |
+| 旧对话 URL | `server/main.py`、`server/chat.py` | 只映射 Native 开始/停止；旧交互回应返回 409，无旧运行器开关 |
+| 辅助模型 | `server/services/auxiliary_model.py` | 无状态直接 HTTP；无工具、会话、子进程、重试或备用后端 |
+| 历史对话 | `server/conversations.py` → `legacy_history.py` | 只读平台 SQLite 中的公开历史；离线导入单独执行 |
+| Astock / 行情 / 扫描 | `analysis_engine.py`、`market/`、`indicators/scanner.py` | 专用 Python 服务或可选第三方 Python 引擎，不是 Claude Code |
+| Vibe | `server/vibe.py` | 新研究与追问固定 503，仅保留账号内已保存历史 |
+| 健康观察 | `server/health.py` | 检查 Native 入口、目录与本地模型配置；不调用模型或 CLI |
+
+提供方采用 Anthropic 兼容 Messages 协议，只表示 HTTP 消息与流事件格式；不依赖 Claude Code。现有 DeepSeek / MiniMax 模型配置继续使用。
 
 ## 控制面：开始、运行、观察、停止
 
@@ -52,7 +66,7 @@ flowchart TD
 
 取消请求写入所属任务的取消意图。运行器停止模型等待，等待已经归属的资源收尾并保存结果，然后通过 `Lease.finish` 与终态事件确认完成。网页不能把取消 API 的受理响应直接当成“底层已经停止”。
 
-[`work_lifecycle.py`](../server/work_lifecycle.py) 管理 `agent`、`analysis`、`scan`、`market`、`cli`、`auxiliary`、`capability` 等生产者；`work_adapters.py` 把 HTTP 和业务工作绑定到真实归属。取消异步等待不会凭空终止线程或清空计数。维护排空必须包括原生 Agent 及其派生工作，详见 [任务归属与排空](work-lifecycle.md)。
+[`work_lifecycle.py`](../server/work_lifecycle.py) 管理 `request`、`agent`、`analysis`、`scan`、`market`、`auxiliary`、`capability`、`diagnostic` 等生产者；`work_adapters.py` 把 HTTP 和业务工作绑定到真实归属。取消异步等待不会凭空终止线程或清空计数。维护排空必须包括原生 Agent 及其派生工作，详见 [任务归属与排空](work-lifecycle.md)。
 
 ## 数据面：执行、证据、报告分别保存
 
@@ -61,6 +75,7 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 | 数据 | 主要位置 / 模块 | 它证明什么 |
 |---|---|---|
 | 用户、会话、消息 | `users`、`conversations`、`messages`；`auth.py` / `conversations.py` | 归属、公开对话与回收站状态 |
+| 已导入的旧公开历史 | `legacy_conversation_history`；`legacy_history.py` | 账号内公开消息、真实用户回合数及源指纹；服务时不打开外部历史文件 |
 | 原生运行 | `native_agent_runs`；`agent/store.py` | 请求、执行状态、取消意图与有限摘要 |
 | 原生事件 | `native_agent_events` | 该任务已持久化的公开顺序事件及用量状态，用于原样回放 |
 | 对话关联 | `native_agent_dialogues` | 原生运行与用户/助手消息及历史边界的联系 |
@@ -86,7 +101,7 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 
 | 代码 | 修改它时重点检查 |
 |---|---|
-| `server/main.py` / `config.py` | 路由组装、初始化会写数据库、配置与明确兼容开关 |
+| `server/main.py` / `config.py` | Native 路由组装、初始化会写数据库、模型与数据配置 |
 | `server/agent/api.py` / `store.py` | 账号、幂等、会话互斥、原子认领、取消、事件序号与终态 |
 | `server/agent/runtime.py` | 全轮预算、上下文、模型/工具等待、资源完成、最终持久化 |
 | `server/agent/provider.py` | 分帧、工具参数、停止原因、用量完整性、提供方地址和超时 |
@@ -99,7 +114,9 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 | `static/js/app.workbench.js` | 能力目录、调用卡片、打开原结果而非重跑 |
 | `static/js/app.industry.js` | 产业关系页面、主题切换和证据边界 |
 
-旧 `server/chat.py`、`server/services/claude_runner.py`、`skills/`、`server/capabilities_mcp.py` 仍服务兼容边界，不是新研究默认入口。`server/analysis_engine.py` 和 Vibe 相关代码是专用工作区的旧引擎，不能因此推断 Native 对话已依赖或替代它们。
+`server/services/claude_runner.py`、根目录 `CLAUDE.md` 与捆绑 `skills/` 已移除。`server/chat.py` 只保留 Native 路由名兼容；仓库保留的旧 MCP 协议代码或运维探针不再是应用执行入口，也不能重新启用 CLI。Astock 的第三方 Python 引擎尚未变成自有 Agent；Vibe 执行明确禁用，不能宣传为已迁移或可用。
+
+旧 JSONL 由 `scripts/import_legacy_history.py` 显式导入操作员预先准备的数据库副本与历史目录副本。导入仅保留公开问答、回合数和源指纹，拒绝不安全路径与源冲突，保持现有 SQL 消息和 Native 历史锚点。应用启动与历史请求不会运行导入器，也不再读取外部 CLI 的项目或设置目录。未迁入的会话返回 `pending_import`，不假装历史已完整恢复。
 
 ## 增加能力的最小路径
 
@@ -110,7 +127,7 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 5. **贯通页面与记录**：复用 `call_id`、`run_id`、`conv_id`，让卡片打开当时结果；刷新、重放、跨会话导航都不能重新执行动作。
 6. **验证失败路径**：模拟提供方与资料，覆盖越权、同请求复用、冲突、断线、真实停止、资源收尾、缺失日期和未知用量。新增付费或外部集成另做有限真实验收。
 
-旧 Astock / Vibe / 扫描启动等能力必须按这条路径逐项迁移。仅添加名称或在工具背后调用旧 CLI，会使声明的原生边界失真。
+Astock / Vibe / 扫描启动等能力必须按这条路径逐项接入。新增能力不得调用 Claude Code CLI，也不得在模型、工具或提供方失败后切换到旧执行链。
 
 ## 运行与发布是另一条边界
 

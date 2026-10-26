@@ -450,6 +450,9 @@ def init_db():
                 retired_at INTEGER NOT NULL
             );
         """)
+        from .legacy_history import init_legacy_history_db
+
+        init_legacy_history_db(conn)
         # Preserve legacy orphaned data without assigning it to a newly created
         # account with the same name. No historical records are deleted.
         for table in (
@@ -466,6 +469,7 @@ def init_db():
             "research_runs",
             "native_agent_runs",
             "native_agent_dialogues",
+            "legacy_conversation_history",
         ):
             if not conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]

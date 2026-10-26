@@ -258,7 +258,7 @@ async def test_scope_capability_uses_token_run_and_rejects_scope_override(test_u
     with get_db() as db:
         db.execute("INSERT INTO conversations(id,username) VALUES('scope-conv',?)", [user])
     run("scope-run", user=user, conv="scope-conv")
-    parent = cap.get_manager().admit("cli")
+    parent = cap.get_manager().admit("agent", persist_required=False)
     request.addfinalizer(parent.release)
     request.addfinalizer(lambda: cap.revoke_run_token("scope-run"))
     token = cap.issue_run_token(user, "scope-conv", "scope-run", parent_lease=parent)
@@ -413,125 +413,6 @@ def test_relations_are_mechanism_candidates_not_supply_facts():
         record_relations("alice", "round-two", [candidate])
 
 
-@pytest.mark.asyncio
-async def test_chat_ingests_real_event_chain_and_saves_each_run(client, auth_cookies, test_user, monkeypatch):
-    from server import chat
-    from server.database import get_db
-
-    with get_db() as db:
-        db.execute(
-            "INSERT INTO conversations(id,username,title,skill) VALUES('ledger-chat',?,'新对话','prism-research')",
-            [test_user["username"]],
-        )
-
-    async def engine(*args, **kwargs):
-        run_id = kwargs["research_context"]["run_id"]
-        yield {
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "native-fetch",
-                        "name": "WebFetch",
-                        "input": {"url": "https://example.test/report"},
-                    }
-                ]
-            },
-        }
-        yield {
-            "type": "user",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "native-fetch",
-                        "content": "2025 年产能为 120 万吨。",
-                    }
-                ]
-            },
-        }
-        ledger = read_research_run(test_user["username"], run_id)
-        record_claims(test_user["username"], run_id, [fact(ledger["passages"][0]["passage_id"])])
-        yield {
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "text", "text": "## 报告已交付\n合成公司的年产能为120万吨，尚待原文复核。"}
-                ]
-            },
-        }
-
-    monkeypatch.setattr(chat, "run_claude_stream", engine)
-    run_ids = []
-    for question in ("合成年产能", "追问有效期间"):
-        response = await client.post(
-            "/api/chat/stream",
-            cookies=auth_cookies,
-            json={"conv_id": "ledger-chat", "question": question, "skill": "prism-research"},
-        )
-        assert response.status_code == 200
-        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
-        research = [e["research"] for e in events if "research" in e][-1]
-        assert research["status"] == "partial"
-        assert [e["ref"] for e in events if "ref" in e][0]["document_id"]
-        run_ids.append(research["run_id"])
-    assert len(set(run_ids)) == 2
-    with get_db() as db:
-        reports = db.execute(
-            "SELECT source_id FROM saved_reports WHERE username=? AND source='chat'", [test_user["username"]]
-        ).fetchall()
-    assert {r[0] for r in reports} == set(run_ids)
-    response = await client.get("/api/research/runs/" + run_ids[0], cookies=auth_cookies)
-    assert response.status_code == 200
-    assert response.json()["claims"][0]["semantic_status"] == "unreviewed"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model,expected", [("unlisted-model", 422), ("unconfigured", 503)])
-async def test_chat_rejects_unavailable_models_before_side_effects(
-    client, auth_cookies, test_user, monkeypatch, model, expected
-):
-    from server import chat
-    from server.database import get_db
-
-    monkeypatch.setattr(chat, "MODELS", {"unconfigured": {"api_key": ""}})
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError("No model should start")
-        yield
-
-    monkeypatch.setattr(chat, "run_claude_stream", forbidden)
-    response = await client.post(
-        "/api/chat/stream",
-        cookies=auth_cookies,
-        json={"question": "合成测试", "model": model, "skill": "prism-research"},
-    )
-    assert response.status_code == expected
-    assert "api_key" not in response.text
-    with get_db() as db:
-        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
-
-
-@pytest.mark.asyncio
-async def test_empty_engine_preserves_failed_fixed_research(client, auth_cookies, monkeypatch):
-    from server import chat
-
-    async def engine(*args, **kwargs):
-        yield {"type": "error", "message": "合成引擎失败"}
-
-    monkeypatch.setattr(chat, "run_claude_stream", engine)
-    response = await client.post(
-        "/api/chat/stream",
-        cookies=auth_cookies,
-        json={"question": "合成测试", "skill": "prism-research"},
-    )
-    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
-    research = [e["research"] for e in events if "research" in e][-1]
-    assert research["status"] != "completed"
-    assert "engine_failed" in research["gaps"]
-
-
 def test_inference_missing_failure_conditions_and_date_mismatch_stay_partial():
     run()
     pid = receipt()[0]["passage_ids"][0]
@@ -558,40 +439,6 @@ def test_original_unknown_or_imprecise_dates_are_not_fabricated():
             ),
         )
     assert all(d["published_at"] is None for d in read_research_run("alice", "round-one")["documents"])
-
-
-@pytest.mark.asyncio
-async def test_disconnect_closes_engine_and_freezes_interrupted_revision(monkeypatch):
-    from server import chat
-    from server.research.ledger import list_research_runs
-
-    closed = []
-
-    class Request:
-        async def json(self):
-            return {"question": "中途断线", "skill": "prism-research"}
-
-    async def engine(*args, **kwargs):
-        try:
-            yield {"type": "assistant", "message": {"content": [{"type": "text", "text": "已取得的部分"}]}}
-            yield {"type": "heartbeat"}
-        finally:
-            closed.append(True)
-
-    monkeypatch.setattr(chat, "require_auth", lambda request: "alice")
-    monkeypatch.setattr(chat, "run_claude_stream", engine)
-    response = await chat.chat_stream(Request())
-    events = response.body_iterator
-    await anext(events)  # Clock
-    await anext(events)  # Start
-    await anext(events)  # Engine text
-    await events.aclose()
-    assert closed == [True]
-    saved = list_research_runs("alice")[0]
-    assert saved["status"] == "cancelled"
-    detail = read_research_run("alice", saved["run_id"])
-    assert detail["report_revisions"][0]["narrative"] == "已取得的部分"
-    assert "interrupted" in saved["gaps"]
 
 
 @pytest.mark.asyncio
@@ -653,58 +500,3 @@ def test_explicit_single_worker_restart_recovery_preserves_receipts_and_old_revi
     assert len(after["report_revisions"]) == 1
     assert read_research_run("alice", "finished")["report_revisions"] == [old]
     assert recover_interrupted_runs() == 0
-
-
-@pytest.mark.asyncio
-async def test_explicit_engine_cancellation_is_not_misreported_as_failure(client, auth_cookies, monkeypatch):
-    from server import chat
-
-    async def engine(*args, **kwargs):
-        yield {"type": "assistant", "message": {"content": [{"type": "text", "text": "已取得部分线索"}]}}
-        yield {"type": "cancelled", "message": "用户已取消本轮研究"}
-
-    monkeypatch.setattr(chat, "run_claude_stream", engine)
-    response = await client.post(
-        "/api/chat/stream",
-        cookies=auth_cookies,
-        json={"question": "中途取消", "skill": "prism-research"},
-    )
-    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
-    research = [e["research"] for e in events if "research" in e][-1]
-    assert research["status"] == "cancelled"
-    assert "engine_failed" not in research["gaps"]
-    assert "用户已取消" in response.text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("terminal", ["success", "error", "missing"])
-async def test_delivery_notice_distinguishes_structure_gap_from_engine_failure(
-    client, auth_cookies, monkeypatch, terminal
-):
-    from server import chat
-
-    async def engine(*args, **kwargs):
-        yield {"type": "assistant", "message": {"content": [{"type": "text", "text": "这是一段正常说明。"}]}}
-        if terminal != "missing":
-            yield {
-                "type": "result",
-                "subtype": "success" if terminal == "success" else "error_max_turns",
-                "is_error": terminal == "error",
-            }
-
-    monkeypatch.setattr(chat, "run_claude_stream", engine)
-    response = await client.post(
-        "/api/chat/stream",
-        cookies=auth_cookies,
-        json={"question": "说明研究边界", "skill": "prism-research"},
-    )
-    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
-    note = next(e["text"] for e in events if e.get("delivery"))
-    assert note.startswith("\n\n**本轮尚未形成完整可核查报告**")
-    assert ">" not in note
-    assert "形成最终结论前结束" not in note
-    research = [e["research"] for e in events if "research" in e][-1]
-    assert research["status"] == "partial"
-    assert ("engine_failed" in research["gaps"]) is (terminal != "success")
-    if terminal == "success":
-        assert "研究引擎" not in note

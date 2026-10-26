@@ -1,5 +1,10 @@
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -79,21 +84,53 @@ def test_chat_report_list_can_open_saved_snapshots():
     assert "App.openSavedReportFromChat" in chat_js
 
 
-def test_report_detail_marks_interrupted_skill_runs():
-    """Interrupted research belongs in a collapsed process, not final decision."""
-    from server.chat import _prepare_chat_report
+def test_report_detail_preserves_and_renders_interrupted_legacy_runs(test_user):
+    """The shipped reader keeps historical incomplete snapshots visibly incomplete."""
+    from server.reports import save_report_snapshot
 
-    text, status = _prepare_chat_report("先读取资料，然后重做批量:", "serenity-bottleneck-hunter")
-    assert status == "incomplete"
-    assert text.endswith(":")
-
-    delivered, status = _prepare_chat_report(
-        "先读取资料\n\n## 报告已交付\n\n**核心发现**：上游仍有验证空间。",
-        "serenity-bottleneck-hunter",
+    interrupted = save_report_snapshot(
+        test_user["username"],
+        {
+            "source": "chat",
+            "source_id": "legacy-interrupted",
+            "report": {
+                "status": "incomplete",
+                "skill": "serenity-bottleneck-hunter",
+                "final_decision": "先读取资料，然后重做批量:",
+            },
+        },
     )
-    assert status == "complete"
-    assert delivered.startswith("## 报告已交付")
-    assert "先读取资料" not in delivered
+    assert interrupted["report"]["status"] == "incomplete"
+    assert interrupted["report"]["final_decision"].endswith(":")
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const context = {App: {}, window: {}};
+vm.runInNewContext(fs.readFileSync('static/js/app.reports.js', 'utf8'), context);
+const app = context.App;
+const saved = JSON.parse(process.argv[1]);
+const report = saved.report;
+assert.equal(app._reportIsIncompleteChat(saved, report, report.final_decision, ''), true);
+assert.equal(app._reportIsIncompleteChat({source:'chat'}, {skill:'historical'}, 'Interrupted API Error', ''), true);
+const draft = '先读取资料\n\n## 报告已交付\n\n**核心发现**：上游仍有验证空间。';
+const delivered = app._reportDeliveredText(draft);
+assert.ok(delivered.startsWith('## 报告已交付'));
+assert.equal(delivered.includes('先读取资料'), false);
+assert.equal(app._reportIsIncompleteChat({source:'chat'}, {skill:'historical'}, draft, delivered), false);
+assert.equal(app._reportIsIncompleteChat({source:'chat'}, {status:'complete'}, '完成答案', ''), false);
+"""
+    result = subprocess.run(
+        [node, "-e", script, json.dumps(interrupted, ensure_ascii=False)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_report_detail_theme_and_incomplete_state_contract():

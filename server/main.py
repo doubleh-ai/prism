@@ -25,7 +25,6 @@ from .auth import hash_password, is_admin_user, require_admin, require_auth, ver
 from .auth import login as auth_login
 from .auth import logout as auth_logout
 from .capabilities import router as capabilities_router
-from .chat import chat_cancel, chat_respond, chat_stream
 from .config import (
     CORS_ALLOW_CREDENTIALS,
     CORS_ORIGINS,
@@ -33,7 +32,6 @@ from .config import (
     LOG_FILE,
     MODELS,
     RATE_EXPLAIN_PER_MIN,
-    SKILL_MAP,
     STATIC_DIR,
     TEMPLATE_DIR,
 )
@@ -565,31 +563,25 @@ async def api_models():
 
 @app.get("/api/skills")
 async def api_skills():
-    return [{"id": k, "name": v["name"], "shortcut": "/" + k[:2]} for k, v in SKILL_MAP.items()]
+    from .agent.prompts import workflow_catalog
+
+    return workflow_catalog()
 
 
 @app.post("/api/chat/stream")
 async def api_chat_stream(request: Request):
-    from . import config
-
-    return await (chat_stream(request) if config.LEGACY_CHAT_ENABLED else native_chat_stream(request))
+    return await native_chat_stream(request)
 
 
 @app.post("/api/chat/respond")
 async def api_chat_respond(request: Request):
-    from . import config
-
-    if not config.LEGACY_CHAT_ENABLED:
-        require_auth(request)
-        return JSONResponse({"error": "请在当前对话中发送补充信息，继续本次研究"}, status_code=409)
-    return await chat_respond(request)
+    require_auth(request)
+    return JSONResponse({"error": "请在当前对话中发送补充信息，继续本次研究"}, status_code=409)
 
 
 @app.post("/api/chat/cancel")
 async def api_chat_cancel(request: Request):
-    from . import config
-
-    return await (chat_cancel(request) if config.LEGACY_CHAT_ENABLED else native_chat_cancel(request))
+    return await native_chat_cancel(request)
 
 
 # ── Market data (v0.6) ──
@@ -685,7 +677,7 @@ async def api_explain_term(request: Request):
         from .services.auxiliary_model import run_text_async
 
         explanation = await run_text_async(prompt, timeout=15)
-        # Filter out common prefixes Claude adds
+        # Remove optional conversational prefixes from the direct model response
         for prefix in ["好的", "以下是", "这是", "解释：", "答案："]:
             if explanation.startswith(prefix):
                 explanation = explanation[len(prefix) :].strip()

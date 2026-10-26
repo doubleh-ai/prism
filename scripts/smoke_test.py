@@ -1,49 +1,59 @@
 #!/usr/bin/env python3
-"""快速自测——每次部署前跑"""
-import subprocess, sys, json, time, os
+"""Read-only basic readiness and local assets; never a release acceptance gate."""
 
-BASE = "http://127.0.0.1:8088"
-OK, FAIL = 0, 0
+from __future__ import annotations
 
-def t(name, cond):
-    global OK, FAIL
-    if cond:
-        OK += 1; print(f"  ✅ {name}")
-    else:
-        FAIL += 1; print(f"  ❌ {name}")
-
-print("=== 自测 ===")
-
-# 1. Service alive
-r = subprocess.run(["curl","-s","-o","/dev/null","-w","%{http_code}",f"{BASE}/login"],
-                   capture_output=True, text=True, timeout=5)
-t("Service running", r.stdout.strip() == "200")
-
-# 2. Login
-r = subprocess.run(["curl","-s","-X","POST",f"{BASE}/api/login",
-    "-H","Content-Type: application/json",
-    "-d",'{"username":"test","password":"test8888"}'],
-    capture_output=True, text=True, timeout=5)
-try: d = json.loads(r.stdout); user = d.get("user",""); t("Login OK", user == "test")
-except: t("Login OK", False)
-
-# 3. Chat SSE
-r = subprocess.run(["curl","-s","-N","-X","POST",f"{BASE}/api/chat/stream",
-    "-H","Content-Type: application/json",
-    "-d",'{"question":"用一句话解释PE","skill":"bottleneck-hunter"}',
-    "-b","token=fake_auth_bypass"],  # won't work without cookie but still checks endpoint
-    capture_output=True, text=True, timeout=5)
-t("Chat endpoint reachable", "error" not in r.stdout.lower()[:100])
-
-# 4. Claude CLI
-claude_bin = os.path.expanduser("~/.npm-global/bin/claude")
-r = subprocess.run([claude_bin,"--version"], capture_output=True, text=True, timeout=5)
-t("Claude CLI", r.returncode == 0)
-
-# 5. Templates
+import json
 import os
-for f in ["templates/login.html","templates/app.html","static/css/app.css","static/js/app.js"]:
-    t(f"File {f}", os.path.exists(f"/home/ubuntu/stock-analyzer/{f}"))
+import re
+from pathlib import Path
+from urllib.request import urlopen
 
-print(f"\n  {OK}/{(OK+FAIL)} passed")
-sys.exit(0 if FAIL == 0 else 1)
+ROOT = Path(__file__).resolve().parents[1]
+ASSETS = (
+    "templates/login.html",
+    "templates/app.html",
+    "static/css/app.css",
+    "static/js/app.core.js",
+)
+
+
+def check_readiness(base: str, expected_revision: str = "") -> bool:
+    """Observe the running service; no login, account writes or model request."""
+    if expected_revision and re.fullmatch(r"[a-fA-F0-9]{40}", expected_revision) is None:
+        return False
+    try:
+        with urlopen(base.rstrip("/") + "/health/ready", timeout=5) as response:
+            if response.status != 200:
+                return False
+            body = response.read(65537)
+        if len(body) > 65536:
+            return False
+        payload = json.loads(body)
+        if not isinstance(payload, dict) or payload.get("status") != "ready":
+            return False
+        revision = payload.get("deployed_revision")
+        if revision != "unknown" and not (
+            isinstance(revision, str) and re.fullmatch(r"[a-f0-9]{40}", revision)
+        ):
+            return False
+        return not expected_revision or revision == expected_revision.lower()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def main() -> int:
+    base = os.environ.get("PRISM_VERIFY_URL", "http://127.0.0.1:8088")
+    expected = os.environ.get("PRISM_EXPECTED_REVISION", "")
+    checks = [("基础就绪与指定服务版本", check_readiness(base, expected))]
+    checks.extend((asset, (ROOT / asset).is_file()) for asset in ASSETS)
+    for name, passed in checks:
+        print(f"{'PASS' if passed else 'FAIL'} {name}")
+    if not expected:
+        print("服务版本未与指定候选核对。")
+    print("仅检查基础数据库就绪和本地资源；Native 配置、真实研究和发布验收需分别核对。")
+    return 0 if all(passed for _, passed in checks) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

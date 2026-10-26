@@ -19,9 +19,9 @@ def basic_health(monkeypatch):
     monkeypatch.setattr(health.time, "time", lambda: 1792540800)
 
     def forbidden():
-        raise AssertionError("Public readiness must not invoke CLI, skills or model checks")
+        raise AssertionError("Public readiness must not inspect runtime or model configuration")
 
-    for name in ("_check_claude_cli", "_skill_checks", "_model_checks"):
+    for name in ("_check_native_core", "_check_tool_catalog", "_model_checks"):
         monkeypatch.setattr(health, name, forbidden)
 
 
@@ -92,26 +92,6 @@ def test_db_probe_only_selects_one(monkeypatch):
     monkeypatch.setattr(health, "get_db", database)
     assert health._check_db()["status"] == "ok"
     assert statements == ["SELECT 1 AS ok"]
-
-
-@pytest.mark.parametrize("legacy_present", [False, True])
-def test_admin_uses_builtin_skill_and_missing_legacy_is_not_critical(monkeypatch, legacy_present):
-    monkeypatch.setattr(health, "release_payload", lambda: {})
-    monkeypatch.setattr(health, "_check_db", lambda: {"status": "ok"})
-    monkeypatch.setattr(health, "_check_claude_cli", lambda: {"status": "ok"})
-    monkeypatch.setattr(health, "_model_checks", lambda: [])
-    skills = [
-        {"id": "prism-research", "status": "ok", "has_claude_md": True},
-        {
-            "id": "bottleneck-hunter",
-            "status": "ok" if legacy_present else "missing",
-            "has_claude_md": legacy_present,
-        },
-    ]
-    monkeypatch.setattr(health, "_skill_checks", lambda: skills)
-    assert health.admin_health_payload()["ok"] is True
-    skills[0]["has_claude_md"] = False
-    assert health.admin_health_payload()["ok"] is False
 
 
 @pytest.mark.parametrize("status,exit_code", [("ready", 0), ("unready", 1)])

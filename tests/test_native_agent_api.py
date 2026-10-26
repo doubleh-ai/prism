@@ -24,7 +24,6 @@ def native(monkeypatch, test_user):
         db.execute("INSERT INTO users(username,password_hash) VALUES('other','synthetic')")
     monkeypatch.setattr(api, "require_auth", lambda request: request.user)
     monkeypatch.setattr(conversations, "require_auth", lambda request: request.user)
-    monkeypatch.setattr(config, "LEGACY_CHAT_ENABLED", False)
     monkeypatch.setattr(
         config,
         "MODELS",

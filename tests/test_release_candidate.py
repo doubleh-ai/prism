@@ -124,7 +124,7 @@ def test_reproducible_git_snapshot_ignores_dirty_files_and_records_no_local_iden
     assert candidate.verify_candidate(Path(first["archive"]))["provenance_verified"] is False
 
 
-def test_runtime_and_installation_files_and_nonbuiltin_skills_are_excluded(source, tmp_path):
+def test_runtime_installation_and_all_external_skill_files_are_excluded(source, tmp_path):
     repo, _ = source
     excluded = [
         ".env",
@@ -142,12 +142,12 @@ def test_runtime_and_installation_files_and_nonbuiltin_skills_are_excluded(sourc
         "static/privategit/old.json",
         "skills/external/CLAUDE.md",
         "skills/CLAUDE.md",
+        "skills/force-chinese/CLAUDE.md",
         "old-history.bundle",
         "tests/test_sentinel.py",
     ]
     for path in excluded:
         write(repo, path, b"excluded runtime fixture")
-    write(repo, "skills/force-chinese/CLAUDE.md", b"# Controlled language instruction\n")
     write(repo, "server/executable.py", b"# executable source\n")
     (repo / "server/executable.py").chmod(0o755)
     commit = commit_all(repo)
@@ -155,7 +155,7 @@ def test_runtime_and_installation_files_and_nonbuiltin_skills_are_excluded(sourc
     manifest = json.loads(Path(result["manifest"]).read_bytes())
     paths = {item["path"] for item in manifest["files"]}
     assert not paths.intersection(excluded)
-    assert "skills/force-chinese/CLAUDE.md" in paths
+    assert candidate.REQUIRED_FILES <= paths
     assert (
         next(item for item in manifest["files"] if item["path"] == "server/executable.py")["mode"] == "0755"
     )
@@ -178,6 +178,13 @@ def test_output_must_be_outside_all_git_workspaces(source, tmp_path, location):
     with pytest.raises(candidate.CandidateError, match="outside every Git"):
         candidate.build_candidate(repo, commit, output)
     assert not output.exists()
+
+
+def test_retired_executor_cannot_be_reintroduced_into_a_candidate(source):
+    repo, _ = source
+    write(repo, "server/services/claude_runner.py", b"# retired executor fixture\n")
+    with pytest.raises(candidate.CandidateError, match="retired external agent executor"):
+        candidate.collect_candidate(repo, commit_all(repo))
 
 
 @pytest.mark.parametrize("bad", ["HEAD", "main", "a" * 39, "A" * 40, "a" * 41])
