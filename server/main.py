@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from lru import LRU
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
@@ -72,6 +73,9 @@ from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
 from .operations import router as operations_router
+from .productivity import init_productivity_db
+from .productivity import router as productivity_router
+from .productivity.store import require_enabled as require_work_enabled
 from .release import APP_VERSION, release_payload
 from .report_files import REPORT_CSP, list_report_files, read_report_file
 from .reports import list_saved_reports_for_conv
@@ -97,6 +101,7 @@ init_db()
 init_research_db()
 init_runtime_db()
 init_feedback_db()
+init_productivity_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -188,6 +193,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         path = request.url.path
+        if path == "/work" or path.startswith("/api/work/"):
+            response.headers["Cache-Control"] = "no-store"
         if path.startswith("/api/reports/") and path.endswith((".html", ".htm")):
             # A response-level sandbox protects new windows and direct access too.
             response.headers["Content-Security-Policy"] = REPORT_CSP
@@ -251,6 +258,26 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class PrivateWorkCacheControlMiddleware:
+    """Keep private Work responses out of caches, including outer rejections."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        private = path == "/work" or path == "/api/work" or path.startswith("/api/work/")
+        if scope["type"] != "http" or not private:
+            return await self.app(scope, receive, send)
+
+        async def send_private(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Cache-Control"] = "no-store"
+            await send(message)
+
+        return await self.app(scope, receive, send_private)
+
+
 app.add_middleware(GZipMiddleware, minimum_size=512)
 app.add_middleware(StaticCacheControlMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
@@ -258,6 +285,7 @@ app.add_middleware(CSRFMiddleware)
 app.add_middleware(ActivityMiddleware)
 # Observe the entire inner response and Activity's final database writes.
 app.add_middleware(WorkAdmissionMiddleware)
+app.add_middleware(PrivateWorkCacheControlMiddleware)
 
 # Static files (proper caching via StaticFiles)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -284,6 +312,14 @@ async def index(request: Request):
     if not u:
         return RedirectResponse("/login")
     return HTMLResponse(render_template("app.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/work", response_class=HTMLResponse)
+async def work_page(request: Request):
+    require_work_enabled()
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login?next=/work", headers={"Cache-Control": "no-store"})
+    return HTMLResponse(render_template("work.html"), headers={"Cache-Control": "no-store"})
 
 
 # ── Auth ──
@@ -599,6 +635,7 @@ app.include_router(research_router)
 app.include_router(diagnostics_router)
 app.include_router(feedback_router)
 app.include_router(operations_router)
+app.include_router(productivity_router)
 
 
 # ── Report viewer ──

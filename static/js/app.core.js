@@ -135,13 +135,14 @@ var App = {
     // Register Service Worker for offline cache (P5). Bypass HTTP cache for
     // the SW script itself so deployments can replace stale app shells.
     if ('serviceWorker' in navigator) {
-      var swReloading = false;
+      var app = this;
+      var hadController = !!navigator.serviceWorker.controller;
       navigator.serviceWorker.addEventListener('controllerchange', function() {
-        if (swReloading) return;
-        swReloading = true;
-        window.location.reload();
+        if (hadController) app._toast('发现新版。请先保存当前内容，再手动刷新页面。');
+        hadController = true;
       });
       navigator.serviceWorker.register('/static/sw.js', {updateViaCache: 'none'}).then(function(reg) {
+        if (reg.waiting) app._toast('发现新版。请先保存当前内容，再手动刷新页面。');
         try { reg.update(); } catch(e) {}
       }).catch(function(){});
     }

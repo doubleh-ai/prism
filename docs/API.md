@@ -19,6 +19,43 @@ Authentication is via a session
 cookie (`token`) issued by `/api/login`. The cookie is `HttpOnly`
 and `Secure` when configured; `SameSite=strict` by default.
 
+## Work personal tasks (development preview)
+
+`PRISM_WORK_ENABLED=1` must be set before starting the isolated instance. Off by
+default; disabled startup creates no Work schema. `/work` requires login, and
+private Work responses, including errors, use `Cache-Control: no-store`. Existing
+CSRF and maintenance admission protections apply. This is not a release claim.
+
+| Endpoint | Contract |
+|---|---|
+| `GET /api/work/overview?limit=50` | Read-only `{workspace, tasks, next_cursor, capabilities}`; workspace may be null. |
+| `POST /api/work/spaces` | `{request_id, name, timezone}` explicitly creates one personal workspace. Returns `{workspace, replayed}`. |
+| `GET /api/work/spaces/{id}/tasks` | `limit` 1–100; optional positive `before` cursor and closed-enum `status`. Returns `{tasks, next_cursor}`. |
+| `POST /api/work/spaces/{id}/tasks` | `{request_id, title, description?, status?, priority?, due_at?, timezone?}`. Returns `{task, replayed}`. |
+| `GET /api/work/spaces/{id}/tasks/{task}` | Owned `{task, history}`; history is limited to the latest 100 events, returned chronologically. |
+| `PATCH /api/work/spaces/{id}/tasks/{task}` | Required integer `expected_version` and at least one mutable task field; stale versions return 409. Returns `{task}`. |
+
+Request IDs are canonical UUIDs. Reusing one with the same validated content
+returns the original creation snapshot; different content returns 409. After a
+replay, read the task if its current state is needed. No owner or arbitrary member
+field is accepted. Writes and finite audit records commit together.
+
+Status is `todo`, `doing`, `done` or `cancelled`; priority is `low`, `normal` or
+`high`. `due_at` is null or an explicit ISO instant with `Z` or a valid offset;
+`timezone` is a valid IANA name. UTC is an explicit instant; non-UTC offsets must
+match a real local time in that zone. Naive dates and spring-forward gaps are
+rejected, and repeated autumn times require an explicit offset. Stored instants
+use UTC. Updating `due_at` to null clears it.
+
+Bodies are limited to 32 KiB, unknown fields and duplicate JSON keys are rejected,
+and validation errors do not echo private input. Deleted or disabled owners and
+inaccessible workspaces cannot read or mutate tasks. Cancellation preserves the
+task; this version has no permanent task deletion endpoint.
+
+Calendar, reminders, team sharing, Work knowledge and Agent actions are not
+implemented here. Their capability fields remain false. See the
+[target architecture and delivery status](platform-next/README.md).
+
 ## Feedback (candidate)
 
 Private user feedback and administrator review, not an execution/deployment API.

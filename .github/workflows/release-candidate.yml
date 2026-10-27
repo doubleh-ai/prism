@@ -5,7 +5,7 @@ name: Release candidate (not deployment)
 
 on:
   pull_request:
-    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench, codex/prism-release-control]
+    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench, codex/prism-release-control, codex/prism-native-agent-framework]
   workflow_dispatch:
     inputs:
       commit:
