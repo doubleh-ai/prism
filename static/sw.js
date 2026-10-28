@@ -1,7 +1,7 @@
 /* Prism Service Worker - offline cache for static assets.
    Network-first for app-shell navigations so deploys cannot get stuck behind
    an old cached / page; cache-first with background update for /static/*. */
-const CACHE_NAME = 'prism-workbench-v87';
+const CACHE_NAME = 'prism-workbench-v88';
 const STATIC_PREFIX = '/static/';
 
 const PRE_CACHE = [
@@ -33,10 +33,11 @@ const PRE_CACHE = [
 self.addEventListener('install', function(ev) {
   ev.waitUntil(
     caches.open(CACHE_NAME).then(function(cache) {
-      return cache.addAll(PRE_CACHE.map(function(path) { return path + '?v=87'; })).catch(function() {});
+        return cache.addAll(PRE_CACHE.map(function(path) { return path + '?v=88'; })).catch(function() {});
     })
   );
-  self.skipWaiting();
+  // Existing editors keep their controller until it naturally becomes idle.
+  // Activation must never navigate a window or discard an unsaved draft.
 });
 
 self.addEventListener('activate', function(ev) {
@@ -47,29 +48,21 @@ self.addEventListener('activate', function(ev) {
       }));
     }).then(function() {
       return self.clients.claim();
-    }).then(function() {
-      return self.clients.matchAll({type: 'window'}).then(function(clients) {
-        return Promise.all(clients.map(function(client) {
-          try {
-            var url = new URL(client.url);
-            if (url.origin === self.location.origin) return client.navigate(client.url);
-          } catch(e) {}
-          return Promise.resolve();
-        }));
-      });
     })
   );
 });
 
 self.addEventListener('fetch', function(ev) {
   var url = new URL(ev.request.url);
+  if (url.origin !== self.location.origin || ev.request.method !== 'GET') return;
   if (url.pathname.startsWith('/api/')) return;
 
   if (ev.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/login') {
     ev.respondWith(
       fetch(ev.request, {cache: 'no-store'}).catch(function() {
-        return caches.match(ev.request).then(function(cached) {
-          return cached || new Response('Offline', {status: 503});
+        // No private page may reappear from an old authenticated cache.
+        return new Response('离线，无法加载页面；请恢复连接后重试。', {
+          status: 503, headers: {'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'}
         });
       })
     );

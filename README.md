@@ -15,6 +15,9 @@ Prism 是可自行部署的开源投资研究工作台。你可以在对话中�
 | 原生 Agent 的具体协议、预算和接口 | [Native Agent v1](docs/native-agent-framework.md) |
 | 提交异常或建议、查看处理与验证进度 | [反馈、修复与每日评审](docs/FEEDBACK.md) |
 | 发布、停止和回退如何进行 | [交付与介入入口](docs/PROJECT_GUIDE.md#发布停止与回退) · [发布规范](docs/release-process.md) |
+| 下一代统一入口、Work、知识、模型与云端协同 | [下一代平台设计与交付状态](docs/platform-next/README.md) |
+
+本分支包含默认关闭的 **Work 个人任务开发预览**。`PRISM_WORK_ENABLED=1` 在隔离开发实例启用 `/work`；支持个人工作区、任务和版本冲突，尚不提供日历、提醒或 Work Agent。完整目标与本批范围见[设计入口](docs/platform-next/README.md)。这不是生产发布声明。
 
 ## 版本与上线状态
 

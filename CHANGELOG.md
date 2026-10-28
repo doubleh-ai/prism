@@ -4,6 +4,14 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [v0.22.0] - 2026-10-27
+
+### 下一代平台与 Work 开发预览
+- 记录统一入口、Prism / Work / 控制台、自研 Agent、知识与画像、股票 / 期货、模型路由、云任务与 Mac 协同的完整目标架构、迁移与分阶段验收；目标与实现状态分开。
+- Work 在功能旗标下提供个人工作区与任务，默认关闭；创建去重、版本冲突、有限审计、严格账号隔离和明确时区。尚未提供日历、提醒、团队或 Work Agent。
+- 新工作区使用独立响应式网页；私有 Work 响应禁止缓存。网页更新不再主动刷新编辑窗口，保留用户输入。
+- 本条记录源码候选变化，不是生产发布证明。此前固定 Native 候选与恢复基线不因本分支而变化；实际部署仍需独立验收和受控发布。
+
 ## [v0.21.2] - 2026-10-27
 
 ### 个股研究地址校验
