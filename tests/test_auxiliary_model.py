@@ -334,6 +334,43 @@ def test_indicator_complex_translation_calls_direct_provider(configured, monkeyp
     assert wire.closed and len(requests) == 1
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not JSON",
+        '```json\n{"kind":"plot","dsl":{"price":"close"}}\n```',
+        '{"kind":"plot","dsl":{"price":"close"}} trailing',
+        json.dumps({"result": json.dumps({"kind": "plot", "dsl": {"price": "close"}})}),
+        '"a string"',
+        "[]",
+    ],
+)
+def test_indicator_translation_rejects_invalid_or_legacy_enveloped_output(configured, monkeypatch, body):
+    helper, _ = configured
+    from server.indicators import translator
+
+    wire = Wire([text(body)])
+    requests, _ = connect(monkeypatch, wire)
+    assert translator.translate("unrecognized custom indicator request") is None
+    assert wire.closed and len(requests) == 1
+
+
+@pytest.mark.parametrize("optional_fields", [{}, {"params": {}, "plan": {}, "visual": {}}])
+def test_indicator_translation_keeps_existing_native_json_schema_defaults(
+    configured, monkeypatch, optional_fields
+):
+    helper, _ = configured
+    from server.indicators import translator
+
+    payload = {"kind": "plot", "dsl": {"price": "close"}, **optional_fields}
+    wire = Wire([text(json.dumps(payload))])
+    requests, _ = connect(monkeypatch, wire)
+    result = translator.translate("unrecognized custom indicator request")
+    assert result["dsl"] == {"price": "close"} and result["params"] == {}
+    assert isinstance(result["plan"], dict) and isinstance(result["visual"], dict)
+    assert wire.closed and len(requests) == 1
+
+
 def test_indicator_rule_fastpath_never_starts_model(helper, monkeypatch):
     from server.indicators import translator
 
@@ -376,16 +413,16 @@ async def test_explanation_cache_is_owner_and_context_scoped(client, auth_cookie
 async def test_unconfirmed_analysis_start_never_echoes_provider_exception(
     client, auth_cookies, monkeypatch, caplog
 ):
-    from server import main
+    from server.services import auxiliary_model
 
     secret = "synthetic-provider-key-do-not-return"
 
     async def fail(*args, **kwargs):
         raise RuntimeError(secret)
 
-    monkeypatch.setattr(main, "start_analysis", fail)
+    monkeypatch.setattr(auxiliary_model, "run_text_async", fail)
     response = await client.post("/api/analysis/start", cookies=auth_cookies, json={"ticker": "600519"})
-    assert response.status_code == 500 and response.json()["code"] == "engine_unavailable"
+    assert response.status_code == 503
     assert secret not in response.text and secret not in caplog.text
 
 

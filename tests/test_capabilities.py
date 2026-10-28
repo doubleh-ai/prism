@@ -59,7 +59,7 @@ async def test_bridge_auth_checks_loopback_origin_forwarding_expiry_and_owner(sc
     declared = await bridge_client.get(path)
     assert declared.status_code == 200
     names = {tool["name"] for tool in declared.json()["tools"]}
-    assert not names & {"vibe_start", "vibe_followup"}
+    assert not names & {"analysis_start", "vibe_start", "vibe_followup"}
     assert {"vibe_list", "vibe_status", "vibe_cancel"} <= names
     for headers in (
         {"Origin": "http://127.0.0.1:8088"},
@@ -241,23 +241,15 @@ async def test_scan_background_creation_and_owner_status(scoped_run, monkeypatch
     assert scanner.get_job(job_id, "other") is None
 
 
-async def test_analysis_uses_owned_persistent_record(scoped_run, monkeypatch):
+async def test_analysis_history_remains_owned_and_does_not_resume(scoped_run):
     from server import analysis_engine
 
-    async def start(**kwargs):
-        assert kwargs["username"] == scoped_run["username"]
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO analysis_runs(id,username,ticker,mode,trade_date,status,started_at,updated_at) VALUES('analysis-one',?,'600519','deep',?,'running',1,1)",
-                [kwargs["username"], kwargs["date"]],
-            )
-        return "analysis-one"
-
-    monkeypatch.setattr(analysis_engine, "start_analysis", start)
-    result = await call(scoped_run, "analysis_start", {"ticker": "600519"})
-    assert result["ok"] is True
-    assert result["call"]["target"]["id"] == "analysis-one"
-    # No memory process remains: status is honest and the record is still readable.
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO analysis_runs(id,username,ticker,mode,trade_date,status,started_at,updated_at) "
+            "VALUES('analysis-one',?,'600519','deep','2026-10-28','running',1,1)",
+            [scoped_run["username"]],
+        )
     status = await call(scoped_run, "analysis_status", {"id": "analysis-one"}, "read-status")
     assert status["data"]["status"] == "interrupted"
     assert analysis_engine.get_analysis_record("analysis-one", "other") is None
@@ -330,21 +322,13 @@ def test_secret_fields_removed_from_nested_dicts_and_serialized_json(key):
     assert cap.safe_result({"output_tokens": 123}) == {"output_tokens": 123}
 
 
-async def test_unavailable_analysis_keeps_failed_call_target(scoped_run, monkeypatch):
-    from server import analysis_engine as engine
-
-    def unavailable():
-        raise ImportError("synthetic missing engine")
-
-    monkeypatch.setattr(engine, "_ensure_astock", unavailable)
-    monkeypatch.setattr(engine, "ASTOCK_CACHE_TTL_SECONDS", 0)
-    result = await call(scoped_run, "analysis_start", {"ticker": "600519"})
-    aid = result["call"]["target"]["id"]
-    try:
-        assert result["ok"] is False
-        assert result["call"]["status"] == "failed"
-        assert result["data"]["status"] == "error"
-        assert engine.get_analysis_record(aid, scoped_run["username"])["status"] == "error"
-        assert engine.get_analysis_record(aid, "other") is None
-    finally:
-        engine._store.pop(aid, None)
+async def test_retired_analysis_rejects_before_task_or_audit_write(scoped_run, monkeypatch):
+    execute = AsyncMock(side_effect=AssertionError("retired execution must never dispatch"))
+    monkeypatch.setattr(cap, "_execute", execute)
+    with pytest.raises(HTTPException) as blocked:
+        await call(scoped_run, "analysis_start", {"ticker": "600519"})
+    assert blocked.value.status_code == 503
+    execute.assert_not_awaited()
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM capability_calls").fetchone()[0] == 0
