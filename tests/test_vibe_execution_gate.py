@@ -223,5 +223,5 @@ async def test_engine_status_reports_unavailable_without_a_health_request(client
     assert response.json()["execution_available"] is False
     assert response.json()["history_available"] is True
     paused = {item["id"]: item for item in cap.capability_catalog() if item.get("available") is False}
-    assert set(paused) == {"vibe_start", "vibe_followup"}
+    assert set(paused) == {"analysis_start", "vibe_start", "vibe_followup"}
     assert all(item["unavailable_reason"] for item in paused.values())

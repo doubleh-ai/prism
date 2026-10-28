@@ -1,9 +1,8 @@
 """Translate free-form indicator descriptions into the Prism indicator DSL."""
 
+import json
 import logging
 import re
-
-from server.analysis_engine import _parse_json_lenient
 
 from .dsl import validate
 
@@ -503,7 +502,10 @@ def translate(user_input: str) -> dict | None:
         log.warning("indicator translation unavailable (%s)", type(exc).__name__)
         return None
 
-    data = _parse_json_lenient(output)
+    try:
+        data = json.loads(output)
+    except (ValueError, TypeError):
+        return None
     if not isinstance(data, dict):
         return None
     dsl = data.get("dsl")

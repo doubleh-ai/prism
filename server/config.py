@@ -145,50 +145,6 @@ PROVIDER_FAIL_CACHE_SECONDS = int(os.environ.get("PRISM_PROVIDER_FAIL_CACHE", "3
 AKSHARE_TIMEOUT = int(os.environ.get("PRISM_AKSHARE_TIMEOUT", "10"))
 BAOSTOCK_TIMEOUT = int(os.environ.get("PRISM_BAOSTOCK_TIMEOUT", "10"))
 
-# ── astock 分析引擎 ──
-# TradingAgents-astock 项目路径（默认与本项目同级）
-ASTOCK_PROJECT = os.environ.get("PRISM_ASTOCK_PROJECT", str(PROJECT_ROOT.parent / "TradingAgents-astock"))
-# LLM 配置：quick 用于分析师/辩论，deep 用于研判/决策
-ASTOCK_LLM_QUICK = os.environ.get("ASTOCK_LLM_QUICK", "deepseek-chat")
-ASTOCK_LLM_DEEP = os.environ.get("ASTOCK_LLM_DEEP", "deepseek-chat")
-ASTOCK_LLM_PROVIDER = os.environ.get("ASTOCK_LLM_PROVIDER", "deepseek")
-# This independent engine uses its provider SDK's protocol and startup key
-# variable (for example DEEPSEEK_API_KEY), not Native's Anthropic-compatible URL.
-# The upstream graph ignores a config API-key field, so do not expose a pretend
-# ASTOCK_LLM_API_KEY setting or copy another protocol's credentials into it.
-ASTOCK_LLM_BASE_URL = os.environ.get("ASTOCK_LLM_BASE_URL", "")
-ASTOCK_DATA_VENDOR = os.environ.get("ASTOCK_DATA_VENDOR", "a_stock")
-ASTOCK_MAX_DEBATE_ROUNDS = int(os.environ.get("ASTOCK_MAX_DEBATE_ROUNDS", "1"))
-ASTOCK_OUTPUT_LANGUAGE = os.environ.get("ASTOCK_OUTPUT_LANGUAGE", "Chinese")
-ASTOCK_RESULTS_DIR = os.environ.get("ASTOCK_RESULTS_DIR", str(DATA_DIR / "analysis_reports"))
-ASTOCK_HARD_TIMEOUT_SECONDS = int(os.environ.get("PRISM_ASTOCK_HARD_TIMEOUT", "1800"))
-ASTOCK_CACHE_TTL_SECONDS = int(os.environ.get("PRISM_ASTOCK_CACHE_TTL", "86400"))
-ASTOCK_FAST_ANALYSTS = [
-    a.strip()
-    for a in os.environ.get("PRISM_ASTOCK_FAST_ANALYSTS", "market,fundamentals").split(",")
-    if a.strip()
-]
-ASTOCK_DEEP_ANALYSTS = [
-    a.strip()
-    for a in os.environ.get(
-        "PRISM_ASTOCK_DEEP_ANALYSTS",
-        "market,social,news,fundamentals,policy,hot_money,lockup",
-    ).split(",")
-    if a.strip()
-]
-ASTOCK_FAST_DEBATE_ROUNDS = int(os.environ.get("PRISM_ASTOCK_FAST_DEBATE_ROUNDS", "0"))
-ASTOCK_FAST_RISK_ROUNDS = int(os.environ.get("PRISM_ASTOCK_FAST_RISK_ROUNDS", "0"))
-ASTOCK_NO_PROXY_DOMAINS = [
-    d.strip()
-    for d in os.environ.get(
-        "PRISM_ASTOCK_NO_PROXY",
-        "eastmoney.com,push2.eastmoney.com,quote.eastmoney.com,"
-        "ths.com,thsi.cn,10jqka.com.cn,cls.cn,finance.sina.com.cn,"
-        "hq.sinajs.cn,sina.com.cn",
-    ).split(",")
-    if d.strip()
-]
-
 # Official HKUDS/Vibe-Trading sidecar. It is intentionally loopback-only in
 # production; Prism owns authentication and persists the user-facing record.
 VIBE_ENGINE_URL = os.environ.get("PRISM_VIBE_ENGINE_URL", "http://127.0.0.1:8899").rstrip("/")

@@ -329,54 +329,18 @@ class TestReleaseMetadata:
 
 
 class TestAnalysisApi:
-    """Astock API options should be wired through to the engine."""
+    """The retired automatic analysis entry point stays unavailable."""
 
-    async def test_analysis_start_accepts_mode_force_refresh_and_reports_cache(
-        self, client, auth_cookies, monkeypatch
-    ):
-        from server import main
+    async def test_analysis_start_rejects_before_body_or_executor(self, client, auth_cookies):
+        from server.analysis_engine import ANALYSIS_EXECUTION_NOTICE
 
-        captured = {}
-
-        async def fake_start_analysis(
-            ticker, name="", date="", username="", mode="deep", force_refresh=False
-        ):
-            captured.update(
-                {
-                    "ticker": ticker,
-                    "name": name,
-                    "username": username,
-                    "mode": mode,
-                    "force_refresh": force_refresh,
-                }
-            )
-            main._store["fakeaid"] = {
-                "id": "fakeaid",
-                "mode": "fast",
-                "cached": True,
-                "selected_analysts": ["market", "fundamentals"],
-            }
-            return "fakeaid"
-
-        main._store.pop("fakeaid", None)
-        monkeypatch.setattr(main, "start_analysis", fake_start_analysis)
-        r = await client.post(
+        response = await client.post(
             "/api/analysis/start",
             cookies=auth_cookies,
-            json={"ticker": "003000", "name": "劲仔食品", "mode": "fast", "force_refresh": True},
+            json={"ticker": "003000", "name": "合成标的", "mode": "fast", "force_refresh": True},
         )
-
-        assert r.status_code == 200
-        data = r.json()
-        assert data["analysis_id"] == "fakeaid"
-        assert data["status"] == "cached"
-        assert data["mode"] == "fast"
-        assert data["cached"] is True
-        assert data["selected_analysts"] == ["market", "fundamentals"]
-        assert captured["ticker"] == "003000"
-        assert captured["mode"] == "fast"
-        assert captured["force_refresh"] is True
-        main._store.pop("fakeaid", None)
+        assert response.status_code == 503
+        assert response.json()["detail"] == ANALYSIS_EXECUTION_NOTICE
 
 
 class TestSavedReports:
@@ -426,24 +390,20 @@ class TestSavedReports:
         assert empty.json()["reports"] == []
 
     async def test_save_completed_analysis_report(self, client, auth_cookies):
-        from server.analysis_engine import _store
+        from server.database import get_db
 
         aid = "unit-analysis-1"
-        _store[aid] = {
-            "id": aid,
-            "ticker": "300750",
-            "name": "CATL",
-            "username": "testuser",
-            "status": "done",
-            "report": {
-                "signal": "BUY",
-                "final_decision": "Battery leader with supply-chain leverage.",
-                "structured": {"signal": "BUY", "thesis": "Power battery bottleneck thesis."},
-            },
+        report = {
             "signal": "BUY",
-            "error": None,
-            "started_at": 1,
+            "final_decision": "Saved synthetic research.",
+            "structured": {"signal": "BUY", "thesis": "Saved synthetic thesis."},
         }
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO analysis_runs(id,username,ticker,name,mode,trade_date,status,report_json,signal,started_at,updated_at) "
+                "VALUES(?,?,?,?,'fast','2026-10-28','done',?,'BUY',1,1)",
+                [aid, "testuser", "300750", "Synthetic", json.dumps(report)],
+            )
         try:
             r = await client.post(
                 f"/api/analysis/{aid}/save-report",
@@ -470,7 +430,8 @@ class TestSavedReports:
             assert r2.json()["report"]["report"] == saved["report"]
             assert r2.json()["report"]["updated_at"] == saved["updated_at"]
         finally:
-            _store.pop(aid, None)
+            with get_db() as db:
+                db.execute("DELETE FROM analysis_runs WHERE id=?", [aid])
 
     async def test_conversation_reports_include_saved_snapshots(self, client, auth_cookies):
         created_conv = await client.post(

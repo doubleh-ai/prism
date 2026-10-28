@@ -23,6 +23,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .analysis_engine import ANALYSIS_EXECUTION_NOTICE, require_analysis_execution
 from .auth import require_auth
 from .config import CAPABILITY_TOKEN_TTL
 from .database import check_rate_limit, get_db
@@ -277,7 +278,7 @@ _TOOLS = (
     Capability(
         "analysis_start",
         "发起个股研究",
-        "启动指定股票的后台研究，立即返回记录；仅在用户请求分析时使用。",
+        ANALYSIS_EXECUTION_NOTICE,
         AnalysisArgs,
         "platform_research",
         "analysis",
@@ -440,6 +441,7 @@ _TOOLS = (
 )
 REGISTRY = {tool.id: tool for tool in _TOOLS}
 _PAUSED_VIBE_TOOLS = frozenset({"vibe_start", "vibe_followup"})
+_PAUSED_EXECUTION_TOOLS = _PAUSED_VIBE_TOOLS | {"analysis_start"}
 
 
 def capability_catalog() -> list[dict]:
@@ -454,8 +456,13 @@ def capability_catalog() -> list[dict]:
             "target_view": t.view,
             "read_only": t.read_only,
             **(
-                {"available": False, "unavailable_reason": "Vibe 隔离执行环境尚待验收"}
-                if t.id in _PAUSED_VIBE_TOOLS
+                {
+                    "available": False,
+                    "unavailable_reason": (
+                        ANALYSIS_EXECUTION_NOTICE if t.id == "analysis_start" else "Vibe 隔离执行环境尚待验收"
+                    ),
+                }
+                if t.id in _PAUSED_EXECUTION_TOOLS
                 else {}
             ),
         }
@@ -716,6 +723,8 @@ def list_calls(
 
 async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dict, str]:
     """Dispatch only explicitly named application functions, in this server process."""
+    if name == "analysis_start":
+        require_analysis_execution()
     if name in _PAUSED_VIBE_TOOLS:
         from .vibe import require_vibe_execution
 
@@ -983,17 +992,9 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         if not report:
             raise HTTPException(404)
         return {"report": report}, target, "已读取历史报告，观点和数据日期以报告为准"
-    if name.startswith("analysis_"):
-        from .analysis_engine import get_analysis_record, start_analysis
-        from .research_context import build_research_context
+    if name == "analysis_status":
+        from .analysis_engine import get_analysis_record
 
-        if name == "analysis_start":
-            aid = await start_analysis(**data, date=build_research_context()["date"], username=user)
-            target["id"] = aid
-            result = get_analysis_record(aid, user) or {"id": aid, "status": "starting"}
-            if result.get("status") == "error":
-                return result, target, "分析引擎不可用，已保留失败记录；没有启动新研究"
-            return result, target, "个股研究已启动，可打开记录查看进度"
         entry = get_analysis_record(data["id"], user)
         if not entry:
             raise HTTPException(404)
@@ -1097,6 +1098,9 @@ def _terminal_db():
 
 async def dispatch_call(context: dict, request: CallRequest) -> dict:
     parent = _run_parent(context)
+    if request.name == "analysis_start":
+        # Policy precedes both new audit writes and replay of a legacy success.
+        require_analysis_execution()
     if request.name in _PAUSED_VIBE_TOOLS:
         from .vibe import require_vibe_execution
 
@@ -1351,7 +1355,7 @@ async def api_bridge_tools(request: Request):
                 "annotations": {"readOnlyHint": t.read_only, "destructiveHint": False},
             }
             for t in _TOOLS
-            if t.id not in _PAUSED_VIBE_TOOLS
+            if t.id not in _PAUSED_EXECUTION_TOOLS
         ]
     }
 

@@ -160,8 +160,6 @@ def test_report_versions_preserve_ids_unknown_values_and_prior_content(owners):
 
 
 async def test_analysis_can_save_after_memory_loss_and_remains_owner_scoped(client, auth_cookies, owners):
-    from server import analysis_engine
-
     report = {
         "markdown": "Durable result",
         "_analysis_meta": {"research": {"as_of": "2026-10-21T12:00:00+08:00"}},
@@ -181,7 +179,6 @@ async def test_analysis_can_save_after_memory_loss_and_remains_owner_scoped(clie
                 2,
             ],
         )
-    analysis_engine._store.pop("durable-analysis", None)
     saved = await client.post("/api/analysis/durable-analysis/save-report", json={}, cookies=auth_cookies)
     assert saved.status_code == 200
     assert saved.json()["report"]["report"]["markdown"] == "Durable result"

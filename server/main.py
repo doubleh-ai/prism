@@ -1,6 +1,5 @@
 """Prism — FastAPI 主入口"""
 
-import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,7 +18,7 @@ from .agent.api import chat_stream as native_chat_stream
 from .agent.api import router as native_agent_router
 from .agent.runtime import init_runtime_db
 from .analysis_engine import _sse as _analysis_sse
-from .analysis_engine import _store, get_analysis_record, start_analysis, stream_events
+from .analysis_engine import get_analysis_record, require_analysis_execution
 from .analysis_graph import router as graph_router
 from .auth import hash_password, is_admin_user, require_admin, require_auth, verify_csrf
 from .auth import login as auth_login
@@ -693,64 +692,28 @@ async def api_explain_term(request: Request):
     return {"term": term, "explanation": f"暂无可用的AI解释，建议搜索「{term}」了解更多。", "cached": False}
 
 
-# ── Astock Analysis Engine ──
+# ── Saved legacy analysis compatibility ──
 
 
 @app.post("/api/analysis/start")
 async def api_analysis_start(request: Request):
-    """Launch an astock analysis for the selected ticker."""
-    u = require_auth(request)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    ticker = (body.get("ticker") or "").strip()
-    name = (body.get("name") or "").strip()
-    mode = (body.get("mode") or "fast").strip().lower()
-    force_refresh = bool(body.get("force_refresh"))
-    if not ticker:
-        return JSONResponse({"error": "请提供股票代码"}, status_code=400)
-    try:
-        aid = await start_analysis(ticker, name, username=u, mode=mode, force_refresh=force_refresh)
-        entry = _store.get(aid, {})
-        return {
-            "analysis_id": aid,
-            "status": "cached" if entry.get("cached") else "started",
-            "mode": entry.get("mode", mode),
-            "cached": bool(entry.get("cached")),
-            "selected_analysts": entry.get("selected_analysts") or [],
-        }
-    except Exception as e:
-        logging.getLogger("prism").error("Analysis start failed (%s)", type(e).__name__)
-        return JSONResponse(
-            {"error": "研究启动失败，请联系管理员核查引擎配置", "code": "engine_unavailable"}, status_code=500
-        )
+    """The retired automatic-analysis endpoint always rejects authenticated starts."""
+    require_auth(request)
+    require_analysis_execution()
 
 
 @app.get("/api/analysis/{analysis_id}/stream")
 async def api_analysis_stream(analysis_id: str, request: Request):
-    """SSE stream of analysis progress events."""
-    u = require_auth(request)
-    entry = _store.get(analysis_id)
-    record = get_analysis_record(analysis_id, u)
+    """Replay one owned saved result; no worker is started or resumed."""
+    record = get_analysis_record(analysis_id, require_auth(request))
     if not record:
-        return StreamingResponse(
-            iter([_analysis_sse({"type": "error", "message": "分析不存在或无权访问"})]),
-            media_type="text/event-stream",
-        )
-
-    async def _generate():
-        if not entry or record["status"] in {"done", "error"}:
-            if record["status"] == "done":
-                yield _analysis_sse({"type": "done", **record})
-            else:
-                yield _analysis_sse({"type": "error", "message": record.get("error") or "研究已结束"})
-            return
-        async for event in stream_events(analysis_id):
-            yield event
-
+        event = {"type": "error", "message": "分析不存在或无权访问"}
+    elif record["status"] == "done":
+        event = {"type": "done", **record}
+    else:
+        event = {"type": "error", "message": record.get("error") or "研究已结束"}
     return StreamingResponse(
-        _generate(),
+        iter([_analysis_sse(event)]),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -213,7 +213,12 @@ class ActivityMiddleware(BaseHTTPMiddleware):
             except Exception:
                 log.debug("server exception diagnostic failed", exc_info=True)
             raise
-        if response.status_code >= 500:
+        expected_policy_rejection = (
+            response.status_code == 503
+            and response.headers.get("X-Prism-Execution-Policy") == "native-only-analysis-disabled"
+            and request.url.path in {"/api/analysis/start", "/api/internal/capabilities/call"}
+        )
+        if response.status_code >= 500 and not expected_policy_rejection:
             try:
                 from .diagnostics import record_diagnostic
 

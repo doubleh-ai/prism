@@ -2,8 +2,6 @@
 
 import asyncio
 import json
-import sys
-import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -46,52 +44,22 @@ async def test_quote_without_source_time_does_not_invent_one(monkeypatch):
     assert quote.timestamp_kind == "retrieved"
 
 
-@pytest.mark.parametrize("structured_fails", [False, True])
+@pytest.mark.parametrize("has_dashboard", [False, True])
 @pytest.mark.asyncio
-async def test_report_stream_finishes_after_optional_dashboard(monkeypatch, structured_fails):
-    class Graph:
-        def __init__(self, **kwargs):
-            self.graph = self
+async def test_saved_analysis_dashboard_remains_owned_history(has_dashboard):
+    from server.database import get_db
 
-        def prepare_graph_run(self, ticker, date):
-            return {"messages": []}, {}, None
-
-        def stream(self, state, **kwargs):
-            yield {"final_trade_decision": "已有报告正文"}
-
-        def finalize_graph_run(self, *args):
-            return "观察"
-
-    module = types.ModuleType("tradingagents.graph.trading_graph")
-    module.TradingAgentsGraph = Graph
-    monkeypatch.setitem(sys.modules, "tradingagents.graph.trading_graph", module)
-    monkeypatch.setattr(ae, "_ensure_astock", lambda: None)
-    monkeypatch.setattr(ae, "_build_config", lambda *args, **kwargs: {})
-    monkeypatch.setattr(ae, "ASTOCK_CACHE_TTL_SECONDS", 0)
-
-    def extract(*args):
-        if structured_fails:
-            raise RuntimeError("synthetic extraction failure")
-        return {"thesis": "整理结果", "confidence": None}
-
-    monkeypatch.setattr(ae, "_extract_structured", extract)
-    aid = await ae.start_analysis("600000", username="owner")
-    try:
-        events = [json.loads(event.removeprefix("data: ")) async for event in ae.stream_events(aid)]
-        types_seen = [event["type"] for event in events]
-        assert types_seen[-1] == "done"
-        assert types_seen.count("done") == 1
-        assert types_seen.index("report") < types_seen.index("done")
-        if not structured_fails:
-            assert types_seen.index("report") < types_seen.index("structured") < types_seen.index("done")
-            assert events[-1]["report"]["structured"]["thesis"] == "整理结果"
-        assert ae.get_analysis_record(aid, "other") is None
-        ae._store.pop(aid)
-        restored = ae.get_analysis_record(aid, "owner")
-        assert restored["status"] == "done"
-        assert "已有报告正文" in restored["report"]["final_decision"]
-    finally:
-        ae._store.pop(aid, None)
+    report = {"final_decision": "已有合成报告正文"}
+    if has_dashboard:
+        report["structured"] = {"thesis": "已保存整理结果", "confidence": None}
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO analysis_runs(id,username,ticker,mode,trade_date,status,report_json,started_at,updated_at) "
+            "VALUES('saved-dashboard','owner','600000','fast','2026-10-28','done',?,1,1)",
+            [json.dumps(report)],
+        )
+    assert ae.get_analysis_record("saved-dashboard", "owner")["report"] == report
+    assert ae.get_analysis_record("saved-dashboard", "other") is None
 
 
 @pytest.mark.asyncio
@@ -105,7 +73,17 @@ async def test_durable_incomplete_record_does_not_claim_to_resume():
         "status": "running",
         "started_at": 1.0,
     }
-    ae._persist_analysis(entry)
+    from server.database import get_db
+
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO analysis_runs(id,username,ticker,mode,trade_date,status,started_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,1)",
+            [
+                entry[key]
+                for key in ("id", "username", "ticker", "mode", "trade_date", "status", "started_at")
+            ],
+        )
     record = ae.get_analysis_record(entry["id"], "owner")
     assert record["status"] == "interrupted"
     assert "未自动重新启动" in record["error"]
@@ -137,89 +115,50 @@ async def test_industry_depth_does_not_escape_category_filter(client):
     assert (await client.get("/api/industry/graph", params={"depth": 20})).status_code == 400
 
 
-def test_structured_summary_does_not_create_unsourced_trade_numbers(monkeypatch):
-    payload = {
-        "thesis": "原文摘要",
-        "confidence": 99,
-        "metrics": {"risk_score": 1},
-        "trade": {"target_price": "1000元", "stop_loss": "10元", "position": "80%"},
-    }
-    monkeypatch.setattr(ae, "_parse_json_lenient", lambda *args: payload)
-    # This test owns only dashboard post-processing. Actual child registration
-    # and process/tool boundaries are exercised in the lifecycle/auxiliary tests.
-    monkeypatch.setattr("server.services.auxiliary_model.run_text", lambda *args, **kwargs: "{}")
-    result = ae._extract_structured({"final_decision": "原文未给出价格或仓位"}, "600000", "Example")
-    assert result["confidence"] is None
-    assert result["metrics"]["risk_score"] is None
-    assert all(value is None for value in result["trade"].values())
+@pytest.mark.asyncio
+async def test_retired_engine_creates_no_failed_task_or_external_import():
+    from fastapi import HTTPException
+
+    from server.database import get_db
+
+    with pytest.raises(HTTPException) as blocked:
+        await ae.start_analysis("600000", username="owner")
+    assert blocked.value.status_code == 503
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
-async def test_missing_engine_retains_readable_failed_record(monkeypatch):
-    def unavailable():
-        raise ImportError("synthetic unavailable engine")
+async def test_saved_analysis_stream_is_repeatable_without_resuming_work(client, auth_cookies):
+    from server.database import get_db
 
-    monkeypatch.setattr(ae, "_ensure_astock", unavailable)
-    monkeypatch.setattr(ae, "ASTOCK_CACHE_TTL_SECONDS", 0)
-    aid = await ae.start_analysis("600000", username="owner")
-    try:
-        events = [json.loads(event.removeprefix("data: ")) async for event in ae.stream_events(aid)]
-        assert events[-1]["type"] == "error"
-        assert ae.get_analysis_record(aid, "owner")["status"] == "error"
-        ae._store.pop(aid)
-        assert ae.get_analysis_record(aid, "owner")["status"] == "error"
-        assert ae.get_analysis_record(aid, "other") is None
-    finally:
-        ae._store.pop(aid, None)
-
-
-@pytest.mark.asyncio
-async def test_analysis_stream_supports_two_readers_and_terminal_replay():
-    aid = "multi-reader"
-    report = {"final_decision": "已完成报告"}
-    ae._store[aid] = {
-        "id": aid,
-        "status": "done",
-        "started_at": 1,
-        "report": report,
-        "events": [
-            {"type": "agent_output", "text": "过程"},
-            {"type": "report", "report": report},
-            {"type": "done", "report": report},
-        ],
-    }
-
-    async def read():
-        return [json.loads(value.removeprefix("data: ")) async for value in ae.stream_events(aid)]
-
-    try:
-        first, second = await asyncio.gather(read(), read())
-        assert first == second
-        assert [event["type"] for event in first] == ["agent_output", "report", "done"]
-        ae._store[aid]["events"] = []
-        assert (await read())[-1]["report"] == report
-        assert ae._store[aid]["status"] == "done"
-    finally:
-        ae._store.pop(aid, None)
+    report = {"final_decision": "已完成合成报告"}
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO analysis_runs(id,username,ticker,mode,trade_date,status,report_json,started_at,updated_at) "
+            "VALUES('repeatable','testuser','600519','fast','2026-10-28','done',?,1,1)",
+            [json.dumps(report)],
+        )
+    first, second = await asyncio.gather(
+        *[client.get("/api/analysis/repeatable/stream", cookies=auth_cookies) for _ in range(2)]
+    )
+    assert first.status_code == second.status_code == 200 and first.text == second.text
+    frame = json.loads(first.text.removeprefix("data: "))
+    assert frame["type"] == "done" and frame["report"] == report
+    assert ae.get_analysis_record("repeatable", "testuser")["status"] == "done"
 
 
 @pytest.mark.asyncio
-async def test_view_timeout_does_not_mark_background_analysis_failed(monkeypatch):
-    import time
+async def test_incomplete_saved_stream_returns_interrupted_history_immediately(client, auth_cookies):
+    from server.database import get_db
 
-    aid = "view-timeout"
-    ae._store[aid] = {
-        "id": aid,
-        "status": "running",
-        "started_at": time.time() - 100,
-        "events": [],
-        "report": None,
-    }
-    monkeypatch.setattr(ae, "ASTOCK_HARD_TIMEOUT_SECONDS", 60)
-    try:
-        events = [json.loads(value.removeprefix("data: ")) async for value in ae.stream_events(aid)]
-        assert events[-1]["type"] == "error"
-        assert "后台任务可能仍在运行" in events[-1]["message"]
-        assert ae._store[aid]["status"] == "running"
-    finally:
-        ae._store.pop(aid, None)
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO analysis_runs(id,username,ticker,mode,trade_date,status,started_at,updated_at) "
+            "VALUES('incomplete','testuser','600519','fast','2026-10-28','running',1,1)"
+        )
+    response = await client.get("/api/analysis/incomplete/stream", cookies=auth_cookies)
+    frame = json.loads(response.text.removeprefix("data: "))
+    assert frame["type"] == "error" and "未自动重新启动" in frame["message"]
+    with get_db() as db:
+        assert db.execute("SELECT status FROM analysis_runs WHERE id='incomplete'").fetchone()[0] == "running"
