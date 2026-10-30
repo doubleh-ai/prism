@@ -18,10 +18,13 @@ h1 { font-size:24px; margin-bottom:12px; }
 <div class="fixture-actions">
   <button onclick="openTour(false)">模型选择引导</button>
   <button onclick="openTour(true)">长说明引导</button>
+  <button onclick="App._startTour('analysis')">个股分析引导</button>
 </div>
+<div id="sidebarVibe" style="display:none"><button class="analysis-run-btn">历史研究入口</button></div>
+<div id="sidebarAnalysis"><input id="analysisQ" aria-label="搜索股票" placeholder="搜索股票"><button class="analysis-run-btn">一键分析</button></div>
 <div class="fixture-composer"><p>提出研究问题，也可以查询行情、比较产业关系或查看历史研报。</p><select id="modelSelect"><option>DeepSeek V4 Pro</option></select></div>
 <script>
-var App = {};
+var App = {_loadPrefs: function() { return {}; }, _savePrefs: function() {}};
 function esc(text) { return String(text).replace(/[&<>"']/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function openTour(long) {
   var text = '下拉切换 AI 模型（DeepSeek / MiniMax 等）。';

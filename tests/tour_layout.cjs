@@ -20,13 +20,16 @@ function setup(width = 1388, height = 668) {
   const target = {isConnected: true, classList: {add(){}, remove(){}},
     rect: {top: height - 110, bottom: height - 70, left: width - 250},
     getBoundingClientRect() { return this.rect; }};
+  // The real shell has an earlier, hidden Vibe button with this same class.
+  const hiddenVibeButton = {...target, rect: {top: 0, bottom: 0, left: 0}};
   const viewport = Object.assign(eventSource(), {width, height, offsetLeft: 0, offsetTop: 0});
   const win = Object.assign(eventSource(), {visualViewport: viewport, innerHeight: height,
     requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame(id) { frames.delete(id); }});
   const doc = {documentElement: {clientWidth: width},
     body: {appendChild(node) { nodes.set(node.id, node); }},
-    querySelector() { return target; }, querySelectorAll() { return [target]; },
+    querySelector(selector) { return selector === '.analysis-run-btn' ? hiddenVibeButton : target; },
+    querySelectorAll() { return [target]; },
     getElementById(id) { return nodes.get(id); },
     createElement() { return {style: {}, innerHTML: '',
       remove() { nodes.delete(this.id); },
@@ -61,6 +64,15 @@ function setup(width = 1388, height = 668) {
 {
   const e = setup(); e.render();
   assert(e.fits().top + e.fits().height < e.target.rect.top);
+}
+// The actual stock step must highlight its own button, not the earlier hidden one.
+{
+  const e = setup();
+  e.app._tourStepsActive = e.app._tourSteps.analysis;
+  e.app._tourIdx = 2;
+  e.render();
+  assert.equal(e.app._tourTarget, e.target);
+  e.fits();
 }
 for (const [width, height] of [[320, 568], [390, 240], [768, 320], [1388, 668]]) {
   const e = setup(width, height); e.render(); e.fits();

@@ -9,7 +9,7 @@ Object.assign(App, {
       {sel:".icon-rail-btn[data-mode='chat']",title:"对话",text:"在这里与 AI 对话。输入问题后按回车发送。"},
       {sel:"#input",title:"输入框",text:"输入投资问题或分析指令。支持 [[quote:600519]] 股票链接。"},
       {sel:"#modelSelect",title:"模型选择",text:"下拉切换 AI 模型（DeepSeek / MiniMax 等）。"},
-      {sel:"#cmpTools",title:"工具管理",text:"点击这里增删分析工具（技能）。"},
+      {sel:"#cmpTools",title:"研究方式",text:"选择本次研究的方式。可调用的工具和历史记录可在「平台能力」中查看。"},
     ],
     market: [
       {sel:".icon-rail-btn[data-mode='market']",title:"行情",text:"看实时行情和 K 线图。搜索或自选股票。"},
@@ -17,9 +17,9 @@ Object.assign(App, {
       {sel:"#indicatorInput",title:"指标库",text:"输入自然语言描述（如 \"MACD金叉\"），翻译成可执行指标并叠加到 K 线。"},
     ],
     analysis: [
-      {sel:".icon-rail-btn[data-mode='analysis']",title:"分析",text:"一键生成 7 位 AI 分析师的结构化投资报告。"},
+      {sel:".icon-rail-btn[data-mode='analysis']",title:"个股研究",text:"选择股票，通过 Prism Native 在研究对话中分析，并保留过程、来源和结果。"},
       {sel:"#analysisQ",title:"搜索股票",text:"输入代码或名称，选中后点击「一键分析」。"},
-      {sel:".analysis-run-btn",title:"一键分析",text:"开始分析。7 位分析师依次给出研报，最终生成仪表盘。"},
+      {sel:"#sidebarAnalysis .analysis-run-btn",title:"一键分析",text:"为选中的股票新建研究对话并开始分析。请在对话中查看进度、结果和数据缺口。"},
     ],
     industry: [
       {sel:".icon-rail-btn[data-mode='industry']",title:"产业链图谱",text:"看全球产业分布地图，钻取产业链上下游关系。"},
