@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
 
+from . import feedback_monitor
 from .activity import ActivityMiddleware
 from .agent.api import cancel as native_chat_cancel
 from .agent.api import chat_stream as native_chat_stream
@@ -588,6 +589,7 @@ async def api_chat_cancel(request: Request):
 app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)
+app.include_router(feedback_monitor.router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)
