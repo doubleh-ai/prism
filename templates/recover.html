@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <meta name="referrer" content="no-referrer"><title>Prism · 管理员密码找回</title>
+  <link rel="stylesheet" href="/static/css/app.css?v=87">
+  <style>
+    body.workbench-login{overflow:auto;min-height:100dvh;padding:24px 0;display:flex;align-items:center;justify-content:center}
+    .workbench-login .login-card{position:static;transform:none;margin:auto;width:calc(100% - 32px);max-width:460px}
+    .recovery-status{line-height:1.7;margin:16px 0;text-align:left;overflow-wrap:anywhere;color:var(--text)}
+    .login-card a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+    .login-card button:disabled{opacity:.6;cursor:wait}
+    .login-card label{display:block;text-align:left;margin:12px 0 6px}
+  </style>
+</head>
+<body class="workbench-login">
+<main class="login-card">
+  <div class="login-mark" aria-hidden="true">◈</div>
+  <h1>找回管理员账号</h1>
+  <p>通过绑定邮箱验证身份，再设置新密码。平台不会保存可查看的原密码。</p>
+  <div id="recoveryStatus" class="recovery-status" role="status" aria-live="polite">正在检查找回服务…</div>
+  <button type="button" id="sendCode" disabled>发送验证码到绑定邮箱</button>
+  <form id="resetForm" hidden>
+    <label for="code">邮件中的 8 位验证码</label>
+    <input id="code" inputmode="numeric" pattern="[0-9]{8}" minlength="8" maxlength="8" autocomplete="one-time-code" required>
+    <label for="newPassword">新密码（至少 12 个字符，不超过 72 字节）</label>
+    <input id="newPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" required>
+    <label for="confirmPassword">再次输入新密码</label>
+    <input id="confirmPassword" type="password" minlength="12" maxlength="72" autocomplete="new-password" required>
+    <p>验证码 10 分钟内有效，最多尝试 5 次。重置后旧登录将失效。</p>
+    <button type="submit" id="resetPassword">验证并重置密码</button>
+  </form>
+  <p><a href="/login">返回登录</a></p>
+  <p>普通账号忘记密码，请联系管理员重置。</p>
+</main>
+<script src="/static/js/password-recovery.js?v=1"></script>
+</body></html>

@@ -703,7 +703,7 @@ Object.assign(App, {
         '</div></td>' +
       '</tr>';
     }, this).join('');
-    return '<section class="admin-tab-section"><div class="admin-section-row"><div><div class="admin-section-title">账号控制</div><p>创建入口位于左侧，仅管理员可重置、禁用或删除账号</p></div></div>' +
+    return '<section class="admin-tab-section"><div class="admin-section-row"><div><div class="admin-section-title">账号控制</div><p>创建入口位于左侧，仅管理员可重置、禁用或删除账号</p><p>密码加密保存，无法查看原密码。<a href="/recover">管理员邮箱找回</a></p></div></div>' +
       (users.length ? '<div class="admin-table-wrap"><table class="admin-table"><thead><tr>' +
         '<th style="width:24%">账号</th><th style="width:10%">状态</th><th style="width:12%">会话</th><th style="width:12%">对话</th><th>创建时间</th><th style="width:230px;text-align:right">操作</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="admin-empty">暂无账号</div>') +

@@ -71,6 +71,7 @@ from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
 from .operations import router as operations_router
+from .password_recovery import router as password_recovery_router
 from .release import APP_VERSION, release_payload
 from .report_files import REPORT_CSP, list_report_files, read_report_file
 from .reports import list_saved_reports_for_conv
@@ -585,6 +586,7 @@ async def api_chat_cancel(request: Request):
 
 # ── Market data (v0.6) ──
 
+app.include_router(password_recovery_router)
 app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)

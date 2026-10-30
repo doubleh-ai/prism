@@ -126,6 +126,15 @@ def init_db():
                 expires INTEGER NOT NULL,
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS admin_recovery_challenges (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                binding TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
