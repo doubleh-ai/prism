@@ -16,6 +16,8 @@ Prism 是可自行部署的开源投资研究工作台。你可以在对话中�
 | 提交异常或建议、查看处理与验证进度 | [反馈、修复与每日评审](docs/FEEDBACK.md) |
 | 发布、停止和回退如何进行 | [交付与介入入口](docs/PROJECT_GUIDE.md#发布停止与回退) · [发布规范](docs/release-process.md) |
 
+- 管理员忘记密码：[账号与邮箱找回](docs/admin-account-recovery.md)（需私有配置和真实投递验收后启用）。
+
 ## 版本与上线状态
 
 维护者本次实例的访问恢复与验收范围见 [v0.21.2 灰度记录](docs/releases/native-v0.21.2-gray.md)。记录区分公开入口恢复、隔离验收和仍未完成的生产用户流程。
