@@ -70,30 +70,69 @@ Object.assign(App, {
       '</div>';
 
     document.body.appendChild(tip);
-
     if (target) {
       // Spotlight: huge box-shadow outside the target
-      var r = target.getBoundingClientRect();
       target.classList.add("tour-spot");
-      overlay.style.display = "block";
-      document.body.appendChild(overlay);
-      // Position tip near target
-      var tipR = tip.getBoundingClientRect();
-      var top = r.bottom + 10, left = r.left;
-      if (top + tipR.height > window.innerHeight - 20) top = r.top - tipR.height - 10;
-      if (left + tipR.width > window.innerWidth - 20) left = window.innerWidth - tipR.width - 20;
-      left = Math.max(10, left); top = Math.max(10, top);
-      tip.style.top = top + "px";
-      tip.style.left = left + "px";
-      tip.style.display = "block";
-    } else {
-      // Last step: center the tip, no highlight
-      overlay.style.display = "block";
-      document.body.appendChild(overlay);
-      tip.style.top = "50%"; tip.style.left = "50%";
-      tip.style.transform = "translate(-50%,-50%)";
-      tip.style.display = "block";
     }
+    overlay.style.display = "block";
+    document.body.appendChild(overlay);
+
+    // display:none has a zero-sized rect. Lay out invisibly before measuring,
+    // then use the visible viewport (including zoom / an on-screen keyboard).
+    tip.style.visibility = "hidden";
+    tip.style.display = "flex";
+    this._tourTarget = target;
+    this._positionTourTip();
+    tip.style.visibility = "visible";
+
+    var self = this;
+    this._tourReposition = function() {
+      if (self._tourFrame) return;
+      self._tourFrame = window.requestAnimationFrame(function() {
+        self._tourFrame = null;
+        self._positionTourTip();
+      });
+    };
+    window.addEventListener("resize", this._tourReposition);
+    // Capture nested workbench scrolling too, not just document scrolling.
+    window.addEventListener("scroll", this._tourReposition, true);
+    this._tourViewport = window.visualViewport;
+    if (this._tourViewport) {
+      this._tourViewport.addEventListener("resize", this._tourReposition);
+      this._tourViewport.addEventListener("scroll", this._tourReposition);
+    }
+    if (window.ResizeObserver) {
+      this._tourObserver = new window.ResizeObserver(this._tourReposition);
+      this._tourObserver.observe(tip);
+      if (target) this._tourObserver.observe(target);
+    }
+  },
+
+  _positionTourTip: function() {
+    var tip = document.getElementById("tourTip");
+    if (!tip) return;
+    var viewport = window.visualViewport;
+    var x = viewport ? viewport.offsetLeft : 0;
+    var y = viewport ? viewport.offsetTop : 0;
+    var width = viewport ? viewport.width : document.documentElement.clientWidth;
+    var height = viewport ? viewport.height : window.innerHeight;
+    var margin = 12, gap = 10;
+    tip.style.width = Math.max(0, Math.min(340, width - margin * 2)) + "px";
+    tip.style.maxHeight = Math.max(0, height - margin * 2) + "px";
+    var size = tip.getBoundingClientRect();
+    var left = x + (width - size.width) / 2;
+    var top = y + (height - size.height) / 2;
+    var target = this._tourTarget;
+    if (target && target.isConnected) {
+      var rect = target.getBoundingClientRect();
+      left = rect.left;
+      top = rect.bottom + gap;
+      if (top + size.height > y + height - margin) {
+        top = rect.top - size.height - gap;
+      }
+    }
+    tip.style.left = Math.max(x + margin, Math.min(left, x + width - size.width - margin)) + "px";
+    tip.style.top = Math.max(y + margin, Math.min(top, y + height - size.height - margin)) + "px";
   },
 
   _nextTourStep: function() {
@@ -109,6 +148,17 @@ Object.assign(App, {
   },
 
   _closeTour: function(persist) {
+    if (this._tourReposition) {
+      window.removeEventListener("resize", this._tourReposition);
+      window.removeEventListener("scroll", this._tourReposition, true);
+      if (this._tourViewport) {
+        this._tourViewport.removeEventListener("resize", this._tourReposition);
+        this._tourViewport.removeEventListener("scroll", this._tourReposition);
+      }
+    }
+    if (this._tourFrame) window.cancelAnimationFrame(this._tourFrame);
+    if (this._tourObserver) this._tourObserver.disconnect();
+    this._tourReposition = this._tourViewport = this._tourObserver = this._tourTarget = this._tourFrame = null;
     var ov = document.getElementById("tourOverlay"); if (ov) ov.remove();
     var tp = document.getElementById("tourTip"); if (tp) tp.remove();
     var spots = document.querySelectorAll(".tour-spot");

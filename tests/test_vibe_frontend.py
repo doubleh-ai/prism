@@ -13,7 +13,7 @@ def test_official_vibe_workbench_static_contract():
     assert "vibePanel" in template
     assert 'id="vibeDepth"' in template
     assert "开始正式研究" in template
-    assert "app.vibe.js?v=89" in template
+    assert "app.vibe.js?v=90" in template
     assert '#appShell[data-mode="vibe"]' in css
     assert "/api/vibe/plan" in js
     assert "/api/vibe/engine" in js
