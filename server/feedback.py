@@ -527,6 +527,11 @@ def _diagnostic_code(kind: str, message: str) -> dict:
     if kind in fixed:
         return {"error_code": fixed[kind]}
     text = message.splitlines()[0][:512] if isinstance(message, str) and message else ""
+    if kind in {"server_native_run_failed", "server_native_run_incomplete"}:
+        from .diagnostics import _NATIVE_ERROR_CODES
+
+        code = text.removeprefix("Native outcome: ")
+        return {"error_code": code if code in _NATIVE_ERROR_CODES else "research_unavailable"}
     if kind in {"api_http_5xx", "server_http_5xx"}:
         found = re.match(r"^HTTP (5[0-9]{2})(?:$| from )", text)
         return {"error_code": "http_server_error", **({"http_status": int(found[1])} if found else {})}
@@ -581,6 +586,8 @@ async def worker_diagnostics(request: Request, limit: int = 50):
         "api_http_5xx",
         "server_exception",
         "server_http_5xx",
+        "server_native_run_failed",
+        "server_native_run_incomplete",
     }
     with get_db() as db:
         rows = db.execute(

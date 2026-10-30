@@ -845,22 +845,5 @@ Object.assign(App, {
       })(hits[i]);
     }
   },
-  _runAnalysis: async function() {
-    if (!this._analysisTicker) { alert("请先搜索并选择一只股票"); return; }
-    var ticker = this._analysisTicker;
-    var name = this._analysisName;
-    var status = document.getElementById("analysisStatus");
-    status.innerHTML = "<div style=\"color:var(--accent);padding:4px 0\">已选: " + esc(name) + " (" + esc(ticker) + ") → 正在启动分析…</div>";
-    // Switch to chat and auto-execute: create conversation + send prompt
-    // all in one click — no manual Enter required.
-    this.switchMode("chat");
-    var input = document.getElementById("input");
-    if (input) {
-      input.value = "分析一下 " + ticker + " " + name + "\n1. 基本面\n2. 技术面\n3. 供应链\n4. 催化剂\n5. 风险";
-      try { input.dispatchEvent(new Event("input")); } catch(e) {}
-      // Auto-send: send() handles newConv() if needed, then streams the response
-      var self = this;
-      setTimeout(function() { self.send(); }, 100);
-    }
-  },
+
 });

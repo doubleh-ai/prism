@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import time
 import weakref
@@ -28,6 +29,8 @@ from ..work_lifecycle import Lease, Manager, WorkHandle
 from . import provider, store
 from .prompts import system_prompt
 from .public_text import public_answer_text
+
+log = logging.getLogger(__name__)
 
 model_stream = provider.stream
 
@@ -657,7 +660,7 @@ class NativeAgent:
             # This task failed the atomic claim and never invoked the model.
             return
         try:
-            store.get_run(outcome.user, outcome.run_id)
+            previous = store.get_run(outcome.user, outcome.run_id)
             if outcome.research_revision:
                 with get_db() as db:
                     row = db.execute(
@@ -679,6 +682,14 @@ class NativeAgent:
             )
             if terminal["status"] != outcome.status:
                 raise RuntimeError("native_terminal_persistence_unconfirmed")
+            if previous["status"] not in store.TERMINAL:
+                try:
+                    from ..diagnostics import record_native_outcome
+
+                    record_native_outcome(outcome.user, outcome.status, outcome.error_code)
+                except Exception:
+                    # Telemetry must not turn an already-saved result into a failed save.
+                    log.warning("native_outcome_diagnostic_unavailable")
 
         except HTTPException as error:
             if error.status_code not in {401, 404}:
