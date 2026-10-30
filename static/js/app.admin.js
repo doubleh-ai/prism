@@ -250,7 +250,7 @@ Object.assign(App, {
     var cards = [
       this._adminStatusPill(!!h.ok, '本地配置检查', (h.version || '-') + ' · ' + (h.deployed_revision || '未部署')),
       this._adminStatusPill(db.status === 'ok', '数据库', db.latency_ms != null ? db.latency_ms + ' ms' : (db.error || '-')),
-      this._adminStatusPill(native.status === 'ok', '运行器代码', '仅检查入口可加载'),
+      this._adminStatusPill(native.status === 'ok', '运行器代码', 'Prism Native · 仅检查入口可加载'),
       this._adminStatusPill(tools.status === 'ok', '工具注册', (tools.count || 0) + ' 项'),
       this._adminStatusPill(provider.status === 'ok', '模型配置', configuredModels + ' / ' + models.length + ' 已配置'),
     ].join('');
@@ -262,7 +262,7 @@ Object.assign(App, {
       '</tr>';
     }).join('');
     return '<section class="admin-health">' +
-      '<div class="admin-section-title">系统健康</div><p>下方只检查本地配置。业务可用性尚未验证，配置通过不代表功能正常。</p>' +
+      '<div class="admin-section-title">系统健康</div><p>下方只检查本地配置；配置检查不调用模型。业务可用性尚未验证，配置通过不代表功能正常。</p>' +
       '<div class="admin-empty">业务验收：待验证。此检查不执行研究、行情查询、指标试算或选股任务，也不验证报告质量。深度研究当前仅开放历史读取。</div>' +
       '<div class="admin-health-grid">' + cards + '</div>' +
       '<div class="admin-table-wrap admin-health-table"><table class="admin-table"><thead><tr><th>模型</th><th>配置</th><th>接入</th></tr></thead><tbody>' + modelRows + '</tbody></table></div>' +
