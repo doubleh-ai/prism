@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from fastapi import HTTPException
 
 from ..database import get_db
+from ..preferences import init_preferences_db, run_profile, snapshot_run
 from ..source_urls import redact_source_text, source_display_payload
 
 TERMINAL = frozenset({"completed", "partial", "failed", "cancelled"})
@@ -163,6 +164,7 @@ def init_agent_db():
     The persistent trigger also runs when an older application deletes a
     conversation. No caller transaction may be implicitly committed by DDL.
     """
+    init_preferences_db()
     with get_db() as db:
         if db.in_transaction:
             raise RuntimeError("native schema initialization requires its own transaction")
@@ -181,6 +183,9 @@ def init_agent_db():
                 created_at REAL NOT NULL, updated_at REAL NOT NULL, finished_at REAL,
                 last_seq INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TRIGGER IF NOT EXISTS profile_run_delete AFTER DELETE ON native_agent_runs BEGIN
+                DELETE FROM native_run_profiles WHERE run_id=OLD.run_id;
+            END;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_native_agent_request
                 ON native_agent_runs(username, COALESCE(conv_id,''), request_id)
                 WHERE request_id IS NOT NULL;
@@ -237,6 +242,8 @@ def _public_run(row):
     result = dict(row)
     result.pop("input_sha256", None)
     result.pop("claimed_by", None)
+    with get_db() as db:
+        result["profile"] = run_profile(db, row["username"], row["run_id"])
     result["id"] = result["run_id"]
     result["cancel_requested"] = bool(result["cancel_requested"])
     return result
@@ -313,6 +320,7 @@ def create_run(user, conv_id, question, model_id, workflow, request_id=None, *, 
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
             [run_id, user, conv_id, safe_question, model_id, workflow, request_id, fingerprint, now, now],
         )
+        snapshot_run(db, user, run_id)
         row = _owned(db, user, run_id)
         _insert_event(db, row, {"type": "run_created", "status": "queued"})
         return {**_public_run(_owned(db, user, run_id)), "created": True, "reused": False}

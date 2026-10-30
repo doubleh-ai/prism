@@ -14,7 +14,7 @@ function element() {
 function env() {
   const elements=new Map(),timers=new Map(),listeners={},storageReads=[],charts=[];let timer=0;
   const doc={cookie:'',hidden:false,visibilityState:'visible',documentElement:element(),addEventListener(k,fn){(listeners[k]||=[]).push(fn);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
-  const ctx={console,document:doc,marked:marked.marked,TextEncoder,TextDecoder,URL,Intl,Date,JSON,Map,Set,Promise,AbortController,
+  const ctx={console,document:doc,marked:marked.marked,TextEncoder,TextDecoder,URL,URLSearchParams,Intl,Date,JSON,Map,Set,Promise,AbortController,
     navigator:{},location:{href:''},localStorage:{getItem(k){storageReads.push(k);return null;},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;},setItem(){},removeItem(){}},matchMedia(){return {matches:false};},addEventListener(){},getComputedStyle(){return {getPropertyValue(){return '';}};},requestAnimationFrame(){return 1;},cancelAnimationFrame(){},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer;},clearTimeout(id){timers.delete(id);},setInterval(){return 1;},clearInterval(){},fetch(){throw new Error('Network is forbidden in frontend regression');},confirm(){return true;},NodeFilter:{SHOW_TEXT:4},echarts:{init(){const chart={setOption(o){this.option=o;},dispose(){},resize(){},dispatchAction(){}};charts.push(chart);return chart;}}};
   ctx.window=ctx;vm.createContext(ctx);
   for(const script of scripts)vm.runInContext(fs.readFileSync('static/js/'+script,'utf8'),ctx,{filename:script});

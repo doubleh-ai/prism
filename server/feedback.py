@@ -24,10 +24,27 @@ from .source_urls import redact_source_text
 router = APIRouter()
 _SHANGHAI = timezone(timedelta(hours=8), name="Asia/Shanghai")
 Feature = Literal[
-    "unknown", "chat", "market", "vibe", "analysis", "reports", "industry", "admin", "screener", "indicators"
+    "unknown",
+    "work",
+    "calendar",
+    "futures",
+    "preferences",
+    "chat",
+    "market",
+    "vibe",
+    "analysis",
+    "reports",
+    "industry",
+    "admin",
+    "screener",
+    "indicators",
 ]
 _FEATURES = {
     "unknown",
+    "work",
+    "calendar",
+    "futures",
+    "preferences",
     "chat",
     "market",
     "vibe",

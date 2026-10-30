@@ -1,11 +1,16 @@
 /* Prism Service Worker - offline cache for static assets.
    Network-first for app-shell navigations so deploys cannot get stuck behind
    an old cached / page; cache-first with background update for /static/*. */
-const CACHE_NAME = 'prism-workbench-v91';
+const CACHE_NAME = 'prism-workbench-v93';
 const STATIC_PREFIX = '/static/';
 
 const PRE_CACHE = [
   '/static/css/app.css',
+  '/static/css/desk.css',
+  '/static/css/work.css',
+  '/static/js/app.work.js',
+  '/static/js/app.hub.js',
+  '/static/js/app.handoff.js',
   '/static/js/app.util.js',
   '/static/js/app.core.js',
   '/static/js/app.diagnostics.js',
@@ -33,7 +38,7 @@ const PRE_CACHE = [
 self.addEventListener('install', function(ev) {
   ev.waitUntil(
     caches.open(CACHE_NAME).then(function(cache) {
-      return cache.addAll(PRE_CACHE.map(function(path) { return path + '?v=91'; })).catch(function() {});
+      return cache.addAll(PRE_CACHE.map(function(path) { return path + '?v=93'; })).catch(function() {});
     })
   );
   self.skipWaiting();
@@ -47,16 +52,6 @@ self.addEventListener('activate', function(ev) {
       }));
     }).then(function() {
       return self.clients.claim();
-    }).then(function() {
-      return self.clients.matchAll({type: 'window'}).then(function(clients) {
-        return Promise.all(clients.map(function(client) {
-          try {
-            var url = new URL(client.url);
-            if (url.origin === self.location.origin) return client.navigate(client.url);
-          } catch(e) {}
-          return Promise.resolve();
-        }));
-      });
     })
   );
 });
@@ -68,9 +63,7 @@ self.addEventListener('fetch', function(ev) {
   if (ev.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/login') {
     ev.respondWith(
       fetch(ev.request, {cache: 'no-store'}).catch(function() {
-        return caches.match(ev.request).then(function(cached) {
-          return cached || new Response('Offline', {status: 503});
-        });
+        return new Response('Offline', {status: 503});
       })
     );
     return;

@@ -593,10 +593,10 @@ class TestServiceWorkerCachePolicy:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
-        assert "prism-workbench-v91" in sw
+        assert "prism-workbench-v93" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
-        assert "client.navigate(client.url)" in sw
+        assert "client.navigate(client.url)" not in sw
         assert "'/'" not in sw.split("const PRE_CACHE = [", 1)[1].split("];", 1)[0]
 
     def test_app_registers_sw_without_update_cache(self):
@@ -606,7 +606,7 @@ class TestServiceWorkerCachePolicy:
         with open(os.path.join(project_root, "static", "js", "app.core.js"), encoding="utf-8") as fh:
             js = fh.read()
         assert "updateViaCache: 'none'" in js
-        assert "controllerchange" in js
+        assert "window.location.reload()" not in js
 
 
 def test_indicator_overlay_reuses_current_chart_kline():
@@ -622,7 +622,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     with open("static/sw.js", encoding="utf-8") as f:
         sw = f.read()
 
-    assert "app.indicator-chart.js?v=91" in template
+    assert "app.indicator-chart.js?v=93" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -653,7 +653,7 @@ def test_industry_workbench_static_contract():
         core = f.read()
 
     assert 'data-mode="industry"' in template
-    assert "app.industry.js?v=91" in template
+    assert "app.industry.js?v=93" in template
     assert "/api/industry/overview" in js
     assert "/api/industry/context" in js
     assert "_renderIndustryOverview" in js
@@ -691,7 +691,7 @@ def test_client_diagnostics_and_admin_bundle_static_contract():
     admin = Path("static/js/app.admin.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=91" in template
+    assert "app.diagnostics.js?v=93" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
@@ -755,8 +755,8 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert "app.css?v=91" in login
-    assert "app.css?v=91" in app
+    assert "app.css?v=93" in login
+    assert "app.css?v=93" in app
 
 
 def test_native_stock_entry_preserves_only_historical_analysis_rendering():
@@ -846,7 +846,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=91" in html
+    assert "app.screener.js?v=93" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener

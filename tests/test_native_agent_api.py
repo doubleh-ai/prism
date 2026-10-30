@@ -261,7 +261,12 @@ async def test_actual_http_auth_csrf_catalog_and_stream_use_native_engine(native
     ) as client:
         assert (await client.get("/api/agent/workflows")).status_code == 401
         client.cookies.set("token", auth.create_session(user))
-        assert len((await client.get("/api/agent/workflows")).json()) == 3
+        assert {r["workflow"] for r in (await client.get("/api/agent/workflows")).json()} == {
+            "research",
+            "industry",
+            "company",
+            "futures",
+        }
         catalog = (await client.get("/api/agent/tools")).json()["capabilities"]
         assert "source_read" in {row["id"] for row in catalog}
         assert "analysis_start" not in {row["id"] for row in catalog}

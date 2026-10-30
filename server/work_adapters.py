@@ -53,7 +53,9 @@ def produces_work(method, path):
             "/api/chat/cancel",
             "/api/agent/chat/cancel",
         }
-    return path.startswith(("/api/quote/", "/api/fundamentals/", "/api/indicators/universe/")) or path in {
+    return path.startswith(
+        ("/api/quote/", "/api/fundamentals/", "/api/indicators/universe/", "/api/futures/")
+    ) or path in {
         "/api/quotes",
         "/api/search",
         "/api/data-providers",

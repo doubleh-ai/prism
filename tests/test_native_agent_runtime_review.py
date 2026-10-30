@@ -483,3 +483,41 @@ def test_diagnostic_failure_does_not_undo_saved_research(engine, monkeypatch):
     )
     engine.service._persist(outcome)
     assert store.get_run(engine.user, engine.run["run_id"])["status"] == "failed"
+
+
+async def test_model_receives_frozen_profile_not_latest_settings(engine, monkeypatch):
+    from server.preferences import init_preferences_db
+
+    init_preferences_db()
+    frozen = {
+        "configured": True,
+        "version": 1,
+        "style": "conservative",
+        "horizon": "long",
+        "max_position_pct": 12,
+        "max_drawdown_pct": 7,
+        "allow_leverage": False,
+    }
+    with get_db() as db:
+        db.execute("DELETE FROM native_agent_runs WHERE run_id=?", [engine.run["run_id"]])
+        db.execute("INSERT INTO research_profiles VALUES(?,?,?,?)", [engine.user, 1, json.dumps(frozen), 1])
+    engine.run = store.create_run(engine.user, engine.conv, "合成偏好验证", "synthetic-model", "research")
+    with get_db() as db:
+        db.execute(
+            "UPDATE research_profiles SET version=2,profile_json=? WHERE username=?",
+            [json.dumps({**frozen, "version": 2, "style": "aggressive"}), engine.user],
+        )
+    systems = []
+
+    async def script(*args, **kwargs):
+        systems.append(kwargs["system"])
+        yield {"type": "text_delta", "text": "合成答案"}
+        yield {"type": "usage", "input_tokens": 5, "output_tokens": 4}
+        yield done()
+
+    monkeypatch.setattr(runtime, "model_stream", script)
+    await execute(engine)
+    assert systems and all('"style": "conservative"' in s and '"version": 1' in s for s in systems)
+    assert all('"style": "aggressive"' not in s for s in systems)
+    assert all("未评估" in s for s in systems)
+    assert store.get_run(engine.user, engine.run["run_id"])["profile"] == frozen

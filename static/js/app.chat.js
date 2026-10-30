@@ -9,7 +9,7 @@ Object.assign(App, {
       if (!r.ok) throw new Error('workflows unavailable');
       var data = await r.json();
       this.skills = (Array.isArray(data) ? data : []).filter(function(item) {
-        return ['prism-research', 'bottleneck-hunter', 'serenity'].indexOf(item.id) >= 0;
+        return ['prism-research', 'bottleneck-hunter', 'serenity', 'futures-research'].indexOf(item.id) >= 0;
       });
       this._workflowsUnavailable = !this.skills.length;
       this.setSkill(this.skill);
@@ -26,7 +26,7 @@ Object.assign(App, {
     if (!box) return;
     if (!this.skills.length) { box.innerHTML = ''; return; }
     var self = this;
-    var selected = ['prism-research','bottleneck-hunter','serenity'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
+    var selected = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
     box.innerHTML = this.skills.filter(function(s){ return s.id === selected; })
       .map(function(s){ return '<button type="button" class="cmp-chip" onclick="App._toggleSkillDrawer()" aria-label="切换研究方式">'+esc(s.name)+'</button>'; }).join('');
   },
@@ -46,7 +46,7 @@ Object.assign(App, {
   },
   _renderSkillDrawerItems: function(d) {
     var self = this;
-    var selected = ['prism-research','bottleneck-hunter','serenity'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
+    var selected = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
     d.innerHTML = '<div class="skill-drawer-hd">研究方式 · 单选</div>' +
       this.skills.map(function(s){
         var on = selected === s.id;
@@ -1178,7 +1178,7 @@ Object.assign(App, {
     }
     if (this._workflowsUnavailable) { this._toast('研究方式暂不可用，请刷新后重试'); return; }
     var self = this;
-    var skillForReq = ['prism-research','bottleneck-hunter','serenity'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
+    var skillForReq = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
     var requestId;
     try { requestId = this._newAgentRequestId(); }
     catch(error) { this._toast(error.message); return; }

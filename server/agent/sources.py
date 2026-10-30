@@ -32,7 +32,17 @@ from ..source_urls import public_source_url, redact_source_text
 MAX_BODY_BYTES = 512 * 1024
 MAX_TEXT_CHARS = 32 * 1024
 MAX_REDIRECTS = 2
-_OFFICIAL = ("sse.com.cn", "szse.cn", "bse.cn", "hkex.com.hk", "cninfo.com.cn")
+_OFFICIAL = (
+    "sse.com.cn",
+    "szse.cn",
+    "bse.cn",
+    "hkex.com.hk",
+    "cninfo.com.cn",
+    "shfe.cn",
+    "shfe.com.cn",
+    "dce.com.cn",
+    "ine.cn",
+)
 _NEWS = ("cls.cn", "jin10.com", "finance.sina.com.cn")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 _REDIRECTS = {301, 302, 303, 307, 308}

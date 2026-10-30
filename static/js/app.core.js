@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '91',
+  _clientAssetVersion: '93',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -132,15 +132,17 @@ var App = {
     this._bindAnalysisSearch();
     this._trackUiEvent('chat', 'open');
     if (this._initWorkbench) this._initWorkbench();
+    var feedbackDialog = document.getElementById('feedbackDialog');
+    if (feedbackDialog) feedbackDialog.addEventListener('close',function(){App._feedbackOrigin='';});
+    var feedbackOrigin = new URLSearchParams(location.search).get('feedback');
+    if (['work','calendar','futures','preferences'].includes(feedbackOrigin) && this._openFeedback) {
+      this._feedbackOrigin = feedbackOrigin; this._openFeedback();
+      history.replaceState(null, '', '/');
+    }
     // Register Service Worker for offline cache (P5). Bypass HTTP cache for
     // the SW script itself so deployments can replace stale app shells.
     if ('serviceWorker' in navigator) {
-      var swReloading = false;
-      navigator.serviceWorker.addEventListener('controllerchange', function() {
-        if (swReloading) return;
-        swReloading = true;
-        window.location.reload();
-      });
+      // Keep drafts intact. New assets load on the next deliberate navigation.
       navigator.serviceWorker.register('/static/sw.js', {updateViaCache: 'none'}).then(function(reg) {
         try { reg.update(); } catch(e) {}
       }).catch(function(){});
@@ -378,7 +380,7 @@ var App = {
 
   newConv: async function(skipWelcome) {
     var requestId = this._convRequestId = (this._convRequestId || 0) + 1;
-    var skillForNew = ['prism-research','bottleneck-hunter','serenity'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
+    var skillForNew = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
     var r = await this.api('/api/convs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({skill: skillForNew})});
     if (!r.ok) return false; var c = await r.json();
     if (requestId !== this._convRequestId) return false;
@@ -499,7 +501,7 @@ var App = {
 
   /* ═══ Skill ═══ */
   setSkill: function(s) {
-    this.skill = ['prism-research','bottleneck-hunter','serenity'].indexOf(s) >= 0 ? s : 'prism-research';
+    this.skill = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(s) >= 0 ? s : 'prism-research';
     this._activeSkills = new Set([this.skill]);
   },
 

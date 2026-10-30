@@ -22,6 +22,7 @@ from .. import config
 from ..capabilities import native_run_context
 from ..database import get_db
 from ..legacy_history import init_legacy_history_db, read_legacy_history
+from ..preferences import profile_prompt
 from ..research import create_research_run, finalize_research_run, ingest_tool_result, set_run_status
 from ..research_context import EvidenceTracker, build_research_context
 from ..source_urls import redact_source_text, source_display_payload
@@ -363,9 +364,11 @@ class NativeAgent:
                     raise RunStopped
                 outcome.observer_only = True
                 return outcome
+            profile = store.get_run(user, run_id).get("profile", {})
             anchor = ensure_dialogue(user, run)
             research = build_research_context(run_id=run_id, engine="prism-native")
             research["ledger_available"] = True
+            research["profile"] = profile
             create_research_run(user, run["conv_id"], run["question"], research)
             set_run_status(user, run_id, "discovering")
             emit("research_started", {"research": research, "status": "整理问题与已有研究"})
@@ -417,6 +420,7 @@ class NativeAgent:
                     requested, completed = [], None
                     clock = build_research_context()
                     system = system_prompt(research, run["workflow"], search_available=call_search_available)
+                    system += profile_prompt(profile)
                     system += f"\n当前服务器时间：{clock['as_of']}；‘今天’以此为准，研究启动观察时点仍保留。"
                     stream = model_stream(
                         messages,
