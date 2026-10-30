@@ -593,7 +593,7 @@ class TestServiceWorkerCachePolicy:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
-        assert "prism-workbench-v87" in sw
+        assert "prism-workbench-v91" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
         assert "client.navigate(client.url)" in sw
@@ -622,7 +622,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     with open("static/sw.js", encoding="utf-8") as f:
         sw = f.read()
 
-    assert "app.indicator-chart.js?v=87" in template
+    assert "app.indicator-chart.js?v=91" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -653,7 +653,7 @@ def test_industry_workbench_static_contract():
         core = f.read()
 
     assert 'data-mode="industry"' in template
-    assert "app.industry.js?v=87" in template
+    assert "app.industry.js?v=91" in template
     assert "/api/industry/overview" in js
     assert "/api/industry/context" in js
     assert "_renderIndustryOverview" in js
@@ -691,7 +691,7 @@ def test_client_diagnostics_and_admin_bundle_static_contract():
     admin = Path("static/js/app.admin.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=87" in template
+    assert "app.diagnostics.js?v=91" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
@@ -755,12 +755,12 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert "app.css?v=87" in login
-    assert "app.css?v=87" in app
+    assert "app.css?v=91" in login
+    assert "app.css?v=91" in app
 
 
-def test_astock_fast_mode_controls_and_metadata_are_wired():
-    """Astock should expose speed controls and report whether a result was cached."""
+def test_native_stock_entry_preserves_only_historical_analysis_rendering():
+    """New execution is Native; old analysis metadata stays readable."""
     with open("templates/app.html", encoding="utf-8") as f:
         html = f.read()
     with open("static/js/app.analysis.js", encoding="utf-8") as f:
@@ -768,14 +768,13 @@ def test_astock_fast_mode_controls_and_metadata_are_wired():
     with open("static/css/app.css", encoding="utf-8") as f:
         css = f.read()
 
-    assert 'id="analysisMode"' in html
-    assert 'value="fast"' in html
-    assert 'class="analysis-mode-segment"' in html
-    assert 'class="analysis-mode-btn active"' in html
-    assert "快速 · 2 Agent" in html
-    assert "深度 · 7 Agent" in html
-    assert 'id="analysisForceRefresh"' in html
-    assert "force_refresh: forceRefresh" in js
+    assert 'id="analysisMode"' not in html
+    assert 'id="analysisForceRefresh"' not in html
+    assert "2 Agent" not in html and "7 Agent" not in html
+    assert "使用 Prism Native" in html
+    assert "await this.newConv()" in js
+    assert "await this.send()" in js
+    assert '"/api/analysis/start"' not in js
     assert "_analysisAgentsForMode" in js
     assert "_setAnalysisMode" in js
     assert 'setAttribute("aria-pressed"' in js
@@ -847,7 +846,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=87" in html
+    assert "app.screener.js?v=91" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener

@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '86',
+  _clientAssetVersion: '91',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -115,12 +115,12 @@ var App = {
     document.getElementById('userBadge').textContent = this.user;
     var adminEntry = document.getElementById('adminEntry');
     if (adminEntry) adminEntry.style.display = this.isAdmin ? 'inline-flex' : 'none';
-    // Theme & width
+    // Theme; conversation width now follows one responsive layout.
     var saved = localStorage.getItem('cl-theme');
     if (saved === 'dark') document.documentElement.className = 'dark';
     else if (saved === 'light') document.documentElement.className = 'light';
     else document.documentElement.className = 'light';
-    if (localStorage.getItem('cl-wide') === 'true') document.documentElement.classList.add('wide');
+    localStorage.removeItem('cl-wide');
     this.loadSkills(); this.loadModels(); this.loadConvs(); this.showWelcome();
     this.renderSkillsBar();
     if (this._initReleaseNotes) this._initReleaseNotes();
@@ -238,9 +238,8 @@ var App = {
 
   /* ═══ Theme ═══ */
   toggleTheme: function() {
-    var c = document.documentElement.className.replace('wide','').trim();
-    var n = (c === 'dark') ? 'light' : 'dark';
-    document.documentElement.className = n + (document.documentElement.classList.contains('wide') ? ' wide' : '');
+    var n = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
+    document.documentElement.className = n;
     localStorage.setItem('cl-theme', n);
     // 主题切换后重绘当前 K 线（换配色表）
     if (this._mode === 'market' && this._currentTicker) {
@@ -249,10 +248,6 @@ var App = {
     if (this._mode === 'industry' && this._refreshIndustryTheme) {
       this._refreshIndustryTheme();
     }
-  },
-  toggleWidth: function() {
-    document.documentElement.classList.toggle('wide');
-    localStorage.setItem('cl-wide', document.documentElement.classList.contains('wide'));
   },
 
   _isCompactViewport: function() {

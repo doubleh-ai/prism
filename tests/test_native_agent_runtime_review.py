@@ -423,3 +423,63 @@ def test_assistant_and_report_failure_roll_back_together(engine, monkeypatch):
             ).fetchone()[0]
             is None
         )
+
+
+@pytest.mark.parametrize("code", ["provider_auth_error", "provider_timeout", "provider_connection_error"])
+def test_native_failed_execution_reaches_diagnostics(engine, monkeypatch, code):
+    async def failed(*args, **kwargs):
+        raise runtime.provider.ProviderError(code)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(runtime, "model_stream", failed)
+    asyncio.run(execute(engine))
+    with get_db() as db:
+        row = dict(
+            db.execute("SELECT * FROM diagnostic_events WHERE kind='server_native_run_failed'").fetchone()
+        )
+    assert row["message"] == "Native outcome: " + code
+    assert row["occurrences"] == 1
+    assert row["severity"] == "error"
+    assert "合成研究问题" not in json.dumps(row, ensure_ascii=False)
+    assert "synthetic-isolated-test" not in json.dumps(row)
+
+
+@pytest.mark.parametrize(
+    "status,code,expected",
+    [
+        ("completed", None, None),
+        ("cancelled", "cancelled_by_user", None),
+        ("cancelled", "execution_interrupted_unknown", "server_native_run_incomplete"),
+        ("partial", "output_incomplete", "server_native_run_incomplete"),
+        ("failed", "budget_exceeded", "server_native_run_incomplete"),
+        ("failed", "private_marker", "server_native_run_failed"),
+    ],
+)
+def test_terminal_diagnostics_classify_and_do_not_duplicate(engine, status, code, expected):
+    outcome = runtime.Outcome(
+        engine.user, engine.run["run_id"], "test", status, text="PRIVATE_ANSWER_MARKER", error_code=code
+    )
+    engine.service._persist(outcome)
+    engine.service._persist(outcome)
+    with get_db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM diagnostic_events")]
+    if expected is None:
+        assert not rows
+    else:
+        assert len(rows) == 1 and rows[0]["kind"] == expected and rows[0]["occurrences"] == 1
+        assert "PRIVATE_ANSWER_MARKER" not in json.dumps(rows)
+        assert "private_marker" not in json.dumps(rows)
+
+
+def test_diagnostic_failure_does_not_undo_saved_research(engine, monkeypatch):
+    from server import diagnostics
+
+    def unavailable(*args):
+        raise RuntimeError("synthetic diagnostic sink unavailable")
+
+    monkeypatch.setattr(diagnostics, "record_native_outcome", unavailable)
+    outcome = runtime.Outcome(
+        engine.user, engine.run["run_id"], "test", "failed", error_code="provider_timeout"
+    )
+    engine.service._persist(outcome)
+    assert store.get_run(engine.user, engine.run["run_id"])["status"] == "failed"

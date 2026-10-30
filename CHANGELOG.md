@@ -4,6 +4,16 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [v0.21.3] - 2026-10-30
+
+### 灰度修复候选
+- 新手引导按实际卡片大小和可见视口定位，底部与窄屏步骤不会把正文及操作按钮放到窗口外。
+- 个股引导指向当前页面的研究按钮，避免选中隐藏的历史研究入口；研究方式与 Native 引导说明同步现有行为。
+- 移除对话宽窄切换，欢迎页、回答和输入区使用一致的响应式阅读宽度，清理旧宽屏偏好。
+- 修复脚本覆盖导致个股入口调用已停用接口的问题，新研究统一进入 Native 对话；移除无效的旧 Agent 数量和缓存选项。
+- 管理页区分本地配置和业务验收，诊断读取失败显示未知；Native 失败或未完成终态进入脱敏诊断，主动取消不当作故障。
+- 本条描述组合候选，尚未证明上线。邮箱找回及 Work、期货能力不包含在本次修复；发布和模型验收仍独立受控。
+
 ## [v0.21.2] - 2026-10-27
 
 ### 个股研究地址校验
