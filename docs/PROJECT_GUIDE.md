@@ -34,7 +34,7 @@ Prism 目前是一个带账号隔离的研究工作台，不是自动交易系�
 | 自选与扫描 | 账号自选及原有扫描页面；原生 Agent 可读自选、查询已有扫描状态 | 原生 Agent 暂不发起扫描或修改自选；新增任务仍须走已有页面的明确操作 |
 | 产业关系 | 查询图谱、上下游与关联研究；原生研究可登记本轮主张和关系候选 | 种子图及连接数不证明商业关系；登记候选不会自动把它升级为已验证的全局知识 |
 | 网页研报 | 已保存报告、研究版本、证据与原会话回看 | 历史报告可能缺少可靠研究时点或原始材料；生成或保存时间不等于数据截至时间 |
-| 个股分析 | Astock 工作区使用可选第三方 Python 引擎 | 原生 Agent 只读取已有任务状态，不启动；并非自有 Agent 或 CLI 回退 |
+| 个股分析 | 查看已有任务与报告；新问题转到 Native 研究对话 | 旧 Astock 模型编排与后台执行已移除；兼容启动接口固定拒绝，不安装旧引擎恢复执行 |
 | 深度研究 / Vibe | 可查看本账号已保存历史 | 新研究与追问明确返回 503，等待独立隔离验收；不是当前可用执行能力 |
 | 历史知识检索 | 搜索、读取当前账号的研究和报告，排除本轮自引用 | 当前是有界文本检索，不是全量向量库、自动事实审查或模型训练 |
 | 管理与发布 | 管理员可观察脱敏发布与检查记录 | 研究 Agent 没有部署、重启、管理员或任意 Shell 权限；管理页不是生产执行器 |
@@ -110,7 +110,7 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8088 --workers 1
 
 没有模型 Key 时仍能启动并查看页面。需要真实研究时，可在启动前通过本地密钥管理或隐藏输入导出 `DEEPSEEK_API_KEY` 或 `MINIMAX_API_KEY`，并按需设置 `PRISM_DEFAULT_MODEL`。支持的端点与模型配置以 [`server/config.py`](../server/config.py) 和 [`provider.py`](../server/agent/provider.py) 为准；配置存在不保证提供方实际接受调用。
 
-`.env.example` 是变量模板，应用通过 `os.environ` 取值，**不会自动加载 `.env`**。不要复制生产配置和数据库来开发。实时行情的可选依赖见 `requirements-extra.txt`；Astock 需要单独的第三方 Python 依赖。整个 Prism 不安装、不调用或回退到 Claude Code CLI，也不读取外部 Skill。`install.sh` 只准备本地 Python 环境，不启动服务或执行生产部署。
+`.env.example` 是变量模板，应用通过 `os.environ` 取值，**不会自动加载 `.env`**。不要复制生产配置和数据库来开发。实时行情的可选依赖见 `requirements-extra.txt`。旧 Astock 模型编排已移除，不再安装它来恢复个股分析。整个 Prism 不安装、不调用或回退到 Claude Code CLI，也不读取外部 Skill。`install.sh` 只准备本地 Python 环境，不启动服务或执行生产部署。
 
 DeepSeek / MiniMax 继续通过直接 HTTP 使用；Anthropic 兼容 Messages 是协议格式，不是 Claude Code 运行时。术语解释、标题、指标翻译等辅助模型同样使用 `server/services/auxiliary_model.py`，失败明确返回错误，不换执行后端。健康页只检查本地 Native 模块、工具目录和模型配置，不能证明真实模型调用成功。
 

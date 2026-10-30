@@ -35,7 +35,8 @@ flowchart TD
 | 旧对话 URL | `server/main.py`、`server/chat.py` | 只映射 Native 开始/停止；旧交互回应返回 409，无旧运行器开关 |
 | 辅助模型 | `server/services/auxiliary_model.py` | 无状态直接 HTTP；无工具、会话、子进程、重试或备用后端 |
 | 历史对话 | `server/conversations.py` → `legacy_history.py` | 只读平台 SQLite 中的公开历史；离线导入单独执行 |
-| Astock / 行情 / 扫描 | `analysis_engine.py`、`market/`、`indicators/scanner.py` | 专用 Python 服务或可选第三方 Python 引擎，不是 Claude Code |
+| 行情 / 扫描 | `market/`、`indicators/scanner.py` | 专用 Python 数据服务与已有任务入口 |
+| 旧个股分析 | `analysis.py`、`capabilities.py` | 只读已有状态与报告；启动固定策略拒绝，新问题转到 Native 对话 |
 | Vibe | `server/vibe.py` | 新研究与追问固定 503，仅保留账号内已保存历史 |
 | 健康观察 | `server/health.py` | 检查 Native 入口、目录与本地模型配置；不调用模型或 CLI |
 
@@ -114,7 +115,7 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 | `static/js/app.workbench.js` | 能力目录、调用卡片、打开原结果而非重跑 |
 | `static/js/app.industry.js` | 产业关系页面、主题切换和证据边界 |
 
-`server/services/claude_runner.py`、根目录 `CLAUDE.md` 与捆绑 `skills/` 已移除。`server/chat.py` 只保留 Native 路由名兼容；仓库保留的旧 MCP 协议代码或运维探针不再是应用执行入口，也不能重新启用 CLI。Astock 的第三方 Python 引擎尚未变成自有 Agent；Vibe 执行明确禁用，不能宣传为已迁移或可用。
+`server/services/claude_runner.py`、根目录 `CLAUDE.md` 与捆绑 `skills/` 已移除。`server/chat.py` 只保留 Native 路由名兼容；仓库保留的旧 MCP 协议代码或运维探针不再是应用执行入口，也不能重新启用 CLI。旧 Astock 模型编排、后台执行和分析缓存实现已移除；Vibe 执行明确禁用。二者只保留所属历史，不能宣传为可运行的替代引擎。
 
 旧 JSONL 由 `scripts/import_legacy_history.py` 显式导入操作员预先准备的数据库副本与历史目录副本。导入仅保留公开问答、回合数和源指纹，拒绝不安全路径与源冲突，保持现有 SQL 消息和 Native 历史锚点。应用启动与历史请求不会运行导入器，也不再读取外部 CLI 的项目或设置目录。未迁入的会话返回 `pending_import`，不假装历史已完整恢复。
 
@@ -127,7 +128,7 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 5. **贯通页面与记录**：复用 `call_id`、`run_id`、`conv_id`，让卡片打开当时结果；刷新、重放、跨会话导航都不能重新执行动作。
 6. **验证失败路径**：模拟提供方与资料，覆盖越权、同请求复用、冲突、断线、真实停止、资源收尾、缺失日期和未知用量。新增付费或外部集成另做有限真实验收。
 
-Astock / Vibe / 扫描启动等能力必须按这条路径逐项接入。新增能力不得调用 Claude Code CLI，也不得在模型、工具或提供方失败后切换到旧执行链。
+公司专用研究、深度研究和扫描启动等新增 Native 能力必须按这条路径逐项接入，不能直接恢复 Astock / Vibe 的旧执行链。新增能力不得调用 Claude Code CLI，也不得在模型、工具或提供方失败后切换到旧执行链。
 
 ## 运行与发布是另一条边界
 

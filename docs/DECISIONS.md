@@ -60,7 +60,7 @@
 
 代价是短期内页面能力多于 Agent 可用工具。这个差异应在目录中如实展示，不能在产品文案中提前宣称“所有功能都已 Agent 化”。
 
-Astock 仍是可选第三方 Python 引擎；Vibe 新研究与追问固定返回 503，只保留所属历史。独立工作区并不等于已经纳入自有 Agent。
+旧 Astock 模型编排、后台执行和分析缓存实现已移除；兼容启动接口在鉴权后固定返回策略拒绝。Vibe 新研究与追问也固定返回 503，只保留所属历史。个股新问题由 Native 对话承担，旧工作区存在不代表旧引擎仍可运行。
 
 对应代码：[`agent/tools.py`](../server/agent/tools.py)、[`capabilities.py`](../server/capabilities.py)，目录边界见[平台能力](platform-capabilities.md)。
 
