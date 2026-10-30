@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
 
+from . import feedback_monitor
 from .activity import ActivityMiddleware
 from .agent.api import cancel as native_chat_cancel
 from .agent.api import chat_stream as native_chat_stream
@@ -65,7 +66,6 @@ from .database import (
 from .diagnostics import router as diagnostics_router
 from .feedback import init_feedback_db, is_worker_update_path
 from .feedback import router as feedback_router
-from .feedback_monitor import router as feedback_monitor_router
 from .health import admin_health_payload, readiness_payload
 from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
@@ -589,6 +589,7 @@ async def api_chat_cancel(request: Request):
 app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)
+app.include_router(feedback_monitor.router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)
@@ -598,7 +599,6 @@ app.include_router(watchlist_router)
 app.include_router(research_router)
 app.include_router(diagnostics_router)
 app.include_router(feedback_router)
-app.include_router(feedback_monitor_router)
 app.include_router(operations_router)
 
 
