@@ -16,7 +16,9 @@ Object.assign(App, {
     var dialog = document.getElementById('feedbackDialog');
     document.getElementById('feedbackReviewEntry').hidden = !this.isAdmin;
     if (category === 'bug' || category === 'suggestion') document.getElementById('feedbackCategory').value = category;
-    document.getElementById('feedbackPage').textContent = '当前页面：' + (this._mode || 'chat');
+    var context = this._feedbackOrigin || this._mode || 'chat';
+    var names = {work:'我的任务',calendar:'日历安排',futures:'期货研究',preferences:'研究偏好'};
+    document.getElementById('feedbackPage').textContent = '当前页面：' + (names[context] || context);
     if (!dialog.open) dialog.showModal();
     this._feedbackView('new');
     document.getElementById('feedbackSummary').focus();
@@ -49,8 +51,8 @@ Object.assign(App, {
       category:document.getElementById('feedbackCategory').value,
       title:document.getElementById('feedbackSummary').value.trim(),
       description:document.getElementById('feedbackDescription').value.trim(),
-      page:location.pathname,
-      feature:this._mode || 'chat'
+      page:this._feedbackOrigin ? '/' + this._feedbackOrigin : location.pathname,
+      feature:this._feedbackOrigin || this._mode || 'chat'
     };
   },
 

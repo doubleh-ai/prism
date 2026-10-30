@@ -14,7 +14,7 @@ function element() {
 function env() {
   const elements=new Map(),timers=new Map(),listeners={},storageReads=[],charts=[];let timer=0;
   const doc={cookie:'',hidden:false,visibilityState:'visible',documentElement:element(),addEventListener(k,fn){(listeners[k]||=[]).push(fn);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
-  const ctx={console,document:doc,marked:marked.marked,TextEncoder,TextDecoder,URL,Intl,Date,JSON,Map,Set,Promise,AbortController,
+  const ctx={console,document:doc,marked:marked.marked,TextEncoder,TextDecoder,URL,URLSearchParams,Intl,Date,JSON,Map,Set,Promise,AbortController,
     navigator:{},location:{href:''},localStorage:{getItem(k){storageReads.push(k);return null;},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;},setItem(){},removeItem(){}},matchMedia(){return {matches:false};},addEventListener(){},getComputedStyle(){return {getPropertyValue(){return '';}};},requestAnimationFrame(){return 1;},cancelAnimationFrame(){},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer;},clearTimeout(id){timers.delete(id);},setInterval(){return 1;},clearInterval(){},fetch(){throw new Error('Network is forbidden in frontend regression');},confirm(){return true;},NodeFilter:{SHOW_TEXT:4},echarts:{init(){const chart={setOption(o){this.option=o;},dispose(){},resize(){},dispatchAction(){}};charts.push(chart);return chart;}}};
   ctx.window=ctx;vm.createContext(ctx);
   for(const script of scripts)vm.runInContext(fs.readFileSync('static/js/'+script,'utf8'),ctx,{filename:script});
@@ -128,11 +128,45 @@ async function configuredModelSelection() {
   app.api=async()=>response([{id:'unconfigured',name:'未配置模型',configured:false,default:false}]);await app.loadModels();assert.equal(app.model,'');assert.equal(doc.getElementById('modelConfigurationNotice').hidden,false);
   let requests=0;ctx.fetch=()=>{requests++;throw Error('must not start');};doc.getElementById('input').value='question';await app.send();assert.equal(requests,0);
 }
+async function analysisUsesNativeOnce() {
+  const {app,doc}=env();let resolve,starts=0,sends=0;
+  app._analysisTicker='600519';app._analysisName='合成名称';
+  app.newConv=()=>{starts++;return new Promise(r=>{resolve=r;});};
+  app.send=async()=>{sends++;assert.match(doc.getElementById('input').value,/600519.*合成名称/);};
+  const pending=app._runAnalysis();await app._runAnalysis();assert.equal(starts,1);
+  resolve(true);await pending;assert.equal(sends,1);assert.equal(app._analysisStarting,false);
+}
 async function analysisStartCannotReplaceHistory() {
-  const {app}=env(),queue=delayed(app);app._analysisTicker='NEW';app._renderAgentGrid=()=>{};app.switchMode=()=>{};
-  const started=app._runAnalysis();await app._runAnalysis();assert.equal(queue.length,1,'double click must not create a second paid task');
-  const old=app._openAnalysisRecord('EXISTING','OLD');queue[1].resolve(response({ticker:'OLD',status:'failed'}));await old;
-  queue[0].resolve(response({analysis_id:'NEW-JOB'}));await started;assert.equal(app._analysisId,'EXISTING');
+  const {app}=env(),queue=delayed(app);let resolve,sends=0;
+  app._analysisTicker='NEW';app._renderAgentGrid=()=>{};app.switchMode=()=>{};
+  app.newConv=()=>new Promise(r=>{resolve=r;});app.send=async()=>{sends++;};
+  const started=app._runAnalysis();
+  const old=app._openAnalysisRecord('EXISTING','OLD');queue[0].resolve(response({ticker:'OLD',status:'failed'}));await old;
+  resolve(true);await started;assert.equal(app._analysisId,'EXISTING');assert.equal(sends,0);
+}
+async function adminDiagnosticFailuresAreUnknown() {
+  for(const kind of ['http','network','invalid-json','invalid-shape']) {
+    const {app}=env();let rendered=false;app._renderAdminUsers=()=>{rendered=true;};
+    app.api=async url=>{
+      if(url==='/api/admin/users')return response({users:[],current_user:'synthetic-admin'});
+      if(url.includes('/diagnostics')) {
+        if(kind==='network')throw Error('offline');
+        if(kind==='http')return {ok:false,status:503};
+        if(kind==='invalid-json')return {ok:true,json:async()=>{throw Error('invalid JSON');}};
+        return response({});
+      }
+      return response({});
+    };
+    await app._loadAdminUsers();assert(rendered,'one failed panel must not prevent the other panels loading');
+    const html=app._renderAdminDiagnosticsTab();assert.match(html,/当前状态未知/);assert(!html.includes('admin-stat-card'));
+  }
+  const {app}=env();app._adminDiagnostics={events:[],stats:{}};
+  assert.match(app._renderAdminDiagnosticsTab(),/不代表所有功能正常/);
+}
+async function adminHealthDoesNotCertifyBusiness() {
+  const {app}=env();assert.match(app._renderAdminHealth(),/当前状态未知/);
+  app._adminHealth={ok:true,checks:{database:{status:'ok'},native_core:{status:'ok'},tool_catalog:{status:'ok'},provider_configuration:{status:'ok'}},models:[]};
+  const html=app._renderAdminHealth();assert.match(html,/本地配置检查/);assert.match(html,/业务验收：待验证/);assert(!html.includes('<span>总览</span>'));
 }
 async function industryGraphSelection() {
   const {app}=env(),queue=delayed(app);let rendered;app._industryShell=(tab,html)=>html;app._disposeIndustryCharts=()=>{};app._renderIndustryChainDetail=category=>{rendered=category;};
@@ -159,4 +193,4 @@ async function normalApiDeadlineAndCallerCancellation() {
   const caller=new AbortController();const cancelled=app.api('/api/vibe/plans/A',{signal:caller.signal});caller.abort();await assert.rejects(cancelled,/aborted/);assert.equal(timers.size,0);
 }
 
-(async()=>{const cases=[normalApiDeadlineAndCallerCancellation,vibeSaveVersionAndSelection,actualChartOrder,klineIdentityAndReverseResponses,lateIndicatorDoesNotApply,savedReportSelection,vibeSelectionAndAction,stoppedVibeRequestCannotReturn,scanSelectionAndReconnect,capabilitySnapshotDoesNotReexecute,accountWatchlistAndFailure,confirmedWatchlistActivityIsPrivate,analysisShowsOnlyObservedStages,researchLedgerAndUntrustedData,researchReverseResponse,configuredModelSelection,analysisStartCannotReplaceHistory,industryGraphSelection];for(const test of cases)await test();console.log('frontend journeys ok: '+cases.length+' scenarios');})().catch(error=>{console.error(error);process.exitCode=1;});
+(async()=>{const cases=[analysisUsesNativeOnce,adminDiagnosticFailuresAreUnknown,adminHealthDoesNotCertifyBusiness,normalApiDeadlineAndCallerCancellation,vibeSaveVersionAndSelection,actualChartOrder,klineIdentityAndReverseResponses,lateIndicatorDoesNotApply,savedReportSelection,vibeSelectionAndAction,stoppedVibeRequestCannotReturn,scanSelectionAndReconnect,capabilitySnapshotDoesNotReexecute,accountWatchlistAndFailure,confirmedWatchlistActivityIsPrivate,analysisShowsOnlyObservedStages,researchLedgerAndUntrustedData,researchReverseResponse,configuredModelSelection,analysisStartCannotReplaceHistory,industryGraphSelection];for(const test of cases)await test();console.log('frontend journeys ok: '+cases.length+' scenarios');})().catch(error=>{console.error(error);process.exitCode=1;});

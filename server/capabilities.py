@@ -47,6 +47,10 @@ class EmptyArgs(Arguments):
     pass
 
 
+class FuturesArgs(Arguments):
+    symbol: Literal["RB", "CU", "AU", "M", "SC"]
+
+
 class QuoteArgs(Arguments):
     ticker: Ticker
 
@@ -180,6 +184,14 @@ class Capability:
 
 # Adding an endpoint elsewhere never makes it available to the agent implicitly.
 _TOOLS = (
+    Capability(
+        "futures_snapshot",
+        "期货研究数据",
+        "查询支持品种的连续日线、技术指标与成交持仓；缺失基本面保留缺口，不等于资金净流入。",
+        FuturesArgs,
+        "platform_market",
+        "market",
+    ),
     Capability(
         "market_quote",
         "查询行情",
@@ -831,6 +843,12 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             if (record := get_analysis_record(row["id"], user))
         ]
         return {"analyses": records}, target, f"找到 {len(records)} 条已有个股研究"
+    if name == "futures_snapshot":
+        from .futures import snapshot
+
+        value = await snapshot(data["symbol"])
+        target["href"] = "/futures?symbol=" + data["symbol"]
+        return value, target, "取得期货连续日线及研究缺口"
     if name.startswith("market_"):
         from .market.factory import get_chain
 

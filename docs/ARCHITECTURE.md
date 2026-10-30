@@ -48,7 +48,7 @@ flowchart TD
 
 [`agent/api.py`](../server/agent/api.py) 接受已有会话中的研究请求，校验登录、模型配置及参数，再创建原生任务。稳定的 `request_id` 加输入摘要用于去重：同输入重用同任务，冲突输入拒绝；数据库认领保证不会因调度重复而执行两次。同一会话最多一轮活跃研究。
 
-[`NativeAgent`](../server/agent/runtime.py) 持有真实的 `agent` Lease，运行有界模型—工具循环。`prompts.py` 提供综合、产业链、公司三种版本化方法；旧 `prism-research` / `bottleneck-hunter` / `serenity` 名称仅保留接口兼容，不对应读取磁盘 Skill。
+[`NativeAgent`](../server/agent/runtime.py) 持有真实的 `agent` Lease，运行有界模型—工具循环。`prompts.py` 提供综合、产业链、公司和期货四种版本化方法；这些方法是版本化的内置提示，不对应读取磁盘 Skill。
 
 工具返回后，模型可以继续分析；这是原研究的正常续接，不是失败请求重试。模型流失败、超时或预算耗尽会保留已有公开内容和已观察用量；没有报告的字段保持未知，不用零补齐，也不自动换提供方。
 
@@ -135,3 +135,27 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 公开应用的管理员观察页、CI 和候选打包器不持有生产执行权。环境专属控制源码、来源清单与回执位于私有运维仓库和私有存储；研究工具不能调用它们。
 
 应用、配置、依赖和运行数据分别固定。升级要有新候选的实际隔离、模型协议、任务排空、备份恢复和兼容回退证据；把提交同步到 `master` 只改变代码主线。入口见[项目指南](PROJECT_GUIDE.md#发布停止与回退)，合同见[发布规范](release-process.md)。
+
+## Personal Work, futures and research preferences
+
+The v0.22.0 candidate extends the existing application, authentication and SQLite
+store. It does not add a second model orchestrator.
+
+| Module | Boundary |
+|---|---|
+| `productivity/store.py`, `routes.py` | Owned tasks, request deduplication, optimistic versions, transactional account checks |
+| `productivity/calendar.py` | Owned one-off events, UTC instants and IANA zones, overlaps, retained cancellation, escaped ICS |
+| `preferences.py` | Explicit user constraints and a snapshot captured atomically with each Native run |
+| `futures.py` | Fixed public daily feed, bounded HTTP, public cache, deterministic technical calculations and explicit missing fields |
+| `agent/tools.py`, `capabilities.py` | Read-only `futures_snapshot`, recorded through the existing research/capability ledger |
+| `app.hub.js` | Account binding, stale-response guards, unknown-write handling, version conflicts and draft protection |
+
+New tables are additive. Account deletion triggers clean up owned Work content
+and profiles; deleting a run removes its profile snapshot. Old-code recovery
+still requires an actual compatibility check and must preserve newly written data.
+
+Research preferences are available to investment research, while private Work
+tasks/events are not automatically sent to it. A future Work Agent needs explicit
+workspace permissions and bounded write proposals. Profile prompts are not a
+deterministic portfolio risk engine. Missing holdings, margins or current
+contract evidence keep risk status `not_evaluated`.

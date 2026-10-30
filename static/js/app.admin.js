@@ -122,29 +122,34 @@ Object.assign(App, {
     var inner = document.getElementById('adminPanelInner');
     if (inner) inner.innerHTML = '<div class="market-empty-state">加载管理看板中...</div>';
     var range = encodeURIComponent(this._adminAnalyticsRange || '7d');
-    var usersReq = this.api('/api/admin/users');
-    var statsReq = this.api('/api/admin/stats');
-    var healthReq = this.api('/api/admin/health');
-    var overviewReq = this.api('/api/admin/analytics/overview?range=' + range);
-    var insightsReq = this.api('/api/admin/analytics/insights?range=' + range);
-    var activityUsersReq = this.api('/api/admin/analytics/users?range=' + range);
-    var eventsReq = this.api(this._adminEventsUrl());
-    var diagnosticsReq = this.api('/api/admin/diagnostics?status=open&limit=120');
-    var resps = await Promise.all([usersReq, statsReq, healthReq, overviewReq, insightsReq, activityUsersReq, eventsReq, diagnosticsReq]);
-    var usersResp = resps[0];
-    if (!usersResp.ok) {
-      if (inner) inner.innerHTML = '<div class="admin-empty">无法加载账号</div>';
+    var self = this;
+    async function readPanel(path) {
+      try {
+        var response = await self.api(path);
+        if (!response.ok) return null;
+        return await response.json();
+      } catch (error) { return null; }
+    }
+    var resps = await Promise.all([
+      '/api/admin/users', '/api/admin/stats', '/api/admin/health',
+      '/api/admin/analytics/overview?range=' + range,
+      '/api/admin/analytics/insights?range=' + range,
+      '/api/admin/analytics/users?range=' + range,
+      this._adminEventsUrl(), '/api/admin/diagnostics?status=open&limit=120'
+    ].map(readPanel));
+    var data = resps[0];
+    if (!data || !Array.isArray(data.users)) {
+      if (inner) inner.innerHTML = '<div class="admin-empty">管理数据加载失败，请刷新重试；当前状态未知。</div>';
       return;
     }
-    var data = await usersResp.json();
-    this._adminUsers = data.users || [];
-    this._adminStats = resps[1].ok ? await resps[1].json() : null;
-    this._adminHealth = resps[2].ok ? await resps[2].json() : null;
-    this._adminAnalytics = resps[3].ok ? await resps[3].json() : null;
-    this._adminInsights = resps[4].ok ? await resps[4].json() : null;
-    this._adminActivityUsers = resps[5].ok ? await resps[5].json() : null;
-    this._adminActivityEvents = resps[6].ok ? await resps[6].json() : null;
-    this._adminDiagnostics = resps[7].ok ? await resps[7].json() : null;
+    this._adminUsers = data.users;
+    this._adminStats = resps[1];
+    this._adminHealth = resps[2];
+    this._adminAnalytics = resps[3];
+    this._adminInsights = resps[4];
+    this._adminActivityUsers = resps[5];
+    this._adminActivityEvents = resps[6];
+    this._adminDiagnostics = resps[7];
     this._renderAdminUsers(data.current_user || this.user);
   },
 
@@ -234,7 +239,7 @@ Object.assign(App, {
 
   _renderAdminHealth: function() {
     var h = this._adminHealth;
-    if (!h) return '';
+    if (!h || !h.checks) return '<div class="admin-empty">健康检查加载失败，当前状态未知；请刷新重试。</div>';
     var checks = h.checks || {};
     var db = checks.database || {};
     var native = checks.native_core || {};
@@ -243,10 +248,10 @@ Object.assign(App, {
     var models = h.models || [];
     var configuredModels = models.filter(function(m){ return !!m.configured; }).length;
     var cards = [
-      this._adminStatusPill(!!h.ok, '总览', (h.version || '-') + ' · ' + (h.deployed_revision || '未部署')),
+      this._adminStatusPill(!!h.ok, '本地配置检查', (h.version || '-') + ' · ' + (h.deployed_revision || '未部署')),
       this._adminStatusPill(db.status === 'ok', '数据库', db.latency_ms != null ? db.latency_ms + ' ms' : (db.error || '-')),
-      this._adminStatusPill(native.status === 'ok', '研究运行器', 'Prism Native'),
-      this._adminStatusPill(tools.status === 'ok', '平台能力', (tools.count || 0) + ' 项'),
+      this._adminStatusPill(native.status === 'ok', '运行器代码', 'Prism Native · 仅检查入口可加载'),
+      this._adminStatusPill(tools.status === 'ok', '工具注册', (tools.count || 0) + ' 项'),
       this._adminStatusPill(provider.status === 'ok', '模型配置', configuredModels + ' / ' + models.length + ' 已配置'),
     ].join('');
     var modelRows = models.map(function(m) {
@@ -257,7 +262,8 @@ Object.assign(App, {
       '</tr>';
     }).join('');
     return '<section class="admin-health">' +
-      '<div class="admin-section-title">系统健康</div><p>配置检查不调用模型；研究质量与真实接入另行验证。</p>' +
+      '<div class="admin-section-title">系统健康</div><p>下方只检查本地配置；配置检查不调用模型。业务可用性尚未验证，配置通过不代表功能正常。</p>' +
+      '<div class="admin-empty">业务验收：待验证。此检查不执行研究、行情查询、指标试算或选股任务，也不验证报告质量。深度研究当前仅开放历史读取。</div>' +
       '<div class="admin-health-grid">' + cards + '</div>' +
       '<div class="admin-table-wrap admin-health-table"><table class="admin-table"><thead><tr><th>模型</th><th>配置</th><th>接入</th></tr></thead><tbody>' + modelRows + '</tbody></table></div>' +
     '</section>';
@@ -627,7 +633,10 @@ Object.assign(App, {
   },
 
   _renderAdminDiagnosticsTab: function() {
-    var payload = this._adminDiagnostics || {};
+    var payload = this._adminDiagnostics;
+    if (!payload || !Array.isArray(payload.events) || !payload.stats) {
+      return '<section class="admin-tab-section"><div class="admin-section-title">异常诊断</div><div class="admin-empty">异常记录加载失败，当前状态未知。请刷新重试；不能据此判断没有异常。</div></section>';
+    }
     var stats = payload.stats || {};
     var events = payload.events || [];
     var cards = [
@@ -655,7 +664,7 @@ Object.assign(App, {
       '<div class="admin-section-row admin-tab-heading"><div><div class="admin-section-title">异常诊断</div><p>区分当前、历史和版本未知记录。历史记录需复测；归档不代表修复完成。匿名 401/403 与未匹配路径请求在诊断包中单独分类。</p></div>' +
       '<button class="admin-btn primary" onclick="App._adminCopyDiagnosticBundle()">复制 Codex 诊断包</button></div>' +
       '<div class="admin-stat-grid">' + cards + '</div>' +
-      (rows ? '<div class="admin-table-wrap admin-scroll-table"><table class="admin-table admin-diagnostic-table"><thead><tr><th>时间</th><th>级别</th><th>组件</th><th>异常</th><th>次数</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="admin-empty">当前没有未处理异常</div>') +
+      (rows ? '<div class="admin-table-wrap admin-scroll-table"><table class="admin-table admin-diagnostic-table"><thead><tr><th>时间</th><th>级别</th><th>组件</th><th>异常</th><th>次数</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="admin-empty">未收到未处理的异常记录；不代表所有功能正常</div>') +
     '</section>';
   },
 
