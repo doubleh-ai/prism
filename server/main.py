@@ -65,6 +65,7 @@ from .database import (
 from .diagnostics import router as diagnostics_router
 from .feedback import init_feedback_db, is_worker_update_path
 from .feedback import router as feedback_router
+from .feedback_monitor import router as feedback_monitor_router
 from .health import admin_health_payload, readiness_payload
 from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
@@ -597,6 +598,7 @@ app.include_router(watchlist_router)
 app.include_router(research_router)
 app.include_router(diagnostics_router)
 app.include_router(feedback_router)
+app.include_router(feedback_monitor_router)
 app.include_router(operations_router)
 
 

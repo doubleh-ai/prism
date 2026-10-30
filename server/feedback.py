@@ -491,6 +491,7 @@ def _worker_auth(request: Request) -> None:
     if not permitted:
         raise HTTPException(401, "反馈处理身份无效")
     expected = os.environ.get("PRISM_FEEDBACK_WORKER_TOKEN", "")
+    monitor = os.environ.get("PRISM_FEEDBACK_MONITOR_TOKEN", "")
     supplied = request.headers.get(_WORKER_HEADER, "")
     enabled = 32 <= len(expected) <= 512 and not any(c.isspace() for c in expected)
     bounded = len(supplied) <= 1024
@@ -499,7 +500,7 @@ def _worker_auth(request: Request) -> None:
     same = secrets.compare_digest(
         hashlib.sha256(expected.encode()).digest(), hashlib.sha256(supplied.encode()).digest()
     )
-    if not (permitted and enabled and bounded and same):
+    if not (permitted and enabled and bounded and same) or (monitor and expected == monitor):
         raise HTTPException(401, "反馈处理身份无效")
 
 
