@@ -7,7 +7,7 @@ from pathlib import Path
 def test_runtime_shell_login_and_diagnostics_share_asset_generation():
     root = Path(__file__).resolve().parent.parent
     shell = (root / "templates/app.html").read_text()
-    versions = re.findall(r'(?:src|href)="/static/[^"?]+\?v=([^"]+)"', shell)
+    versions = re.findall(r'(?:src|href)="/static/[^"?]+\?v=([^"#]+)(?:#[^"]*)?"', shell)
     assert versions and len(set(versions)) == 1, "Mixed UI generations can revive retired entry points"
     version = versions[0]
     core = (root / "static/js/app.core.js").read_text()

@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '93',
+  _clientAssetVersion: '94',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -539,12 +539,25 @@ document.addEventListener('click', function(e) {
   var sd = document.getElementById('skillDrawer');
   if (sd && sd.style.display==='block' && !e.target.closest('#skillDrawer') && !e.target.closest('#cmpTools')) sd.style.display='none';
 });
-document.getElementById('input').addEventListener('keydown', function(e) {
-  var key = e.key||e.code||'';
-  if (key==='Enter'&&!e.shiftKey) { e.preventDefault(); if (App.selectAC()) return; App.send(); return; }
-  if (key==='Tab'||e.keyCode===9) { e.preventDefault(); var dd=document.getElementById('acDropdown'); if (dd.style.display!=='none') { if (App.acIdx<0) { App.moveAC(1); } else { App.selectAC(); } return; } App.showAC(); return; }
-  if (key==='ArrowDown'||e.keyCode===40) { e.preventDefault(); App.moveAC(1); return; }
-  if (key==='ArrowUp'||e.keyCode===38) { e.preventDefault(); App.moveAC(-1); return; }
-  if (key==='Escape'||e.keyCode===27) { App.hideAC(); return; }
-});
+(function bindComposerKeys(input) {
+  var composing = false;
+  input.addEventListener('compositionstart', function() { composing = true; });
+  input.addEventListener('compositionend', function() { composing = false; });
+  input.addEventListener('blur', function() { composing = false; });
+  input.addEventListener('keydown', function(e) {
+    // WebKit can report the confirming keydown after compositionend, with keyCode 229.
+    if (composing || e.isComposing || e.keyCode === 229) return;
+
+    var key = e.key || e.code || '';
+    if (key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!e.repeat && !App.selectAC()) App.send();
+      return;
+    }
+    if (key==='Tab'||e.keyCode===9) { e.preventDefault(); var dd=document.getElementById('acDropdown'); if (dd.style.display!=='none') { if (App.acIdx<0) { App.moveAC(1); } else { App.selectAC(); } return; } App.showAC(); return; }
+    if (key==='ArrowDown'||e.keyCode===40) { e.preventDefault(); App.moveAC(1); return; }
+    if (key==='ArrowUp'||e.keyCode===38) { e.preventDefault(); App.moveAC(-1); return; }
+    if (key==='Escape'||e.keyCode===27) { App.hideAC(); return; }
+  });
+})(document.getElementById('input'));
 document.getElementById('input').addEventListener('input', function() { App.showAC(); this.style.height='auto'; this.style.height=Math.min(140,Math.max(24,this.scrollHeight))+'px'; });
