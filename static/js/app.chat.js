@@ -183,7 +183,7 @@ Object.assign(App, {
       // when the user switches back, the typewriter picks up where it left off.
       var sid = App.convId;
       var s = sid ? Streams[sid] : null;
-      if (s && s.active) {
+      if (s && s.active && !s.saveUnconfirmed) {
         anyActive = true;
         var m = s.msgs[s.msgIdx];
         if (m && m.role === 'assistant' && !s.restored) {
@@ -202,7 +202,7 @@ Object.assign(App, {
       // Also keep the timer alive if any stream is still active elsewhere,
       // so the loop can pick up when the user switches back.
       for (var otherSid in Streams) {
-        if (Streams[otherSid].active && otherSid !== App.convId) { anyActive = true; break; }
+        if (Streams[otherSid].active && !Streams[otherSid].saveUnconfirmed && otherSid !== App.convId) { anyActive = true; break; }
       }
       if (anyActive) {
         self._twTimer = requestAnimationFrame(tick);
@@ -238,18 +238,19 @@ Object.assign(App, {
       if (m && m.role === 'assistant' && m._chunks) {
         this.renderOne(this.msgs.length - 1);
       }
-      if (s.offline && !s.following && s.runId) this._followNativeStream(s);
+      if (s.offline && !s.following && !s.saveUnconfirmed && s.runId) this._followNativeStream(s);
     }
     if (!this._twTimer && !(s && s.restored)) this._startTypewriter();
   },
 
   _syncChatStreamControls: function() {
-    var stream = Streams[this.convId], running = !!(stream && stream.active);
+    var stream = Streams[this.convId], blocked = !!(stream && stream.saveUnconfirmed);
+    var running = !!(stream && stream.active && !blocked);
     var button = document.getElementById('sendBtn');
     if (button) {
-      button.disabled = !!(stream && stream.stopping); button.classList.toggle('stop-mode', running);
+      button.disabled = blocked || !!(stream && stream.stopping); button.classList.toggle('stop-mode', running);
       button.onclick = running ? function() { App.stopStream(); } : function() { App.send(); };
-      button.title = running ? (stream.stopping ? '正在确认停止…' : '停止生成') : '发送 (Enter)';
+      button.title = blocked ? '本轮研究保存异常' : running ? (stream.stopping ? '正在确认停止…' : '停止生成') : '发送 (Enter)';
     }
     var bar = document.getElementById('loadingBar'); if (bar) bar.classList.toggle('active', running);
     this._activeReader = running ? stream.reader || null : null;
@@ -395,7 +396,7 @@ Object.assign(App, {
     // the live structure. We must render from _chunks to preserve tool steps,
     // think blocks, and references.
     var stream = Streams[this.convId];
-    var streamingLastIdx = (stream && stream.active) ? stream.msgIdx : -1;
+    var streamingLastIdx = (stream && stream.active && !stream.saveUnconfirmed) ? stream.msgIdx : -1;
     el.innerHTML = this.msgs.map(function(m, idx) {
       if (m.role === 'user') return '<div class="msg user"><div class="msg-inner"><div class="bubble">'+esc(m.content)+'</div></div></div>';
       try {
@@ -445,7 +446,8 @@ Object.assign(App, {
     var m = this.msgs[idx];
     if (!m || m.role !== 'assistant') return;
     var chunks = m._chunks || [];
-    var streaming = !!(Streams[this.convId] && Streams[this.convId].active);
+    var stream = Streams[this.convId];
+    var streaming = !!(stream && stream.active && !stream.saveUnconfirmed);
 
     // Ensure _refs is populated from _chunks when missing — renderOne can be
     // called on completion before renderAll has had a chance to build _refs.
@@ -980,7 +982,7 @@ Object.assign(App, {
             displayChunks = snapshot.chunks.slice();
             message.content = snapshot.text; message._refs = snapshot.refs.slice();
           }
-          displayChunks.push({t:'status',c:'连接暂时中断，已保留研究记录。仍可请求停止；本次不会重复提交研究。'});
+          displayChunks.push({t:'status',c:stream.saveUnconfirmed ? error.message : '连接暂时中断，已保留研究记录。仍可请求停止；本次不会重复提交研究。'});
           message._chunks = displayChunks;
         }
       } finally {
@@ -1063,6 +1065,12 @@ Object.assign(App, {
   _acceptNativeFrame: function(stream, frame) {
     var agent = frame.agent;
     if (!agent) {
+      if (frame.stream_error === 'result_unconfirmed' && stream.runId && frame.run_id === stream.runId && frame.after_seq === stream.lastSeq) {
+        stream.saveUnconfirmed = true;
+        var saveError = new Error('本轮研究已停止，最终结果保存异常。可重新打开本会话查看已保存的进度，或通过「反馈与建议」报告问题。');
+        saveError.stopReplay = true;
+        throw saveError;
+      }
       if (frame.pulse) return true;
       throw new Error('研究事件缺少运行记录，正在尝试恢复已保存进度');
     }
@@ -1161,7 +1169,7 @@ Object.assign(App, {
 
   send: async function() {
     if (this._sendStarting || (Streams[this.convId] && Streams[this.convId].active)) {
-      if (this._toast) this._toast('当前会话仍在生成，请等待完成或先停止');
+      if (this._toast) this._toast(Streams[this.convId] && Streams[this.convId].saveUnconfirmed ? '本轮研究的保存状态尚未确认，请先核对会话记录' : '当前会话仍在生成，请等待完成或先停止');
       return;
     }
     if (this._modelsLoaded && !this.model) { this._toast('尚无可用模型配置，请刷新配置或联系管理员；不会创建空的研究任务'); return; }
@@ -1324,7 +1332,7 @@ Object.assign(App, {
   /* ═══ Stop Generation ═══ */
   stopStream: async function() {
     var sid = this.convId, activeStream = Streams[sid];
-    if (!sid || (activeStream && activeStream.stopping)) return;
+    if (!sid || (activeStream && (activeStream.stopping || activeStream.saveUnconfirmed))) return;
     if (activeStream) activeStream.stopping = true;
     this._syncChatStreamControls();
     var controller = new AbortController();
