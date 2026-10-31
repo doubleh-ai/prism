@@ -5,6 +5,7 @@ const CACHE_NAME = 'prism-workbench-v93';
 const STATIC_PREFIX = '/static/';
 
 const PRE_CACHE = [
+  '/static/prism-mark.svg',
   '/static/css/app.css',
   '/static/css/desk.css',
   '/static/css/work.css',
