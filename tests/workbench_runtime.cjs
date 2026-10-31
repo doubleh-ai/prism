@@ -10,12 +10,12 @@ process.env.TZ = 'UTC';
 
 function element() {
   const classes = new Set();
-  return {
+  return Object.assign(new EventTarget(), {
     innerHTML:'',textContent:'',value:'',style:{},dataset:{},open:false,disabled:false,title:'',
     classList:{add(...names){names.forEach(n=>classes.add(n));},remove(...names){names.forEach(n=>classes.delete(n));},contains(n){return classes.has(n);},toggle(n,on){const next=on===undefined?!classes.has(n):on;if(next)classes.add(n);else classes.delete(n);return next;}},
-    addEventListener(){},setAttribute(){},removeAttribute(){},querySelectorAll(){return [];},querySelector(){return null;},appendChild(){},focus(){},scrollTo(){},scrollIntoView(){},
+    setAttribute(){},removeAttribute(){},querySelectorAll(){return [];},querySelector(){return null;},appendChild(){},focus(){},scrollTo(){},scrollIntoView(){},
     showModal(){this.open=true;},close(){this.open=false;},
-  };
+  });
 }
 function environment() {
   const elements = new Map();
@@ -33,6 +33,42 @@ function environment() {
   return {context,app,elements,doc,shippedRenderOne,listeners};
 }
 const settled=()=>new Promise(setImmediate);
+
+function imeEnterCommitsWithoutSending() {
+  const {app, doc} = environment();
+  const input = doc.getElementById('input');
+  const sent = [];
+  let autocompleteChecks = 0;
+  app.selectAC = () => { autocompleteChecks++; return false; };
+  app.send = () => { sent.push(input.value); input.value = ''; };
+  const keydown = (key, details = {}) =>
+    input.dispatchEvent(Object.assign(new Event('keydown', {cancelable:true}), {key}, details));
+
+  input.value = 'a';
+  input.dispatchEvent(new Event('compositionstart'));
+  assert.ok(keydown('Enter', {isComposing:true, keyCode:13}), 'let the IME commit the letter');
+  assert.ok(keydown('ArrowDown'), 'the candidate list owns its navigation');
+  assert.ok(keydown('Enter', {keyCode:13}), 'an active composition owns Enter even without a flag');
+  input.dispatchEvent(new Event('compositionend'));
+  assert.ok(keydown('Enter', {isComposing:false, keyCode:229}), 'WebKit may end composition before keydown');
+  assert.equal(keydown('Enter', {repeat:true}), false);
+  assert.equal(autocompleteChecks, 0);
+  assert.deepEqual(sent, []);
+  assert.equal(input.value, 'a');
+
+  assert.equal(keydown('Enter', {keyCode:13}), false);
+  assert.deepEqual(sent, ['a'], 'the next deliberate Enter sends immediately');
+  assert.ok(keydown('Enter', {shiftKey:true}), 'Shift+Enter keeps the native newline');
+  app.selectAC = () => true;
+  assert.equal(keydown('Enter'), false);
+  assert.deepEqual(sent, ['a'], 'a selected Prism shortcut still takes precedence');
+  input.dispatchEvent(new Event('compositionstart'));
+  input.dispatchEvent(new Event('blur'));
+  app.selectAC = () => false;
+  input.value = 'new draft';
+  assert.equal(keydown('Enter'), false);
+  assert.deepEqual(sent, ['a', 'new draft']);
+}
 
 async function conversationOrder() {
   const {app}=environment(),pending={};
@@ -238,7 +274,8 @@ async function managementDoesNotRequestCapabilityHistory() {
 }
 
 (async()=>{
+  imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
   await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();
-  console.log('workbench runtime ok: 15 scenarios');
+  console.log('workbench runtime ok: 16 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});
