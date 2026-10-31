@@ -15,7 +15,7 @@ from ..auth import require_auth
 from ..database import check_rate_limit
 from ..models import validation_error_message
 from ..source_urls import source_display_payload
-from ..work_lifecycle import LifecycleError, get_manager
+from ..work_lifecycle import LifecycleError, Manager, get_manager
 from . import store
 from .prompts import workflow_catalog, workflow_id
 from .runtime import ensure_dialogue, get_service
@@ -65,10 +65,13 @@ def event_payload(event: dict, run: dict) -> dict:
     )
 
 
-def stream_run(user: str, run_id: str, *, after_seq: int = 0) -> StreamingResponse:
+def stream_run(
+    user: str, run_id: str, *, after_seq: int = 0, manager: Manager | None = None
+) -> StreamingResponse:
     initial = store.get_run(user, run_id)
     if after_seq < 0 or after_seq > initial["last_seq"]:
         raise HTTPException(422, "事件序号无效")
+    service = get_service(manager or get_manager())
 
     async def replay():
         cursor, pulse_at = after_seq, time.monotonic()
@@ -89,6 +92,13 @@ def stream_run(user: str, run_id: str, *, after_seq: int = 0) -> StreamingRespon
                 return
             if events:
                 continue
+            active = service.active.get(run_id)
+            if active and active.handle.failed():
+                # The durable cursor stays on the last saved event. A blocked
+                # owner cannot publish a terminal event or release its lease.
+                notice = {"stream_error": "result_unconfirmed", "run_id": run_id, "after_seq": cursor}
+                yield f"data: {json.dumps(notice)}\n\n"
+                return
             if time.monotonic() - pulse_at >= 5:
                 yield 'data: {"pulse":"wait"}\n\n'
                 pulse_at = time.monotonic()
@@ -171,7 +181,7 @@ async def chat_stream(request: Request):
         # request may be scheduled again; the transaction claim prevents execution twice.
         if run["status"] == "queued":
             get_service(manager).start(user, run, dict(model_cfg), parent=request_lease)
-    return stream_run(user, run["run_id"])
+    return stream_run(user, run["run_id"], manager=manager)
 
 
 @router.get("/runs/{run_id}")
@@ -190,7 +200,12 @@ async def events(run_id: str, request: Request, after_seq: int = 0):
 async def stream(run_id: str, request: Request, after_seq: int = 0):
     if after_seq < 0:
         raise HTTPException(422, "事件序号无效")
-    return stream_run(require_auth(request), run_id, after_seq=after_seq)
+    return stream_run(
+        require_auth(request),
+        run_id,
+        after_seq=after_seq,
+        manager=get_manager(getattr(request, "scope", None)),
+    )
 
 
 @router.post("/chat/cancel")

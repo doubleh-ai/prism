@@ -94,6 +94,24 @@ async function terminalAndDoneDoNotReconnect() {
   const {app,context}=environment(),s=stream();context.fetch=()=>{throw Error('DONE must not reconnect');};
   await app._readNativeStream(s,response([frame(1,{text:'内容'})],{done:true}),()=>{});assert.equal(s.doneReceived,true);
 }
+async function failedSaveStopsWaitingAndPreservesProgress() {
+  const failed=environment(),partial={stream_error:'result_unconfirmed',run_id:'native-run',after_seq:1};
+  const requests=[];failed.document.getElementById('input').value='合成问题';
+  failed.context.fetch=async(url,options)=>{requests.push(options.method);return response([frame(1,{text:'已保存片段'}),partial]);};
+  await failed.app.send();
+  const saved=failed.context.Streams.conv;
+  assert.deepEqual(requests,['POST']);assert(saved.saveUnconfirmed);assert.equal(saved.lastSeq,1);
+  assert.match(failed.app.msgs[1].content,/已保存片段/);assert.match(failed.app.msgs[1].content,/最终结果保存异常/);
+  assert(!saved.terminal);assert(failed.document.getElementById('sendBtn').disabled);
+  failed.app._reattachStream();await failed.app.send();await failed.app.stopStream();
+  assert.deepEqual(requests,['POST']);
+  const stale=stream();stale.runId='native-run';stale.lastSeq=2;
+  assert.throws(()=>failed.app._acceptNativeFrame(stale,partial));assert(!stale.saveUnconfirmed);
+  const reload=environment(),{payload}=historyPayload();reload.app.msgs=[{role:'assistant',content:JSON.stringify(payload)}];
+  reload.context.fetch=async(url,options)=>{assert.equal(options.method,'GET');return response([frame(1,{text:'历史进度'},'running','history-run'),{...partial,run_id:'history-run'}]);};
+  reload.app._restoreNativeStream('conv');const restored=reload.context.Streams.conv;await restored.promise;
+  assert(restored.saveUnconfirmed);assert(!restored.terminal);assert(reload.app.msgs[0]._chunks.some(chunk=>chunk.c.includes('最终结果保存异常')));
+}
 async function ownershipErrorsAndMalformedFrames() {
   const {app,context}=environment(),s=stream();let gets=0;
   context.fetch=async()=>{gets++;return response([],{status:404});};
@@ -201,7 +219,8 @@ async function unknownWorkflowCommandRemainsUserText() {
   await onePostReplayAndDedupe();await readerAndGetFailuresOnlyReplayOriginalRun();await exhaustedReplayIsBounded();await unknownRunNeverRetries();
   await sequenceGapRecoversWithoutSkipping();await terminalAndDoneDoNotReconnect();await ownershipErrorsAndMalformedFrames();await cancelUsesNativeOwnerAndRun();await workflowsAreSingleAndNative();await nextQuestionHasDifferentRequestId();await doubleSendAndWorkflowShortcutDoNotCreateTwoRuns();await cancellationDiscardsLateTransportFrames();await unknownWorkflowCommandRemainsUserText();
   await refreshRestoresGetOnlyAndRebuildsCardsOnce();await restoredOfflineRetainsProgressAndReopensSameCursor();await restoredRunDoesNotRenderIntoAnotherConversation();await disconnectedSendStillOwnsStopControl();
-  console.log('native frontend runtime ok: 17 scenarios');
+  await failedSaveStopsWaitingAndPreservesProgress();
+  console.log('native frontend runtime ok: 18 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
 
@@ -219,7 +238,7 @@ def test_native_frontend_replay_cancel_and_workflows():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "native frontend runtime ok: 17 scenarios" in result.stdout
+    assert "native frontend runtime ok: 18 scenarios" in result.stdout
 
 
 def test_native_entry_and_catalog_are_explicit():
