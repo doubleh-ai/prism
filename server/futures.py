@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
+from . import warehouse_receipts
 from .auth import require_auth
 from .database import check_rate_limit
 
@@ -194,7 +195,7 @@ def analyze(symbol, bars, collected_at):
             {"topic": topic, "status": "not_collected", "official_url": official_url} for topic in drivers
         ],
         "gaps": [
-            "库存、现货基差、期限结构和会员持仓尚需原始数据",
+            "社会库存、现货基差、期限结构和会员持仓尚需原始数据",
             "当前合约、保证金及交割规则须按交易所和经纪商最新披露核对",
         ],
         "notice": "连续日线仅用于观察，可能含换月跳变，不能直接下单或作为策略回测收益；当日数据可能尚未收盘。",
@@ -210,7 +211,9 @@ async def snapshot(symbol):
     if cached and time.monotonic() - cached[0] < 300:
         return copy.deepcopy({**cached[1], "cached": True})
     try:
-        async with asyncio.timeout(15), _slots:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 15
+        async with asyncio.timeout_at(deadline), _slots:
             async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False) as client:
                 raw = bytearray()
                 async with client.stream("GET", ENDPOINT, params={"symbol": symbol + "0"}) as response:
@@ -219,9 +222,13 @@ async def snapshot(symbol):
                         raw.extend(chunk)
                         if len(raw) > 4 * 1024 * 1024:
                             raise ValueError("series too large")
-            now = datetime.now(SHANGHAI)
-            bars = parse_bars(bytes(raw), now.date())
-            value = analyze(symbol, bars, now.isoformat(timespec="seconds"))
+                now = datetime.now(SHANGHAI)
+                bars = parse_bars(bytes(raw), now.date())
+                value = analyze(symbol, bars, now.isoformat(timespec="seconds"))
+                observation_day = datetime.fromisoformat(value["data_as_of"]).date()
+                value["warehouse_receipt"] = await warehouse_receipts.read_report(
+                    client, symbol, observation_day, min(deadline - 0.25, loop.time() + 4)
+                )
             _cache[symbol] = (time.monotonic(), value)
             return copy.deepcopy({**value, "cached": False})
     except (httpx.HTTPError, ValueError, TypeError, KeyError, OverflowError, RecursionError, TimeoutError):

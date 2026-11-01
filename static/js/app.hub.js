@@ -113,7 +113,14 @@
             title:row.title,description:row.description,start_at:row.start_at,end_at:row.end_at,timezone:row.timezone,cancelled:true},'PUT');await loadCalendar(); }
           catch(error){notice(error.message+'；请刷新核对取消结果。');cancel.disabled=false;}
         };card.append(cancel);
-        var link=node('a','导出至日历 ↗');link.href='/api/work/calendar/'+row.id+'.ics';card.append(link);
+        var reminder=node('select'), reminderLabel=node('label','导入日历后的提醒 ');
+        [0,5,15,30,60].forEach(function(minutes){
+          var option=node('option',minutes?'提前 '+minutes+' 分钟':'无提醒');option.value=String(minutes);reminder.append(option);
+        });
+        reminderLabel.append(reminder);
+        var exportUrl='/api/work/calendar/'+row.id+'.ics',link=node('a','导出至日历 ↗');
+        link.href=exportUrl;reminder.onchange=function(){link.href=exportUrl+'?reminder_minutes='+reminder.value;};
+        card.append(reminderLabel,link);
       } else {var taskLink=node('a','打开任务 ↗');taskLink.href='/work';card.append(taskLink);}
       list.append(card);
     });
@@ -142,7 +149,18 @@
       overview.append(node('p','数据日期 '+value.data_as_of+' · 采集 '+value.collected_at+(value.cached?' · 5分钟内缓存':''),'muted'));
       var metrics=node('div',undefined,'metrics');metrics.append(metric('最近收盘',value.latest.close),metric('日变动（%）',value.technical.change_pct),metric('20日均值',value.technical.sma20));overview.append(metrics,node('p',value.notice,'muted'));root.append(overview);
       var tech=node('section',undefined,'card');tech.append(node('h2','技术与成交持仓'));var values=node('div',undefined,'metrics');values.append(metric('60日均值',value.technical.sma60),metric('成交量',value.positioning.volume),metric('持仓量变化',value.positioning.open_interest_change));tech.append(values,node('p',value.positioning.notice,'muted'));root.append(tech);
-      var fund=node('section',undefined,'card');fund.append(node('h2','基本面 · 待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/?futures='+value.symbol;fund.append(action);root.append(fund);
+      var fund=node('section',undefined,'card');
+      fund.append(node('h2','基本面'));
+      var receipt=value.warehouse_receipt;
+      if(receipt && receipt.status==='collected'){
+        fund.append(node('h3','交易所仓单 · '+receipt.table),node('p',receipt.data_as_of+' · '+receipt.row+' '+receipt.quantity+' '+receipt.unit+'，较上一期变化 '+receipt.change+' '+receipt.unit));
+        var reportLink=node('a','查看当日仓单原表 ↗');
+        reportLink.href=receipt.source_url;reportLink.target='_blank';reportLink.rel='noopener noreferrer';
+        fund.append(reportLink,node('p','仅覆盖该表已登记仓单，社会库存仍待核查。','muted'));
+      }else if(receipt){
+        fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得对应交易日的官方仓单，保留行情结果。','muted'));
+      }
+      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/?futures='+value.symbol;fund.append(action);root.append(fund);
       var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }

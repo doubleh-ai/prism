@@ -187,7 +187,7 @@ _TOOLS = (
     Capability(
         "futures_snapshot",
         "期货研究数据",
-        "查询支持品种的连续日线、技术指标与成交持仓；缺失基本面保留缺口，不等于资金净流入。",
+        "读取连续日线、技术指标、成交持仓及已覆盖品种的同日交易所仓单。保留缺失来源与数据日期。",
         FuturesArgs,
         "platform_market",
         "market",

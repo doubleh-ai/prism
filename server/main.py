@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
 
+from . import feedback_monitor
 from .activity import ActivityMiddleware
 from .agent.api import cancel as native_chat_cancel
 from .agent.api import chat_stream as native_chat_stream
@@ -72,6 +73,7 @@ from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
 from .operations import router as operations_router
+from .password_recovery import router as password_recovery_router
 from .preferences import init_preferences_db
 from .preferences import router as preferences_router
 from .productivity.calendar import init_calendar_db
@@ -626,9 +628,11 @@ async def api_chat_cancel(request: Request):
 
 # ── Market data (v0.6) ──
 
+app.include_router(password_recovery_router)
 app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)
+app.include_router(feedback_monitor.router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)

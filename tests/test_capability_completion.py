@@ -144,10 +144,17 @@ async def test_calendar_create_conflict_replay_edit_and_export(client, feature_d
     exported = await client.get("/api/work/calendar/" + row["id"] + ".ics", cookies=first)
     assert exported.headers["cache-control"] == "no-store"
     assert "DTSTART:20261102T010000Z" in exported.text and "SUMMARY:已调整" in exported.text
+    assert "VALARM" not in exported.text
+    alarm_url = "/api/work/calendar/" + row["id"] + ".ics?reminder_minutes=15"
+    assert (await client.get(alarm_url, cookies=second)).status_code == 404
+    with_alarm = await client.get(alarm_url, cookies=first)
+    assert "TRIGGER:-PT15M\r\nACTION:DISPLAY\r\nDESCRIPTION:已调整" in with_alarm.text
+    assert (await client.get(alarm_url.replace("=15", "=1441"), cookies=first)).status_code == 422
     cancelled = await client.put(
         "/api/work/calendar/" + row["id"], cookies=first, json=event(expected_version=2, cancelled=True)
     )
     assert cancelled.json()["event"]["cancelled"]
+    assert "VALARM" not in (await client.get(alarm_url, cookies=first)).text
     assert row["id"] not in [
         r["id"] for r in (await client.get("/api/work/calendar" + RANGE, cookies=first)).json()["events"]
     ]
@@ -236,6 +243,8 @@ async def test_real_futures_http_parser_and_cache_without_external_calls(monkeyp
 
     def handler(request):
         requests.append(request)
+        if request.url.host == "www.shfe.com.cn":
+            return httpx.Response(404)
         assert request.url.host == "stock2.finance.sina.com.cn"
         assert request.url.params["symbol"] == "RB0"
         return httpx.Response(
@@ -250,7 +259,8 @@ async def test_real_futures_http_parser_and_cache_without_external_calls(monkeyp
     first = await futures.snapshot("RB")
     first["latest"]["close"] = 0
     again = await futures.snapshot("RB")
-    assert len(requests) == 1 and again["cached"] and again["latest"]["close"] == 170
+    assert len(requests) == 2 and again["cached"] and again["latest"]["close"] == 170
+    assert again["warehouse_receipt"]["status"] == "unavailable"
 
 
 def test_native_catalog_and_futures_workflow_share_real_tool():

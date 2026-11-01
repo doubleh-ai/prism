@@ -118,6 +118,26 @@ def test_real_binding_and_exact_owner_lease_are_required(native):
             T.NativeTools(context, parent, tracker)
 
 
+async def test_futures_exchange_report_reaches_the_owned_agent(native, monkeypatch):
+    from server import futures
+
+    report = {
+        "table": "铜",
+        "status": "collected",
+        "unit": "吨",
+        "quantity": 17,
+        "change": -2,
+        "data_as_of": "2026-10-30",
+        "source_url": "https://www.shfe.com.cn/data/tradedata/future/stockdata/dailystock_20261030/ZH/all.html",
+    }
+    monkeypatch.setattr(
+        futures, "snapshot", AsyncMock(return_value={"symbol": "CU", "warehouse_receipt": report})
+    )
+    result = await native.tools.execute("futures_snapshot", {"symbol": "CU"}, "synthetic-copper")
+    assert result["ok"] and result["data"]["warehouse_receipt"] == report
+    assert result["call"]["target"]["href"] == "/futures?symbol=CU"
+
+
 async def test_platform_dispatch_is_durable_idempotent_and_not_external_evidence(native):
     first = await native.tools.execute("indicator_list", {}, "actual-platform")
     assert first["ok"] and first["source_kind"] == "platform_indicator"

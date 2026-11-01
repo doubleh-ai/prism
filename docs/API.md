@@ -74,6 +74,52 @@ other APIs, execute a repair or deploy a release. Matching release fields are
 not proof of real verification; task activation and production acceptance are
 separate from implementing these endpoints.
 
+### Read-only feedback monitoring candidate
+
+`GET /api/internal/feedback-monitor/queue` and
+`GET /api/internal/feedback-monitor/diagnostics` use a separate
+`X-Prism-Monitor-Token` header and `PRISM_FEEDBACK_MONITOR_TOKEN` configuration.
+They are disabled by default. The token must be 32–512 characters without
+whitespace, distinct from the feedback worker token. If both configured values
+are equal, both identities fail closed. Cookies do not grant monitoring access;
+the monitoring token cannot read full feedback, update its status, or access
+administrator APIs. Responses are `no-store`. Authentication attempts are
+bounded to 60/minute per direct peer; forwarded headers do not set this identity.
+
+The queue exposes only numeric IDs/revision counters/times and validated
+category, feature, status and release metadata. It does not select titles,
+descriptions, user names, paths, replies, verification text or history. Diagnostic
+signals contain fixed error codes/classes, counts and version scope; arbitrary
+method names, raw errors, stacks and request context are omitted. Anonymous
+access refusals, unmatched paths and explicit cancellation records are not in
+the diagnostic kind allowlist. Signals, including those with the current version
+label, still require reproduction; a version label does not certify an exact
+deployed revision. These endpoints never change feedback or resolve diagnostics.
+
+Both accept `since` (inclusive Unix seconds, default 0), `after_id` (default 0)
+and `limit` (1–100, default 50). Queue additionally accepts `category=bug` or
+`suggestion` (default bug). Unknown, duplicate, invalid or future-time parameters
+return 422 without echoing input. The response includes `schema`, `kind`,
+`poll_started_at`, `next_after_id`, `items`, release metadata, `read_only: true`,
+`signals_verified: false` and `user_text_included: false`.
+
+To poll safely, retain the **first page's** `poll_started_at`, keep `since`
+unchanged while following `next_after_id`, and advance the checkpoint only after
+all pages succeed. The next cycle resets `after_id` to 0 and uses the retained
+start time inclusively (optionally with an overlap). Deduplicate queue items by
+`(id, revision_number)` and diagnostics by `(id, occurrences, last_seen)`; a
+changed old item or a same-second update must be reconsidered. Do not advance on
+an incomplete pass. Server-clock rollback requires replay from an earlier
+checkpoint. This is a current-state feed, not a durable every-transition log;
+deleted or resolved records need not appear, and a missing record does not prove
+a fix. Large backlogs can be processed in bounded passes with checkpoints.
+
+This is an application interface candidate, not an installed cloud consumer.
+Production configuration, private client integration, identity provisioning and
+deployed contract verification remain separate controlled work. Metadata alone
+cannot support a reasoned review of a user's suggestion; do not claim a review
+or an empty queue without authorized content access and a completed read.
+
 ## Cross-cutting
 
 - **Request ID**: every response carries `X-Request-ID`. Clients

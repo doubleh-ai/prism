@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import Field, model_validator
 
 from ..database import get_db
@@ -194,7 +194,7 @@ async def read_agenda(request: Request):
     return agenda(owner, request.query_params.get("start"), request.query_params.get("end"))
 
 
-def ics(event):
+def ics(event, reminder_minutes=0):
     def escape(value):
         return (
             value.replace("\\", "\\\\")
@@ -220,9 +220,18 @@ def ics(event):
         "SUMMARY:" + escape(event["title"]),
         "DESCRIPTION:" + escape(event["description"]),
         "STATUS:" + ("CANCELLED" if event["cancelled"] else "CONFIRMED"),
-        "END:VEVENT",
-        "END:VCALENDAR",
     ]
+    if reminder_minutes and not event["cancelled"]:
+        lines.extend(
+            [
+                "BEGIN:VALARM",
+                f"TRIGGER:-PT{reminder_minutes}M",
+                "ACTION:DISPLAY",
+                "DESCRIPTION:" + escape(event["title"]),
+                "END:VALARM",
+            ]
+        )
+    lines.extend(["END:VEVENT", "END:VCALENDAR"])
     folded = []
     for line in lines:
         chunk = ""
@@ -236,14 +245,16 @@ def ics(event):
 
 
 @router.get("/{event_id}.ics")
-async def export_event(event_id: str, request: Request):
+async def export_event(
+    event_id: str, request: Request, reminder_minutes: int = Query(default=0, ge=0, le=1440)
+):
     owner = _owner(request)
     init_calendar_db()
     with get_db() as db:
         store._active(db, owner)
         event = _event(_owned(db, owner, _id(event_id)))
     return Response(
-        ics(event),
+        ics(event, reminder_minutes),
         media_type="text/calendar",
         headers={
             "Cache-Control": "no-store",
