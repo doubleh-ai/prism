@@ -336,7 +336,21 @@ def ingest_tool_result(username: str, run_id: str, call: dict, block: dict, refs
                     "retrieved_at": source_timestamp(ref.get("retrieved_at")),
                     "published_at": published_at,
                     "publication_precision": precision,
-                    "publication_basis": "tool_metadata" if published_at else "unknown",
+                    "publication_basis": (
+                        ref.get("published_at_basis")
+                        if ref.get("published_at_basis") in {"page_metadata", "source_index_metadata"}
+                        else "tool_metadata"
+                    )
+                    if published_at
+                    else "unknown",
+                    "source_index": {
+                        "url": _safe_url(ref.get("index_source_url")),
+                        "body_sha256": ref["index_body_sha256"],
+                    }
+                    if _safe_url(ref.get("index_source_url"))
+                    and isinstance(ref.get("index_body_sha256"), str)
+                    and re.fullmatch(r"[a-f0-9]{64}", ref["index_body_sha256"])
+                    else None,
                     "data_period": None,
                     "content_sha256": content_hash,
                     "retrieved_body_sha256": ref.get("body_sha256")

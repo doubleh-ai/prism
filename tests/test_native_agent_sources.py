@@ -1,12 +1,100 @@
 """Synthetic DNS/socket/TLS fixtures only; no external request is performed."""
 
 import io
+import json
 import socket
 import ssl
 
 import pytest
 
 from server.agent import sources
+
+
+def test_json_index_retains_pinned_transport_and_never_sends_authentication(network):
+    body = b'{"result":[]}'
+    network["wires"] = [wire(body, content_type="application/json")]
+    result = sources.fetch_public_index(
+        "https://query.sse.com.cn/fixture?TITLE=public", referer="https://www.sse.com.cn/"
+    )
+    assert result["status"] == "ok" and result["data"] == {"result": []}
+    assert result["body_bytes"] == len(body) and len(result["body_sha256"]) == 64
+    request = network["requests"][0].decode()
+    assert request.startswith("GET /fixture?TITLE=public HTTP/1.1")
+    assert "Accept: application/json" in request and "Referer: https://www.sse.com.cn/" in request
+    assert "Authorization:" not in request and "Cookie:" not in request and "Proxy-" not in request
+    assert network["connects"] == [("8.8.8.8", 443)] and network["sni"] == ["query.sse.com.cn"]
+    assert network["closed"] == 1 and result["automatic_retry"] is False
+
+
+@pytest.mark.parametrize("body", [b'{"a":1,"a":2}', b'{"x":NaN}', b"null", b"1", b"callback({})", b"\xff"])
+def test_index_requires_pure_unambiguous_json_and_cannot_execute_jsonp(network, body):
+    network["wires"] = [wire(body, content_type="application/json")]
+    result = sources.fetch_public_index("https://query.sse.com.cn/index")
+    assert result["status"] == "invalid_json" and result["data"] is None
+    assert len(network["requests"]) == network["closed"] == 1
+
+
+@pytest.mark.parametrize("kind", ["html", "compressed", "cross_redirect", "unsafe_dns", "bad_referer"])
+def test_index_cannot_bypass_source_network_or_content_guards(network, kind):
+    url = "https://query.sse.com.cn/index"
+    kwargs = {}
+    expected = "unsupported_content_type"
+    network["wires"] = [wire(b"{}", content_type="text/html")]
+    if kind == "compressed":
+        network["wires"] = [
+            wire(b"{}", content_type="application/json", headers=[("Content-Encoding", "gzip")])
+        ]
+        expected = "unsupported_content_encoding"
+    if kind == "cross_redirect":
+        network["wires"] = [wire(status=302, headers=[("Location", "https://not-approved.example/")])]
+        expected = "host_not_allowed"
+    if kind == "unsafe_dns":
+        network["peer"] = "127.0.0.1"
+        expected = "peer_mismatch"
+    if kind == "bad_referer":
+        kwargs["referer"] = "https://www.sse.com.cn/?api_key=synthetic"
+        expected = "invalid_url"
+    result = sources.fetch_public_index(url, **kwargs)
+    assert result["status"] == expected and result["data"] is None
+    assert len(network["requests"]) <= 1
+
+
+def test_source_exposes_only_actual_approved_links_without_fetching_or_guessing_dates(network):
+    body = b"""<nav><a href="/menu">menu</a></nav><main>Original excerpt.
+    <a href="/docs/report.pdf"><b>Original</b> announcement</a>
+    <a href="https://ir.synthetic.example/quarter">Company disclosure</a>
+    <a href="https://unapproved.example/report">Unapproved</a>
+    <a href="javascript:alert(1)">script</a><a href="https://127.0.0.1/">private</a>
+    <a href="/docs/report.pdf#anchor">duplicate</a><a href>Missing href</a>
+    <a href="/2026/11/03/report?token=synthetic">credential-shaped</a></main>"""
+    network["wires"] = [wire(body)]
+    result = sources.fetch_public_source(
+        "https://www.sse.com.cn/list/", allowed_hosts=("ir.synthetic.example",)
+    )
+    assert result["status"] == "ok" and result["published_at"] is None
+    assert result["links"] == [
+        {
+            "url": "https://www.sse.com.cn/docs/report.pdf",
+            "title": "Original announcement",
+            "source_class": "official_disclosure",
+        },
+        {
+            "url": "https://ir.synthetic.example/quarter",
+            "title": "Company disclosure",
+            "source_class": "company_ir",
+        },
+    ]
+    assert len(network["requests"]) == 1 and result["links_truncated"] is False
+
+
+def test_source_link_metadata_is_bounded_and_not_a_crawling_loop(network):
+    body = (
+        "<main>" + "".join(f'<a href="/disclosure/{i}">Disclosure {i}</a>' for i in range(300)) + "</main>"
+    ).encode()
+    network["wires"] = [wire(body)]
+    result = sources.fetch_public_source("https://www.sse.com.cn/")
+    assert len(result["links"]) == 20 and result["links_truncated"] is True
+    assert len(json.dumps(result["links"]).encode()) <= 8192 and len(network["requests"]) == 1
 
 
 def wire(body=b"public text", *, status=200, content_type="text/html; charset=utf-8", headers=()):

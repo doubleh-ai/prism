@@ -46,6 +46,7 @@ _CUSTOM = {
     "knowledge_search": ("检索我的历史研究", "historical_research"),
     "knowledge_get": ("读取我的历史研究", "historical_research"),
     "source_read": ("读取公开资料节选", "external_web"),
+    "source_find": ("查找公开资料", "external_web"),
 }
 _ERRORS = {
     "unknown_tool": "该工具不可用",
@@ -73,7 +74,14 @@ def _platform():
 
 
 def _custom_definitions():
+    from .discovery import SCHEMA
+
     return [
+        {
+            "name": "source_find",
+            "description": "用短的公开关键词查找公告与新闻线索，不需猜测URL或提供搜索密钥。当前覆盖上交所公告和新浪有界滚动索引；保留日期、分页、来源和缺口，随后用source_read读原文。不要发送用户持仓、个人信息或凭证。",
+            "input_schema": copy.deepcopy(SCHEMA),
+        },
         {
             "name": "knowledge_search",
             "description": "检索当前账号的历史研究；排除本轮，历史观点不等于最新事实。",
@@ -136,6 +144,12 @@ def _fetch_source(url, *, allowed_hosts):
     from .sources import fetch_public_source
 
     return fetch_public_source(url, allowed_hosts=allowed_hosts)
+
+
+def _find_sources(arguments):
+    from .discovery import find
+
+    return find(arguments)
 
 
 def _knowledge_call(name, username, arguments, run_id):
@@ -217,6 +231,7 @@ class NativeTools:
         self.lease, self.evidence = lease, evidence
         self.allowed_source_hosts = tuple(h.lower() for h in allowed_source_hosts)
         self._cache = {}
+        self._source_dates = {}
         self._lock = asyncio.Lock()
         self._authorize()
 
@@ -275,6 +290,13 @@ class NativeTools:
                 or re.fullmatch(r"(?:research|report):[A-Za-z0-9_-]{1,128}", arguments["id"]) is None
             ):
                 raise NativeToolError("invalid_arguments")
+        elif name == "source_find":
+            from .discovery import validate
+
+            try:
+                validate(arguments)
+            except (ValueError, TypeError, OverflowError):
+                raise NativeToolError("invalid_arguments") from None
         elif set(arguments) != {"url"} or not _valid_url(arguments["url"]):
             raise NativeToolError("invalid_arguments")
 
@@ -323,6 +345,59 @@ class NativeTools:
             "result_summary": "已读取资料，内容仍待语义核验" if ok else "未形成可用资料，保留研究缺口",
         }
 
+    def _persist_custom_call(self, call, fingerprint):
+        """Indexed shared history keeps metadata, not query text or documents.
+
+        Evidence stays in the owned research. A persistence failure propagates
+        rather than presenting an unrecorded operation as recorded success.
+        """
+        from ..database import get_db
+
+        self._authorize()
+        context = self.context
+        receipt = {
+            "ok": call["status"] == "completed",
+            "call": call,
+            "data": {"research_run_id": context["run_id"]},
+            "source_kind": call["source_kind"],
+        }
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if not db.execute(
+                    "SELECT c.id FROM conversations c JOIN users u ON u.username=c.username "
+                    "WHERE c.id=? AND c.username=? AND c.deleted_at IS NULL AND u.disabled_at IS NULL",
+                    [context["conv_id"], context["username"]],
+                ).fetchone():
+                    raise NativeToolError("unavailable_context")
+                db.execute(
+                    "INSERT INTO capability_calls(call_id,run_id,username,conv_id,request_id,capability_id,"
+                    "arguments_hash,status,input_summary,result_summary,target_json,response_json,created_at,"
+                    "completed_at,arguments_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        call["call_id"],
+                        context["run_id"],
+                        context["username"],
+                        context["conv_id"],
+                        "native-" + call["call_id"],
+                        call["capability_id"],
+                        fingerprint,
+                        call["status"],
+                        call["input_summary"],
+                        call["result_summary"],
+                        json.dumps(call["target"]),
+                        json.dumps(receipt, ensure_ascii=False),
+                        call["created_at"],
+                        call["completed_at"],
+                        "{}",
+                    ],
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
+
     async def _read_source(self, arguments, call_id):
         existing = self.evidence.calls.get(call_id)
         if call_id in self.evidence.completed or existing and existing.get("name") != "source_read":
@@ -337,6 +412,13 @@ class NativeTools:
         if type(value) is not dict:
             raise NativeToolError("source_unavailable")
         data = self._safe(value)
+        if data.get("published_at") and not data.get("published_at_basis"):
+            data["published_at_basis"] = "tool_metadata"
+        index = self._source_dates.get(value.get("url"))
+        if index and not data.get("published_at"):
+            data["published_at"] = index["published_at"]
+            data["published_at_basis"] = "source_index_metadata"
+            data["publication_index"] = {"url": index["index_url"], "body_sha256": index["index_body_sha256"]}
         data["semantic_status"], data["original_verified"] = "unreviewed", False
         if isinstance(value.get("text"), str) and isinstance(data.get("text"), str):
             data["text_truncated"] = bool(value.get("text_truncated")) or len(data["text"]) < len(
@@ -364,6 +446,9 @@ class NativeTools:
                 **ref,
                 "title": data.get("title") or ref["url"],
                 "published_at": data.get("published_at"),
+                "published_at_basis": data.get("published_at_basis"),
+                "index_source_url": index.get("index_url") if index else None,
+                "index_body_sha256": index.get("index_body_sha256") if index else None,
                 "semantic_status": "unreviewed",
                 "original_obtained": False,
                 "original_verified": False,
@@ -383,6 +468,74 @@ class NativeTools:
             call,
             block,
             refs,
+            parent=self.lease,
+        )
+        return {"ok": True, "data": data, "refs": self._safe(refs), "source_kind": "external_web"}
+
+    async def _discover(self, arguments, call_id):
+        value = await self.lease.manager.run_blocking(
+            "auxiliary", _find_sources, arguments, parent=self.lease
+        )
+        if type(value) is not dict or type(value.get("items")) is not list or len(value["items"]) > 20:
+            raise NativeToolError("source_unavailable")
+        data = self._safe(value)
+        if value.get("status") != "ok":
+            return {
+                "ok": False,
+                "data": data,
+                "refs": [],
+                "source_kind": "external_web",
+                "error": {"code": "source_unavailable", "message": _ERRORS["source_unavailable"]},
+            }
+        items = data.get("items", [])
+        if any(
+            type(i) is not dict or not _valid_url(i.get("url")) or type(i.get("title")) is not str
+            for i in items
+        ):
+            raise NativeToolError("source_unavailable")
+        if not items:
+            return {"ok": True, "data": data, "refs": [], "source_kind": "external_web"}
+        call = {
+            "type": "tool_use",
+            "id": call_id,
+            "name": "WebSearch",
+            "input": {"query": arguments.get("query") or arguments.get("stock_code")},
+        }
+        block = {
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": json.dumps({"results": items}, ensure_ascii=False),
+        }
+        self.evidence.record_call(call)
+        refs = self.evidence.record_result(block, retrieved_at=value.get("as_of"))
+        indexed = {i["url"]: i for i in items}
+        enriched = []
+        for ref in refs:
+            item = indexed.get(ref["url"])
+            if not item:
+                continue
+            self._source_dates[item["url"]] = item
+            enriched.append(
+                {
+                    **ref,
+                    "published_at": item.get("published_at"),
+                    "published_at_basis": "source_index_metadata",
+                    "index_source_url": item.get("index_url"),
+                    "index_body_sha256": item.get("index_body_sha256"),
+                    "retrieved_at": item.get("retrieved_at") or ref.get("retrieved_at"),
+                    "original_obtained": False,
+                    "original_verified": False,
+                    "content_scope": "search_snippet",
+                }
+            )
+        refs = await self.lease.manager.run_blocking(
+            "auxiliary",
+            _ingest,
+            self.context["username"],
+            self.context["run_id"],
+            call,
+            block,
+            enriched,
             parent=self.lease,
         )
         return {"ok": True, "data": data, "refs": self._safe(refs), "source_kind": "external_web"}
@@ -420,6 +573,8 @@ class NativeTools:
             return output
         if name == "source_read":
             return await self._read_source(arguments, call_id)
+        if name == "source_find":
+            return await self._discover(arguments, call_id)
         value = await self.lease.manager.run_blocking(
             "auxiliary",
             _knowledge_call,
@@ -477,6 +632,7 @@ class NativeTools:
                 result = self._error(code, source_kind=_CUSTOM.get(name, (None, "unknown"))[1])
             if name in _CUSTOM:
                 result["call"] = self._custom_call(name, call_id, started, ok=result.get("ok") is True)
+                self._persist_custom_call(result["call"], fingerprint)
             result = self._final(result)
             self._cache[call_id] = (fingerprint, copy.deepcopy(result))
             return result

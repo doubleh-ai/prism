@@ -682,6 +682,9 @@ def safe_result(value: Any, depth: int = 0) -> Any:
 def _public_call(row) -> dict:
     result = dict(row)
     tool = REGISTRY.get(result["capability_id"])
+    from .agent.tools import _CUSTOM
+
+    native_label, native_kind = _CUSTOM.get(result["capability_id"], (result["capability_id"], "unknown"))
     return {
         k: result[k]
         for k in (
@@ -696,8 +699,8 @@ def _public_call(row) -> dict:
             "completed_at",
         )
     } | {
-        "label": tool.label if tool else result["capability_id"],
-        "source_kind": tool.source_kind if tool else "unknown",
+        "label": tool.label if tool else native_label,
+        "source_kind": tool.source_kind if tool else native_kind,
         "target": json.loads(result["target_json"]),
     }
 
@@ -718,6 +721,10 @@ def list_calls(
         args.append(run_id)
     if view:
         ids = [t.id for t in _TOOLS if t.view == view]
+        if view == "reports":
+            from .agent.tools import _CUSTOM
+
+            ids.extend(_CUSTOM)
         if not ids:
             return []
         clauses.append("capability_id IN (" + ",".join("?" for _ in ids) + ")")

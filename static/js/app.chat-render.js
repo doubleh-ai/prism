@@ -48,6 +48,16 @@ var ChatRender = (function() {
     stringify: _s,
     clean: _clean,
 
+    publicationLabel: function(source) {
+      return source && (source.published_at_basis || source.publication_basis) === 'source_index_metadata' ? '索引标注' : '发布';
+    },
+
+    publicationBasis: function(source) {
+      var basis = source && (source.published_at_basis || source.publication_basis);
+      var labels = {source_index_metadata:'来源索引',page_metadata:'原文元数据',tool_metadata:'工具记录'};
+      return typeof basis === 'string' && Object.prototype.hasOwnProperty.call(labels,basis) ? labels[basis] : '未提供';
+    },
+
     formatTime: function(value) {
       if (value === null || value === undefined || value === '') return '未提供';
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value);
@@ -74,6 +84,10 @@ var ChatRender = (function() {
         if (positions[key] !== undefined) {
           var existing = result[positions[key]];
           Object.keys(ref).forEach(function(k) { if (ref[k] !== null && ref[k] !== undefined && ref[k] !== '') existing[k] = ref[k]; });
+          if (Object.prototype.hasOwnProperty.call(ref,'published_at')) {
+            existing.published_at = ref.published_at;
+            existing.published_at_basis = ref.published_at_basis || ref.publication_basis || (ref.published_at ? 'tool_metadata' : null);
+          }
         } else { positions[key] = result.length; result.push(Object.assign({}, ref, {t:'ref'})); }
       });
       return result;
@@ -112,7 +126,7 @@ var ChatRender = (function() {
         return '<div class="ref-item"><span class="ref-idx"></span><div class="ref-body"><div class="ref-meta"><span>'+esc(kind)+'</span><span>'+status+'</span></div>' +
           (url ? '<a class="ref-link" href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">'+title+' ↗</a>' : '<span class="ref-link">'+title+'</span>') +
           (c.snippet?'<div class="ref-snippet">'+esc(_s(c.snippet))+'</div>':'') +
-          '<div class="ref-time">发布：'+esc(this.formatTime(c.published_at))+'<br>采集：'+esc(this.formatTime(c.retrieved_at))+'</div></div></div>';
+          '<div class="ref-time">'+this.publicationLabel(c)+'：'+esc(this.formatTime(c.published_at))+'<br>采集：'+esc(this.formatTime(c.retrieved_at))+'</div></div></div>';
       }
       return _md(v);
     },

@@ -36,7 +36,7 @@ flowchart TD
 | `server/agent/runtime.py` | 有上限的模型—工具循环，真正后台任务归属、停止、历史上下文、版本和结果保存。 |
 | `server/agent/store.py` | SQLite 任务、顺序事件、事务认领、提交去重、取消意图和中断记录。 |
 | `server/agent/tools.py` | 由真实任务授权的平台工具与来源/知识工具；不提供任意 Shell、文件系统或代码执行。 |
-| `server/agent/sources.py` | HTTPS 公共资料抓取、来源白名单、DNS 和连接地址校验、大小/时间上限、页面节选。 |
+| `server/agent/sources.py`、`discovery.py` | 固定公开来源索引、实际链接与节选；公网 DNS、固定地址 TLS、安全响应和日期范围检查。 |
 | `server/agent/knowledge.py` | 账号内历史研究与报告的只读检索，保留原研究时间和待核验状态。 |
 | `server/agent/prompts.py` | 内置综合研究、产业链、公司研究三种方法和证据规则。方法是版本化代码，不是外部 Skill 文件。 |
 | `server/agent/api.py` | 开始、停止、任务查询和有序事件回放；回放请求不会触发模型。 |

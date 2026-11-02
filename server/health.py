@@ -79,10 +79,10 @@ def _check_native_core() -> dict[str, Any]:
 def _check_tool_catalog() -> dict[str, Any]:
     """Inspect the same in-process definitions exposed to the Native runtime."""
     try:
-        from .agent.tools import PLATFORM_TOOLS, native_catalog
+        from .agent.tools import _CUSTOM, PLATFORM_TOOLS, native_catalog
 
         rows = native_catalog()
-        required = {*PLATFORM_TOOLS, "knowledge_search", "knowledge_get", "source_read"}
+        required = {*PLATFORM_TOOLS, *_CUSTOM}
         identifiers = [row["id"] for row in rows]
         valid = (
             set(identifiers) == required

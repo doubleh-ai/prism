@@ -18,6 +18,7 @@ import hashlib
 import http.client
 import io
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -44,7 +45,7 @@ _OFFICIAL = (
     "dce.com.cn",
     "ine.cn",
 )
-_NEWS = ("cls.cn", "jin10.com", "finance.sina.com.cn")
+_NEWS = ("cls.cn", "jin10.com", "finance.sina.com.cn", "feed.mix.sina.com.cn")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 _REDIRECTS = {301, 302, 303, 307, 308}
 _CHARSETS = {"utf-8", "utf8", "gb18030", "gbk", "gb2312", "big5", "iso-8859-1", "windows-1252"}
@@ -75,6 +76,7 @@ _CODES = frozenset(
         "pdf_timeout",
         "empty_content",
         "invalid_html",
+        "invalid_json",
     }
 )
 
@@ -217,14 +219,22 @@ def _tls_socket(host, address, deadline):
 
 
 @contextlib.contextmanager
-def _open_response(host, address, target, deadline):
+def _open_response(host, address, target, deadline, *, json_index=False, referer=None):
     sock = _tls_socket(host, address, deadline)
     response = None
     try:
+        _need(type(json_index) is bool, "invalid_headers")
+        _need(
+            referer is None
+            or (type(referer) is str and len(referer) <= 2048 and all(32 <= ord(c) < 127 for c in referer)),
+            "invalid_headers",
+        )
+        accept = "application/json" if json_index else "text/html, text/plain;q=0.9"
         request = (
             f"GET {target} HTTP/1.1\r\nHost: {host}\r\n"
-            "User-Agent: PrismResearch/1.0\r\nAccept: text/html, text/plain;q=0.9\r\n"
-            "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
+            f"User-Agent: PrismResearch/1.0\r\nAccept: {accept}\r\n"
+            + (f"Referer: {referer}\r\n" if referer else "")
+            + "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
         ).encode("ascii")
         sock.settimeout(_remaining(deadline))
         sock.sendall(request)
@@ -329,6 +339,9 @@ class _Excerpt(HTMLParser):
         self.characters = 0
         self.truncated = False
         self.published_at = None
+        self.links = []
+        self.anchor = None
+        self.links_truncated = False
 
     def _append(self, text):
         remaining = MAX_TEXT_CHARS - self.characters
@@ -343,6 +356,10 @@ class _Excerpt(HTMLParser):
             self.hidden.append(tag)
         if self.hidden:
             return
+        if tag == "a":
+            attrs = dict(attrs)
+            href = attrs.get("href")
+            self.anchor = {"url": href, "title": ""} if type(href) is str and 0 < len(href) <= 2048 else None
         if tag == "title":
             self.in_title = True
         elif tag == "meta":
@@ -371,19 +388,27 @@ class _Excerpt(HTMLParser):
             return
         if tag == "title":
             self.in_title = False
+        if tag == "a" and self.anchor is not None:
+            if len(self.links) < 200:
+                self.links.append(self.anchor)
+            else:
+                self.links_truncated = True
+            self.anchor = None
         if tag in self._BLOCKS:
             self._append("\n")
 
     def handle_data(self, data):
         if self.hidden:
             return
+        if self.anchor is not None:
+            self.anchor["title"] = (self.anchor["title"] + data)[:160]
         if self.in_title:
             self.title = (self.title + data)[:500]
         else:
             self._append(data)
 
 
-def _extract(raw, content_type):
+def _extract(raw, content_type, *, links_out=None):
     match = re.search(r"charset\s*=\s*[\"']?([^;\s\"']+)", content_type, re.I)
     charset = match.group(1).casefold() if match else "utf-8"
     charset = charset if charset in _CHARSETS else "utf-8"
@@ -396,6 +421,8 @@ def _extract(raw, content_type):
         parser.close()
         text = "".join(parser.parts)
         title, published, truncated = parser.title, parser.published_at, parser.truncated
+        if links_out is not None:
+            links_out.extend(parser.links)
     text = re.sub(r"[ \t\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     return redact_source_text(text), redact_source_text(title.strip()), published, truncated
@@ -446,6 +473,7 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                     "unsupported_content_encoding",
                 )
                 pdf_fields = {}
+                raw_links = []
                 if mime == "application/pdf":
                     from .pdf_text import MAX_PDF_BYTES, extract_pdf
 
@@ -467,8 +495,26 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                     }
                 else:
                     raw = _body(response, headers, deadline)
-                    text, title, published, truncated = _extract(raw, content_type)
+                    text, title, published, truncated = _extract(raw, content_type, links_out=raw_links)
                 _remaining(deadline)
+            links, seen, link_bytes = [], set(), 0
+            links_truncated = False
+            for link in raw_links:
+                try:
+                    link_url, _, link_class = _admit_url(urljoin(current, link["url"]), extras)
+                except _Rejected:
+                    continue
+                title_text = redact_source_text(re.sub(r"\s+", " ", link["title"]).strip())
+                if not title_text or link_url in seen or len(link_url) > 2048:
+                    continue
+                item = {"url": link_url, "title": title_text, "source_class": link_class}
+                size = len(json.dumps(item, ensure_ascii=False).encode())
+                if len(links) >= 20 or link_bytes + size > 8192:
+                    links_truncated = True
+                    break
+                seen.add(link_url)
+                link_bytes += size
+                links.append(item)
             return {
                 "status": "ok" if text else "empty_content",
                 "url": current,
@@ -490,6 +536,8 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                 **pdf_fields,
                 "redirect_count": redirects,
                 "automatic_retry": False,
+                "links": links,
+                "links_truncated": links_truncated or len(raw_links) >= 200,
             }
     except _Rejected as exc:
         code = exc.args[0] if exc.args and exc.args[0] in _CODES else "network_failed"
@@ -514,5 +562,90 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
         "trust_level": "untrusted_external_content",
         "http_status": http_status,
         "redirect_count": redirects,
+        "automatic_retry": False,
+    }
+
+
+def fetch_public_index(url, *, timeout_seconds=8, referer=None):
+    """Internal JSON index transport; the model cannot choose headers or hosts.
+
+    Fixed discovery adapters consume the returned data, not arbitrary URLs from
+    its payload. This retains the public DNS, pinned TLS, total deadline, size,
+    redirect and no-credentials contract of source excerpts.
+    """
+    current, source_class, http_status = None, None, None
+    try:
+        _need(type(timeout_seconds) in (int, float) and 0 < timeout_seconds <= 8, "invalid_timeout")
+        deadline = time.monotonic() + timeout_seconds
+        if referer is not None:
+            referer, _, _ = _admit_url(referer, set())
+        candidate = url
+        for redirects in range(MAX_REDIRECTS + 1):
+            current, host, source_class = _admit_url(candidate, set())
+            addresses = _resolve(host, deadline)
+            parsed = urlsplit(current)
+            target = parsed.path + ("?" + parsed.query if parsed.query else "")
+            with _open_response(
+                host, addresses[0], target, deadline, json_index=True, referer=referer
+            ) as response:
+                http_status = response.status
+                headers = _headers(response)
+                if http_status in _REDIRECTS:
+                    _need(redirects < MAX_REDIRECTS, "redirect_limit")
+                    _need(bool(headers.get("location")), "redirect_missing_location")
+                    candidate = urljoin(current, headers["location"])
+                    _admit_url(candidate, set())
+                    continue
+                _need(200 <= http_status < 300, "http_error")
+                mime = headers.get("content-type", "").partition(";")[0].strip().casefold()
+                _need(mime in {"application/json", "text/json", "text/plain"}, "unsupported_content_type")
+                _need(
+                    headers.get("content-encoding", "identity").strip().casefold() in {"", "identity"},
+                    "unsupported_content_encoding",
+                )
+                raw = _body(response, headers, deadline)
+
+            def pairs(values):
+                result = {}
+                for key, value in values:
+                    _need(key not in result, "invalid_json")
+                    result[key] = value
+                return result
+
+            def invalid_constant(_):
+                raise _Rejected("invalid_json")
+
+            try:
+                data = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+            except (ValueError, UnicodeError, RecursionError):
+                raise _Rejected("invalid_json") from None
+            _need(type(data) in (dict, list), "invalid_json")
+            _remaining(deadline)
+            return {
+                "status": "ok",
+                "data": data,
+                "url": current,
+                "source_class": source_class,
+                "retrieved_at": _now(),
+                "body_sha256": hashlib.sha256(raw).hexdigest(),
+                "body_bytes": len(raw),
+                "automatic_retry": False,
+            }
+        raise _Rejected("redirect_limit")
+    except _Rejected as exc:
+        code = exc.args[0] if exc.args and exc.args[0] in _CODES else "network_failed"
+    except TimeoutError:
+        code = "timeout"
+    except ssl.SSLError:
+        code = "tls_failed"
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError, RecursionError):
+        code = "network_failed"
+    return {
+        "status": code,
+        "url": current,
+        "data": None,
+        "source_class": source_class,
+        "retrieved_at": _now(),
+        "http_status": http_status,
         "automatic_retry": False,
     }

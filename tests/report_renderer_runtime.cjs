@@ -14,6 +14,14 @@ for (const file of ['app.util.js', 'app.chat-render.js', 'app.reports.js']) {
   vm.runInContext(fs.readFileSync('static/js/' + file, 'utf8'), context);
 }
 const app = context.App;
+const indexed = context.ChatRender.renderChunk({t:'ref',url:'https://www.sse.com.cn/fixture.pdf',published_at:'2026-11-03',published_at_basis:'source_index_metadata'});
+assert(indexed.includes('索引标注：2026-11-03') && !indexed.includes('发布：'), indexed);
+assert.strictEqual(context.ChatRender.publicationLabel({publication_basis:'source_index_metadata'}),'索引标注');
+assert.strictEqual(context.ChatRender.publicationBasis({publication_basis:'source_index_metadata'}),'来源索引');
+assert.strictEqual(context.ChatRender.publicationBasis({publication_basis:'constructor'}),'未提供');
+const merged=context.ChatRender.collectRefs([{url:'https://www.sse.com.cn/fixture.pdf',published_at:'2026-11-03',published_at_basis:'source_index_metadata'}],[{t:'ref',url:'https://www.sse.com.cn/fixture.pdf',published_at:null}]);
+assert.strictEqual(merged[0].published_at,null);
+assert.strictEqual(merged[0].published_at_basis,null);
 const longUrl = 'https://example.com/research/' + 'a'.repeat(300);
 const markdown = [
   '## 报告已交付', '',

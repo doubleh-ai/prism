@@ -47,6 +47,7 @@ async def scripted(messages, **kwargs):
         yield {'type':'usage', 'input_tokens':8, 'output_tokens':4}
         if not continuation:
             calls = [
+                {'type':'tool_use','id':'discovery','name':'source_find','input':{'query':'合成','providers':['sse'],'start_date':'2020-01-01','end_date':'2020-01-20'}},
                 {'type':'tool_use','id':'indicators','name':'indicator_list','input':{}},
                 {'type':'tool_use','id':'source','name':'source_read',
                  'input':{'url':'https://www.sse.com.cn/disclosure/fixture'}}]
@@ -65,6 +66,7 @@ def fetched(*args, **kwargs):
     return {'status':'ok','url':'https://www.sse.com.cn/disclosure/fixture',
             'title':'合成交易所公告','text':'合成公告中产能为120万吨。',
             'retrieved_at':'2026-10-25T18:00:00+08:00','published_at':'2026-10-20',
+            'published_at_basis':'page_metadata',
             'original_obtained':True,'original_preserved':False,
             'content_scope':'server_extracted_excerpt','text_truncated':False}
 if sys.argv[4] == 'openai':
@@ -93,6 +95,9 @@ if sys.argv[4] == 'openai':
         if not continued:
             items=[{'id':'rs_fixture','type':'reasoning','summary':[],
                     'encrypted_content':'private-continuation-fixture'},
+                   {'id':'fc_discovery','type':'function_call','call_id':'discovery','name':'source_find',
+                    'arguments':json.dumps({'query':'合成','providers':['sse'],'start_date':'2020-01-01','end_date':'2020-01-20'}),
+                    'status':'completed'},
                    {'id':'fc_indicators','type':'function_call','call_id':'indicators','name':'indicator_list',
                     'arguments':'{}','status':'completed'},
                    {'id':'fc_source','type':'function_call','call_id':'source','name':'source_read',
@@ -100,7 +105,7 @@ if sys.argv[4] == 'openai':
                     'status':'completed'}]
         else:
             assert any(item.get('encrypted_content')=='private-continuation-fixture' for item in body['input'])
-            assert {item['call_id'] for item in body['input'] if item.get('type')=='function_call_output'}=={'indicators','source'}
+            assert {item['call_id'] for item in body['input'] if item.get('type')=='function_call_output'}=={'discovery','indicators','source'}
             text=('已保存的合成研究进度，公告节选仍待核验。' if 'slow' in question else '最终合成结论。公告节选仍待核验。')*50
             items=[{'id':'msg_fixture','type':'message','role':'assistant','status':'completed','content':[
                 {'type':'output_text','text':text,'annotations':[]}]}]
@@ -112,6 +117,16 @@ if sys.argv[4] == 'openai':
 else:
     runtime.model_stream = scripted
 tools._fetch_source = fetched
+from server.agent import discovery
+def index_response(url, **kwargs):
+    from urllib.parse import parse_qs,urlsplit
+    assert urlsplit(url).hostname=='query.sse.com.cn'
+    assert parse_qs(urlsplit(url).query)['TITLE']==['合成']
+    return {'status':'ok','url':url,'retrieved_at':'2026-10-25T18:00:00+08:00','body_sha256':'a'*64,
+            'data':{'result':[[{'TITLE':'合成交易所公告','SECURITY_CODE':'600001','SECURITY_NAME':'合成公司',
+                'SSEDATE':'2020-01-10','URL':'https://www.sse.com.cn/disclosure/fixture'}]],
+                    'pageHelp':{'pageNo':1,'pageCount':1}}}
+discovery.fetch_public_index=index_response
 async def no_process(*args, **kwargs):
     raise AssertionError('native HTTP journey forbids CLI execution')
 asyncio.create_subprocess_exec = no_process
@@ -253,6 +268,9 @@ def test_real_http_refresh_cancel_reports_sources_and_owner_isolation(live_nativ
     assert owner.get("/__fixture/state").json()["model_calls"] == initial_calls
     call_id = next(event["platform_call"]["call_id"] for event in received if event.get("platform_call"))
     assert owner.get(f"/api/capabilities/calls/{call_id}").status_code == 200
+    history_calls = owner.get(f"/api/convs/{conv}/capability-calls").json()["calls"]
+    assert {c["capability_id"] for c in history_calls} == {"source_find", "indicator_list", "source_read"}
+    assert all(c["source_kind"] != "unknown" for c in history_calls)
     for path in (
         f"/api/convs/{conv}",
         f"/api/agent/runs/{run_id}",
@@ -308,7 +326,7 @@ def test_responses_http_tool_save_replay_and_usage_leave_private_reasoning_in_ra
     run_id = events[-1]["agent"]["run_id"]
     run = owner.get(f"/api/agent/runs/{run_id}").json()["run"]
     assert run["status"] == "completed"
-    assert sum(bool(e.get("platform_call")) for e in events) == 2
+    assert sum(bool(e.get("platform_call")) for e in events) == 3
     assert any(e.get("ref", {}).get("url") == "https://www.sse.com.cn/disclosure/fixture" for e in events)
     with owner.stream("POST", "/api/agent/chat/stream", json=body) as response:
         assert list(frames(response)) == events
@@ -320,6 +338,14 @@ def test_responses_http_tool_save_replay_and_usage_leave_private_reasoning_in_ra
     assert "private-continuation-fixture" not in json.dumps([events, history, run])
     assert peer.get(f"/api/convs/{conv}").status_code == 404
     persisted = owner.get(f"/api/agent/runs/{run_id}/events").json()["events"]
+    indexed_refs = [
+        e["ui"]["ref"]
+        for e in persisted
+        if e.get("type") == "source_recorded"
+        and e.get("ui", {}).get("ref", {}).get("published_at_basis") == "source_index_metadata"
+    ]
+    assert indexed_refs and indexed_refs[0]["published_at"] == "2020-01-10"
+    assert indexed_refs[0]["original_verified"] is False
     usage = [e["usage"] for e in persisted if e.get("type") == "model_usage"][-1]
     assert usage["model_calls"] == 2 and usage["usage_complete"] is True
 
