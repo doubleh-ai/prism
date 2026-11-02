@@ -244,10 +244,11 @@ Object.assign(App, {
     var context = this._industryContext || {};
     var summary = context.summary || {};
     var ready = Number(context.generated_at || 0) > 0;
+    if (!ready) return "";
     return '<div class="industry-sync' + (ready ? " ready" : "") + '">' +
-      '<span><i></i>' + (ready ? "跨模块已同步" : "等待数据联动") + '</span>' +
+      '<span><i></i>' + (ready ? "相关研究已更新" : "暂无相关研究") + '</span>' +
       '<em>' + esc(this._industryRelativeTime(context.generated_at)) + (ready ? " · " + Number(summary.linked_tickers || 0) + " 已归链" : "") + '</em>' +
-      '<button type="button" title="刷新跨模块数据" aria-label="刷新跨模块数据" onclick="App._refreshIndustryContext(this)">↻</button>' +
+      '<button type="button" title="刷新相关研究" aria-label="刷新相关研究" onclick="App._refreshIndustryContext(this)">↻</button>' +
     '</div>';
   },
 
@@ -320,14 +321,15 @@ Object.assign(App, {
     var context = this._industryContext || {};
     var events = context.recent_events || [];
     var unlinked = context.unlinked || [];
+    if (!events.length && !unlinked.length) return "";
     return '<section class="industry-context-grid">' +
-      '<div class="industry-section"><div class="industry-section-hd"><h3>跨模块动态</h3><span>' + esc(String(events.length)) + ' 条</span></div>' +
+      '<div class="industry-section"><div class="industry-section-hd"><h3>相关研究</h3><span>' + esc(String(events.length)) + ' 条</span></div>' +
         '<div class="industry-context-events">' + (events.length ? events.slice(0, 8).map(function(event) {
           var category = (event.categories || [])[0] || "";
           return '<button type="button" data-c="' + escAttr(category) + '" data-t="' + escAttr(event.ticker || "") + '" onclick="App._openIndustryContext(this.dataset.c,this.dataset.t)">' +
             '<i class="source-' + escAttr(event.source || "") + '"></i><span><b>' + esc(event.name || event.ticker) + '</b><em>' + esc(event.source_label + (event.signal ? " · " + event.signal : "")) + '</em></span><time>' + esc(App._industryRelativeTime(event.at)) + '</time>' +
           '</button>';
-        }).join("") : '<div class="ind-empty small">暂无跨模块动态</div>') + '</div>' +
+        }).join("") : '<div class="ind-empty small">暂无相关研究</div>') + '</div>' +
       '</div>' +
       '<div class="industry-section"><div class="industry-section-hd"><h3>待归链</h3><span>' + esc(String((((context.summary || {}).unlinked_tickers) || 0))) + ' 个标的</span></div>' +
         '<div class="industry-unlinked">' + (unlinked.length ? unlinked.slice(0, 8).map(function(item) {
@@ -359,7 +361,7 @@ Object.assign(App, {
     var latest = (live.signals || [])[0] || {};
     return '<button class="industry-chain-card" data-c="' + escAttr(c.category) + '" onclick="App._selectIndustryChain(this.dataset.c)">' +
       '<div class="industry-chain-card-hd"><strong>' + esc(c.category) + '</strong><span>' + esc(String(c.node_count || 0)) + ' 节点</span></div>' +
-      (live.active_tickers ? '<div class="industry-chain-live"><i></i><span>' + esc(String(live.active_tickers)) + ' 个联动标的</span>' + (latest.signal ? '<em class="tone-' + escAttr(latest.tone || "neutral") + '">' + esc(latest.ticker + " " + latest.signal) + '</em>' : '<em>' + esc(this._industryRelativeTime(live.latest_at)) + '</em>') + '</div>' : '') +
+      (live.active_tickers ? '<div class="industry-chain-live"><i></i><span>' + esc(String(live.active_tickers)) + ' 个相关标的</span>' + (latest.signal ? '<em class="tone-' + escAttr(latest.tone || "neutral") + '">' + esc(latest.ticker + " " + latest.signal) + '</em>' : '<em>' + esc(this._industryRelativeTime(live.latest_at)) + '</em>') + '</div>' : '') +
       '<div class="industry-chain-bars"><i style="width:' + up + '%"></i><b style="width:' + mid + '%"></b><em style="width:' + down + '%"></em></div>' +
       '<div class="industry-chain-card-meta">' + esc(String(c.edge_count || 0)) + ' 关系 · ' + esc(String(c.country_count || 0)) + ' 国 · ' + esc(String(c.ticker_count || 0)) + ' 标的</div>' +
       '<div class="industry-chain-card-nodes">' + nodes + '</div>' +
@@ -495,7 +497,7 @@ Object.assign(App, {
     }
     var body =
       '<section class="industry-chain-hero">' +
-        '<div><span>INDUSTRY CHAIN</span><h3>' + esc(cat) + '</h3><p>' + esc(this._industryChainThesis(nodes, edges)) + '</p></div>' +
+        '<div><h3>' + esc(cat) + '</h3><p>' + esc(this._industryChainThesis(nodes, edges)) + '</p></div>' +
         '<div class="industry-chain-actions"><button onclick="App._backToMap()">返回总览</button><button onclick="App._industryAskChain()">交给 AI 深挖</button></div>' +
       '</section>' +
       '<section class="industry-kpis compact">' +
@@ -709,7 +711,7 @@ Object.assign(App, {
   _renderIndustryDrawerContext: function(context) {
     if (!context) return '';
     var evidence = context.evidence || [];
-    return '<div class="industry-drawer-context"><div class="industry-drawer-context-hd"><span>跨模块动态</span><em>' + esc(this._industryRelativeTime(context.latest_at)) + '</em></div>' +
+    return '<div class="industry-drawer-context"><div class="industry-drawer-context-hd"><span>相关研究</span><em>' + esc(this._industryRelativeTime(context.latest_at)) + '</em></div>' +
       (context.latest_signal ? '<div class="industry-drawer-signal tone-' + escAttr(context.signal_tone || "neutral") + '"><span>最新评级</span><strong>' + esc(context.latest_signal) + '</strong></div>' : '') +
       '<div class="industry-drawer-evidence">' + evidence.slice(0, 5).map(function(item) {
         return '<div><i class="source-' + escAttr(item.source || "") + '"></i><span><b>' + esc(item.label || item.source_label || "联动记录") + '</b><em>' + esc((item.detail || item.source_label || "") + " · " + App._industryRelativeTime(item.at)) + '</em></span></div>';

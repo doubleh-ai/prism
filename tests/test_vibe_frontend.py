@@ -11,12 +11,13 @@ def test_official_vibe_workbench_static_contract():
 
     assert 'data-mode="vibe"' in template
     assert "vibePanel" in template
-    assert 'id="vibeDepth"' in template
-    assert "开始正式研究" in template
-    assert "app.vibe.js?v=95" in template
+    assert 'id="vibeDepth"' not in template
+    assert 'id="vibeHistoryList"' in template
+    assert "开始正式研究" not in template
+    assert "app.vibe.js?v=96" in template
     assert '#appShell[data-mode="vibe"]' in css
     assert "/api/vibe/plan" in js
-    assert "/api/vibe/engine" in js
+    assert "/api/vibe/engine" not in js
     assert "_vibeExecutionNotice" in js
     assert "HKUDS/Vibe-Trading" in js
     assert "_vibeActivityHtml" in js

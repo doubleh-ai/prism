@@ -258,7 +258,7 @@ async function managementDoesNotRequestCapabilityHistory() {
   app.api=url=>{requests.push(url);return new Promise(resolve=>{finishOld=resolve;});};
   const pending=app._loadWorkbenchHistory();
   app.switchMode('admin');await settled();
-  assert.equal(doc.getElementById('workbenchContext').style.display,'none');
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);
   assert.equal(requests.length,1);assert(!requests.some(url=>url.includes('view=admin')));
   assert.equal(app._workbenchHistoryLoading,false);assert.equal(doc.getElementById('workbenchCallCount').textContent,'0');
   finishOld({ok:false,status:503});await pending;assert.equal(app._workbenchHistoryError,'','late capability failure must not raise a management alert');
@@ -267,15 +267,34 @@ async function managementDoesNotRequestCapabilityHistory() {
   app._openWorkbenchPanel('history');assert.equal(app._workbenchPanel,'capabilities');assert.equal(doc.getElementById('workbenchHistoryTab').hidden,true);
   app.api=async url=>{requests.push(url);return {ok:true,json:async()=>({calls:[]})};};
   app.switchMode('market');await settled();
-  assert.equal(doc.getElementById('workbenchContext').style.display,'');assert.equal(doc.getElementById('workbenchHistoryTab').hidden,false);
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);assert.equal(doc.getElementById('workbenchHistoryTab').hidden,false);
   assert.equal(requests.at(-1),'/api/capability-calls?view=market&limit=30');
   app.convId='original-chat';app.switchMode('chat');await settled();assert.equal(requests.at(-1),'/api/convs/original-chat/capability-calls');
-  const before=requests.length;app.switchMode('unsupported-view');await settled();assert.equal(requests.length,before);assert.equal(doc.getElementById('workbenchContext').style.display,'none');
+  const before=requests.length;app.switchMode('unsupported-view');await settled();assert.equal(requests.length,before);assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);
+}
+
+async function historyAndErrorsAppearOnlyWhenRelevant() {
+  const {context,app,doc}=environment();
+  vm.runInContext(fs.readFileSync('static/js/app.workbench.js','utf8'),context);
+  app._mode='chat';app.convId='own-conversation';app.msgs=[];
+  app.showWelcome();
+  let html=doc.getElementById('msgList').innerHTML;
+  assert(!html.includes('data-capability-view=')&&!html.includes('项平台能力'));
+  app._updateWorkbenchCount();assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);
+  app._receivePlatformCall({call_id:'own-call',conv_id:app.convId,status:'completed',target:{view:'market'}});
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,false);
+  assert.equal(doc.getElementById('workbenchCallCount').textContent,'1');
+  app.api=async()=>({ok:false,status:503});
+  await app._loadWorkbenchHistory();
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,false,'failed reads remain discoverable');
+  app._capabilityError='能力清单暂时无法读取，请重试。';app.showWelcome();
+  html=doc.getElementById('msgList').innerHTML;
+  assert(html.includes('role="status"')&&html.includes('data-workbench-retry="capabilities"'));
 }
 
 (async()=>{
   imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
-  await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();
-  console.log('workbench runtime ok: 16 scenarios');
+  await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();await historyAndErrorsAppearOnlyWhenRelevant();
+  console.log('workbench runtime ok: 17 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

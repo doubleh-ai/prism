@@ -4,19 +4,12 @@ Object.assign(App, {
   _activeVibePlanId: '',
   _activeVibePlan: null,
   _vibePollTimers: {},
-  _vibeEngine: null,
   _vibeExecutionNotice: 'Vibe 新研究与追问暂不可用：隔离执行环境尚待验收。可查看本账号已保存的历史。',
 
   _initVibe: function() {
-    document.querySelectorAll('#sidebarVibe textarea, #sidebarVibe select, #sidebarVibe .analysis-run-btn').forEach(function(control) { control.disabled = true; control.title = App._vibeExecutionNotice; });
-    var runButton = document.querySelector('#sidebarVibe .analysis-run-btn');
-    if (runButton) runButton.textContent = '新研究暂不可用';
     var shell = document.getElementById('appShell');
     if (shell) shell.classList.remove('collapsed');
     this._loadVibePlans();
-    this._loadVibeEngine();
-    var input = document.getElementById('vibePrompt');
-    if (input) setTimeout(function() { input.focus(); }, 50);
     if (!this._activeVibePlanId) this._renderVibeEmpty();
   },
 
@@ -24,18 +17,10 @@ Object.assign(App, {
     return !!plan && ['queued', 'running', 'cancelling'].indexOf(plan.status) >= 0;
   },
 
-  _loadVibeEngine: async function() {
-    try { var response = await this.api('/api/vibe/engine');
-      if (response.ok) this._vibeEngine = await response.json();
-      else this._vibeEngine = {status:'unavailable'};
-    } catch (error) { this._vibeEngine = {status:'unavailable'}; }
-    if (!this._activeVibePlanId) this._renderVibeEmpty();
-  },
-
   _renderVibeEmpty: function() {
     var inner = document.getElementById('vibePanelInner');
     if (!inner) return;
-    inner.innerHTML = '<div class="vibe-home"><div class="vibe-home-head"><span>VIBE HISTORY</span><h2>查看已保存的主题研究</h2><p>'+esc(this._vibeExecutionNotice)+'</p><div class="research-notice">历史中的研究状态是最后一次保存的状态；本版不会连接旧引擎补取内容或自动恢复任务，也不代表旧任务已停止。</div></div></div>';
+    inner.innerHTML = '<div class="vibe-home"><div class="vibe-home-head"><h2>历史主题研究</h2><p>从左侧选择已保存的记录。新研究请使用研究对话。</p><details class="history-boundary"><summary>历史记录说明</summary><p>状态以最后保存为准；本页不会自动恢复旧任务，显示历史记录也不表示后台任务已经停止。</p></details></div></div>';
   },
 
   _vibeUseExample: function(text) {

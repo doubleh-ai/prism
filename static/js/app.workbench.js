@@ -3,7 +3,6 @@
   'use strict';
   var viewLabels = {chat:'研究对话',market:'行情工作区',vibe:'深度研究',analysis:'个股分析',reports:'网页研报',industry:'产业关系',indicators:'指标实验室',screener:'全市场选股',admin:'工作台管理'};
   var capabilityViews = ['market','vibe','analysis','reports','industry','indicators','screener'];
-  var viewDescriptions = {chat:'能力调用、研究时间与来源会随本轮对话保留。',market:'查看行情与数据时点，保留从对话进入的查询记录。',vibe:'追踪正在进行的研究，继续阅读已生成的网页研报。',analysis:'查看个股分析过程与既有结果；打开记录不会重复启动任务。',reports:'网页阅读优先，保留原始来源与研究上下文。',industry:'区分产品用途与供货关系，查看证据及尚未证明的部分。',indicators:'检查指标定义、参数和历史评估记录。',screener:'查看筛选条件、执行进度与已保存结果。',admin:'账号、运行状态与诊断信息。'};
   var originalSwitchMode = App.switchMode;
   var originalMarketWorkspace = App._showMarketWorkspace;
   Object.assign(App, {
@@ -38,12 +37,9 @@
     },
     _syncWorkbenchHeading: function() {
       var view = this._workbenchView(), title = viewLabels[view] || '研究工作台';
-      var context = document.getElementById('workbenchContext');
-      if (context) context.style.display = view === 'chat' || capabilityViews.indexOf(view) >= 0 ? '' : 'none';
       var heading = document.getElementById('workbenchPageTitle'); if (heading) heading.textContent = title;
       var sidebarTitle = document.getElementById('workbenchSidebarTitle'); if (sidebarTitle) sidebarTitle.textContent = view === 'chat' ? '研究会话' : title;
-      var contextTitle = document.getElementById('workbenchContextTitle'); if (contextTitle) contextTitle.textContent = view === 'chat' ? '从对话开始研究' : '来自对话的能力调用';
-      var description = document.getElementById('workbenchContextDescription'); if (description) description.textContent = viewDescriptions[view] || '';
+      this._updateWorkbenchCount();
       document.querySelectorAll('.icon-rail-btn').forEach(function(button) {
         var target = button.dataset.workbenchView || button.dataset.mode;
         button.classList.toggle('active', target === view);
@@ -69,13 +65,8 @@
     },
     showWelcome: function() {
       var list = document.getElementById('msgList'); if (!list) return;
-      var cards = [
-        {view:'market',mark:'↗',title:'行情与筛选',text:'查看数据时点，比较行情与指标结果。'},
-        {view:'industry',mark:'◇',title:'产业与证据',text:'梳理关系，区分已知事实与研究假设。'},
-        {view:'reports',mark:'▤',title:'研究与研报',text:'继续已有研究，追溯来源与调用记录。'}
-      ];
-      var availability = this._capabilityError ? '<button class="workbench-inline-retry" data-workbench-retry="capabilities">'+esc(this._capabilityError)+'</button>' : '<span>'+(this._capabilitiesLoaded ? this._capabilities.length+' 项平台能力与历史入口' : '正在读取平台能力与历史入口…')+'</span>';
-      list.innerHTML = '<div class="workbench-welcome"><div class="workbench-kicker">YOUR RESEARCH WORKSPACE</div><h2>从一个问题开始，<br>把研究过程连起来。</h2><p>在对话里明确目标。查看真实能力调用、结果与来源，<br class="desktop-only">也可以进入对应工作区继续探索。</p><div class="workbench-welcome-status"><i></i>'+availability+'</div><div class="workbench-entry-grid">'+cards.map(function(card){return '<button data-capability-view="'+card.view+'"><span class="workbench-entry-mark">'+card.mark+'</span><h3>'+card.title+'</h3><p>'+card.text+'</p><small>打开工作区 <span>↗</span></small></button>';}).join('')+'</div><div class="workbench-prompts"><span>试着从这里开始</span><button data-research-run="">查看我的研究与证据 ↗</button><button data-draft-question="请先查询可用的平台能力，再帮我建立一份区分事实、推断与假设的研究计划。">建立研究计划 ↗</button><button data-draft-question="请列出我已有的研究报告，说明研究时点、来源与仍待核验的问题。">梳理已有研报 ↗</button></div><div class="workbench-evidence-principle">采集成功不等于事实已核验 · 数据时点未知时明确标注</div></div>';
+      var error = this._capabilityError ? '<p role="status">'+esc(this._capabilityError)+' <button class="workbench-inline-retry" data-workbench-retry="capabilities">重试</button></p>' : '';
+      list.innerHTML = '<div class="workbench-welcome"><h2>有什么想研究的？</h2><p>输入问题，开始研究。</p>'+error+'</div>';
     },
     _draftResearchQuestion: function(text) {
       this.switchMode('chat');
@@ -120,6 +111,9 @@
     },
     _updateWorkbenchCount: function() {
       var count = document.getElementById('workbenchCallCount'); if(count) count.textContent = this._workbenchHistoryError ? '!' : this._workbenchHistoryLoading ? '…' : String(this._workbenchCalls.length);
+      var entry = document.getElementById('workbenchHistoryEntry');
+      var view = this._workbenchView();
+      if (entry) entry.hidden = !(view === 'chat' || capabilityViews.indexOf(view) >= 0) || (!this._workbenchCalls.length && !this._workbenchHistoryError);
     },
     _openWorkbenchPanel: function(panel) {
       var view = this._workbenchView();

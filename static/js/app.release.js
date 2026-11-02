@@ -13,16 +13,15 @@ Object.assign(App, {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); App.openReleaseNotes(); }
       };
     }
-    this._loadReleaseNotes(true);
+    this._loadReleaseNotes();
   },
 
-  _loadReleaseNotes: async function(showGuide) {
+  _loadReleaseNotes: async function() {
     var r = await this.api('/api/releases');
     if (!r.ok) return null;
     var data = await r.json();
     this._releaseData = data;
     this._renderReleaseVersion(data);
-    if (showGuide) this._maybeShowReleaseGuide(data);
     return data;
   },
 
@@ -63,29 +62,10 @@ Object.assign(App, {
     return items;
   },
 
-  _maybeShowReleaseGuide: function(data) {
-    if (!data || !data.version) return;
-    var key = 'prism_seen_release';
-    try {
-      if (localStorage.getItem(key) === data.version) return;
-      localStorage.setItem(key, data.version);
-    } catch(e) {}
-    var latest = data.latest || {};
-    var items = this._releaseSummaryItems(latest, 3);
-    var box = document.createElement('div');
-    box.className = 'guide-toast release-guide show';
-    box.innerHTML = '<div class="guide-toast-hd"><span>新版本 ' + esc(data.version) + '</span>' +
-      '<button class="guide-toast-dismiss" onclick="this.closest(\'.release-guide\').remove()">关闭</button></div>' +
-      '<div class="guide-toast-body">' +
-      (items.length ? '<ul>' + items.map(function(x) { return '<li>' + App._renderReleaseMarkdownInline(x) + '</li>'; }).join('') + '</ul>' : '已更新到最新版本。') +
-      '<button class="release-guide-more" onclick="App.openReleaseNotes();this.closest(\'.release-guide\').remove()">查看更新</button>' +
-      '</div>';
-    document.body.appendChild(box);
-    setTimeout(function() { if (box && box.parentNode) box.remove(); }, 12000);
-  },
+
 
   openReleaseNotes: async function() {
-    var data = this._releaseData || await this._loadReleaseNotes(false);
+    var data = this._releaseData || await this._loadReleaseNotes();
     var modal = document.getElementById('releaseModal');
     var body = document.getElementById('releaseList');
     if (!modal || !body) return;

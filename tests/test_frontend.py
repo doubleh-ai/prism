@@ -520,7 +520,6 @@ class TestReleaseMarkdownRendering:
         assert "marked.parseInline" in js
         assert "sanitizeHtml" in js
         assert "_renderReleaseMarkdownInline(item)" in js
-        assert "_renderReleaseMarkdownInline(x)" in js
 
 
 class TestChatObjectArtifactGuard:
@@ -593,7 +592,7 @@ class TestServiceWorkerCachePolicy:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(project_root, "static", "sw.js"), encoding="utf-8") as fh:
             sw = fh.read()
-        assert "prism-workbench-v95" in sw
+        assert "prism-workbench-v96" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
         assert "client.navigate(client.url)" not in sw
@@ -622,7 +621,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     with open("static/sw.js", encoding="utf-8") as f:
         sw = f.read()
 
-    assert "app.indicator-chart.js?v=95" in template
+    assert "app.indicator-chart.js?v=96" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -653,7 +652,7 @@ def test_industry_workbench_static_contract():
         core = f.read()
 
     assert 'data-mode="industry"' in template
-    assert "app.industry.js?v=95" in template
+    assert "app.industry.js?v=96" in template
     assert "/api/industry/overview" in js
     assert "/api/industry/context" in js
     assert "_renderIndustryOverview" in js
@@ -663,7 +662,7 @@ def test_industry_workbench_static_contract():
     assert "this._refreshIndustryTheme()" in core
     assert "产业链研究工作台" in js
     assert "产业雷达" in js
-    assert "跨模块已同步" in js
+    assert "相关研究已更新" in js
     assert "待归链" in js
     assert "_scheduleIndustryContext" in js
     assert "_renderIndustryTickerBadges" in js
@@ -691,11 +690,11 @@ def test_client_diagnostics_and_admin_bundle_static_contract():
     admin = Path("static/js/app.admin.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=95" in template
+    assert "app.diagnostics.js?v=96" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
-    assert "复制 Codex 诊断包" in admin
+    assert "复制诊断信息" in admin
     assert "/api/admin/diagnostics/bundle" in admin
     assert "app.diagnostics.js" in sw
 
@@ -755,8 +754,8 @@ def test_login_and_app_share_release_cache_version():
     with open("templates/app.html", encoding="utf-8") as f:
         app = f.read()
 
-    assert "app.css?v=95" in login
-    assert "app.css?v=95" in app
+    assert "app.css?v=96" in login
+    assert "app.css?v=96" in app
 
 
 def test_native_stock_entry_preserves_only_historical_analysis_rendering():
@@ -771,7 +770,6 @@ def test_native_stock_entry_preserves_only_historical_analysis_rendering():
     assert 'id="analysisMode"' not in html
     assert 'id="analysisForceRefresh"' not in html
     assert "2 Agent" not in html and "7 Agent" not in html
-    assert "使用 Prism Native" in html
     assert "await this.newConv()" in js
     assert "await this.send()" in js
     assert '"/api/analysis/start"' not in js
@@ -846,7 +844,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=95" in html
+    assert "app.screener.js?v=96" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener

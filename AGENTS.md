@@ -27,6 +27,11 @@ Use only a reviewed Native-only private controller and fixed candidate for autho
 
 ## Development boundaries
 
+For UI changes follow [the interface guidelines](docs/ui-guidelines.md). Integrate
+features into existing navigation; do not add persistent announcement cards,
+duplicate shortcuts or implementation commentary to business pages. Preserve
+visible errors, data provenance and effective operator intervention paths.
+
 Keep production credentials, `.env`, runtime data, logs, backups and old private Git history outside commits and candidate artifacts. Use temporary HOME/data paths and mock external engines for offline tests. Do not point an unverified candidate at the production database: importing the app initializes/migrates data.
 
 Update `docs/release-process.md` when delivery capabilities change. Keep implemented controls and planned controls visibly separate. Prefer the connected GitHub tools for repository changes; attach created PRs to the task. Use the existing `codex/` branch convention.

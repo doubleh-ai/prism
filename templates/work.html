@@ -6,35 +6,35 @@
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="same-origin">
   <title>Work · 我的工作台</title>
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=95">
-  <link rel="stylesheet" href="/static/css/work.css?v=95">
-  <script src="/static/js/app.work.js?v=95" defer></script>
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=96">
+  <link rel="stylesheet" href="/static/css/work.css?v=96">
+  <script src="/static/js/app.work.js?v=96" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#workMain">跳至任务</a>
   <div class="work-shell" id="workApp">
     <aside class="work-sidebar" aria-label="工作区导航">
-      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=95#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
-      <span class="preview-label">个人工作区</span>
-      <nav class="work-nav" aria-label="任务视图"><a class="button" href="/calendar">日历与日程 ↗</a>
+      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=96#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
+
+      <nav class="work-nav" aria-label="任务视图"><a class="button" href="/calendar">日历安排</a>
         <button type="button" data-work-filter="today" aria-current="page"><span aria-hidden="true">◷</span>今日<span class="nav-count" id="workTodayCount"></span></button>
         <button type="button" data-work-filter="all"><span aria-hidden="true">☷</span>全部任务<span class="nav-count" id="workAllCount"></span></button>
         <button type="button" data-work-filter="done"><span aria-hidden="true">✓</span>已完成<span class="nav-count" id="workDoneCount"></span></button>
       </nav>
-      <div class="sidebar-bottom"><a href="/?feedback=work">反馈与进度 ↗</a><a href="/">↗ Prism 研究</a><p>任务已保存到服务器后，可在其他设备查看。</p></div>
+      <div class="sidebar-bottom"><a href="/?feedback=work">反馈与建议</a><a href="/">Prism ↗</a></div>
     </aside>
     <main class="work-main" id="workMain">
       <header class="work-header">
-        <div><p class="eyebrow" id="workDate">我的工作</p><h1 id="workViewTitle">今天，专注重要的事。</h1></div>
+        <div><p class="eyebrow" id="workDate">我的工作</p><h1 id="workViewTitle">今日任务</h1></div>
         <button type="button" class="button button-secondary" id="workRefresh">刷新</button>
       </header>
       <p class="work-zone" id="workTimezone"></p>
       <div id="workNotice" class="work-notice" role="status" aria-live="polite" hidden></div>
       <section class="work-welcome" id="workWelcome" hidden aria-labelledby="workWelcomeTitle">
-        <div class="welcome-symbol" aria-hidden="true">↗</div><h2 id="workWelcomeTitle">给工作一个清晰的开始</h2>
-        <p>先记录一件需要完成的事。任务与进度只在你的个人工作区可见。</p>
+        <h2 id="workWelcomeTitle">开始使用任务</h2>
+        <p>创建任务后，会保存在你的账号下。</p>
         <button type="button" class="button button-primary" id="workEnable">启用我的工作台</button>
-        <p class="fine-print">任务与日程可在登录后的不同设备访问。消息推送、团队协作与 Agent 写操作尚未接入。</p>
+
       </section>
       <div id="workContent" hidden>
         <section class="task-composer" aria-labelledby="workComposerTitle">
