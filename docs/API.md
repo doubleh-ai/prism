@@ -1,5 +1,29 @@
 # Prism API Reference
 
+## Portfolio preview and bounded linear futures risk (candidate)
+
+`GET/PUT /api/preferences/portfolio` keep owner binding, CSRF and optimistic
+`expected_version`. Optional `futures_equity` is a decimal string distinct from
+cash. `share_with_agent` defaults to false; when enabled, only the current risk
+summary is frozen for new owned Native runs, without per-position rows.
+
+Security positions retain their existing contract. Futures positions require
+`asset_class: futures`, a concrete `SHFE/INE/DCE:PRODUCTYYMM` code, integral
+positive `quantity`, decimal `price` and `multiplier`, CNY, an explicit
+`price_as_of` instant, and `side: long|short`. Optional
+`broker_margin_rate_pct`, `terms_as_of`, public HTTPS `source_url` and ISO
+`last_trading_date` support margin/date checks; missing inputs remain unassessed.
+Responses include existing rules plus optional bounded `scenarios`.
+
+`POST /api/preferences/portfolio/import-preview` accepts closed JSON fields
+`csv_text`, `currency`, and optional explicit `price_as_of` fallback. It requires
+the same authentication, account binding and CSRF, parses at most 64KiB/100 rows
+in memory, and returns `positions`, `counts`, `ignored_columns`, and
+`input_basis: user_supplied_preview`. No file or portfolio is saved. The caller
+must preview and then use the existing versioned PUT to persist. Unsupported
+columns are excluded; malformed or ambiguous rows reject the entire preview.
+Full field names, meanings and limits are in [the portfolio guide](portfolio-risk.md).
+
 ## DoubleH and personal Work
 
 `/` is the shared authenticated product entrance; `/prism` opens research. Work,

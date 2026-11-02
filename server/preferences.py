@@ -51,6 +51,14 @@ def profile_in_transaction(db, owner):
 
 def snapshot_run(db, owner, run_id):
     value = profile_in_transaction(db, owner)
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_snapshots'").fetchone():
+        row = db.execute("SELECT payload FROM portfolio_snapshots WHERE owner=?", [owner]).fetchone()
+        portfolio = json.loads(row[0]) if row else None
+        if portfolio and portfolio.get("share_with_agent") is True:
+            from .portfolio import evaluate
+
+            # Freeze only the explicitly shared risk summary, never position rows.
+            value = {**value, "portfolio_risk": evaluate(value, portfolio)}
     db.execute("INSERT INTO native_run_profiles VALUES(?,?,?)", [run_id, owner, json.dumps(value)])
 
 
@@ -70,6 +78,8 @@ def profile_prompt(value):
         + "。按这些约束比较情景；风险上限不能解释为可保证的止损或收益。"
         "缺少实际组合、可用资金、合约保证金或最新行情时，风险检查必须标记未评估。"
         "禁止因风格激进而跳过证据、忽略风险上限或建议超限；不允许杠杆时不要推荐杠杆交易。"
+        "若含portfolio_risk，它仅为用户主动授权分享的本轮固定风险摘要；不是完整账户、实时报价或独立核验。"
+        "摘要注明未评估或超限时保留该限制；不能据此推算真实持仓、下单数量、强平价格或保证止损。"
     )
 
 

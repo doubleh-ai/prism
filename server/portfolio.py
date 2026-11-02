@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field, field_validator, model_validator
@@ -24,7 +25,7 @@ from .source_urls import public_source_url
 
 router = APIRouter(prefix="/api/preferences", tags=["preferences"])
 Currency = Literal["CNY", "USD", "HKD"]
-_DECIMAL = re.compile(r"(?:0|[1-9]\d{0,14})(?:\.\d{1,8})?\Z")
+_DECIMAL = re.compile(r"(?:0|[1-9]\d{0,14})(?:\.\d{1,8})?\Z", re.ASCII)
 
 
 def _amount(value, *, positive=False, signed=False):
@@ -60,6 +61,60 @@ class Position(ClosedModel):
             raise ValueError("public HTTPS source URL required")
         return value
 
+    @field_validator("asset_id")
+    @classmethod
+    def security_code(cls, value):
+        if value.upper().startswith(("SHFE:", "DCE:", "INE:")):
+            raise ValueError("select futures for a futures contract")
+        return value
+
+
+class FuturesPosition(ClosedModel):
+    asset_class: Literal["futures"]
+    asset_id: str = Field(pattern=r"^(?:SHFE|DCE|INE):[A-Za-z]{1,3}[0-9]{4}$", max_length=40)
+    quantity: str = Field(pattern=r"^[1-9][0-9]{0,8}$", max_length=9)
+    price: str = Field(max_length=24)
+    currency: Literal["CNY"]
+    price_as_of: str = Field(max_length=40)
+    source_url: str | None = Field(default=None, max_length=2048)
+    side: Literal["long", "short"]
+    multiplier: str = Field(max_length=24)
+    broker_margin_rate_pct: str | None = Field(default=None, max_length=24)
+    terms_as_of: str | None = Field(default=None, max_length=40)
+    last_trading_date: str | None = Field(default=None, max_length=10)
+
+    _positive = field_validator("price", "multiplier")(Position.positive_amount.__func__)
+    _price_time = field_validator("price_as_of")(Position.dated_price.__func__)
+    _public = field_validator("source_url")(Position.public_url.__func__)
+
+    @field_validator("asset_id")
+    @classmethod
+    def concrete_contract(cls, value):
+        if not 1 <= int(value[-2:]) <= 12:
+            raise ValueError("concrete delivery month required")
+        return value.upper()
+
+    @field_validator("broker_margin_rate_pct")
+    @classmethod
+    def explicit_margin(cls, value):
+        if value is not None:
+            _amount(value, positive=True)
+            if Decimal(value) > 100:
+                raise ValueError("margin percentage exceeds 100")
+        return value
+
+    @field_validator("terms_as_of")
+    @classmethod
+    def terms_time(cls, value):
+        return canonical_instant(value, "UTC") if value is not None else None
+
+    @field_validator("last_trading_date")
+    @classmethod
+    def explicit_expiry(cls, value):
+        if value is not None and date.fromisoformat(value).isoformat() != value:
+            raise ValueError("ISO calendar date required")
+        return value
+
 
 class PortfolioUpdate(ClosedModel):
     expected_version: int = Field(ge=0)
@@ -67,7 +122,9 @@ class PortfolioUpdate(ClosedModel):
     observed_at: str = Field(max_length=40)
     cash: str = Field(max_length=24)
     debt: str = Field(max_length=24)
-    positions: list[Position] = Field(max_length=100)
+    positions: list[Position | FuturesPosition] = Field(max_length=100)
+    futures_equity: str | None = Field(default=None, max_length=24)
+    share_with_agent: bool = False
     equity_peak: str | None = Field(default=None, max_length=24)
     peak_as_of: str | None = Field(default=None, max_length=40)
     net_flows_since_peak: str = Field(default="0", max_length=25)
@@ -85,6 +142,8 @@ class PortfolioUpdate(ClosedModel):
     @model_validator(mode="after")
     def versioned_snapshot(self):
         self.observed_at = canonical_instant(self.observed_at, "UTC")
+        if self.futures_equity is not None:
+            _amount(self.futures_equity, signed=True)
         if (self.equity_peak is None) != (self.peak_as_of is None):
             raise ValueError("equity peak requires its observation time")
         if self.equity_peak is not None:
@@ -92,7 +151,8 @@ class PortfolioUpdate(ClosedModel):
             self.peak_as_of = canonical_instant(self.peak_as_of, "UTC")
             if self.peak_as_of > self.observed_at:
                 raise ValueError("peak cannot follow portfolio observation")
-        if len({p.asset_id.casefold() for p in self.positions}) != len(self.positions):
+        keys = [(p.asset_id.casefold(), getattr(p, "side", None)) for p in self.positions]
+        if len(set(keys)) != len(keys):
             raise ValueError("duplicate asset")
         return self
 
@@ -120,6 +180,105 @@ def evaluate(profile, portfolio, *, now=None):
     with localcontext() as context:
         context.prec = 80
         return _evaluate(profile, portfolio, now=now)
+
+
+def _futures_checks(portfolio, positions, now, rule):
+    """Linear domestic contracts only; no margin offsets or liquidation promise."""
+    if not positions:
+        return []
+    notionals = [Decimal(p["quantity"]) * Decimal(p["price"]) * Decimal(p["multiplier"]) for p in positions]
+    gross = sum(notionals, Decimal(0))
+    unit = portfolio["currency"]
+    balance = Decimal(portfolio["futures_equity"]) if portfolio.get("futures_equity") is not None else None
+    rule(
+        "futures_equity",
+        "not_evaluated" if balance is None else "pass" if balance > 0 else "breach",
+        "期货账户权益单独计入净权益，不把合约名义金额当作资产；须与现金分开填写",
+        str(balance) if balance is not None else None,
+        "0",
+        unit,
+    )
+    dated = all(
+        p.get("source_url")
+        and p.get("terms_as_of")
+        and now - timedelta(days=7) <= datetime.fromisoformat(p["terms_as_of"]) <= now + timedelta(minutes=5)
+        for p in positions
+    )
+    rule(
+        "futures_terms",
+        "pass" if dated else "not_evaluated",
+        "已填规则来源与7天内核对时间，仍是用户输入，未独立核验原文或经纪商条件"
+        if dated
+        else "缺少规则来源或近期核对时间，不能确认乘数及保证金条件仍适用",
+    )
+    rates_known = all(p.get("broker_margin_rate_pct") is not None for p in positions)
+    required = (
+        sum(
+            (
+                n * Decimal(p["broker_margin_rate_pct"]) / 100
+                for p, n in zip(positions, notionals, strict=True)
+            ),
+            Decimal(0),
+        )
+        if rates_known
+        else None
+    )
+    complete = dated and required is not None and balance is not None
+    rule(
+        "futures_margin",
+        "breach" if complete and required > balance else "pass" if complete else "not_evaluated",
+        "按填写的经纪商比例逐合约估算占用，不抵扣套利或对冲保证金；不代表经纪商实际可用资金或追保金额",
+        str(required) if required is not None else None,
+        str(balance) if balance is not None else None,
+        unit,
+    )
+    today = now.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    dates = [date.fromisoformat(p["last_trading_date"]) for p in positions if p.get("last_trading_date")]
+    expired = any(d < today for d in dates)
+    near = any(d <= today + timedelta(days=7) for d in dates)
+    rule(
+        "futures_delivery",
+        "breach"
+        if expired
+        else "not_evaluated"
+        if near or len(dates) != len(positions) or not dated
+        else "pass",
+        "存在已经过最后交易日的合约，请核对实际持仓"
+        if expired
+        else "最后交易日缺失、临近或规则未核对；需人工核对持仓期限与交割资格"
+        if near or len(dates) != len(positions) or not dated
+        else "填写的最后交易日均在7天以后；仅日期检查，不证明交割资格",
+    )
+    scenarios = []
+    for shock in (Decimal("5"), Decimal("10")):
+        loss = gross * shock / 100
+        remaining = balance - loss if balance is not None else None
+        stressed_margin = (
+            sum(
+                (
+                    n
+                    * (1 - shock / 100 if p["side"] == "long" else 1 + shock / 100)
+                    * Decimal(p["broker_margin_rate_pct"])
+                    / 100
+                    for p, n in zip(positions, notionals, strict=True)
+                ),
+                Decimal(0),
+            )
+            if rates_known
+            else None
+        )
+        scenarios.append(
+            {
+                "adverse_move_pct": str(shock),
+                "futures_loss": str(loss),
+                "remaining_futures_equity": str(remaining) if remaining is not None else None,
+                "estimated_margin": str(stressed_margin) if stressed_margin is not None else None,
+                "margin_shortfall": str(max(Decimal(0), stressed_margin - remaining)) if complete else None,
+                "unit": unit,
+                "assumption": "所有期货分别向持仓不利方向变动；按线性乘数及现有保证金比例，不抵扣对冲，不含手续费、滑点、跳空及比例调整。不是概率预测或强平价格。",
+            }
+        )
+    return scenarios
 
 
 def _evaluate(profile, portfolio, *, now=None):
@@ -151,26 +310,52 @@ def _evaluate(profile, portfolio, *, now=None):
     )
     if not freshness or not same_currency:
         return {**empty, "overall": "not_evaluated", "rules": rules}
-    values = [(p["asset_id"], Decimal(p["quantity"]) * Decimal(p["price"])) for p in positions]
+    securities = [p for p in positions if p.get("asset_class", "security") == "security"]
+    futures = [p for p in positions if p.get("asset_class") == "futures"]
+    scenarios = _futures_checks(portfolio, futures, now, rule)
+    if futures and portfolio.get("futures_equity") is None:
+        return {
+            **empty,
+            "overall": "breach" if any(r["status"] == "breach" for r in rules) else "not_evaluated",
+            "rules": rules,
+            "scenarios": scenarios,
+            "input_basis": "user_supplied_not_independently_verified",
+        }
+    securities_value = sum((Decimal(p["quantity"]) * Decimal(p["price"]) for p in securities), Decimal(0))
+    values = [
+        (
+            re.sub(r"[0-9]{4}$", "", p["asset_id"]) if p.get("asset_class") == "futures" else p["asset_id"],
+            Decimal(p["quantity"])
+            * Decimal(p["price"])
+            * (Decimal(p["multiplier"]) if p.get("asset_class") == "futures" else 1),
+        )
+        for p in positions
+    ]
     exposure = sum((v for _, v in values), Decimal(0))
     debt = Decimal(portfolio["debt"])
-    equity = Decimal(portfolio["cash"]) + exposure - debt
+    equity = (
+        Decimal(portfolio["cash"]) + securities_value + Decimal(portfolio.get("futures_equity") or "0") - debt
+    )
     unit = portfolio["currency"]
     rule(
         "net_equity",
         "pass" if equity > 0 else "breach",
-        "净权益＝现金＋持仓市值－负债",
+        "净权益＝现金＋证券市值＋期货账户权益－负债（不计期货名义金额）",
         str(equity),
         "0",
         unit,
     )
     if equity > 0:
-        largest = max((v for _, v in values), default=Decimal(0)) / equity * 100
+        grouped = {}
+        for code, amount in values:
+            key = code.casefold()
+            grouped[key] = grouped.get(key, Decimal(0)) + amount
+        largest = max(grouped.values(), default=Decimal(0)) / equity * 100
         limit = Decimal(profile["max_position_pct"])
         rule(
             "concentration",
             "pass" if largest <= limit else "breach",
-            "最大单一标的市值占净权益比例",
+            "最大单一证券或期货品种总敞口占净权益比例；期货跨到期月合并，多空不互相抵消",
             str(largest.quantize(Decimal("0.0001"))),
             str(limit),
             "%",
@@ -179,7 +364,7 @@ def _evaluate(profile, portfolio, *, now=None):
         rule(
             "leverage",
             "breach" if leveraged and not profile["allow_leverage"] else "pass",
-            "按负债与总敞口核对杠杆偏好；未评估衍生品保证金",
+            "按负债与证券市值、期货名义总敞口核对杠杆偏好；不抵扣对冲",
             str((exposure / equity).quantize(Decimal("0.0001"))),
             None,
             "倍",
@@ -214,6 +399,7 @@ def _evaluate(profile, portfolio, *, now=None):
         **empty,
         "overall": status,
         "rules": rules,
+        "scenarios": scenarios,
         "input_basis": "user_supplied_not_independently_verified",
     }
 
@@ -235,6 +421,22 @@ async def read_portfolio(request: Request):
         return _reply(db, owner)
 
 
+@router.post("/portfolio/import-preview")
+async def preview_portfolio(request: Request):
+    from .auth import verify_csrf
+    from .portfolio_import import ImportPreview, parse_preview
+    from .productivity.store import _active
+
+    owner = _owner(request)
+    verify_csrf(request)
+    body = await _body(request, ImportPreview, maximum=131072)
+    if _owner(request) != owner:
+        raise HTTPException(401, "请重新登录")
+    with get_db() as db:
+        _active(db, owner)
+    return parse_preview(body)
+
+
 @router.put("/portfolio")
 async def save_portfolio(request: Request):
     from .auth import verify_csrf
@@ -242,7 +444,7 @@ async def save_portfolio(request: Request):
 
     owner = _owner(request)
     verify_csrf(request)
-    body = await _body(request, PortfolioUpdate)
+    body = await _body(request, PortfolioUpdate, maximum=131072)
     if _owner(request) != owner:
         raise HTTPException(401, "请重新登录")
     init_portfolio_db()
