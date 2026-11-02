@@ -84,3 +84,13 @@ PR 自己运行的绿色检查属于开发证据。生产晋级还需独立受�
 独立记录应显示固定提交、产物摘要、环境、操作者、阶段、开始/结束时间、停止状态和各类验收证据。公开内容仅保留必要的脱敏状态。
 
 仅在固定候选通过实际验证、正常恢复访问且本轮没有回退后，标记本轮部署验证成功。失败、取消、未知和回退分别呈现，不能覆盖为绿色成功。具体执行细节与环境清单由部署所有者受限管理。
+
+## v0.22.0 incremental data compatibility
+
+The capability candidate adds personal task/calendar and research-profile tables.
+Its local UI and regression checks do not grant production promotion. In addition
+to the existing gates, validate additive schema initialization, account-deletion
+triggers, profile snapshot retention and preservation of new Work records when
+returning to compatible old code. Do not drop new tables to make rollback pass.
+The release uses the existing private Native-only controller; no new deployment
+or unrestricted shell execution is added by the application features.

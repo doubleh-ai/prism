@@ -224,7 +224,7 @@ class TestImportSanity:
         from server.agent.prompts import workflow_catalog
 
         methods = workflow_catalog()
-        assert {row["workflow"] for row in methods} == {"research", "industry", "company"}
+        assert {row["workflow"] for row in methods} == {"research", "industry", "company", "futures"}
         assert all("dir" not in row for row in methods)
 
     def test_all_models_have_required_fields(self):

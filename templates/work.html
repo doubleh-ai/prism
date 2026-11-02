@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="same-origin">
+  <title>Work · 我的工作台</title>
+  <link rel="stylesheet" href="/static/css/work.css?v=93">
+  <script src="/static/js/app.work.js?v=93" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workMain">跳至任务</a>
+  <div class="work-shell" id="workApp">
+    <aside class="work-sidebar" aria-label="工作区导航">
+      <a class="work-brand" href="/work"><span class="brand-mark" aria-hidden="true">W</span><span>Work<span class="brand-caption">我的工作台</span></span></a>
+      <span class="preview-label">个人工作区</span>
+      <nav class="work-nav" aria-label="任务视图"><a class="button" href="/calendar">日历与日程 ↗</a>
+        <button type="button" data-work-filter="today" aria-current="page"><span aria-hidden="true">◷</span>今日<span class="nav-count" id="workTodayCount"></span></button>
+        <button type="button" data-work-filter="all"><span aria-hidden="true">☷</span>全部任务<span class="nav-count" id="workAllCount"></span></button>
+        <button type="button" data-work-filter="done"><span aria-hidden="true">✓</span>已完成<span class="nav-count" id="workDoneCount"></span></button>
+      </nav>
+      <div class="sidebar-bottom"><a href="/?feedback=work">反馈与进度 ↗</a><a href="/">↗ Prism 研究</a><p>任务已保存到服务器后，可在其他设备查看。</p></div>
+    </aside>
+    <main class="work-main" id="workMain">
+      <header class="work-header">
+        <div><p class="eyebrow" id="workDate">我的工作</p><h1 id="workViewTitle">今天，专注重要的事。</h1></div>
+        <button type="button" class="button button-secondary" id="workRefresh">刷新</button>
+      </header>
+      <p class="work-zone" id="workTimezone"></p>
+      <div id="workNotice" class="work-notice" role="status" aria-live="polite" hidden></div>
+      <section class="work-welcome" id="workWelcome" hidden aria-labelledby="workWelcomeTitle">
+        <div class="welcome-symbol" aria-hidden="true">↗</div><h2 id="workWelcomeTitle">给工作一个清晰的开始</h2>
+        <p>先记录一件需要完成的事。任务与进度只在你的个人工作区可见。</p>
+        <button type="button" class="button button-primary" id="workEnable">启用我的工作台</button>
+        <p class="fine-print">任务与日程可在登录后的不同设备访问。消息推送、团队协作与 Agent 写操作尚未接入。</p>
+      </section>
+      <div id="workContent" hidden>
+        <section class="task-composer" aria-labelledby="workComposerTitle">
+          <div class="section-heading"><h2 id="workComposerTitle">记下一件事</h2><span class="fine-print">Ctrl / ⌘ + Enter 保存</span></div>
+          <form id="workCreateForm">
+            <label class="sr-only" for="workTitle">任务名称</label>
+            <input id="workTitle" name="title" class="task-title-input" maxlength="200" required autocomplete="off" placeholder="例如：整理周五评审需要的材料">
+            <label class="sr-only" for="workDescription">任务说明</label>
+            <textarea id="workDescription" name="description" maxlength="4000" rows="2" placeholder="补充背景、交付标准或下一步（可选）"></textarea>
+            <div class="composer-options">
+              <label>优先级<select id="workPriority" name="priority"><option value="normal">普通</option><option value="high">重要</option><option value="low">较低</option></select></label>
+              <label>截止时间（可选）<input id="workDue" name="due" type="datetime-local" step="60"></label>
+              <label id="workDueChoiceLabel" hidden>这一天有两次相同时间<select id="workDueChoice"><option value="">请选择一次</option></select></label>
+              <button type="submit" class="button button-primary" id="workCreate">添加任务 <span aria-hidden="true">↗</span></button>
+            </div>
+            <p class="fine-print" id="workDueHint">截止时间按工作区时区解释，不设置则留空。</p>
+          </form>
+        </section>
+        <section aria-labelledby="workListTitle" class="task-section">
+          <div class="section-heading"><h2 id="workListTitle">待推进</h2><span class="fine-print" id="workListSummary"></span></div>
+          <div id="workTaskList" class="task-list" aria-live="polite"></div>
+          <p class="empty-state" id="workEmpty" hidden></p>
+          <button type="button" class="button button-secondary load-more" id="workLoadMore" hidden>加载更多任务</button>
+          <p class="fine-print list-boundary" id="workListBoundary" hidden>此视图基于已加载的任务；加载更多可继续查看。</p>
+        </section>
+      </div>
+    </main>
+    <section class="task-detail" id="workDetail" hidden aria-labelledby="workDetailHeading">
+      <div class="section-heading"><h2 id="workDetailHeading">任务详情</h2><button type="button" class="button button-quiet" id="workCloseDetail">关闭</button></div>
+      <p id="workDetailState" class="fine-print" role="status" aria-live="polite"></p>
+      <form id="workDetailForm">
+        <label for="workEditTitle">任务名称</label><input id="workEditTitle" maxlength="200" required>
+        <label for="workEditDescription">说明</label><textarea id="workEditDescription" maxlength="4000" rows="6"></textarea>
+        <div class="detail-fields"><label>状态<select id="workEditStatus"><option value="todo">待开始</option><option value="doing">进行中</option><option value="done">已完成</option><option value="cancelled">已取消</option></select></label><label>优先级<select id="workEditPriority"><option value="normal">普通</option><option value="high">重要</option><option value="low">较低</option></select></label></div>
+        <p class="detail-due" id="workDetailDue"></p>
+        <button class="button button-primary" type="submit" id="workSaveDetail">保存更改</button>
+        <button class="button button-secondary" type="button" id="workReloadDetail" hidden>读取最新版本</button>
+      </form>
+      <div class="detail-history"><h3>更新记录</h3><ol id="workHistory"></ol></div>
+    </section>
+  </div>
+</body>
+</html>

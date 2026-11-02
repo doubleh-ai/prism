@@ -111,7 +111,7 @@ function nativeHealthShowsConfigurationWithoutAnExternalExecutor() {
   assert(html.includes('Prism Native'));assert(html.includes('22 项'));assert(html.includes('直接 API'));
   assert(html.includes('配置检查不调用模型'));assert(!/Claude|CLI|默认技能|builtin\//i.test(html));
   app._adminHealth.checks.native_core.status='error';
-  assert(!/<span>研究运行器<\/span><strong>正常<\/strong>/.test(app._renderAdminHealth()));
+  assert(!/<span>运行器代码<\/span><strong>正常<\/strong>/.test(app._renderAdminHealth()));
 }
 async function stalledRequestHasABoundedDeadline() {
   const {app,timers}=environment();

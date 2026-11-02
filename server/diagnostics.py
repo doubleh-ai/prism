@@ -130,6 +130,44 @@ def record_diagnostic(
         return int(cur.lastrowid)
 
 
+_NATIVE_ERROR_CODES = frozenset(
+    {
+        "provider_auth_error",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_stream_truncated",
+        "provider_protocol_error",
+        "provider_upstream_error",
+        "provider_connection_error",
+        "budget_exceeded",
+        "output_incomplete",
+        "research_unavailable",
+        "execution_interrupted_unknown",
+    }
+)
+
+
+def record_native_outcome(username: str, status: str, error_code: str | None) -> None:
+    """Record terminal execution failure, even when the delivery HTTP succeeded.
+
+    Never ingest questions, answers, tool payloads or raw provider error text.
+    User cancellation and a completed run are not incidents.
+    """
+    interrupted = status == "cancelled" and error_code == "execution_interrupted_unknown"
+    if status not in {"failed", "partial"} and not interrupted:
+        return
+    code = error_code if error_code in _NATIVE_ERROR_CODES else "research_unavailable"
+    incomplete = status != "failed" or code == "budget_exceeded"
+    record_diagnostic(
+        username=username,
+        kind="server_native_run_incomplete" if incomplete else "server_native_run_failed",
+        severity="warning" if incomplete else "error",
+        component="prism-native",
+        message="Native outcome: " + code,
+        context={"mode": status, "source": "prism-native"},
+    )
+
+
 def _diagnostic_rows(status: str = "open", limit: int = 100) -> list[dict[str, Any]]:
     where = "resolved_at IS NULL" if status != "resolved" else "resolved_at IS NOT NULL"
     with get_db() as db:

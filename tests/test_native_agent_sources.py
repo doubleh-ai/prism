@@ -336,3 +336,11 @@ def test_timeout_configuration_is_bounded(timeout, network):
         == "invalid_timeout"
     )
     assert network["dns_calls"] == []
+
+
+@pytest.mark.parametrize("host", ["www.shfe.cn", "www.shfe.com.cn", "www.dce.com.cn", "www.ine.cn"])
+def test_futures_exchange_urls_share_existing_safety_checks(host):
+    url, actual, kind = sources._admit_url("https://" + host + "/", set())
+    assert actual == host and kind == "official_disclosure"
+    with pytest.raises(ValueError):
+        sources._admit_url("https://" + host + ".example.invalid/", set())

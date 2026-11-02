@@ -65,12 +65,20 @@ from .database import (
 from .diagnostics import router as diagnostics_router
 from .feedback import init_feedback_db, is_worker_update_path
 from .feedback import router as feedback_router
+from .futures import router as futures_router
 from .health import admin_health_payload, readiness_payload
 from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
 from .operations import router as operations_router
+from .preferences import init_preferences_db
+from .preferences import router as preferences_router
+from .productivity.calendar import init_calendar_db
+from .productivity.calendar import router as calendar_router
+from .productivity.routes import router as work_router
+from .productivity.store import init_productivity_db
+from .productivity.store import require_enabled as require_work_enabled
 from .release import APP_VERSION, release_payload
 from .report_files import REPORT_CSP, list_report_files, read_report_file
 from .reports import list_saved_reports_for_conv
@@ -96,6 +104,9 @@ init_db()
 init_research_db()
 init_runtime_db()
 init_feedback_db()
+init_preferences_db()
+init_productivity_db()
+init_calendar_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -283,6 +294,36 @@ async def index(request: Request):
     if not u:
         return RedirectResponse("/login")
     return HTMLResponse(render_template("app.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/work", response_class=HTMLResponse)
+async def work_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    require_work_enabled()
+    return HTMLResponse(render_template("work.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/preferences", response_class=HTMLResponse)
+async def preferences_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    return HTMLResponse(render_template("preferences.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/calendar", response_class=HTMLResponse)
+async def calendar_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    require_work_enabled()
+    return HTMLResponse(render_template("calendar.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/futures", response_class=HTMLResponse)
+async def futures_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    return HTMLResponse(render_template("futures.html"), headers={"Cache-Control": "no-store"})
 
 
 # ── Auth ──
@@ -597,6 +638,10 @@ app.include_router(watchlist_router)
 app.include_router(research_router)
 app.include_router(diagnostics_router)
 app.include_router(feedback_router)
+app.include_router(work_router)
+app.include_router(calendar_router)
+app.include_router(futures_router)
+app.include_router(preferences_router)
 app.include_router(operations_router)
 
 

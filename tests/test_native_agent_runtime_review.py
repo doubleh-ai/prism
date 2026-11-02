@@ -423,3 +423,101 @@ def test_assistant_and_report_failure_roll_back_together(engine, monkeypatch):
             ).fetchone()[0]
             is None
         )
+
+
+@pytest.mark.parametrize("code", ["provider_auth_error", "provider_timeout", "provider_connection_error"])
+def test_native_failed_execution_reaches_diagnostics(engine, monkeypatch, code):
+    async def failed(*args, **kwargs):
+        raise runtime.provider.ProviderError(code)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(runtime, "model_stream", failed)
+    asyncio.run(execute(engine))
+    with get_db() as db:
+        row = dict(
+            db.execute("SELECT * FROM diagnostic_events WHERE kind='server_native_run_failed'").fetchone()
+        )
+    assert row["message"] == "Native outcome: " + code
+    assert row["occurrences"] == 1
+    assert row["severity"] == "error"
+    assert "合成研究问题" not in json.dumps(row, ensure_ascii=False)
+    assert "synthetic-isolated-test" not in json.dumps(row)
+
+
+@pytest.mark.parametrize(
+    "status,code,expected",
+    [
+        ("completed", None, None),
+        ("cancelled", "cancelled_by_user", None),
+        ("cancelled", "execution_interrupted_unknown", "server_native_run_incomplete"),
+        ("partial", "output_incomplete", "server_native_run_incomplete"),
+        ("failed", "budget_exceeded", "server_native_run_incomplete"),
+        ("failed", "private_marker", "server_native_run_failed"),
+    ],
+)
+def test_terminal_diagnostics_classify_and_do_not_duplicate(engine, status, code, expected):
+    outcome = runtime.Outcome(
+        engine.user, engine.run["run_id"], "test", status, text="PRIVATE_ANSWER_MARKER", error_code=code
+    )
+    engine.service._persist(outcome)
+    engine.service._persist(outcome)
+    with get_db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM diagnostic_events")]
+    if expected is None:
+        assert not rows
+    else:
+        assert len(rows) == 1 and rows[0]["kind"] == expected and rows[0]["occurrences"] == 1
+        assert "PRIVATE_ANSWER_MARKER" not in json.dumps(rows)
+        assert "private_marker" not in json.dumps(rows)
+
+
+def test_diagnostic_failure_does_not_undo_saved_research(engine, monkeypatch):
+    from server import diagnostics
+
+    def unavailable(*args):
+        raise RuntimeError("synthetic diagnostic sink unavailable")
+
+    monkeypatch.setattr(diagnostics, "record_native_outcome", unavailable)
+    outcome = runtime.Outcome(
+        engine.user, engine.run["run_id"], "test", "failed", error_code="provider_timeout"
+    )
+    engine.service._persist(outcome)
+    assert store.get_run(engine.user, engine.run["run_id"])["status"] == "failed"
+
+
+async def test_model_receives_frozen_profile_not_latest_settings(engine, monkeypatch):
+    from server.preferences import init_preferences_db
+
+    init_preferences_db()
+    frozen = {
+        "configured": True,
+        "version": 1,
+        "style": "conservative",
+        "horizon": "long",
+        "max_position_pct": 12,
+        "max_drawdown_pct": 7,
+        "allow_leverage": False,
+    }
+    with get_db() as db:
+        db.execute("DELETE FROM native_agent_runs WHERE run_id=?", [engine.run["run_id"]])
+        db.execute("INSERT INTO research_profiles VALUES(?,?,?,?)", [engine.user, 1, json.dumps(frozen), 1])
+    engine.run = store.create_run(engine.user, engine.conv, "合成偏好验证", "synthetic-model", "research")
+    with get_db() as db:
+        db.execute(
+            "UPDATE research_profiles SET version=2,profile_json=? WHERE username=?",
+            [json.dumps({**frozen, "version": 2, "style": "aggressive"}), engine.user],
+        )
+    systems = []
+
+    async def script(*args, **kwargs):
+        systems.append(kwargs["system"])
+        yield {"type": "text_delta", "text": "合成答案"}
+        yield {"type": "usage", "input_tokens": 5, "output_tokens": 4}
+        yield done()
+
+    monkeypatch.setattr(runtime, "model_stream", script)
+    await execute(engine)
+    assert systems and all('"style": "conservative"' in s and '"version": 1' in s for s in systems)
+    assert all('"style": "aggressive"' not in s for s in systems)
+    assert all("未评估" in s for s in systems)
+    assert store.get_run(engine.user, engine.run["run_id"])["profile"] == frozen

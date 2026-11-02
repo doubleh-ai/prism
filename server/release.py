@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-APP_VERSION = "v0.21.2"
+APP_VERSION = "v0.22.0"
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
 DEPLOY_REVISION_PATH = ROOT_DIR / ".deploy-revision"

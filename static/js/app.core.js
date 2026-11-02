@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '86',
+  _clientAssetVersion: '93',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -115,12 +115,12 @@ var App = {
     document.getElementById('userBadge').textContent = this.user;
     var adminEntry = document.getElementById('adminEntry');
     if (adminEntry) adminEntry.style.display = this.isAdmin ? 'inline-flex' : 'none';
-    // Theme & width
+    // Theme; conversation width now follows one responsive layout.
     var saved = localStorage.getItem('cl-theme');
     if (saved === 'dark') document.documentElement.className = 'dark';
     else if (saved === 'light') document.documentElement.className = 'light';
     else document.documentElement.className = 'light';
-    if (localStorage.getItem('cl-wide') === 'true') document.documentElement.classList.add('wide');
+    localStorage.removeItem('cl-wide');
     this.loadSkills(); this.loadModels(); this.loadConvs(); this.showWelcome();
     this.renderSkillsBar();
     if (this._initReleaseNotes) this._initReleaseNotes();
@@ -132,15 +132,17 @@ var App = {
     this._bindAnalysisSearch();
     this._trackUiEvent('chat', 'open');
     if (this._initWorkbench) this._initWorkbench();
+    var feedbackDialog = document.getElementById('feedbackDialog');
+    if (feedbackDialog) feedbackDialog.addEventListener('close',function(){App._feedbackOrigin='';});
+    var feedbackOrigin = new URLSearchParams(location.search).get('feedback');
+    if (['work','calendar','futures','preferences'].includes(feedbackOrigin) && this._openFeedback) {
+      this._feedbackOrigin = feedbackOrigin; this._openFeedback();
+      history.replaceState(null, '', '/');
+    }
     // Register Service Worker for offline cache (P5). Bypass HTTP cache for
     // the SW script itself so deployments can replace stale app shells.
     if ('serviceWorker' in navigator) {
-      var swReloading = false;
-      navigator.serviceWorker.addEventListener('controllerchange', function() {
-        if (swReloading) return;
-        swReloading = true;
-        window.location.reload();
-      });
+      // Keep drafts intact. New assets load on the next deliberate navigation.
       navigator.serviceWorker.register('/static/sw.js', {updateViaCache: 'none'}).then(function(reg) {
         try { reg.update(); } catch(e) {}
       }).catch(function(){});
@@ -238,9 +240,8 @@ var App = {
 
   /* ═══ Theme ═══ */
   toggleTheme: function() {
-    var c = document.documentElement.className.replace('wide','').trim();
-    var n = (c === 'dark') ? 'light' : 'dark';
-    document.documentElement.className = n + (document.documentElement.classList.contains('wide') ? ' wide' : '');
+    var n = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
+    document.documentElement.className = n;
     localStorage.setItem('cl-theme', n);
     // 主题切换后重绘当前 K 线（换配色表）
     if (this._mode === 'market' && this._currentTicker) {
@@ -249,10 +250,6 @@ var App = {
     if (this._mode === 'industry' && this._refreshIndustryTheme) {
       this._refreshIndustryTheme();
     }
-  },
-  toggleWidth: function() {
-    document.documentElement.classList.toggle('wide');
-    localStorage.setItem('cl-wide', document.documentElement.classList.contains('wide'));
   },
 
   _isCompactViewport: function() {
@@ -383,7 +380,7 @@ var App = {
 
   newConv: async function(skipWelcome) {
     var requestId = this._convRequestId = (this._convRequestId || 0) + 1;
-    var skillForNew = ['prism-research','bottleneck-hunter','serenity'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
+    var skillForNew = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(this.skill) >= 0 ? this.skill : 'prism-research';
     var r = await this.api('/api/convs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({skill: skillForNew})});
     if (!r.ok) return false; var c = await r.json();
     if (requestId !== this._convRequestId) return false;
@@ -504,7 +501,7 @@ var App = {
 
   /* ═══ Skill ═══ */
   setSkill: function(s) {
-    this.skill = ['prism-research','bottleneck-hunter','serenity'].indexOf(s) >= 0 ? s : 'prism-research';
+    this.skill = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(s) >= 0 ? s : 'prism-research';
     this._activeSkills = new Set([this.skill]);
   },
 

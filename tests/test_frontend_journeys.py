@@ -20,4 +20,4 @@ def test_frontend_journeys_actual_asset_order():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "frontend journeys ok: 18 scenarios" in result.stdout
+    assert "frontend journeys ok: 21 scenarios" in result.stdout

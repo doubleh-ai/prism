@@ -3,11 +3,17 @@
 from ..research_context import build_research_prompt
 
 WORKFLOWS = {
+    "futures": ("期货研究", "分别核对基本面、技术面及成交持仓，区分品种连续序列与可交易合约。"),
     "research": ("综合研究", "围绕问题建立证据、比较解释并给出可检验的判断。"),
     "industry": ("产业链研究", "追踪产品、供需、商业关系和利润传导，保留反证。"),
     "company": ("公司研究", "从公告、财务与经营数据分析公司，区分估值假设。"),
 }
-ALIASES = {"prism-research": "research", "bottleneck-hunter": "industry", "serenity": "company"}
+ALIASES = {
+    "futures-research": "futures",
+    "prism-research": "research",
+    "bottleneck-hunter": "industry",
+    "serenity": "company",
+}
 
 
 def workflow_id(value: str) -> str:
@@ -34,6 +40,12 @@ def workflow_catalog() -> list[dict]:
 def system_prompt(context: dict, workflow: str, *, search_available: bool) -> str:
     label, description = WORKFLOWS[workflow]
     method = {
+        "futures": (
+            "先调用 futures_snapshot 获取支持品种的真实数据。分别回答基本面、技术面和成交持仓。"
+            "基本面缺项通过来源工具核查交易所公告、库存、基差、供应和需求，未采集则说明未知。"
+            "连续合约不是可交易合约；换月影响技术指标，不可从持仓变化推断净资金流入或多空方向。"
+            "当前合约、交易时段、保证金、到期交割和期限结构均需最新来源，缺少时不计算可开仓数量。"
+        ),
         "research": "列出待回答的问题，优先核实关键事实，再比较至少两种解释。不要为了形式强行生成长报告。",
         "industry": (
             "按产品、关键材料/设备、制造、客户与终端需求追溯关系。区分同产业、产品用途、已披露供货、"

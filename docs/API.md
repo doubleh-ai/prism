@@ -542,3 +542,36 @@ Each event line is `data: {json}\n\n`:
 | reference | `{"ref": {"url": "...", "title": "...", "snippet": "..."}}` |
 | error | `{"error": "..."}` |
 | done | `data: [DONE]\n\n` |
+
+## Work, calendar and preferences (v0.22.0 candidate)
+
+All endpoints require the signed-in owner. Writes retain CSRF checks and a
+32 KiB closed JSON schema; unknown keys and duplicate fields fail. Optional
+`X-Prism-Account` binds the page to its initial account and rejects a mismatch.
+Work defaults enabled; `PRISM_WORK_ENABLED=0` explicitly disables tasks/calendar.
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /api/work/overview` | Personal workspace and first task page; does not create a workspace |
+| `POST /api/work/spaces` | Explicit personal workspace creation with UUID `request_id` and timezone |
+| `GET/POST /api/work/spaces/{id}/tasks` | Owned tasks; bounded pagination and stable creation request ID |
+| `PATCH /api/work/spaces/{id}/tasks/{task_id}` | Owned update with `expected_version` and UUID |
+| `GET /api/work/calendar?start=...&end=...` | At most 31 days, overlapping noncancelled events and open task deadlines; maximum 200 of each with `truncated` |
+| `POST /api/work/calendar` | UUID, title, description, ISO start/end instants and IANA timezone; returns event and bounded overlap list |
+| `PUT /api/work/calendar/{id}` | Full fields plus `expected_version` and `cancelled`; stale writes 409, repeated request/body replays original response |
+| `GET /api/work/calendar/{id}.ics` | One owned event, escaped/folded UTF-8, UTC timestamps, revision sequence, no-store |
+| `GET/PUT /api/preferences/research` | Own explicit profile or `configured:false`; writes require `expected_version` |
+| `GET /api/futures/products` | Fixed supported product catalog |
+| `GET /api/futures/{symbol}/snapshot` | Bounded public daily observation with dates, calculations and gaps; 12 reads/minute/account |
+
+Profile fields: `style` conservative/balanced/aggressive, `horizon`
+short/medium/long, integer `max_position_pct` 1-100, integer
+`max_drawdown_pct` 1-50 and boolean `allow_leverage`. Each Native run captures a
+stable profile version; current preferences never rewrite existing runs. Actual
+holdings are not assumed and `portfolio_risk_status` remains `not_evaluated`.
+
+`futures_snapshot` accepts RB/CU/AU/M/SC only. Five-minute public cache retains
+collection time. Continuous series are not executable contracts; missing
+fundamentals and capital flow are explicit. Trading and Work write tools are not
+in the research Agent catalog. Native feedback accepts `work`, `calendar`,
+`futures` and `preferences` as additional closed-enum feature names.

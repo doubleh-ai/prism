@@ -19,6 +19,7 @@ from ..source_urls import public_source_url
 from ..work_lifecycle import Lease
 
 PLATFORM_TOOLS = (
+    "futures_snapshot",
     "market_quote",
     "market_fundamentals",
     "market_kline",

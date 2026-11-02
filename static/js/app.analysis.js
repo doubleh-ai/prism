@@ -48,63 +48,25 @@ Object.assign(App, {
     }
   },
 
-  /* ── 一键分析 (astock) ── */
+  /* New stock research uses the Native conversation entry; old records remain readable. */
   _runAnalysis: async function() {
     if (this._analysisStarting) return;
-    if (!this._analysisTicker) { alert("请先搜索并选择一只股票"); return; }
-    if (this._analysisStreaming) { this._stopAnalysis(); return; }
+    if (!this._analysisTicker) { this._toast('请先搜索并选择一只股票'); return; }
+    if (this._modelsLoaded && !this.model) { this._toast('尚无可用模型配置，请先检查模型设置。'); return; }
+    var ticker = this._analysisTicker, name = this._analysisName || '';
+    var owner = this.user;
     var sequence = this._analysisRequestSeq = (this._analysisRequestSeq || 0) + 1;
     this._analysisStarting = true;
-
-    var ticker = this._analysisTicker, name = this._analysisName;
-    var modeEl = document.getElementById("analysisMode");
-    var forceEl = document.getElementById("analysisForceRefresh");
-    var mode = (modeEl && modeEl.value) || "fast";
-    var forceRefresh = !!(forceEl && forceEl.checked);
-    this._analysisMode = mode;
-    this._analysisSelectedAgents = this._analysisAgentsForMode(mode);
-    this._analysisAgentDone = {};
-    this._analysisEvents = [];
-    this._analysisCurrentStage = "";
-    this._analysisCompletedNodes = 0;
-    this._analysisStartTime = Date.now();
-    this._analysisElapsedSeconds = null;
-
-    document.getElementById("analysisPanelInner").innerHTML =
-      '<div class="ap-container">' +
-        this._buildProgressBar() +
-        '<div class="ap-status" id="apStatus">正在启动' + esc(this._analysisModeLabels[mode] || "分析") + '…</div>' +
-        '<div class="ap-agent-grid" id="apAgentGrid"></div>' +
-        '<div class="ap-stream" id="apStream"><div class="ap-stream-hd" onclick="App._toggleStream()">🧠 分析过程 <span class="ap-stream-cnt"></span></div><div class="ap-stream-body" id="apStreamBody"></div></div>' +
-      '</div>' +
-      '<div class="ap-report" id="apReport" style="display:none"></div>';
-
-    this._renderAgentGrid();
-
-    var r;
-    try { r = await this.api("/api/analysis/start", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ticker: ticker, name: name, mode: mode, force_refresh: forceRefresh})
-    }); } catch (error) { r = {ok:false}; }
-    this._analysisStarting = false;
-    if (sequence !== this._analysisRequestSeq) return;
-    if (!r.ok) {
-      document.getElementById("analysisPanelInner").innerHTML =
-        '<div class="market-empty-state">启动请求未确认，请先核对已有研究记录再决定是否重试。</div>';
-      return;
-    }
-    var data = await r.json();
-    if (sequence !== this._analysisRequestSeq) return;
-    this._analysisId = data.analysis_id;
-    this._analysisMode = data.mode || mode;
-    this._setAnalysisMode(this._analysisMode);
-    this._analysisSelectedAgents = (data.selected_analysts && data.selected_analysts.length)
-      ? data.selected_analysts
-      : this._analysisAgentsForMode(this._analysisMode);
-    this._renderAgentGrid();
-    this._analysisStreaming = true;
-    this._saveAnalysisState();
-    this._connectAnalysisStream();
+    try {
+      var created = await this.newConv();
+      if (!created || this.user !== owner || sequence !== this._analysisRequestSeq) return;
+      var input = document.getElementById('input');
+      if (!input) return;
+      input.value = '请分析 ' + ticker + ' ' + name + '\n请核对数据时间与来源，依次分析基本面、技术面、产业关系、催化剂和风险；缺少的数据请明确标注。';
+      await this.send();
+    } catch (error) {
+      this._toast('研究启动未确认，请先查看研究对话中的记录；本次不会自动重试。');
+    } finally { this._analysisStarting = false; }
   },
 
   _stopAnalysis: function() {
