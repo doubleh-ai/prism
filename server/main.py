@@ -684,11 +684,13 @@ async def api_batch_delete_convs(request: Request):
 
 @app.get("/api/models")
 async def api_models():
+    from .agent.provider import configuration_status
+
     return [
         {
             "id": key,
             "name": model["name"],
-            "configured": bool(model.get("api_key")),
+            "configured": configuration_status(model)["configured"],
             "default": key == DEFAULT_MODEL,
         }
         for key, model in MODELS.items()

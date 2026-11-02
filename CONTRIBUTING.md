@@ -6,7 +6,7 @@ Start with the [Project Guide](docs/PROJECT_GUIDE.md) for local setup and the [a
 
 Use Python 3.12+ and an isolated virtual environment, HOME and data directory. Install `requirements.txt`; install development tools such as pytest-cov and Ruff separately. Node.js is needed for browser-script regression tests. `install.sh` only prepares local Python dependencies; it does not start a service or perform a deployment.
 
-The app can start without model credentials. Real research needs a configured DeepSeek or MiniMax key loaded into the process environment. `.env.example` is a template, not an automatically loaded configuration file. Keep credentials out of command history, commits and test output.
+The app can start without model credentials. Real research needs a configured provider loaded into the process environment. DeepSeek and MiniMax use direct Messages HTTP; OpenAI uses direct Responses HTTP and requires both `OPENAI_API_KEY` and an explicit `OPENAI_MODEL`. No model is selected on the operator's behalf for the OpenAI slot. `.env.example` is a template, not an automatically loaded configuration file. Keep credentials out of command history, commits and test output.
 
 **No part of Prism may depend on or fall back to Claude Code CLI.** Do not install the CLI or external Skills for development, tests, candidate acceptance or recovery. Anthropic-compatible Messages denotes the direct HTTP protocol, not a Claude Code dependency. Application prompts belong in `server/agent/prompts.py`; auxiliary model tasks use `server/services/auxiliary_model.py`. Missing configuration or provider failure must remain an explicit failure.
 
@@ -36,6 +36,8 @@ Test the changed behavior and relevant failure paths. Local socket tests need lo
 | Browser replay and rendering | `static/js/app.chat.js`, `app.chat-render.js`, `app.research.js` |
 
 New routes require authentication, owner checks, closed input schemas and existing CSRF protection. New tools also require explicit Native allowlisting, real work ownership, cancellation, idempotency, safe error/result records and a link to the saved result. See the extension checklist in the architecture map.
+
+Follow the [product principles](docs/product-principles.md) and [interface guidelines](docs/ui-guidelines.md). Start from the user's goal, reuse known information, keep advanced options folded, and let the Agent organize the work. A feature review should remove unnecessary inputs, navigation and repeated status text while preserving editable results, clear failures, permissions and operator intervention.
 
 Astock remains an optional third-party Python engine. Vibe execution is disabled with 503; only owned saved history is available. Do not describe either as a completed migration to the owned Agent.
 

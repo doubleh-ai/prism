@@ -407,10 +407,7 @@ class NativeAgent:
                 tools = NativeTools(
                     context, lease, evidence, allowed_source_hosts=config.RESEARCH_SOURCE_HOSTS
                 )
-                search_available = model_cfg["base_url"].rstrip("/") in {
-                    "https://api.deepseek.com/anthropic",
-                    "https://api.deepseek.com/anthropic/v1",
-                }
+                search_available = provider.supports_search(model_cfg)
                 definitions = tools.definitions()
                 finished = False
                 for index in range(limits.model_calls):

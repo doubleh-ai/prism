@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 
 from . import config
+from .agent.provider import configuration_status
 from .auth import require_admin, verify_csrf
 from .database import get_db
 from .productivity.models import ClosedModel
@@ -70,9 +71,11 @@ def _choices():
         {
             "id": key,
             "name": value.get("name", key),
-            "configured": bool(value.get("api_key")),
-            "protocol": "direct_http",
-            "endpoint_host": "minimax" if "minimax" in value.get("base_url", "") else "deepseek",
+            **{
+                k: v
+                for k, v in configuration_status(value).items()
+                if k in {"configured", "protocol", "endpoint_host"}
+            },
         }
         for key, value in config.MODELS.items()
     ]
@@ -90,7 +93,7 @@ def resolve(purpose, *, explicit_model=None, private_work=False):
         raise HTTPException(409, "工作内容的模型处理尚未获配置授权，可继续手动安排")
     model_id = explicit_model or route.get("model_id") or config.DEFAULT_MODEL
     model = config.MODELS.get(model_id)
-    if model is None or not model.get("api_key"):
+    if not configuration_status(model)["configured"]:
         raise HTTPException(503, "该用途尚未配置可用模型")
     return model_id, dict(model), route
 

@@ -40,7 +40,17 @@ flowchart TD
 | Vibe | `server/vibe.py` | 新研究与追问固定 503，仅保留账号内已保存历史 |
 | 健康观察 | `server/health.py` | 检查 Native 入口、目录与本地模型配置；不调用模型或 CLI |
 
-提供方采用 Anthropic 兼容 Messages 协议，只表示 HTTP 消息与流事件格式；不依赖 Claude Code。现有 DeepSeek / MiniMax 模型配置继续使用。
+`provider.py` 按已配置协议显式分派：DeepSeek / MiniMax 使用 Anthropic 兼容
+Messages HTTP，OpenAI 使用 `provider_openai.py` 的 Responses HTTP。协议名不代表
+依赖任何 CLI。网络或模型失败后不会切换协议、模型或提供方。
+
+OpenAI 槽位必须同时配置独立 Key 和具体模型 ID，未配置时保持不可用。
+Responses 请求使用 `store: false`，不创建提供方会话，不依赖远端响应 ID 回取历史；
+续接所需的加密推理项仅在本轮内存使用，公开事件、报告和历史只保存公开文本、
+实际工具调用及来源。这里描述应用保存行为，不替代提供方的数据保留政策。
+工具只有在完整响应终态核对后才能交给本地调度；内置搜索按实际调用计数并保留
+原始 URL。为在公开文本中附上可点击的真实引用，Responses 文本按已完成内容项
+提交，不承诺逐 token 展示。现有停止、权限、用量未知及最终持久化合同不变。
 
 ## 控制面：开始、运行、观察、停止
 

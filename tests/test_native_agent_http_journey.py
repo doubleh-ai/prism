@@ -67,7 +67,50 @@ def fetched(*args, **kwargs):
             'retrieved_at':'2026-10-25T18:00:00+08:00','published_at':'2026-10-20',
             'original_obtained':True,'original_preserved':False,
             'content_scope':'server_extracted_excerpt','text_truncated':False}
-runtime.model_stream = scripted
+if sys.argv[4] == 'openai':
+    import httpx
+    from server.agent import provider, provider_openai
+    config.MODELS['mock'].update(protocol='openai_responses', base_url='https://api.openai.com/v1')
+    def frame(kind, **fields):
+        return ('event: '+kind+'\ndata: '+json.dumps({'type':kind,**fields},ensure_ascii=False)+'\n\n').encode()
+    class ResponsesWire(httpx.AsyncByteStream):
+        def __init__(self, items, slow): self.items,self.slow=items,slow
+        async def __aiter__(self):
+            yield frame('response.created',response={'id':'resp_fixture'})
+            for index,item in enumerate(self.items):
+                yield frame('response.output_item.added',output_index=index,item={**item,'status':'in_progress'})
+                yield frame('response.output_item.done',output_index=index,item=item)
+            if self.slow: await asyncio.Event().wait()
+            yield frame('response.completed',response={'id':'resp_fixture','status':'completed',
+                'output':self.items,'usage':{'input_tokens':8,'output_tokens':4}})
+        async def aclose(self): state['model_closed']+=1
+    def responses(request):
+        assert str(request.url)=='https://api.openai.com/v1/responses'
+        body=json.loads(request.content); assert body['store'] is False
+        state['model_calls']+=1
+        continued=any(item.get('type')=='function_call_output' for item in body['input'])
+        question=body['input'][0]['content']
+        if not continued:
+            items=[{'id':'rs_fixture','type':'reasoning','summary':[],
+                    'encrypted_content':'private-continuation-fixture'},
+                   {'id':'fc_indicators','type':'function_call','call_id':'indicators','name':'indicator_list',
+                    'arguments':'{}','status':'completed'},
+                   {'id':'fc_source','type':'function_call','call_id':'source','name':'source_read',
+                    'arguments':json.dumps({'url':'https://www.sse.com.cn/disclosure/fixture'}),
+                    'status':'completed'}]
+        else:
+            assert any(item.get('encrypted_content')=='private-continuation-fixture' for item in body['input'])
+            assert {item['call_id'] for item in body['input'] if item.get('type')=='function_call_output'}=={'indicators','source'}
+            text=('已保存的合成研究进度，公告节选仍待核验。' if 'slow' in question else '最终合成结论。公告节选仍待核验。')*50
+            items=[{'id':'msg_fixture','type':'message','role':'assistant','status':'completed','content':[
+                {'type':'output_text','text':text,'annotations':[]}]}]
+        return httpx.Response(200,headers={'content-type':'text/event-stream'},
+            stream=ResponsesWire(items,continued and 'slow' in question))
+    original=provider_openai.OpenAIResponsesProvider
+    provider_openai.OpenAIResponsesProvider=lambda:original(transport=httpx.MockTransport(responses))
+    runtime.model_stream=provider.stream
+else:
+    runtime.model_stream = scripted
 tools._fetch_source = fetched
 async def no_process(*args, **kwargs):
     raise AssertionError('native HTTP journey forbids CLI execution')
@@ -91,7 +134,7 @@ uvicorn.Server(uvicorn.Config(main.app, log_level='critical', access_log=False,
 
 
 @pytest.fixture
-def live_native(tmp_path):
+def live_native(tmp_path, request):
     home, data = tmp_path / "home", tmp_path / "data"
     home.mkdir()
     data.mkdir()
@@ -117,6 +160,7 @@ def live_native(tmp_path):
                 str(ROOT),
                 str(tmp_path),
                 str(Path(httpx.__file__).resolve().parents[1]),
+                getattr(request, "param", "scripted"),
             ],
             env=env,
             stdin=subprocess.DEVNULL,
@@ -169,6 +213,7 @@ def frames(response):
                 yield value
 
 
+@pytest.mark.parametrize("live_native", ["scripted", "openai"], indirect=True)
 def test_real_http_refresh_cancel_reports_sources_and_owner_isolation(live_native):
     owner, peer = live_native
     conv = owner.post("/api/convs", json={"skill": "prism-research"}).json()["id"]
@@ -245,6 +290,38 @@ def test_real_http_refresh_cancel_reports_sources_and_owner_isolation(live_nativ
     assert report.status_code == 200 and "合成" in report.text
     assert peer.get(f"/api/reports/library/{report_id}").status_code == 404
     assert peer.get("/api/reports/library").json()["reports"] == []
+
+
+@pytest.mark.parametrize("live_native", ["openai"], indirect=True)
+def test_responses_http_tool_save_replay_and_usage_leave_private_reasoning_in_ram(live_native):
+    owner, peer = live_native
+    conv = owner.post("/api/convs", json={}).json()["id"]
+    body = {
+        "conv_id": conv,
+        "request_id": "responses-success",
+        "question": "synthetic research",
+        "model": "mock",
+    }
+    with owner.stream("POST", "/api/agent/chat/stream", json=body) as response:
+        events = list(frames(response))
+    assert events[-1]["agent"]["status"] == "completed"
+    run_id = events[-1]["agent"]["run_id"]
+    run = owner.get(f"/api/agent/runs/{run_id}").json()["run"]
+    assert run["status"] == "completed"
+    assert sum(bool(e.get("platform_call")) for e in events) == 2
+    assert any(e.get("ref", {}).get("url") == "https://www.sse.com.cn/disclosure/fixture" for e in events)
+    with owner.stream("POST", "/api/agent/chat/stream", json=body) as response:
+        assert list(frames(response)) == events
+    state = owner.get("/__fixture/state").json()
+    assert state == {"model_calls": 2, "model_closed": 2}
+    history = owner.get(f"/api/convs/{conv}").json()
+    saved = json.loads(history["messages"][-1]["content"])
+    assert "最终合成结论" in saved["text"]
+    assert "private-continuation-fixture" not in json.dumps([events, history, run])
+    assert peer.get(f"/api/convs/{conv}").status_code == 404
+    persisted = owner.get(f"/api/agent/runs/{run_id}/events").json()["events"]
+    usage = [e["usage"] for e in persisted if e.get("type") == "model_usage"][-1]
+    assert usage["model_calls"] == 2 and usage["usage_complete"] is True
 
 
 def test_real_http_project_collaboration_and_agent_schedule_without_model(live_native):

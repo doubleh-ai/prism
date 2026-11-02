@@ -1,4 +1,4 @@
-"""Direct, bounded Anthropic Messages streaming for Prism's configured providers.
+"""Direct bounded model protocols, with explicit dispatch and no fallback.
 
 No SDK, environment/config import, credential discovery or retries. Only the
 caller-supplied key is used, in an authentication header to a fixed HTTPS URL.
@@ -24,6 +24,55 @@ _ENDPOINTS = {
     "https://api.deepseek.com/anthropic/v1": "https://api.deepseek.com/anthropic/v1/messages",
     "https://api.minimax.io/anthropic/v1": "https://api.minimax.io/anthropic/v1/messages",
 }
+_OPENAI_ENDPOINTS = {"https://api.openai.com", "https://api.openai.com/v1"}
+
+
+def configuration_status(model_cfg: dict) -> dict:
+    """Local configuration only; never authenticates or exposes a credential."""
+    if type(model_cfg) is not dict:
+        model_cfg = {}
+    protocol = model_cfg.get("protocol", "anthropic_messages")
+    base, key, model = (model_cfg.get(k) for k in ("base_url", "api_key", "model"))
+    base = base.rstrip("/") if type(base) is str else ""
+    endpoints = (
+        _ENDPOINTS
+        if protocol == "anthropic_messages"
+        else _OPENAI_ENDPOINTS
+        if protocol == "openai_responses"
+        else ()
+    )
+    endpoint_supported = base in endpoints
+    credential_configured = (
+        type(key) is str and 0 < len(key) <= 8192 and all(33 <= ord(c) <= 126 for c in key)
+    )
+    model_configured = type(model) is str and 0 < len(model) <= 128 and all(32 <= ord(c) < 127 for c in model)
+    vendor = (
+        "openai"
+        if base in _OPENAI_ENDPOINTS
+        else "minimax"
+        if base == "https://api.minimax.io/anthropic/v1"
+        else "deepseek"
+        if base in _ENDPOINTS
+        else "unknown"
+    )
+    return {
+        "configured": endpoint_supported and credential_configured and model_configured,
+        "credential_configured": credential_configured,
+        "endpoint_supported": endpoint_supported,
+        "model_configured": model_configured,
+        "protocol": protocol if protocol in ("anthropic_messages", "openai_responses") else "unsupported",
+        "endpoint_host": vendor,
+    }
+
+
+def supports_search(model_cfg: dict) -> bool:
+    """Only explicitly supported built-in web-search protocols; no live claim."""
+    status = configuration_status(model_cfg)
+    return status["configured"] and (
+        status["protocol"] == "openai_responses" or status["endpoint_host"] == "deepseek"
+    )
+
+
 _ERROR_CODES = frozenset(
     {
         "provider_configuration_error",
@@ -532,7 +581,16 @@ async def stream(
     timeout_seconds: float,
 ) -> AsyncIterator[dict]:
     """Default production entry; callers close the iterator when stopping early."""
-    iterator = AnthropicMessagesProvider().stream(
+    protocol = model_cfg.get("protocol", "anthropic_messages") if type(model_cfg) is dict else None
+    if protocol == "anthropic_messages":
+        selected = AnthropicMessagesProvider()
+    elif protocol == "openai_responses":
+        from .provider_openai import OpenAIResponsesProvider
+
+        selected = OpenAIResponsesProvider()
+    else:
+        raise ProviderError("provider_configuration_error")
+    iterator = selected.stream(
         messages,
         system=system,
         tools=tools,
