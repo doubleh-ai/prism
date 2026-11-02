@@ -160,7 +160,7 @@
       }else if(receipt){
         fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得对应交易日的官方仓单，保留行情结果。','muted'));
       }
-      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/?futures='+value.symbol;fund.append(action);root.append(fund);
+      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/prism?futures='+value.symbol;fund.append(action);root.append(fund);
       var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }

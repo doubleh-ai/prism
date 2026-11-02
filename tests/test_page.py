@@ -11,7 +11,7 @@ async def page_html(auth_cookies):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/", cookies=auth_cookies)
+        r = await client.get("/prism", cookies=auth_cookies)
         assert r.status_code == 200
         return r.text
 

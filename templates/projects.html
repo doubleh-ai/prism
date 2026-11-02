@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="same-origin">
+  <title>项目 · Work</title>
+  <link rel="icon" type="image/svg+xml" href="/static/prism-mark.svg?v=97">
+  <link rel="stylesheet" href="/static/css/work.css?v=97">
+  <link rel="stylesheet" href="/static/css/projects.css?v=97">
+  <script src="/static/js/projects.js?v=97" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至项目</a>
+  <div class="work-shell">
+    <aside class="work-sidebar" aria-label="工作区导航">
+      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=97#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
+      <nav class="project-nav" aria-label="工作导航"><a href="/projects" aria-current="page">项目</a><a href="/work">我的任务</a><a href="/calendar">日历安排</a><a href="/notifications">提醒</a></nav>
+      <div class="project-sidebar-bottom"><a href="/prism?feedback=projects">反馈与建议</a><a href="/">DoubleH</a></div>
+    </aside>
+    <main class="work-main project-main" id="main">
+      <header class="work-header"><h1>项目</h1><button class="button button-secondary" type="button" id="refresh">刷新</button></header>
+      <p class="project-account" id="account"></p>
+      <div class="work-notice" id="notice" role="status" aria-live="polite" hidden></div>
+      <div id="content" hidden>
+        <section class="project-create" aria-labelledby="createTitle"><h2 id="createTitle">新建项目</h2>
+          <form id="createForm"><label for="createName">项目名称</label><input id="createName" maxlength="200" required autocomplete="off"><label for="createDescription">说明（可选）</label><textarea id="createDescription" maxlength="4000" rows="2"></textarea><button class="button button-primary" type="submit">创建项目</button></form>
+        </section>
+        <section class="project-section" aria-labelledby="listTitle"><h2 id="listTitle">我的项目</h2><div id="projectList"></div><p class="empty-state" id="empty" hidden>还没有项目，可以先创建一个。</p></section>
+        <section class="project-detail" id="detail" hidden aria-labelledby="detailTitle"><div class="section-heading"><h2 id="detailTitle">项目详情</h2><button class="button button-quiet" type="button" id="closeDetail">关闭</button></div>
+          <form id="editForm"><label for="editName">项目名称</label><input id="editName" maxlength="200" required><label for="editDescription">说明</label><textarea id="editDescription" maxlength="4000" rows="3"></textarea><label for="editStatus">状态</label><select id="editStatus"><option value="active">进行中</option><option value="completed">已完成</option><option value="archived">已归档</option></select><button class="button button-primary" type="submit">保存更改</button></form>
+          <div class="project-tasks"><h3>项目任务</h3>
+            <form id="taskForm"><label for="taskTitle">任务名称</label><input id="taskTitle" maxlength="200" required autocomplete="off"><label for="taskPriority">优先级</label><select id="taskPriority"><option value="normal">普通</option><option value="high">重要</option><option value="low">较低</option></select><button class="button button-primary" type="submit">添加任务</button></form>
+            <p class="project-task-message" id="taskHint" hidden></p><div id="taskList" aria-live="polite"></div><p class="project-task-message"><a href="/work">在任务中管理状态</a></p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

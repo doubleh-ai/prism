@@ -246,6 +246,7 @@ Object.assign(App, {
     var native = checks.native_core || {};
     var tools = checks.tool_catalog || {};
     var provider = checks.provider_configuration || {};
+    var reminder = h.background && h.background.work_reminders;
     var models = h.models || [];
     var configuredModels = models.filter(function(m){ return !!m.configured; }).length;
     var cards = [
@@ -255,6 +256,11 @@ Object.assign(App, {
       this._adminStatusPill(tools.status === 'ok', '工具注册', (tools.count || 0) + ' 项'),
       this._adminStatusPill(provider.status === 'ok', '模型配置', configuredModels + ' / ' + models.length + ' 已配置'),
     ].join('');
+    if (reminder) {
+      var fresh = reminder.last_success && Date.now()/1000 - reminder.last_success < 90;
+      var reminderLabel = !reminder.enabled ? '未启用' : reminder.last_failure ? '最近生成失败' : reminder.running && fresh ? '最近生成检查正常' : '尚未取得有效运行记录';
+      cards += this._adminStatusPill(!!(reminder.enabled && reminder.running && fresh && !reminder.last_failure), '站内提醒', reminderLabel);
+    }
     var modelRows = models.map(function(m) {
       return '<tr>' +
         '<td>' + esc(m.name || m.id) + '</td>' +

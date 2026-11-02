@@ -1,5 +1,32 @@
 # Prism API Reference
 
+## DoubleH and personal Work
+
+`/` is the shared authenticated product entrance; `/prism` opens research. Work,
+projects, calendar and reminders use `/work`, `/projects`, `/calendar` and
+`/notifications`. `GET /api/platform` returns product availability only, with no
+research or personal Work payload. Existing accounts remain valid.
+
+- `GET/POST /api/work/projects`: list or create owned projects. Creation requires
+  a UUID `request_id`, `name` and optional `description`.
+- `PATCH /api/work/projects/{id}`: update with a new `request_id`,
+  `expected_version`, `name`, `description` and `active/completed/archived` status.
+  Stale versions return 409. Repeated identical request IDs replay the result.
+- `GET/POST /api/work/projects/{id}/tasks`: list project tasks or create one using
+  the regular Work task schema. Creation requires an existing personal workspace
+  and an active project; task and project association commit atomically.
+- `GET /api/work/notifications`: read the current account's in-app reminders.
+  `POST /api/work/notifications/{id}/read` marks an owned reminder read.
+- `GET /api/work/notifications/health`: administrator-only scheduler observation.
+  A recent tick does not prove external mail delivery or device push.
+
+Writes require the existing CSRF contract. `X-Prism-Account` detects a changed
+account before a write. The server checks due tasks and upcoming calendar events
+every 30 seconds, starting 15 minutes before their scheduled time. Duplicate
+ticks deduplicate by owner, record and version; cancelled or changed records
+invalidate old displayed reminders. Scheduling participates in maintenance drain.
+This channel is in-app only; it does not send mail, SMS or user text to a model.
+
 ## Native research chat
 
 Research chat uses Prism's owned direct HTTP runtime. The entire application prohibits Claude Code CLI execution or fallback; external Skills and retired MCP adapters are not execution backends. This reference describes repository source, not an instance's deployment state. Implementation and migration limits are in [Native Agent](native-agent-framework.md) and [Project Guide](PROJECT_GUIDE.md).

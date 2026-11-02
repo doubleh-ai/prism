@@ -329,7 +329,7 @@ Object.assign(App, {
     // Status events are a changing state, not paragraphs in the answer. Match
     // known routine events exactly so unfamiliar warnings remain discoverable.
     var routine = ['准备中','研究中','Prism 正在准备研究','Prism 正在研究',
-      '整理问题与已有研究','核对资料与组织分析','检索外部资料',
+      '整理问题与已有研究','核对资料与组织分析','检索外部资料','整理研究结论',
       '已停止模型等待，正在保存进度','研究已保存'];
     var attention = ['awaiting_user','partial','failed','cancelled'];
     var attentionLabels = attention.map(this._nativeStatusLabel);

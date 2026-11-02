@@ -4,6 +4,18 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [v0.23.0]
+
+### DoubleH 与 Work
+- 新增 DoubleH 统一入口；Prism 研究与 Work 个人工作使用同一账号、独立导航。原研究页面迁至 `/prism`，旧反馈链接继续跳转。
+- 新增个人项目、项目任务创建和归档；跨设备编辑冲突明确拒绝，不自动覆盖。
+- 任务截止和日程开始前 15 分钟由服务器生成站内提醒。重复调度不会重复生成同版本提醒；取消或修改后旧提醒不再展示。邮件与设备推送尚未启用。
+
+### Native 研究
+- 在既有调用上限内预留一次收尾回答，避免持续检索直到额度耗尽；不增加模型请求预算。
+- 区分运行时间、模型次数、工具次数、检索次数、上下文与输出长度限制，保留具体中断原因。
+- 将应用维护规则整理为跨 Agent 可读的仓库 Skill；环境专属运维仍私有保存。
+
 ## [v0.22.1]
 
 ### 界面清理

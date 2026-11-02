@@ -3,6 +3,7 @@
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -78,6 +79,16 @@ from .preferences import init_preferences_db
 from .preferences import router as preferences_router
 from .productivity.calendar import init_calendar_db
 from .productivity.calendar import router as calendar_router
+from .productivity.notifications import (
+    ReminderScheduler,
+    init_notifications_db,
+    reminder_health,
+)
+from .productivity.notifications import (
+    router as notifications_router,
+)
+from .productivity.projects import init_projects_db
+from .productivity.projects import router as projects_router
 from .productivity.routes import router as work_router
 from .productivity.store import init_productivity_db
 from .productivity.store import require_enabled as require_work_enabled
@@ -109,6 +120,8 @@ init_feedback_db()
 init_preferences_db()
 init_productivity_db()
 init_calendar_db()
+init_projects_db()
+init_notifications_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -142,17 +155,21 @@ ensure_configured_admin_user()
 @asynccontextmanager
 async def lifespan(application):
     runtime = await open_runtime(producers={kind: kind != "vibe" for kind in KINDS})
+    reminders = ReminderScheduler(runtime.manager)
     try:
         bind_manager(application, runtime.manager)
         application.state.work_runtime = runtime
+        application.state.work_reminders = reminders
         if runtime.controlled and os.environ.get("PRISM_SINGLE_WORKER") == "1":
             from .agent.store import recover_interrupted_runs as recover_native_runs
 
             # The private control listener has been exclusively acquired before
             # classifying old runs; ordinary reads never replay/recover execution.
             recover_native_runs(exclusive_startup=True)
+        reminders.start()
         yield
     finally:
+        await reminders.close()
         await runtime.aclose()
 
 
@@ -295,7 +312,40 @@ async def index(request: Request):
     u = require_auth(request, optional=True)
     if not u:
         return RedirectResponse("/login")
+    # Retain bookmarked research/feedback links while the root becomes the
+    # shared product entrance. Destinations are always local and fixed.
+    query = [
+        (key, value)
+        for key, value in request.query_params.multi_items()
+        if key in {"feedback", "conv", "mode", "run_id", "futures"}
+    ]
+    if query:
+        return RedirectResponse("/prism?" + urlencode(query))
+    return HTMLResponse(render_template("portal.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/prism", response_class=HTMLResponse)
+async def prism_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
     return HTMLResponse(render_template("app.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/platform")
+async def api_platform(request: Request):
+    require_auth(request)
+    from .productivity.store import enabled
+
+    return JSONResponse(
+        {
+            "version": APP_VERSION,
+            "products": [
+                {"id": "prism", "name": "Prism", "href": "/prism", "available": True},
+                {"id": "work", "name": "Work", "href": "/work", "available": enabled()},
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/work", response_class=HTMLResponse)
@@ -319,6 +369,22 @@ async def calendar_page(request: Request):
         return RedirectResponse("/login")
     require_work_enabled()
     return HTMLResponse(render_template("calendar.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/projects", response_class=HTMLResponse)
+async def projects_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    require_work_enabled()
+    return HTMLResponse(render_template("projects.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/notifications", response_class=HTMLResponse)
+async def notifications_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    require_work_enabled()
+    return HTMLResponse(render_template("notifications.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/futures", response_class=HTMLResponse)
@@ -415,7 +481,9 @@ async def api_admin_stats(request: Request):
 @app.get("/api/admin/health")
 async def api_admin_health(request: Request):
     require_admin(request)
-    return admin_health_payload()
+    result = admin_health_payload()
+    result["background"] = {"work_reminders": await reminder_health(request)}
+    return result
 
 
 @app.get("/api/admin/analytics/overview")
@@ -644,6 +712,8 @@ app.include_router(diagnostics_router)
 app.include_router(feedback_router)
 app.include_router(work_router)
 app.include_router(calendar_router)
+app.include_router(projects_router)
+app.include_router(notifications_router)
 app.include_router(futures_router)
 app.include_router(preferences_router)
 app.include_router(operations_router)

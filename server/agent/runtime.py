@@ -53,7 +53,9 @@ class RunStopped(Exception):
 
 
 class BudgetExceeded(Exception):
-    pass
+    def __init__(self, reason="unknown"):
+        self.reason = reason
+        super().__init__(reason)
 
 
 @dataclass
@@ -64,6 +66,7 @@ class Outcome:
     status: str
     text: str = ""
     error_code: str | None = None
+    limit_reason: str | None = None
     research_revision: str | None = None
     message_id: int | None = None
     message_payload: str | None = None
@@ -236,7 +239,17 @@ def _history(user: str, conv_id: str, before: int) -> list[dict]:
     return result
 
 
-def _error_message(code: str) -> str:
+def _error_message(code: str, limit_reason: str | None = None) -> str:
+    if code == "budget_exceeded":
+        reason = {
+            "wall_time": "本轮研究达到运行时间上限",
+            "model_calls": "本轮研究达到模型调用次数上限",
+            "tool_calls": "本轮研究达到工具调用次数上限",
+            "search_calls": "本轮研究达到外部检索次数上限",
+            "context_characters": "本轮资料达到上下文容量上限",
+            "output_characters": "本轮回答达到输出长度上限",
+        }.get(limit_reason, "本轮研究达到时间或用量上限")
+        return reason + "。已有资料与未完成状态已保留，可缩小问题后继续研究。"
     return {
         "provider_auth_error": "模型认证失败，请管理员检查当前模型配置。已保存本轮进度。",
         "provider_rate_limited": "模型服务暂时限流，本轮没有自动重试。已保存进度。",
@@ -287,7 +300,7 @@ class NativeAgent:
                 if cancel.is_set() or store.is_cancelled(user, run_id):
                     raise RunStopped
                 if time.monotonic() >= end:
-                    raise BudgetExceeded
+                    raise BudgetExceeded("wall_time")
                 try:
                     return await asyncio.wait_for(
                         asyncio.shield(task), timeout=min(0.2, end - time.monotonic())
@@ -349,7 +362,7 @@ class NativeAgent:
                 if cancel.is_set() or store.is_cancelled(user, run_id):
                     raise RunStopped
                 if time.monotonic() >= end:
-                    raise BudgetExceeded
+                    raise BudgetExceeded("wall_time")
                 try:
                     await asyncio.wait_for(self._slots.acquire(), 0.2)
                     acquired = True
@@ -390,12 +403,24 @@ class NativeAgent:
                 finished = False
                 for index in range(self.limits.model_calls):
                     if len(json.dumps(messages, ensure_ascii=False)) > self.limits.context_characters:
-                        raise BudgetExceeded
+                        raise BudgetExceeded("context_characters")
                     if cancel.is_set() or store.is_cancelled(user, run_id):
                         raise RunStopped
                     if time.monotonic() >= end:
-                        raise BudgetExceeded
-                    emit("model_started", {"status": "核对资料与组织分析"}, attempt=index + 1)
+                        raise BudgetExceeded("wall_time")
+                    # Reserve the last permitted call for an answer. This is
+                    # still the same bounded run, never an extra retry/budget.
+                    concluding = (
+                        index == self.limits.model_calls - 1
+                        or usage["tool_calls"] >= max(1, self.limits.tool_calls - 2)
+                        or (index > 0 and end - time.monotonic() <= 45)
+                    )
+                    emit(
+                        "model_started",
+                        {"status": "整理研究结论" if concluding else "核对资料与组织分析"},
+                        attempt=index + 1,
+                        concluding=concluding,
+                    )
                     usage["model_calls"] += 1
                     previous_complete = usage["usage_complete"]
                     previous_search_complete = usage["server_search_usage_complete"]
@@ -406,8 +431,8 @@ class NativeAgent:
                     current_complete = False
                     current_search_complete = False
                     search_allowance = min(2, self.limits.server_search_calls - usage["server_search_calls"])
-                    call_search_available = search_available and search_allowance > 0
-                    request_definitions = list(definitions)
+                    call_search_available = search_available and search_allowance > 0 and not concluding
+                    request_definitions = [] if concluding else list(definitions)
                     if call_search_available:
                         request_definitions.append(
                             {
@@ -422,6 +447,12 @@ class NativeAgent:
                     system = system_prompt(research, run["workflow"], search_available=call_search_available)
                     system += profile_prompt(profile)
                     system += f"\n当前服务器时间：{clock['as_of']}；‘今天’以此为准，研究启动观察时点仍保留。"
+                    if concluding:
+                        system += (
+                            "\n本轮进入收尾阶段，不再调用工具或继续搜索。基于已经取得的资料，"
+                            "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
+                            "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
+                        )
                     stream = model_stream(
                         messages,
                         system=system,
@@ -441,7 +472,7 @@ class NativeAgent:
                                 if kind == "text_delta":
                                     pending += event.get("text", "")
                                     if len(full_text) + len(pending) > self.limits.output_characters:
-                                        raise BudgetExceeded
+                                        raise BudgetExceeded("output_characters")
                                     flush()
                                 elif kind == "tool_call":
                                     requested.append(event)
@@ -455,7 +486,7 @@ class NativeAgent:
                                         or observed_searches > search_allowance
                                         or usage["server_search_calls"] > self.limits.server_search_calls
                                     ):
-                                        raise BudgetExceeded
+                                        raise BudgetExceeded("search_calls")
                                     evidence.record_server_call(event["block"])
                                     emit("source_search_started", {"status": "检索外部资料"})
                                 elif kind == "server_tool_result":
@@ -499,13 +530,17 @@ class NativeAgent:
                     continuation = content.continuation() if hasattr(content, "continuation") else content
                     messages.append({"role": "assistant", "content": continuation})
                     if completed["stop_reason"] == "tool_use":
+                        if concluding:
+                            raise BudgetExceeded(
+                                "model_calls" if index == self.limits.model_calls - 1 else "tool_calls"
+                            )
                         if not requested:
                             raise provider.ProviderError("provider_protocol_error")
                         results = []
                         for call in requested:
                             usage["tool_calls"] += 1
                             if usage["tool_calls"] > self.limits.tool_calls:
-                                raise BudgetExceeded
+                                raise BudgetExceeded("tool_calls")
                             name, arguments, call_id = call.get("name"), call.get("arguments"), call.get("id")
                             if not isinstance(call_id, str) or not re.fullmatch(
                                 r"[A-Za-z0-9_-]{1,128}", call_id
@@ -541,18 +576,19 @@ class NativeAgent:
                         outcome.error_code = "output_incomplete"
                         break
                 if not finished and not outcome.error_code:
-                    raise BudgetExceeded
+                    raise BudgetExceeded("model_calls")
                 if finished and not full_text.strip():
                     finished, outcome.error_code = False, "output_incomplete"
                 outcome.status = "completed" if finished else "partial" if full_text else "failed"
         except RunStopped:
             outcome.status, outcome.error_code = "cancelled", "cancelled_by_user"
-        except BudgetExceeded:
+        except BudgetExceeded as error:
             progressed = full_text or pending or usage["server_search_calls"] or usage["tool_calls"] or refs
             outcome.status, outcome.error_code = (
                 "partial" if progressed else "failed",
                 "budget_exceeded",
             )
+            outcome.limit_reason = error.reason
         except provider.ProviderError as error:
             outcome.status, outcome.error_code = "partial" if full_text or pending else "failed", error.code
         except HTTPException as error:
@@ -577,7 +613,10 @@ class NativeAgent:
             flush(final=True)
             if outcome.error_code and outcome.status != "cancelled":
                 emit(
-                    "run_error", {"error": _error_message(outcome.error_code)}, error_code=outcome.error_code
+                    "run_error",
+                    {"error": _error_message(outcome.error_code, outcome.limit_reason)},
+                    error_code=outcome.error_code,
+                    limit_reason=outcome.limit_reason,
                 )
             elif outcome.status == "cancelled":
                 emit("cancellation_acknowledged", {"status": "已停止模型等待，正在保存进度"})
@@ -608,6 +647,7 @@ class NativeAgent:
                                 "run_id": run_id,
                                 "engine": "prism-native",
                                 "status": outcome.status,
+                                "limit_reason": outcome.limit_reason,
                             },
                             "history_anchor": anchor,
                             "report_status": revision["acceptance_status"],

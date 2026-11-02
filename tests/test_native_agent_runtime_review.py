@@ -342,8 +342,42 @@ async def test_unexpected_search_overrun_preserves_observed_attempt(engine, monk
     monkeypatch.setattr(runtime, "model_stream", script)
     outcome = await execute(engine)
     assert outcome.status == "partial" and outcome.error_code == "budget_exceeded"
+    assert outcome.limit_reason == "search_calls"
     assert last_usage(engine)["server_search_calls"] == 2
     assert last_usage(engine)["server_search_usage_complete"] is False
+
+
+async def test_final_allowed_call_produces_answer_without_new_tools(engine, monkeypatch):
+    calls = []
+
+    async def script(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) < engine.service.limits.model_calls:
+            yield done("pause_turn")
+        else:
+            assert kwargs["tools"] == []
+            assert "本轮进入收尾阶段" in kwargs["system"]
+            yield {"type": "text_delta", "text": "基于已有资料的阶段性判断，尚缺最新公告。"}
+            yield done()
+
+    monkeypatch.setattr(runtime, "model_stream", script)
+    outcome = await execute(engine)
+    assert outcome.status == "completed"
+    assert len(calls) == engine.service.limits.model_calls
+    assert last_usage(engine)["model_calls"] == len(calls)
+    assert "阶段性判断" in outcome.text
+    assert any(e["type"] == "model_started" and e["concluding"] for e in events(engine))
+
+
+async def test_context_budget_is_specific_and_persisted_without_model_call(engine):
+    engine.service.limits = runtime.Limits(context_characters=1)
+    outcome = await execute(engine)
+    assert outcome.status == "failed" and outcome.limit_reason == "context_characters"
+    error = next(e for e in events(engine) if e["type"] == "run_error")
+    assert error["limit_reason"] == "context_characters"
+    assert "上下文容量上限" in error["ui"]["error"]
+    assert not any(e["type"] == "model_started" for e in events(engine))
+    assert json.loads(outcome.message_payload)["native_agent"]["limit_reason"] == "context_characters"
 
 
 def claimed_outcome(engine):
