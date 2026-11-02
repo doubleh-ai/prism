@@ -669,6 +669,7 @@ the existing CSRF protection and reject account switches.
 | `GET /api/knowledge/items/{id}` | Claim, source passages, review history and affected owned research |
 | `PUT /api/knowledge/items/{id}/review` | `expected_version`, state, note, optional correction link; reviewed claims require a future validity time, incomplete citations cannot be promoted |
 | `GET/PUT /api/admin/model-routes[/{purpose}]` | Administrator-only purpose selection and bounded request/token/time quotas; only registered model IDs, no key material |
+| `GET /api/industry/research?q=...&before=...&limit=20` | Owned structured relationship candidates, original source excerpts, supporting/opposing claim review state, finite transmission hypotheses and cursor pagination; background seed edges excluded |
 
 Calendar create/update accepts optional `recurrence`: `frequency` daily, weekly
 or monthly; `interval` 1–12; weekly `weekdays` 0 (Monday) through 6; exactly one of
@@ -699,3 +700,22 @@ owned. The default excerpt covers at most ten pages and 32,768 characters. Page
 numbers, total pages and body hash accompany the excerpt. Encrypted, scanned,
 invalid and timed-out documents retain explicit gaps; PDF metadata is not used
 to invent a publication date. This parser is not a CLI Agent or a model fallback.
+
+Futures snapshots add `exchange_daily` for SHFE RB/CU/AU and INE SC. Exact-date
+official contract reports include `contracts`, `active_contract` (largest daily
+reported volume), quote unit, a two-contract settlement `curve`, and separately
+ranked `member_positioning` columns. Their original report URLs and body hashes
+are retained. Missing/invalid data stays unavailable; it does not invalidate the
+continuous bars. A far-minus-near price difference is not spot basis. The
+ranking samples differ across columns and dates; they do not establish net
+capital flow, whole-market direction or personal portfolio suitability.
+
+Relationship traversal forms at most 30 acyclic two/three-link hypotheses per
+bounded page. Product/period overlap, capacity, substitution and downstream
+orders still need semantic review. Revoked/expired/disputed/replaced supports,
+missing source passages and opposing evidence block automatic path reuse. The
+Agent receives a compact summary; original owned research retains full detail.
+Legacy history retrieval filters all owned rows before a maximum matching window
+of 200 reports and 200 research versions. It ranks only visible public-answer
+text and preserves owner/deleted-conversation checks; it is not an unlimited
+ranking index or external fact certification.

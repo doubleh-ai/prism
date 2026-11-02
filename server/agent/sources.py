@@ -452,10 +452,15 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                     raw = _body(response, headers, deadline, MAX_PDF_BYTES)
                     pdf = extract_pdf(raw, timeout_seconds=min(5, _remaining(deadline)))
                     _need(pdf["status"] == "ok", pdf["status"])
-                    text = redact_source_text(
+                    full_text = redact_source_text(
                         "\n\n".join(f"[第{p['page']}页]\n{p['text']}" for p in pdf["pages"])
-                    )[:MAX_TEXT_CHARS]
-                    title, published, truncated = "PDF 公告节选", None, pdf["truncated"]
+                    )
+                    text = full_text[:MAX_TEXT_CHARS]
+                    title, published, truncated = (
+                        "PDF 公告节选",
+                        None,
+                        pdf["truncated"] or len(full_text) > MAX_TEXT_CHARS,
+                    )
                     pdf_fields = {
                         "page_range": [p["page"] for p in pdf["pages"]],
                         "total_pages": pdf["page_count"],

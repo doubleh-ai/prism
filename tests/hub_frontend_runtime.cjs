@@ -53,4 +53,18 @@ async function showOfficialWarrants(){
  const rendered=JSON.stringify(e.els.futuresResult);
  assert.match(rendered,/2026-10-30 · 总计 17 吨，较上一期变化 -2 吨/);assert.ok(rendered.includes(url));
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();console.log('hub journeys ok: 4 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showExchangeFuturesData(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},
+  exchange_daily:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/daily',active_contract:'cu2612',contracts:[{contract:'cu2612',delivery_month:'2026-12',close:70000,settlement:69900,volume:100,open_interest:80}],curve:{status:'collected',near_contract:'cu2612',far_contract:'cu2701',near_settlement:69900,far_settlement:70100,far_minus_near:200,shape:'contango'}},
+  member_positioning:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/members',contract:'cu2612',sides:{long:{ranked_members:20,quantity_sum:123,change_sum:-3,members:[{rank:1,member:'会员甲',quantity:12,change:-1}]}},notice:'多空排名差不代表净资金流。'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['远月升水','远月减近月：200','会员甲','多空排名差不代表净资金流','https://example.com/daily','https://example.com/members','空头持仓：未提供'])assert.ok(rendered.includes(text),text);
+}
+async function showMissingFuturesData(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'unavailable'},member_positioning:{status:'not_reported'}});await run;
+ const rendered=JSON.stringify(e.els.futuresResult);assert.match(rendered,/未取得交易所合约数据/);assert.match(rendered,/交易所未披露该合约的会员持仓/);
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();console.log('hub journeys ok: 6 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

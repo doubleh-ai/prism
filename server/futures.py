@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from . import warehouse_receipts
+from . import exchange_futures, warehouse_receipts
 from .auth import require_auth
 from .database import check_rate_limit
 
@@ -226,9 +226,19 @@ async def snapshot(symbol):
                 bars = parse_bars(bytes(raw), now.date())
                 value = analyze(symbol, bars, now.isoformat(timespec="seconds"))
                 observation_day = datetime.fromisoformat(value["data_as_of"]).date()
-                value["warehouse_receipt"] = await warehouse_receipts.read_report(
-                    client, symbol, observation_day, min(deadline - 0.25, loop.time() + 4)
+                value["warehouse_receipt"], value["exchange_daily"] = await asyncio.gather(
+                    warehouse_receipts.read_report(
+                        client, symbol, observation_day, min(deadline - 0.25, loop.time() + 4)
+                    ),
+                    exchange_futures.read_daily(
+                        client, symbol, observation_day, min(deadline - 0.25, loop.time() + 6)
+                    ),
                 )
+                if value["exchange_daily"]["status"] == "collected":
+                    value["positioning"]["member_rankings"] = value["exchange_daily"]["member_positioning"]
+                    value["gaps"][0] = (
+                        "社会库存和同日同规格现货基差尚需原始数据；已取得的合约期限结构与会员排名见各自日期和范围"
+                    )
             _cache[symbol] = (time.monotonic(), value)
             return copy.deepcopy({**value, "cached": False})
     except (httpx.HTTPError, ValueError, TypeError, KeyError, OverflowError, RecursionError, TimeoutError):

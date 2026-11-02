@@ -192,6 +192,32 @@
       overview.append(node('p','数据日期 '+value.data_as_of+' · 采集 '+value.collected_at+(value.cached?' · 5分钟内缓存':''),'muted'));
       var metrics=node('div',undefined,'metrics');metrics.append(metric('最近收盘',value.latest.close),metric('日变动（%）',value.technical.change_pct),metric('20日均值',value.technical.sma20));overview.append(metrics,node('p',value.notice,'muted'));root.append(overview);
       var tech=node('section',undefined,'card');tech.append(node('h2','技术与成交持仓'));var values=node('div',undefined,'metrics');values.append(metric('60日均值',value.technical.sma60),metric('成交量',value.positioning.volume),metric('持仓量变化',value.positioning.open_interest_change));tech.append(values,node('p',value.positioning.notice,'muted'));root.append(tech);
+      var exchange=value.exchange_daily||{},curve=exchange.curve||{},members=exchange.member_positioning||value.member_positioning||{};
+      var display=function(v){return v===null||v===undefined||v===''?'未提供':String(v);};
+      var sourceLink=function(url,label){try{var parsed=new URL(url);if(parsed.protocol!=='https:'||parsed.username||parsed.password)return null;var a=node('a',label);a.href=parsed.href;a.target='_blank';a.rel='noopener noreferrer';return a;}catch(_){return null;}};
+      var makeTable=function(headers,rows){var wrap=node('div',undefined,'table-scroll'),table=node('table'),head=node('thead'),hr=node('tr'),body=node('tbody');headers.forEach(function(h){hr.append(node('th',h));});head.append(hr);rows.forEach(function(row){var tr=node('tr');row.forEach(function(cell){tr.append(node('td',display(cell)));});body.append(tr);});table.append(head,body);wrap.append(table);return wrap;};
+      var market=node('section',undefined,'card');market.append(node('h2','期限结构与会员持仓'));
+      if(exchange.status==='collected'){
+        market.append(node('h3','期限结构'),node('p','交易所日期 '+display(exchange.data_as_of)+' · 当日成交量最高合约 '+display(exchange.active_contract)+'（非交易建议）','muted'));
+        if(curve.status==='collected'){
+          var shapes={contango:'远月升水',backwardation:'远月贴水',flat:'平水'};
+          market.append(node('p',display(curve.near_contract)+'（结算 '+display(curve.near_settlement)+'） → '+display(curve.far_contract)+'（结算 '+display(curve.far_settlement)+'）'),node('p','远月减近月：'+display(curve.far_minus_near)+(exchange.quote_unit?' '+exchange.quote_unit:'')+' · '+(shapes[curve.shape]||'结构未知')));
+        }else market.append(node('p',curve.status==='insufficient'?'可比较的合约不足，期限结构未计算。':'期限结构状态未知。','muted'));
+        var contracts=Array.isArray(exchange.contracts)?exchange.contracts:[],contractDetails=node('details');contractDetails.append(node('summary','合约明细与原表'));
+        if(contracts.length)contractDetails.append(makeTable(['合约','交割月','收盘','结算','成交量','持仓量'],contracts.map(function(c){return [c.contract,c.delivery_month,c.close,c.settlement,c.volume,c.open_interest];})));else contractDetails.append(node('p','未提供合约明细。','muted'));
+        var dailySource=sourceLink(exchange.source_url,'查看交易所原表 ↗');if(dailySource)contractDetails.append(dailySource);market.append(contractDetails);
+      }else market.append(node('h3','期限结构'),node('p',exchange.status==='not_covered'?'该品种的交易所合约数据尚未覆盖。':exchange.status==='unavailable'?'未取得交易所合约数据。':'交易所合约数据状态未知。','muted'));
+      market.append(node('h3','会员持仓'));
+      if(members.status==='collected'){
+        market.append(node('p','交易所日期 '+display(members.data_as_of)+' · 合约 '+display(members.contract),'muted'));
+        var sides=members.sides||{},labels={volume:'成交量',long:'多头持仓',short:'空头持仓'};
+        ['volume','long','short'].forEach(function(key){var side=sides[key];if(!side){market.append(node('p',labels[key]+'：未提供','muted'));return;}market.append(node('p',labels[key]+'：前 '+display(side.ranked_members)+' 名合计 '+display(side.quantity_sum)+'，增减 '+display(side.change_sum)));});
+        market.append(node('p',members.notice||'会员排名为交易所披露的分项数据，多空排名差不代表净资金流。','muted'));
+        var memberDetails=node('details');memberDetails.append(node('summary','会员明细与原表'));
+        ['volume','long','short'].forEach(function(key){var side=sides[key],rows=side&&Array.isArray(side.members)?side.members:[];memberDetails.append(node('h3',labels[key]));if(rows.length)memberDetails.append(makeTable(['排名','会员','数量','增减'],rows.map(function(m){return [m.rank,m.member,m.quantity,m.change];})));else memberDetails.append(node('p','未提供会员明细。','muted'));});
+        var memberSource=sourceLink(members.source_url,'查看交易所原表 ↗');if(memberSource)memberDetails.append(memberSource);market.append(memberDetails);
+      }else{var memberStatus={unavailable:'未取得会员持仓数据。',not_covered:'该品种的会员持仓数据尚未覆盖。',not_reported:'交易所未披露该合约的会员持仓。'};market.append(node('p',memberStatus[members.status]||'会员持仓数据状态未知。','muted'));if(members.notice)market.append(node('p',members.notice,'muted'));}
+      root.append(market);
       var fund=node('section',undefined,'card');
       fund.append(node('h2','基本面'));
       var receipt=value.warehouse_receipt;

@@ -187,7 +187,7 @@ _TOOLS = (
     Capability(
         "futures_snapshot",
         "期货研究数据",
-        "读取连续日线、技术指标、成交持仓及已覆盖品种的同日交易所仓单。保留缺失来源与数据日期。",
+        "读取连续日线、技术指标、成交持仓、已覆盖品种的同日交易所仓单、具体合约结算曲线和分别披露的会员排名。保留来源、日期和缺口。",
         FuturesArgs,
         "platform_market",
         "market",
@@ -990,6 +990,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         return result, target, "指标已计算；结果仅对应本次取得的数据"
     if name.startswith("industry_"):
         from .industry_context import build_industry_context
+        from .industry_research import evidence_graph
         from .industry_router import overview, ticker_chain
 
         if name == "industry_overview":
@@ -998,6 +999,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             value = await ticker_chain(data["ticker"])
         else:
             value = build_industry_context(user)
+        value["evidence_graph"] = evidence_graph(user, query=data.get("ticker", ""), limit=6, compact=True)
         value["evidence_notice"] = "现有种子连线未经商业关系核验；平台研究动态不是原始披露。"
         return value, target, "已读取现有产业图谱与研究动态"
     if name.startswith("report_"):

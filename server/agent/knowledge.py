@@ -28,8 +28,8 @@ def _payload(raw):
         return {}
 
 
-def _documents(user: str, *, document_id: str | None = None):
-    """Bounded first version; no external index can bypass account/deletion checks."""
+def _documents(user: str, *, document_id: str | None = None, terms=()):
+    """Filter all owned history before the bounded matching-result window."""
     with get_db() as db:
         if not db.execute("SELECT 1 FROM users WHERE username=? AND disabled_at IS NULL", [user]).fetchone():
             raise HTTPException(404, "研究记录不存在或不可访问")
@@ -43,13 +43,33 @@ def _documents(user: str, *, document_id: str | None = None):
             if document_id and document_id.startswith("research:")
             else (" AND 0" if document_id else "")
         )
+
+        def filter_terms(columns):
+            if not terms:
+                return "", []
+            predicates, parameters = [], []
+            for term in terms:
+                # Historical JSON may use either literal Unicode or escaped
+                # Unicode. Bound candidates using both, then rank only public
+                # visible text below; private reasoning never becomes a result.
+                for encoded in dict.fromkeys((term, json.dumps(term, ensure_ascii=True)[1:-1])):
+                    escaped = encoded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    for column in columns:
+                        predicates.append(column + " LIKE ? ESCAPE '\\'")
+                        parameters.append("%" + escaped + "%")
+            return " AND (" + " OR ".join(predicates) + ")", parameters
+
+        report_terms, report_params = filter_terms(("s.title", "s.report_json"))
+        research_terms, research_params = filter_terms(("r.payload", "v.payload"))
         reports = db.execute(
             "SELECT id,conv_id,title,report_json,updated_at FROM saved_reports s WHERE username=? "
             "AND (conv_id IS NULL OR EXISTS (SELECT 1 FROM conversations c WHERE c.id=s.conv_id "
             "AND c.username=s.username AND c.deleted_at IS NULL))"
             + report_filter
+            + report_terms
             + " ORDER BY updated_at DESC LIMIT 200",
-            [user, document_id.split(":", 1)[1]] if report_filter == " AND s.id=?" else [user],
+            ([user, document_id.split(":", 1)[1]] if report_filter == " AND s.id=?" else [user])
+            + report_params,
         ).fetchall()
         rows = db.execute(
             "SELECT r.run_id,r.payload,v.payload AS revision FROM research_runs r "
@@ -57,8 +77,10 @@ def _documents(user: str, *, document_id: str | None = None):
             "AND (r.conv_id IS NULL OR EXISTS (SELECT 1 FROM conversations c WHERE c.id=r.conv_id "
             "AND c.username=r.username AND c.deleted_at IS NULL))"
             + research_filter
+            + research_terms
             + " ORDER BY r.created_at DESC LIMIT 200",
-            [user, document_id.split(":", 1)[1]] if research_filter == " AND r.run_id=?" else [user],
+            ([user, document_id.split(":", 1)[1]] if research_filter == " AND r.run_id=?" else [user])
+            + research_params,
         ).fetchall()
     documents = []
     for row in rows:
@@ -110,7 +132,7 @@ def search(user: str, query: str, *, limit: int = 8, exclude_run_id: str | None 
     terms = list(dict.fromkeys(re.findall(r"[\w.\-]+", query.casefold())))[:12]
     matches = []
     seen = set()
-    for doc in _documents(user):
+    for doc in _documents(user, terms=terms):
         if exclude_run_id and doc["run_id"] == exclude_run_id:
             continue
         key = doc["run_id"] or doc["id"]
@@ -132,7 +154,8 @@ def search(user: str, query: str, *, limit: int = 8, exclude_run_id: str | None 
         {
             "results": [row for _, row in matches[:limit]],
             "reviewed_claims": reviewed["items"],
-            "index_scope": "latest_200_reports_and_200_research_versions",
+            "index_scope": "all_owned_history_filtered_before_latest_200_matches_per_kind",
+            "matching_window_bounded": True,
             "notice": "历史研究及候选判断，尚未经独立语义核验。已撤回、过期、有争议或被替代的条目不能作为有效证据；用户复核也不等于外部事实认证。观察时间不代表数据更新时间。",
         }
     )
