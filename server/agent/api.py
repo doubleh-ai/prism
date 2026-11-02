@@ -140,12 +140,15 @@ async def chat_stream(request: Request):
         return JSONResponse({"error": "请输入研究问题"}, status_code=422)
     if not check_rate_limit(f"native-chat:{user}", config.RATE_CHAT_PER_MIN, 60):
         return JSONResponse({"error": "请求太频繁，请稍后再试"}, status_code=429)
-    model_id = req.model or config.DEFAULT_MODEL
-    model_cfg = config.MODELS.get(model_id)
-    if model_cfg is None:
+    if req.model is not None and req.model not in config.MODELS:
         return JSONResponse({"error": "所选模型不存在，请重新选择"}, status_code=422)
-    if not model_cfg.get("api_key"):
-        return JSONResponse({"error": "所选模型尚未配置认证，请选择可用模型或联系管理员"}, status_code=503)
+    from ..model_routes import resolve
+
+    try:
+        model_id, model_cfg, route = resolve("research", explicit_model=req.model)
+    except HTTPException as failure:
+        return JSONResponse({"error": failure.detail}, status_code=failure.status_code)
+    model_cfg["_purpose_route"] = route
     manager = get_manager(getattr(request, "scope", None))
     try:
         request_lease = manager.admit("request", persist_required=False)

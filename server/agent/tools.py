@@ -142,9 +142,14 @@ def _knowledge_call(name, username, arguments, run_id):
     from . import knowledge
 
     if name == "knowledge_search":
-        return knowledge.search(
+        value = knowledge.search(
             username, arguments["query"], limit=arguments.get("limit", 8), exclude_run_id=run_id
         )
+        if value.get("reviewed_claims"):
+            from ..research.knowledge import record_usage
+
+            record_usage(username, run_id, value["reviewed_claims"])
+        return value
     value = knowledge.get(username, arguments["id"])
     if (
         isinstance(value, dict)
@@ -364,6 +369,9 @@ class NativeTools:
                 "original_verified": False,
                 "original_preserved": False,
                 "content_scope": "server_extracted_excerpt",
+                "body_sha256": value.get("body_sha256"),
+                "page_range": value.get("page_range"),
+                "total_pages": value.get("total_pages"),
             }
             for ref in refs
         ]

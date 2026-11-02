@@ -303,7 +303,7 @@ def overview(owner: str, *, limit=50):
         result = {"workspace": _space(row) if row else None, "tasks": [], "next_cursor": None}
         if row:
             result.update(_tasks(db, row["id"], limit=limit))
-    result["capabilities"] = {"tasks": True, "calendar": True, "reminders": False, "agent_actions": False}
+    result["capabilities"] = {"tasks": True, "calendar": True, "reminders": True, "agent_actions": True}
     return result
 
 

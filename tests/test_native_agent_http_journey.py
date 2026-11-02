@@ -16,6 +16,7 @@ SERVER = r"""
 import asyncio, json, socket, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[3])
 root = Path(sys.argv[2])
 def no_external(*args, **kwargs):
     raise AssertionError('isolated HTTP journey forbids outgoing connections')
@@ -101,7 +102,17 @@ def live_native(tmp_path):
     # No inherited provider keys, .env, user HOME or production database paths.
     with (tmp_path / "process.log").open("w+") as output:
         process = subprocess.Popen(
-            [sys.executable, "-I", "-B", "-c", SERVER, str(ROOT), str(tmp_path)],
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-S",
+                "-c",
+                SERVER,
+                str(ROOT),
+                str(tmp_path),
+                str(Path(httpx.__file__).resolve().parents[1]),
+            ],
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=output,

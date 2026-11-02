@@ -195,7 +195,8 @@ async def test_calendar_includes_due_tasks_and_deletion_cleans_private_data(clie
     await client.put("/api/preferences/research", cookies=first, json=profile())
     agenda = (await client.get("/api/work/calendar" + RANGE, cookies=first)).json()
     assert len(agenda["tasks"]) == len(agenda["events"]) == 1
-    assert agenda["reminders"] == "not_configured"
+    assert agenda["reminders"] == "in_app"
+    assert len(agenda["occurrences"]) == 1
     with get_db() as db:
         db.execute("DELETE FROM users WHERE username='testuser'")
         for table in ["work_calendar", "work_tasks", "work_mutations", "research_profiles"]:

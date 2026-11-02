@@ -270,10 +270,10 @@ def test_invalid_additional_host_config_fails_before_dns(hosts, network):
     assert result["status"] == "invalid_host_configuration" and network["dns_calls"] == []
 
 
-def test_pdf_and_compressed_body_are_explicitly_unsupported(network):
+def test_invalid_pdf_and_compressed_body_are_explicitly_rejected(network):
     network["wires"] = [wire(b"%PDF-synthetic", content_type="application/pdf")]
     result = sources.fetch_public_source("https://www.sse.com.cn/report.pdf")
-    assert result["status"] == "unsupported_pdf" and not result["original_obtained"] and result["text"] == ""
+    assert result["status"] == "pdf_invalid" and not result["original_obtained"] and result["text"] == ""
     network["wires"] = [wire(headers=[("Content-Encoding", "gzip")])]
     assert sources.fetch_public_source("https://www.sse.com.cn/")["status"] == "unsupported_content_encoding"
 

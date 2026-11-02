@@ -14,7 +14,7 @@ import re
 import time
 import weakref
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import HTTPException
 
@@ -313,6 +313,18 @@ class NativeAgent:
             await asyncio.gather(task, return_exceptions=True)
 
     async def _execute(self, user, run, model_cfg, lease, cancel):
+        route = model_cfg.get("_purpose_route", {})
+        limits = replace(
+            self.limits,
+            model_calls=min(self.limits.model_calls, route.get("model_calls_max", self.limits.model_calls)),
+            output_tokens_per_call=min(
+                self.limits.output_tokens_per_call,
+                route.get("output_tokens_max", self.limits.output_tokens_per_call),
+            ),
+            wall_seconds=min(
+                self.limits.wall_seconds, route.get("wall_seconds_max", self.limits.wall_seconds)
+            ),
+        )
         run_id = run["run_id"]
         outcome = Outcome(user, run_id, lease.id, "failed")
         acquired = claimed = False
@@ -320,7 +332,7 @@ class NativeAgent:
         full_text, pending = "", ""
         chunks, refs, calls = [], [], []
         started = time.monotonic()
-        end = started + self.limits.wall_seconds
+        end = started + limits.wall_seconds
         usage = {
             "model_calls": 0,
             "tool_calls": 0,
@@ -401,8 +413,8 @@ class NativeAgent:
                 }
                 definitions = tools.definitions()
                 finished = False
-                for index in range(self.limits.model_calls):
-                    if len(json.dumps(messages, ensure_ascii=False)) > self.limits.context_characters:
+                for index in range(limits.model_calls):
+                    if len(json.dumps(messages, ensure_ascii=False)) > limits.context_characters:
                         raise BudgetExceeded("context_characters")
                     if cancel.is_set() or store.is_cancelled(user, run_id):
                         raise RunStopped
@@ -411,8 +423,8 @@ class NativeAgent:
                     # Reserve the last permitted call for an answer. This is
                     # still the same bounded run, never an extra retry/budget.
                     concluding = (
-                        index == self.limits.model_calls - 1
-                        or usage["tool_calls"] >= max(1, self.limits.tool_calls - 2)
+                        index == limits.model_calls - 1
+                        or usage["tool_calls"] >= max(1, limits.tool_calls - 2)
                         or (index > 0 and end - time.monotonic() <= 45)
                     )
                     emit(
@@ -421,6 +433,18 @@ class NativeAgent:
                         attempt=index + 1,
                         concluding=concluding,
                     )
+                    purpose_request = None
+                    if "_purpose_route" in model_cfg:
+                        from ..model_routes import reserve
+
+                        purpose_request = f"research-{run_id}-{index}"
+                        reserve(
+                            "research",
+                            user,
+                            purpose_request,
+                            run["model_id"],
+                            expected_route_version=route["version"],
+                        )
                     usage["model_calls"] += 1
                     previous_complete = usage["usage_complete"]
                     previous_search_complete = usage["server_search_usage_complete"]
@@ -430,7 +454,7 @@ class NativeAgent:
                     seen_usage = set()
                     current_complete = False
                     current_search_complete = False
-                    search_allowance = min(2, self.limits.server_search_calls - usage["server_search_calls"])
+                    search_allowance = min(2, limits.server_search_calls - usage["server_search_calls"])
                     call_search_available = search_available and search_allowance > 0 and not concluding
                     request_definitions = [] if concluding else list(definitions)
                     if call_search_available:
@@ -458,7 +482,7 @@ class NativeAgent:
                         system=system,
                         tools=request_definitions,
                         model_cfg=model_cfg,
-                        max_tokens=self.limits.output_tokens_per_call,
+                        max_tokens=limits.output_tokens_per_call,
                         timeout_seconds=max(0.1, end - time.monotonic()),
                     )
                     try:
@@ -471,7 +495,7 @@ class NativeAgent:
                                 kind = event.get("type")
                                 if kind == "text_delta":
                                     pending += event.get("text", "")
-                                    if len(full_text) + len(pending) > self.limits.output_characters:
+                                    if len(full_text) + len(pending) > limits.output_characters:
                                         raise BudgetExceeded("output_characters")
                                     flush()
                                 elif kind == "tool_call":
@@ -484,7 +508,7 @@ class NativeAgent:
                                     if (
                                         not call_search_available
                                         or observed_searches > search_allowance
-                                        or usage["server_search_calls"] > self.limits.server_search_calls
+                                        or usage["server_search_calls"] > limits.server_search_calls
                                     ):
                                         raise BudgetExceeded("search_calls")
                                     evidence.record_server_call(event["block"])
@@ -516,6 +540,19 @@ class NativeAgent:
                         )
                         current_search_complete = True
                     finally:
+                        if purpose_request is not None:
+                            from ..model_routes import finish
+
+                            finish(
+                                purpose_request,
+                                input_tokens=current_usage["input_tokens"]
+                                if "input_tokens" in seen_usage
+                                else None,
+                                output_tokens=current_usage["output_tokens"]
+                                if "output_tokens" in seen_usage
+                                else None,
+                                complete=current_complete,
+                            )
                         for key, value in current_usage.items():
                             usage[key] += value
                         usage["usage_complete"] = previous_complete and current_complete
@@ -532,14 +569,14 @@ class NativeAgent:
                     if completed["stop_reason"] == "tool_use":
                         if concluding:
                             raise BudgetExceeded(
-                                "model_calls" if index == self.limits.model_calls - 1 else "tool_calls"
+                                "model_calls" if index == limits.model_calls - 1 else "tool_calls"
                             )
                         if not requested:
                             raise provider.ProviderError("provider_protocol_error")
                         results = []
                         for call in requested:
                             usage["tool_calls"] += 1
-                            if usage["tool_calls"] > self.limits.tool_calls:
+                            if usage["tool_calls"] > limits.tool_calls:
                                 raise BudgetExceeded("tool_calls")
                             name, arguments, call_id = call.get("name"), call.get("arguments"), call.get("id")
                             if not isinstance(call_id, str) or not re.fullmatch(

@@ -73,10 +73,16 @@ from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
+from .model_routes import init_model_routes_db
+from .model_routes import router as model_routes_router
 from .operations import router as operations_router
 from .password_recovery import router as password_recovery_router
+from .portfolio import init_portfolio_db
+from .portfolio import router as portfolio_router
 from .preferences import init_preferences_db
 from .preferences import router as preferences_router
+from .productivity.assistant import init_assistant_db
+from .productivity.assistant import router as work_assistant_router
 from .productivity.calendar import init_calendar_db
 from .productivity.calendar import router as calendar_router
 from .productivity.notifications import (
@@ -98,6 +104,8 @@ from .reports import list_saved_reports_for_conv
 from .reports import router as reports_router
 from .research import init_research_db, recover_interrupted_runs
 from .research import router as research_router
+from .research.knowledge import init_knowledge_db
+from .research.knowledge import router as knowledge_router
 from .vibe import router as vibe_router
 from .watchlist import router as watchlist_router
 from .work_adapters import WorkAdmissionMiddleware
@@ -115,13 +123,17 @@ log = configure_logging(str(LOG_PATH), level=log_level)
 # ── Init ──
 init_db()
 init_research_db()
+init_knowledge_db()
 init_runtime_db()
 init_feedback_db()
 init_preferences_db()
+init_portfolio_db()
+init_model_routes_db()
 init_productivity_db()
 init_calendar_db()
 init_projects_db()
 init_notifications_db()
+init_assistant_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -361,6 +373,13 @@ async def preferences_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
     return HTMLResponse(render_template("preferences.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    return HTMLResponse(render_template("knowledge.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/calendar", response_class=HTMLResponse)
@@ -708,14 +727,18 @@ app.include_router(reports_router)
 app.include_router(vibe_router)
 app.include_router(watchlist_router)
 app.include_router(research_router)
+app.include_router(knowledge_router)
 app.include_router(diagnostics_router)
 app.include_router(feedback_router)
 app.include_router(work_router)
 app.include_router(calendar_router)
 app.include_router(projects_router)
 app.include_router(notifications_router)
+app.include_router(work_assistant_router)
 app.include_router(futures_router)
 app.include_router(preferences_router)
+app.include_router(portfolio_router)
+app.include_router(model_routes_router)
 app.include_router(operations_router)
 
 

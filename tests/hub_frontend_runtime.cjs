@@ -9,6 +9,7 @@ function setup(page='preferences'){
  Object.assign(fields.style,{value:'conservative'});fields.horizon.value='long';fields.max_position_pct.value='20';fields.max_drawdown_pct.value='10';
  const submit=el(),form=el();form.elements={namedItem:k=>fields[k]};form.querySelector=()=>submit;
  const els={main:el(),notice:el(),profileForm:form,profileReload:el(),profileVersion:el()},requests=[],listeners={};
+ Object.assign(els,{portfolioForm:el(),addPosition:el(),useObservedPriceTime:el(),portfolioReload:el(),portfolioDetails:el()});
  Object.assign(els,{futuresForm:form,futureSymbol:el(),futuresResult:el()});
  const context={console,URL,URLSearchParams,Intl,Date,JSON,Number,String,Promise,AbortController,Object,Error,
   setTimeout,clearTimeout,location:{pathname:'/'+page,search:'',replace(){}},confirm:()=>true,

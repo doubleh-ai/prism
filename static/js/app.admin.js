@@ -273,6 +273,7 @@ Object.assign(App, {
       '<div class="admin-empty">业务验收：待验证。此检查不执行研究、行情查询、指标试算或选股任务，也不验证报告质量。深度研究当前仅开放历史读取。</div>' +
       '<div class="admin-health-grid">' + cards + '</div>' +
       '<div class="admin-table-wrap admin-health-table"><table class="admin-table"><thead><tr><th>模型</th><th>配置</th><th>接入</th></tr></thead><tbody>' + modelRows + '</tbody></table></div>' +
+      '<details id="modelRoutes"><summary>按用途设置</summary><div id="modelRoutesBody"></div></details>' +
     '</section>';
   },
 
@@ -748,6 +749,7 @@ Object.assign(App, {
       '<div class="admin-head"><h2>' + esc(titles[this._adminTab] || '概览') + '</h2>' +
       '<div class="admin-toolbar"><button class="admin-btn" onclick="'+(this._adminTab === 'operations' ? 'App._loadOperations()' : 'App._loadAdminUsers()')+'">刷新</button></div></div>' +
       content + '</div>';
+    if (this._adminTab === 'health' && window.ModelRoutes) window.ModelRoutes.attach();
     if (this._adminTab === 'overview') {
       var self = this;
       setTimeout(function(){ self._renderAdminCharts(); }, 0);

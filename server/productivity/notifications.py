@@ -51,11 +51,13 @@ def collect_due(*, now=None):
         db.execute("BEGIN IMMEDIATE")
         try:
             events = db.execute(
-                "SELECT c.id,c.owner,c.version FROM work_calendar c JOIN users u ON u.username=c.owner "
-                "WHERE u.disabled_at IS NULL AND c.cancelled=0 AND c.start_at<=? AND c.end_at>=? "
-                "AND NOT EXISTS(SELECT 1 FROM work_notifications n WHERE n.owner=c.owner "
-                "AND n.kind='calendar' AND n.target_id=c.id AND n.target_version=c.version) "
-                "ORDER BY c.start_at,c.id LIMIT 100",
+                "SELECT i.id,i.owner,i.version FROM work_calendar_instances i "
+                "JOIN work_calendar c ON c.id=i.series_id JOIN users u ON u.username=i.owner "
+                "WHERE u.disabled_at IS NULL AND c.cancelled=0 AND i.cancelled=0 "
+                "AND i.start_at<=? AND i.end_at>=? "
+                "AND NOT EXISTS(SELECT 1 FROM work_notifications n WHERE n.owner=i.owner "
+                "AND n.kind='calendar' AND n.target_id=i.id AND n.target_version=i.version) "
+                "ORDER BY i.start_at,i.id LIMIT 100",
                 [upper, current],
             ).fetchall()
             tasks = db.execute(
@@ -94,9 +96,10 @@ async def list_notifications(request: Request):
     with get_db() as db:
         store._active(db, owner)
         rows = db.execute(
-            "SELECT n.id,n.kind,n.created_at,n.read_at,c.title,c.start_at AS due_at,'/calendar' AS href "
-            "FROM work_notifications n JOIN work_calendar c ON c.id=n.target_id AND c.owner=n.owner "
-            "WHERE n.owner=? AND n.kind='calendar' AND n.target_version=c.version AND c.cancelled=0 "
+            "SELECT n.id,n.kind,n.created_at,n.read_at,c.title,i.start_at AS due_at,'/calendar' AS href "
+            "FROM work_notifications n JOIN work_calendar_instances i ON i.id=n.target_id AND i.owner=n.owner "
+            "JOIN work_calendar c ON c.id=i.series_id "
+            "WHERE n.owner=? AND n.kind='calendar' AND n.target_version=i.version AND i.cancelled=0 AND c.cancelled=0 "
             "UNION ALL SELECT n.id,n.kind,n.created_at,n.read_at,t.title,t.due_at,'/work' AS href "
             "FROM work_notifications n JOIN work_tasks t ON t.id=n.target_id "
             "JOIN work_spaces s ON s.id=t.workspace_id AND s.owner=n.owner "

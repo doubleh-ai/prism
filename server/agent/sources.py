@@ -14,6 +14,7 @@ created here. This module performs no network operation at import time.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import io
 import ipaddress
@@ -67,6 +68,11 @@ _CODES = frozenset(
         "unsupported_content_encoding",
         "unsupported_content_type",
         "unsupported_pdf",
+        "pdf_invalid",
+        "pdf_encrypted",
+        "pdf_no_text",
+        "pdf_unavailable",
+        "pdf_timeout",
         "empty_content",
         "invalid_html",
     }
@@ -276,22 +282,22 @@ def _headers(response):
     return {name: rows[0] for name, rows in values.items()}
 
 
-def _body(response, headers, deadline):
+def _body(response, headers, deadline, maximum=MAX_BODY_BYTES):
     length = headers.get("content-length")
     if length is not None:
         _need(length.isdecimal(), "invalid_headers")
-        _need(int(length) <= MAX_BODY_BYTES, "body_too_large")
+        _need(int(length) <= maximum, "body_too_large")
     chunks, size = [], 0
     while True:
         response._prism_socket.settimeout(_remaining(deadline))
         # read1 returns after at most one underlying buffered read. A slow peer
         # cannot restart the total budget with a series of small chunks.
-        chunk = response.read1(min(16384, MAX_BODY_BYTES + 1 - size))
+        chunk = response.read1(min(16384, maximum + 1 - size))
         _remaining(deadline)
         if not chunk:
             break
         size += len(chunk)
-        _need(size <= MAX_BODY_BYTES, "body_too_large")
+        _need(size <= maximum, "body_too_large")
         chunks.append(chunk)
     if length is not None:
         _need(size == int(length), "network_failed")
@@ -431,16 +437,32 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                 _need(200 <= http_status < 300, "http_error")
                 content_type = headers.get("content-type", "").strip()
                 mime = content_type.partition(";")[0].strip().casefold()
-                _need(mime != "application/pdf", "unsupported_pdf")
                 _need(
-                    mime in {"text/html", "text/plain", "application/xhtml+xml"}, "unsupported_content_type"
+                    mime in {"text/html", "text/plain", "application/xhtml+xml", "application/pdf"},
+                    "unsupported_content_type",
                 )
                 _need(
                     headers.get("content-encoding", "identity").strip().casefold() in {"", "identity"},
                     "unsupported_content_encoding",
                 )
-                raw = _body(response, headers, deadline)
-                text, title, published, truncated = _extract(raw, content_type)
+                pdf_fields = {}
+                if mime == "application/pdf":
+                    from .pdf_text import MAX_PDF_BYTES, extract_pdf
+
+                    raw = _body(response, headers, deadline, MAX_PDF_BYTES)
+                    pdf = extract_pdf(raw, timeout_seconds=min(5, _remaining(deadline)))
+                    _need(pdf["status"] == "ok", pdf["status"])
+                    text = redact_source_text(
+                        "\n\n".join(f"[第{p['page']}页]\n{p['text']}" for p in pdf["pages"])
+                    )[:MAX_TEXT_CHARS]
+                    title, published, truncated = "PDF 公告节选", None, pdf["truncated"]
+                    pdf_fields = {
+                        "page_range": [p["page"] for p in pdf["pages"]],
+                        "total_pages": pdf["page_count"],
+                    }
+                else:
+                    raw = _body(response, headers, deadline)
+                    text, title, published, truncated = _extract(raw, content_type)
                 _remaining(deadline)
             return {
                 "status": "ok" if text else "empty_content",
@@ -459,6 +481,8 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                 "trust_level": "untrusted_external_content",
                 "http_status": http_status,
                 "body_bytes": len(raw),
+                "body_sha256": hashlib.sha256(raw).hexdigest(),
+                **pdf_fields,
                 "redirect_count": redirects,
                 "automatic_retry": False,
             }

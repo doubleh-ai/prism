@@ -648,3 +648,54 @@ collection time. Continuous series are not executable contracts; missing
 fundamentals and capital flow are explicit. Trading and Work write tools are not
 in the research Agent catalog. Native feedback accepts `work`, `calendar`,
 `futures` and `preferences` as additional closed-enum feature names.
+
+## v0.23.0 completion work (unreleased)
+
+These additions are development contracts, not proof of a deployed version.
+All private results are owner-scoped and must not be cached. Mutations require
+the existing CSRF protection and reject account switches.
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /api/work/assistant/proposals` | UUID `request_id`, `text`, IANA `timezone`, explicit `allow_model` (default false); returns a validated preview or clarification, with no business write |
+| `GET /api/work/assistant/proposals/by-request/{request_id}` | Reconcile a lost response using the original request, without resending a model call |
+| `GET /api/work/assistant/proposals/{id}` | Read the original proposal, execution state and receipt |
+| `POST /api/work/assistant/proposals/{id}/confirm` | Exact preview `digest`, live owner and 15-minute validity; creates only proposed objects, with stable business idempotency IDs |
+| `POST /api/work/assistant/proposals/{id}/undo` | Cancel/archive created objects while original versions still match; preserves records and refuses later edits |
+| `GET /api/work/calendar/{id}` | Original series and recurrence rule for whole-series editing |
+| `PUT /api/work/calendar/{id}/occurrences/{occurrence_id}` | UUID, instance `expected_version` and `cancelled`; does not cancel other occurrences |
+| `GET/PUT /api/preferences/portfolio` | Own explicit security positions, currency, cash/debt and observation times; writes compare `expected_version` and return deterministic risk rules |
+| `GET /api/knowledge/items?query=...&before=...&limit=30` | Search all accessible persisted structured claims with bounded cursor pagination |
+| `GET /api/knowledge/items/{id}` | Claim, source passages, review history and affected owned research |
+| `PUT /api/knowledge/items/{id}/review` | `expected_version`, state, note, optional correction link; reviewed claims require a future validity time, incomplete citations cannot be promoted |
+| `GET/PUT /api/admin/model-routes[/{purpose}]` | Administrator-only purpose selection and bounded request/token/time quotas; only registered model IDs, no key material |
+
+Calendar create/update accepts optional `recurrence`: `frequency` daily, weekly
+or monthly; `interval` 1–12; weekly `weekdays` 0 (Monday) through 6; exactly one of
+`count` or inclusive local `until`. Rules are finite (at most 366 occurrences and
+ten years). Invalid month dates/DST gaps are skipped; the explicit DTSTART fold
+selects repeated local times. Agenda returns original `events` and actual
+`occurrences`; the latter have separate instance and series versions. ICS uses
+the materialized UTC occurrence set and cancellation exceptions.
+
+Portfolio decimals are strings, not binary floats. At most 100 unique securities
+are accepted. Quotes older than seven days, future observations and mixed
+currencies without FX are unevaluated. Optional `equity_peak`, `peak_as_of` and
+signed `net_flows_since_peak` enable drawdown against a supplied high-water mark;
+these user-supplied values are not independently verified prices or NAV history.
+The profile endpoint's older `portfolio_risk_status` is not a risk certificate;
+the portfolio response contains actual version-bound rule results.
+
+Work planning never receives investment history or other Work records. Routine
+instructions stay local. A model is used only after explicit selection and a
+configured Work route permitting that data purpose. A model proposal cannot
+execute itself. Unknown, failed and reserved model use is not refunded or reset
+by route edits. Costs and subscription coverage stay unknown until verified.
+
+Public PDF reads retain the same DNS/TLS/host policy. Bodies are capped at 8 MiB;
+an isolated Python parser has CPU/memory/time limits, no inherited credentials,
+and is killed and reaped on timeout while its parent auxiliary work remains
+owned. The default excerpt covers at most ten pages and 32,768 characters. Page
+numbers, total pages and body hash accompany the excerpt. Encrypted, scanned,
+invalid and timed-out documents retain explicit gaps; PDF metadata is not used
+to invent a publication date. This parser is not a CLI Agent or a model fallback.

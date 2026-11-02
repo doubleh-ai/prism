@@ -123,11 +123,17 @@ def search(user: str, query: str, *, limit: int = 8, exclude_run_id: str | None 
         excerpt = (doc["title"] + "\n" + doc["text"])[max(0, at - 80) : at + 800]
         matches.append((score, {k: v for k, v in doc.items() if k != "text"} | {"excerpt": excerpt}))
     matches.sort(key=lambda item: item[0], reverse=True)
+    from ..research.knowledge import search as claim_search
+
+    reviewed = claim_search(
+        user, query=query, limit=min(limit, 20), exclude_run_id=exclude_run_id, reusable_only=True
+    )
     return source_display_payload(
         {
             "results": [row for _, row in matches[:limit]],
+            "reviewed_claims": reviewed["items"],
             "index_scope": "latest_200_reports_and_200_research_versions",
-            "notice": "历史研究及候选判断，尚未经语义核验。观察时间不代表数据更新时间；复用前检查原始证据与时效。",
+            "notice": "历史研究及候选判断，尚未经独立语义核验。已撤回、过期、有争议或被替代的条目不能作为有效证据；用户复核也不等于外部事实认证。观察时间不代表数据更新时间。",
         }
     )
 

@@ -6,7 +6,7 @@
   var page = document.body.dataset.page;
   var zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
   function node(tag, text, cls) { var el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
-  function notice(text) { $('notice').textContent = text || ''; $('notice').hidden = !text; }
+  function notice(text) { var target=$('notice'); if(target){target.textContent = text || ''; target.hidden = !text;} }
   async function request(path, options) {
     var controller = new AbortController(), timer = setTimeout(function(){controller.abort();},15000);
     try { return await fetch(path,Object.assign({},options,{signal:controller.signal})); }
@@ -25,10 +25,15 @@
       headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest','X-Prism-Account':user || ''},
       body:body ? JSON.stringify(body) : undefined});
     var value = await response.json();
-    if (!response.ok) throw new Error(typeof value.detail === 'string' ? value.detail : '请求未完成，请刷新核对');
+    if (!response.ok) { var error=new Error(typeof value.detail === 'string' ? value.detail : '请求未完成，请刷新核对');error.status=response.status;throw error; }
     return value;
   }
-  function field(form, name) { return form.elements.namedItem(name); }
+  function field(form, name) {
+    var value = form.elements.namedItem(name);
+    // Position rows repeat names such as currency. The form-level field is
+    // first in document order; RadioNodeList.value is only defined for radios.
+    return value && !value.tagName && typeof value.item === 'function' ? value.item(0) : value;
+  }
   async function loadProfile() {
     var ticket = ++epoch;
     profileReady = false;
@@ -77,16 +82,31 @@
     if (!possibilities.some(function (item) { return item.iso===choice.value; })) throw new Error('这一天存在两次相同时间，请选择对应的时区偏移');
     return choice.value;
   }
+  function recurrenceUI() {
+    var form=$('eventForm'), frequency=field(form,'frequency').value, endType=field(form,'endType').value;
+    $('recurrenceOptions').hidden=!frequency; $('weekdays').hidden=frequency!=='weekly';
+    $('untilLabel').hidden=endType!=='until'; $('countLabel').hidden=endType!=='count';
+    field(form,'until').required=!!frequency&&endType==='until'; field(form,'count').required=!!frequency&&endType==='count';
+  }
+  function recurrenceBody(form) {
+    var frequency=field(form,'frequency').value;if(!frequency)return null;
+    var interval=Number(field(form,'interval').value), count=Number(field(form,'count').value), endType=field(form,'endType').value;
+    if(!Number.isInteger(interval)||interval<1||interval>12)throw new Error('重复间隔须为 1 至 12');
+    if(endType==='count'&&(!Number.isInteger(count)||count<1||count>366))throw new Error('重复次数须为 1 至 366');
+    if(endType==='until'&&!field(form,'until').value)throw new Error('请选择结束日期');
+    var weekdays=Array.from(form.querySelectorAll('[name=weekday]:checked')).map(function(input){return Number(input.value);}); if(frequency==='weekly'&&!weekdays.length){var date=field(form,'start').value.slice(0,10).split('-').map(Number);if(date.length===3)weekdays=[(new Date(Date.UTC(date[0],date[1]-1,date[2])).getUTCDay()+6)%7];}
+    return {frequency:frequency,interval:interval,weekdays:weekdays,until:endType==='until'?field(form,'until').value:null,count:endType==='count'?count:null};
+  }
   function eventBody(form) { return {title:field(form,'title').value,description:field(form,'description').value,
-    start_at:resolveTime(form,'start',false),end_at:resolveTime(form,'end',false),timezone:zone}; }
+    start_at:resolveTime(form,'start',false),end_at:resolveTime(form,'end',false),timezone:zone,recurrence:recurrenceBody(form)}; }
   function editEvent(row) {
     editing=row; pending=null; dirty=false; var form=$('eventForm');
-    field(form,'title').value=row.title; field(form,'description').value=row.description;
+    field(form,'title').value=row.title; field(form,'description').value=row.description || ''; var recurrence=row.recurrence || null; field(form,'frequency').value=recurrence?recurrence.frequency:''; field(form,'interval').value=recurrence?recurrence.interval:1; field(form,'endType').value=recurrence&&recurrence.count?'count':'until'; field(form,'until').value=recurrence&&recurrence.until||''; field(form,'count').value=recurrence&&recurrence.count||12; form.querySelectorAll('[name=weekday]').forEach(function(input){input.checked=!!recurrence&&(recurrence.weekdays||[]).includes(Number(input.value));}); recurrenceUI();
     field(form,'start').value=localInput(row.start_at); field(form,'end').value=localInput(row.end_at);
     ['start','end'].forEach(function (name) { resolveTime(form,name,true,row[name+'_at']); });
     $('eventHeading').textContent='编辑日程 · 版本 '+row.version; form.scrollIntoView({block:'center',behavior:'smooth'});
   }
-  function resetEvent() { editing=null; pending=null; dirty=false; $('eventForm').reset(); $('eventHeading').textContent='安排一件事'; ['startFold','endFold'].forEach(function (key) { field($('eventForm'),key).hidden=true; }); }
+  function resetEvent() { editing=null; pending=null; dirty=false; $('eventForm').reset(); $('eventHeading').textContent='安排一件事'; ['startFold','endFold'].forEach(function (key) { field($('eventForm'),key).hidden=true; }); recurrenceUI(); }
   async function loadCalendar() {
     var ticket=++epoch, day=$('calendarDay').value;
     if (!day) return;
@@ -97,28 +117,27 @@
     if (!end) throw new Error('结束日期的本地零点不可用');
     var value=await api('/api/work/calendar?start='+encodeURIComponent(start.iso)+'&end='+encodeURIComponent(end.iso));
     if (ticket!==epoch) return;
-    calendarRows=value.events; var list=$('calendarList'); list.replaceChildren();
-    var rows=value.events.map(function (row) { return {kind:'event',row:row,time:row.start_at}; }).concat(value.tasks.map(function(row){return {kind:'task',row:row,time:row.due_at};}));
+    calendarRows=value.occurrences || value.events || []; var list=$('calendarList'); list.replaceChildren();
+    var rows=calendarRows.map(function (row) { return {kind:'event',row:row,time:row.start_at}; }).concat((value.tasks||[]).map(function(row){return {kind:'task',row:row,time:row.due_at};}));
     rows.sort(function(a,b){return a.time.localeCompare(b.time);});
     rows.forEach(function(item){
       var row=item.row, card=node('article'); card.append(node('h3',row.title));
       card.append(node('p',displayTime(item.time)+(item.kind==='event'?' — '+displayTime(row.end_at):' · 任务截止'),'muted'));
       if(item.kind==='event') {
         if(row.description) card.append(node('p',row.description));
-        var edit=node('button','编辑','secondary'); edit.onclick=function(){if(!dirty||confirm('替换当前未保存的日程内容？'))editEvent(row);};card.append(edit);
-        var cancel=node('button','取消日程','secondary'); cancel.onclick=async function(){
+        var edit=node('button',row.series_id?'编辑整组':'编辑','secondary'); edit.onclick=async function(){if(dirty&&!confirm('替换当前未保存的日程内容？'))return;edit.disabled=true;try{await identify();var value=await api('/api/work/calendar/'+encodeURIComponent(row.series_id||row.id));await identify();if(!value.event)throw new Error('未能读取整组日程');editEvent(value.event);}catch(error){notice(error.message+'；请重新读取日程。');}finally{edit.disabled=false;}};card.append(edit);
+        var cancel=node('button',row.occurrence_id?'取消本次':'取消日程','secondary'); cancel.onclick=async function(){
           if(!confirm('取消这条日程？已有记录会保留。'))return;
           cancel.disabled=true;
-          try { await api('/api/work/calendar/'+row.id,{request_id:crypto.randomUUID(),expected_version:row.version,
-            title:row.title,description:row.description,start_at:row.start_at,end_at:row.end_at,timezone:row.timezone,cancelled:true},'PUT');await loadCalendar(); }
-          catch(error){notice(error.message+'；请刷新核对取消结果。');cancel.disabled=false;}
+          try { var body={request_id:crypto.randomUUID(),expected_version:row.version,cancelled:true}; var path='/api/work/calendar/'+encodeURIComponent(row.series_id||row.id); if(row.occurrence_id)path+='/occurrences/'+encodeURIComponent(row.occurrence_id);else Object.assign(body,{title:row.title,description:row.description,start_at:row.start_at,end_at:row.end_at,timezone:row.timezone,recurrence:row.recurrence||null}); await api(path,body,'PUT');await loadCalendar(); }
+          catch(error){notice(error.message+'；请刷新核对取消结果。');cancel.textContent='请刷新核对';}
         };card.append(cancel);
         var reminder=node('select'), reminderLabel=node('label','导入日历后的提醒 ');
         [0,5,15,30,60].forEach(function(minutes){
           var option=node('option',minutes?'提前 '+minutes+' 分钟':'无提醒');option.value=String(minutes);reminder.append(option);
         });
         reminderLabel.append(reminder);
-        var exportUrl='/api/work/calendar/'+row.id+'.ics',link=node('a','导出至日历 ↗');
+        var exportUrl='/api/work/calendar/'+encodeURIComponent(row.series_id||row.id)+'.ics',link=node('a','导出至日历 ↗');
         link.href=exportUrl;reminder.onchange=function(){link.href=exportUrl+'?reminder_minutes='+reminder.value;};
         card.append(reminderLabel,link);
       } else {var taskLink=node('a','打开任务 ↗');taskLink.href='/work';card.append(taskLink);}
@@ -128,15 +147,39 @@
     if(value.truncated)list.append(node('p','记录超过显示上限，请改选起始日期查看后续记录。','notice'));
   }
   async function saveEvent(event) {
-    event.preventDefault();var form=event.currentTarget,button=form.querySelector('[type=submit]');button.disabled=true;++epoch;
+    event.preventDefault();var form=event.currentTarget,button=form.querySelector('[type=submit]'),sent=false;if(pending&&pending.unknown){notice('上次保存结果未知，请先刷新核对，草稿仍保留。');return;}button.disabled=true;++epoch;
     try {
       var body=eventBody(form);if(editing){body.expected_version=editing.version;body.cancelled=false;}
       var fingerprint=JSON.stringify(body);
       if(pending&&pending.fingerprint!==fingerprint)throw new Error('上次保存结果未知，请先刷新核对；若未保存，点击“新建另一条”后再提交新内容');
       if(!pending)pending={fingerprint:fingerprint,id:crypto.randomUUID()};body.request_id=pending.id;
-      var result=await api('/api/work/calendar'+(editing?'/'+editing.id:''),body,editing?'PUT':'POST');
-      resetEvent();notice(result.conflicts.length?'已保存。与 '+result.conflicts.length+' 条日程时间重叠，请核对安排。':'日程已保存，可在其他设备查看。');await loadCalendar();
-    }catch(error){notice(error.message);}finally{button.disabled=false;}
+      sent=true;var result=await api('/api/work/calendar'+(editing?'/'+encodeURIComponent(editing.series_id||editing.id):''),body,editing?'PUT':'POST');
+      resetEvent();notice((result.conflicts||[]).length?'已保存。与 '+result.conflicts.length+' 条日程时间重叠，请核对安排。':'日程已保存，可在其他设备查看。');await loadCalendar();
+    }catch(error){if(sent&&pending)pending.unknown=true;notice(error.message+(sent?'；请先刷新核对，草稿仍保留。':''));}finally{button.disabled=false;}
+  }
+  var portfolioVersion=0, portfolioReady=false, portfolioDirty=false, portfolioUnknown=false;
+  function portfolioNotice(value){$('portfolioNotice').textContent=value||'';}
+  function currencySelect(value){var select=node('select');['CNY','USD','HKD'].forEach(function(code){var option=node('option',code);option.value=code;select.append(option);});select.value=value||'CNY';return select;}
+  function inputInstant(input){var date=new Date(input);if(!input||!Number.isFinite(date.getTime()))throw new Error('请选择有效的日期和时间');return date.toISOString();}
+  function positionTimeUI(){var use=$('useObservedPriceTime').checked;document.querySelectorAll('#positions .price-time').forEach(function(label){label.hidden=use;label.querySelector('input').required=!use;});}
+  function positionRow(value){
+    value=value||{};var row=node('div',undefined,'position-row');
+    [['标的代码','asset_id'],['数量','quantity'],['价格','price']].forEach(function(spec){var label=node('label',spec[0]),input=node('input');input.name=spec[1];input.value=value[spec[1]]||'';input.required=true;if(spec[1]==='asset_id')input.maxLength=40;label.append(input);row.append(label);});
+    var label=node('label','币种'),select=currencySelect(value.currency);select.name='currency';label.append(select);row.append(label);
+    var timeLabel=node('label','价格时间','price-time'),time=node('input');time.type='datetime-local';time.name='price_as_of';if(value.price_as_of)time.value=localInput(value.price_as_of);timeLabel.append(time);row.append(timeLabel);
+    var advanced=node('details',undefined,'wide');advanced.append(node('summary','来源（可选）'));var sourceLabel=node('label','公开 HTTPS 来源网址'),source=node('input');source.type='url';source.name='source_url';source.value=value.source_url||'';sourceLabel.append(source);advanced.append(sourceLabel);row.append(advanced);
+    var remove=node('button','移除','secondary');remove.type='button';remove.onclick=function(){row.remove();portfolioDirty=true;};row.append(remove);$('positions').append(row);positionTimeUI();
+  }
+  function renderRisk(risk){var root=$('riskResults');root.replaceChildren();if(!risk)return;var names={pass:'通过',breach:'超出限制',not_evaluated:'未评估'};root.append(node('h3','风险检查 · '+(names[risk.overall]||'未知')));(risk.rules||[]).forEach(function(rule){var item=node('div',undefined,'risk-rule');item.append(node('strong',String(rule.id)+' · '+(names[rule.status]||'未知')),node('p',rule.reason||''));if(rule.observed!==null&&rule.observed!==undefined||rule.limit!==null&&rule.limit!==undefined)item.append(node('p','观察值 '+String(rule.observed??'未提供')+' · 限制 '+String(rule.limit??'未提供')+' '+String(rule.unit||''),'muted'));root.append(item);});root.append(node('p','偏好版本 '+String(risk.profile_version??'未知')+' · 持仓版本 '+String(risk.portfolio_version??'未知'),'muted'));}
+  async function loadPortfolio(){
+    portfolioReady=false;$('portfolioForm').querySelector('[type=submit]').disabled=true;portfolioNotice('正在读取…');
+    try{await identify();var value=await api('/api/preferences/portfolio');await identify();var portfolio=value.portfolio;if(!portfolio)throw new Error('读取结果不完整');var form=$('portfolioForm');portfolioVersion=portfolio.version||0;['currency','observed_at','cash','debt','equity_peak','peak_as_of','net_flows_since_peak'].forEach(function(key){if(portfolio[key]!==undefined&&portfolio[key]!==null)field(form,key).value=['observed_at','peak_as_of'].includes(key)?localInput(portfolio[key]):portfolio[key];});$('positions').replaceChildren();$('useObservedPriceTime').checked=!(portfolio.positions||[]).some(function(position){return position.price_as_of&&portfolio.observed_at&&Date.parse(position.price_as_of)!==Date.parse(portfolio.observed_at);});(portfolio.positions||[]).forEach(positionRow);if(!portfolio.observed_at)field(form,'observed_at').value=localInput(new Date());positionTimeUI();renderRisk(value.risk);portfolioDirty=false;portfolioUnknown=false;portfolioReady=true;form.querySelector('[type=submit]').disabled=false;$('portfolioVersion').textContent=portfolio.configured?'已保存 · 版本 '+portfolioVersion:'尚未设置';portfolioNotice('');}
+    catch(error){portfolioNotice(error.message+'；请重新读取。');}
+  }
+  async function savePortfolio(event){
+    event.preventDefault();if(!portfolioReady||portfolioUnknown){portfolioNotice('请先重新读取并核对，再保存。');return;}var form=event.currentTarget,button=form.querySelector('[type=submit]'),sent=false;button.disabled=true;
+    try{var positions=Array.from($('positions').children).map(function(row){var obj={};row.querySelectorAll('input,select').forEach(function(input){obj[input.name]=input.value.trim();});if(!/^(?:\d+)(?:\.\d+)?$/.test(obj.quantity)||Number(obj.quantity)<=0||!/^(?:\d+)(?:\.\d+)?$/.test(obj.price)||Number(obj.price)<=0)throw new Error('数量和价格须为正十进制');obj.price_as_of=inputInstant($('useObservedPriceTime').checked?field(form,'observed_at').value:obj.price_as_of);if(obj.source_url){var u=new URL(obj.source_url);if(u.protocol!=='https:'||u.username||u.password||u.hostname==='localhost'||!u.hostname.includes('.'))throw new Error('来源须为公开 HTTPS 网址');}else obj.source_url=null;return obj;});var observed=inputInstant(field(form,'observed_at').value);var cash=field(form,'cash').value.trim(),debt=field(form,'debt').value.trim();if(!/^\d+(?:\.\d+)?$/.test(cash)||!/^\d+(?:\.\d+)?$/.test(debt))throw new Error('现金和负债须为非负十进制');var peak=field(form,'equity_peak').value.trim(),peakTime=field(form,'peak_as_of').value.trim(),flows=field(form,'net_flows_since_peak').value.trim()||'0';if(peak&&!/^(?:\d+)(?:\.\d+)?$/.test(peak)||peak&&Number(peak)<=0)throw new Error('权益高点须为正十进制');if(Boolean(peak)!==Boolean(peakTime))throw new Error('权益高点与高点时间须同时填写');if(peakTime)peakTime=inputInstant(peakTime);if(!/^[+-]?\d+(?:\.\d+)?$/.test(flows))throw new Error('净入金须为带符号十进制');sent=true;var value=await api('/api/preferences/portfolio',{expected_version:portfolioVersion,currency:field(form,'currency').value,observed_at:observed,cash:cash,debt:debt,positions:positions,equity_peak:peak||null,peak_as_of:peakTime||null,net_flows_since_peak:flows},'PUT');await identify();portfolioVersion=value.portfolio.version;portfolioDirty=false;$('portfolioVersion').textContent='已保存 · 版本 '+portfolioVersion;renderRisk(value.risk);portfolioNotice('已保存。');}
+    catch(error){if(sent){portfolioUnknown=true;portfolioNotice(error.message+'；请重新读取并核对结果，当前输入会保留至重新读取。');}else portfolioNotice(error.message);}finally{button.disabled=false;}
   }
   function metric(label,value){var box=node('div',undefined,'metric');box.append(node('span',label),node('strong',value===null||value===undefined?'待核查':String(value)));return box;}
   async function loadFutures(event){
@@ -170,7 +213,7 @@
       if(page!=='futures')form.addEventListener('input',function(){dirty=true;});
     });
     if(page==='preferences'){
-      $('profileForm').onsubmit=saveProfile;
+      $('profileForm').onsubmit=saveProfile; $('portfolioForm').onsubmit=savePortfolio; $('portfolioForm').addEventListener('input',function(){portfolioDirty=true;}); $('addPosition').onclick=function(){positionRow();portfolioDirty=true;}; $('useObservedPriceTime').onchange=positionTimeUI; $('portfolioReload').onclick=function(){if((!portfolioDirty&&!portfolioUnknown)||confirm('重新读取将替换未保存的持仓输入，继续吗？'))loadPortfolio();}; $('portfolioDetails').addEventListener('toggle',function(){if(this.open&&!portfolioReady&&!portfolioUnknown)loadPortfolio();});
       $('profileForm').querySelector('[type=submit]').disabled=true;
       $('profileReload').onclick=function(){if(!dirty||confirm('重新读取将替换未保存的偏好，继续吗？'))loadProfile().catch(function(e){notice(e.message);});};
     }
@@ -179,8 +222,9 @@
       await identify();
       if(page==='preferences')await loadProfile();
       if(page==='calendar'){
-        $('calendarDay').value=dateInput(new Date());$('calendarZone').textContent='时间按 '+zone+' 显示与保存';
+        $('calendarDay').value=dateInput(new Date());var initial=new Date();initial.setMinutes(0,0,0);initial.setHours(initial.getHours()+1);field($('eventForm'),'start').value=localInput(initial);field($('eventForm'),'end').value=localInput(new Date(initial.getTime()+3600000));$('calendarZone').textContent='时间按 '+zone+' 显示与保存';
         $('calendarLoad').onclick=function(){loadCalendar().catch(function(e){notice(e.message);});};$('eventForm').onsubmit=saveEvent;
+        field($('eventForm'),'frequency').onchange=recurrenceUI;field($('eventForm'),'endType').onchange=recurrenceUI;recurrenceUI();
         $('eventNew').onclick=function(){if((!pending&&!dirty)||confirm('当前有未保存内容或上次结果未知，请先核对列表。仍要另建一条吗？'))resetEvent();};
         ['start','end'].forEach(function(name){field($('eventForm'),name).onchange=function(){try{resolveTime($('eventForm'),name,true);notice('');}catch(error){notice(error.message);}};});
         await loadCalendar();
@@ -188,7 +232,7 @@
       if(page==='futures'){var symbol=new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;}
     }catch(error){notice(error.message);}
   }
-  window.addEventListener('beforeunload',function(event){if(dirty||pending){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('beforeunload',function(event){if(dirty||pending||portfolioDirty||portfolioUnknown){event.preventDefault();event.returnValue='';}});
   window.addEventListener('pageshow',function(event){if(event.persisted)location.reload();});
   document.addEventListener('visibilitychange',async function(){
     if(document.hidden){$('main').style.visibility='hidden';return;}

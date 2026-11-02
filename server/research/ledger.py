@@ -339,6 +339,15 @@ def ingest_tool_result(username: str, run_id: str, call: dict, block: dict, refs
                     "publication_basis": "tool_metadata" if published_at else "unknown",
                     "data_period": None,
                     "content_sha256": content_hash,
+                    "retrieved_body_sha256": ref.get("body_sha256")
+                    if isinstance(ref.get("body_sha256"), str)
+                    and re.fullmatch(r"[a-f0-9]{64}", ref["body_sha256"])
+                    else None,
+                    "pdf_page_range": ref.get("page_range")
+                    if isinstance(ref.get("page_range"), list)
+                    and len(ref["page_range"]) <= 20
+                    and all(type(p) is int and 1 <= p <= 2000 for p in ref["page_range"])
+                    else None,
                     "receipt_sha256": _hash(text),
                     "hash_basis": "normalized_tool_return"
                     if tool == "WebFetch"
@@ -414,6 +423,9 @@ def _records(db, table, run_id):
 
 def read_research_run(username: str, run_id: str) -> dict:
     init_research_db()
+    from .knowledge import change_notices, init_knowledge_db
+
+    init_knowledge_db()
     with get_db() as db:
         run = _owned(db, username, run_id)
         return source_display_payload(
@@ -425,6 +437,7 @@ def read_research_run(username: str, run_id: str) -> dict:
                 "report_revisions": _records(db, "research_revisions", run_id),
                 "relations": _records(db, "research_relations", run_id),
                 "gaps": run["gaps"],
+                "knowledge_changes": change_notices(db, username, run_id),
             }
         )
 

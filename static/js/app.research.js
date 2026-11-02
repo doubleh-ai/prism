@@ -44,6 +44,8 @@
       var header = '<div class="research-boundary"><span>'+text(states[run.status] || run.status || '状态未知')+'</span><span>研究截至 '+text(ChatRender.formatTime(run.as_of))+'</span><span>数据截至：以各来源为准，缺失则未知</span></div>';
       if (run.information_cutoff) header += '<p class="research-note">信息截止：'+text(run.cutoff_precision === 'day' ? String(run.information_cutoff).slice(0,10)+'（日精度）' : ChatRender.formatTime(run.information_cutoff))+'；观察时间保持本轮实际时间。'+(run.requested_period?' 研究期间：'+text(run.requested_period):'')+'</p>';
       header += '<p class="research-notice">这里保留研究过程、原始线索与候选判断。引用结构匹配不等于语义核验；事实候选仍需核对原文。</p>';
+      var changes=list(data.knowledge_changes).filter(function(change){return change && typeof change.source_claim_id==='string' && change.source_claim_id;});
+      if(changes.length)header += '<details class="research-notice"><summary>引用的历史结论有更新，查看复核</summary>'+changes.map(function(change){return '<p><a href="/knowledge?id='+escAttr(encodeURIComponent(change.source_claim_id))+'">查看复核</a></p>';}).join('')+'</details>';
       var body = '';
       if (tab === 'overview') {
         body = '<section class="research-section"><h3>核心判断与边界</h3>'+this._researchClaimsHTML(list(data.claims))+'</section>';
