@@ -900,19 +900,6 @@ def test_mobile_and_foldable_layout_static_contract():
     assert "needsDrawer = mode !== 'chat' && mode !== 'industry'" in market
 
 
-def test_completed_tool_steps_are_collapsed_static_contract():
-    """Completed command/tool steps should not stay visibly expanded in chat."""
-    with open("static/js/app.chat-render.js", encoding="utf-8") as f:
-        js = f.read()
-    with open("static/css/app.css", encoding="utf-8") as f:
-        css = f.read()
-
-    assert "var completed = streaming ? steps.slice(0, Math.max(0, n - 1)) : steps;" in js
-    assert "已完成 '+completed.length+' 步" in js
-    assert "stepTag(last, ' now step-now')" in js
-    assert ".step-fold:not([open]) .step-tag{display:none}" in css
-
-
 def test_kline_periods_and_a_share_color_semantics_static_contract():
     """Day/week/month must request distinct ranges and use red-up/green-down."""
     with open("static/js/app.market.js", encoding="utf-8") as f:

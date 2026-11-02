@@ -2044,6 +2044,9 @@ body::after{display:none}
 @media(max-width:520px){.topbar{gap:4px}.topbar button.tb{width:26px}.workbench-page-title{margin-left:1px}.workbench-welcome{max-width:720px;margin:0 auto;padding:clamp(48px,12vh,120px) 24px 40px;text-align:center}.workbench-welcome h2{font-size:clamp(23px,2.2vw,29px);font-weight:550;line-height:1.4;letter-spacing:0;margin:0 0 12px}.workbench-welcome>p{font-size:11px}.desktop-only{display:none}.composer-bar{flex-wrap:wrap}.composer-bar>select{flex:1 1 80px;max-width:120px}.workbench-capability-grid{grid-template-columns:1fr}.research-context{font-size:9px;padding:9px}.ref-time{font-size:9px}.platform-call-card{padding:12px}.workbench-history-btn{font-size:8px}.workbench-login .login-card{width:calc(100% - 30px);padding:28px}}
 @media(prefers-reduced-motion:reduce){.app-shell *{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
 .research-status-notice{padding:11px 13px;margin:10px 0 16px;border:1px solid var(--border2);border-radius:6px;background:var(--accent-bg);color:var(--text2);font-size:11px;line-height:1.8}
+.bubble .research-status-notice{padding:5px 0;margin:10px 0;border:0;border-radius:0;background:none;color:var(--text2);font-size:12px;line-height:1.8;overflow-wrap:anywhere}
+.research-progress{display:flex;align-items:center;gap:8px;margin:12px 0 0;color:var(--text2);font-size:12px;line-height:1.8;overflow-wrap:anywhere}
+.research-progress::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
 
 /* Read-only release observation: no production controls are implied. */
 

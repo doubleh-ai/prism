@@ -29,8 +29,9 @@ function environment() {
   for(const name of ['app.util.js','app.chat-render.js','app.core.js','app.chat.js','app.vibe.js']) vm.runInContext(fs.readFileSync('static/js/'+name,'utf8'),context,{filename:name});
   const app=context.App;
   const shippedRenderOne=app.renderOne;
+  const shippedRenderAll=app.renderAll;
   Object.assign(app,{renderAll(){},renderOne(){},loadConvs:async()=>{},_refreshReportsButton(){},_closeMobileSidebar(){},_buildTOC(){},_scrollToBottom(){},_startTypewriter(){},_stopTypewriter(){},_toast(){},selectAC(){return false;},_reportFilesForMessage(){return [];}});
-  return {context,app,elements,doc,shippedRenderOne,listeners};
+  return {context,app,elements,doc,shippedRenderOne,shippedRenderAll,listeners};
 }
 const settled=()=>new Promise(setImmediate);
 
@@ -292,9 +293,74 @@ async function historyAndErrorsAppearOnlyWhenRelevant() {
   assert(html.includes('role="status"')&&html.includes('data-workbench-retry="capabilities"'));
 }
 
+function compactResearchProgress() {
+  const {app}=environment();
+  const chunks=[
+    {t:'status',c:'Prism 正在准备研究'},
+    {t:'status',c:'Prism 正在研究'},
+    {t:'status',c:'整理问题与已有研究'},
+    {t:'tool',c:'indicator_list',d:'合成工具参数'},
+    {t:'status',c:'核对资料与组织分析'},
+    {t:'tool',c:'research_read',d:'空合成账本'},
+    {t:'think',c:'合成分析过程'},
+    {t:'text',c:'合成正文'},
+  ];
+  const before=JSON.stringify(chunks);
+  let html=app._renderMsg(chunks,'合成正文',true,{agent:{status:'running'}});
+  assert.equal((html.match(/class="research-progress"/g)||[]).length,1);
+  assert(html.includes('核对资料与组织分析'));
+  for(const old of ['Prism 正在准备研究','Prism 正在研究','整理问题与已有研究'])assert(!html.includes(old));
+  assert(!html.includes('research-status-notice')&&!html.includes('step-now'));
+  assert(html.includes('<details class="step-fold"><summary>工具调用 · 2 项</summary>'));
+  assert(html.includes('indicator_list')&&html.includes('research_read'));
+  assert(html.includes('<details class="think-box"><summary>分析过程</summary>'));
+  assert.equal(JSON.stringify(chunks),before,'display consolidation must not rewrite recorded events');
+  for(const streaming of [true,false]){
+    html=app._renderMsg(chunks.concat({t:'status',c:'研究已保存'}),'合成正文',streaming,{native_agent:{status:'completed'}});
+    assert(html.includes('合成正文')&&!html.includes('research-progress')&&!html.includes('research-status-notice'));
+  }
+}
+
+function researchExceptionsRemainVisible() {
+  const {app}=environment();
+  for(const state of ['partial','failed','cancelled','awaiting_user']){
+    const label=app._nativeStatusLabel(state);
+    let html=app._renderMsg([{t:'status',c:'核对资料与组织分析'},{t:'status',c:label,state}],'已有内容',true,{agent:{status:state}});
+    assert.equal((html.match(/class="research-status-notice"/g)||[]).length,1);
+    assert(html.includes(label)&&!html.includes('research-progress'));
+    html=app._renderMsg([],'已有内容',false,{native_agent:{status:state}});
+    assert(html.includes(label),'saved terminal metadata must restore the warning without live status events');
+  }
+  const cancelled=app._renderMsg([{t:'status',c:'本轮研究已停止，进度已保存'}],'',false,{native_agent:{status:'cancelled'}});
+  assert.equal((cancelled.match(/class="research-status-notice"/g)||[]).length,1);
+  const warning='连接中断 <img src=x onerror=alert(1)>';
+  const html=app._renderMsg([{t:'status',c:warning},{t:'status',c:warning}],'已有内容',false,{agent:{status:'running'}});
+  assert.equal((html.match(/class="research-status-notice"/g)||[]).length,1);
+  assert(!html.includes('<img')&&html.includes('&lt;img')&&!html.includes('research-progress'));
+}
+
+function persistedAndOfflineResearchStatus() {
+  const {app,context,doc,shippedRenderAll,shippedRenderOne}=environment();
+  app.renderQuoteTags=app._glossifyTerms=app._linkifyReports=html=>html;app.fillQuoteChips=()=>{};
+  app.convId='A';
+  app.msgs=[{role:'assistant',content:JSON.stringify({text:'保存的内容',chunks:[{t:'text',c:'保存的内容'}],native_agent:{engine:'prism-native',status:'partial'}})}];
+  shippedRenderAll.call(app);
+  let html=doc.getElementById('msgList').innerHTML;
+  assert(html.includes('研究尚未完整完成'),'history reads terminal metadata instead of losing partial status');
+  const message={role:'assistant',content:'已有内容',agent:{status:'running'},_chunks:[{t:'status',c:'核对资料与组织分析'},{t:'status',c:'连接暂时中断，仍可请求停止'},{t:'text',c:'已有内容'}]};
+  app.msgs=[message];context.Streams.A={active:true,offline:true,msgIdx:0,msgs:app.msgs};
+  shippedRenderAll.call(app);html=doc.getElementById('msgList').innerHTML;
+  assert(html.includes('连接暂时中断')&&!html.includes('research-progress'));
+  assert(context.Streams.A.active,'displaying disconnection must not clear run ownership or stop controls');
+  const bubble=element();doc.getElementById('msgList').querySelectorAll=()=>[bubble];
+  message._lastSig=null;shippedRenderOne.call(app,0);
+  assert(bubble.innerHTML.includes('连接暂时中断')&&!bubble.innerHTML.includes('research-progress'));
+}
+
 (async()=>{
   imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
   await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();await historyAndErrorsAppearOnlyWhenRelevant();
-  console.log('workbench runtime ok: 17 scenarios');
+  compactResearchProgress();researchExceptionsRemainVisible();persistedAndOfflineResearchStatus();
+  console.log('workbench runtime ok: 20 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

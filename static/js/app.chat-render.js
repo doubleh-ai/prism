@@ -130,19 +130,14 @@ var ChatRender = (function() {
           '</span>';
       }
 
-      var completed = streaming ? steps.slice(0, Math.max(0, n - 1)) : steps;
-      if (completed.length) {
-        h += '<details class="step-fold"><summary>已完成 '+completed.length+' 步</summary>';
-      }
-      for (var i=0;i<completed.length;i++) {
+      // A tool event records an invocation, not proof of completion. Keep the
+      // invocation log folded even while the answer is streaming.
+      h += '<details class="step-fold"><summary>工具调用 · '+n+' 项</summary>';
+      for (var i=0;i<n;i++) {
         var s = steps[i];
         h += stepTag(s, '');
       }
-      if (completed.length) h += '</details>';
-      if (streaming && n>0) {
-        var last = steps[n-1];
-        h += stepTag(last, ' now step-now');
-      }
+      h += '</details>';
       h += '</div>';
       return h;
     }

@@ -325,6 +325,40 @@ Object.assign(App, {
   },
 
   /* ═══ Rendering ═══ */
+  _renderRunStatus: function(chunks, streaming, msgObj) {
+    // Status events are a changing state, not paragraphs in the answer. Match
+    // known routine events exactly so unfamiliar warnings remain discoverable.
+    var routine = ['准备中','研究中','Prism 正在准备研究','Prism 正在研究',
+      '整理问题与已有研究','核对资料与组织分析','检索外部资料',
+      '已停止模型等待，正在保存进度','研究已保存'];
+    var attention = ['awaiting_user','partial','failed','cancelled'];
+    var attentionLabels = attention.map(this._nativeStatusLabel);
+    attentionLabels.push('本轮研究已停止，进度已保存', '研究执行被中断，已保存进度；未自动重新调用模型');
+    var terminal = ['completed','done','partial','failed','cancelled'];
+    var agent = msgObj && (msgObj.agent || msgObj.native_agent) || {};
+    var notices = [], latest = '', terminalNotice = '';
+    chunks.forEach(function(chunk) {
+      if (!chunk || chunk.t !== 'status') return;
+      var text = ChatRender.clean(chunk.c);
+      if (!text) return;
+      if (routine.indexOf(text) >= 0) { latest = text; return; }
+      if (attention.indexOf(chunk.state) >= 0 || attentionLabels.indexOf(text) >= 0) terminalNotice = text;
+      else if (notices.indexOf(text) < 0) notices.push(text);
+    });
+    if (attention.indexOf(agent.status) >= 0) {
+      var label = terminalNotice || this._nativeStatusLabel(agent.status);
+      if (notices.indexOf(label) < 0) notices.push(label);
+    } else if (terminalNotice && notices.indexOf(terminalNotice) < 0) notices.push(terminalNotice);
+    var html = notices.map(function(text) {
+      return '<div class="research-status-notice" role="status">' + esc(text) + '</div>';
+    }).join('');
+    if (streaming && terminal.indexOf(agent.status) < 0 && agent.status !== 'awaiting_user' && latest !== '研究已保存' && !notices.length) {
+      html += '<div class="research-progress" role="status" aria-live="polite">' +
+        esc(latest || this._nativeStatusLabel(agent.status || 'running')) + '</div>';
+    }
+    return html;
+  },
+
   _renderMsg: function(chunks, fullText, streaming, msgObj) {
     chunks = Array.isArray(chunks) ? chunks : [];
     var refs = ChatRender.collectRefs((msgObj && msgObj._refs) || [], chunks);
@@ -343,17 +377,17 @@ Object.assign(App, {
     try {
       if (!chunks.some(function(c) { return c && (c.t === 'text' || !c.t); })) html += ChatRender.renderContent(reportFiles.length ? this._compactDeliveredReportText(fullText) : fullText);
       chunks.forEach(function(c, index) {
-        if (!c || c.t === 'ref' || c.t === 'research' || c.t === 'platform_call') return;
+        if (!c || c.t === 'ref' || c.t === 'research' || c.t === 'platform_call' || c.t === 'status') return;
         if (c.t === 'tool') { pending.push(c); return; }
         html += ChatRender.renderSteps(pending); pending = [];
-        if (c.t === 'think' || c.t === 'ask') html += ChatRender.renderChunk(c, {open:streaming});
-        else if (c.t === 'status') html += '<div class="research-status-notice" role="status">'+esc(ChatRender.stringify(c.c))+'</div>';
+        if (c.t === 'think' || c.t === 'ask') html += ChatRender.renderChunk(c);
         else if (c.t === 'text' || !c.t) {
           var text = reportFiles.length ? this._compactDeliveredReportText(ChatRender.stringify(c.c)) : c.c;
           html += ChatRender.renderContent(text) + (streaming && index === chunks.length - 1 ? '<span class="stream-cursor"></span>' : '');
         }
       }, this);
       html += ChatRender.renderSteps(pending, streaming);
+      html += this._renderRunStatus(chunks, streaming, msgObj);
       if (streaming && !html) html = '<div class="shimmer-bar" style="width:60%"></div>';
       if (reportFiles.length) html += this._inlineReportCard(reportFiles);
       if (callOrder.length && this._renderPlatformCallHTML) {
@@ -396,18 +430,18 @@ Object.assign(App, {
     // the live structure. We must render from _chunks to preserve tool steps,
     // think blocks, and references.
     var stream = Streams[this.convId];
-    var streamingLastIdx = (stream && stream.active && !stream.saveUnconfirmed) ? stream.msgIdx : -1;
+    var streamingLastIdx = (stream && stream.active && !stream.offline && !stream.saveUnconfirmed) ? stream.msgIdx : -1;
     el.innerHTML = this.msgs.map(function(m, idx) {
       if (m.role === 'user') return '<div class="msg user"><div class="msg-inner"><div class="bubble">'+esc(m.content)+'</div></div></div>';
       try {
         var text = m.content || '', chunks = null;
         // Prefer the live _chunks array for the currently-streaming message;
         // for any other message fall back to parsing the stored JSON content.
-        if (idx === streamingLastIdx && m._chunks && m._chunks.length) {
+        if (stream && stream.active && idx === stream.msgIdx && m._chunks && m._chunks.length) {
           chunks = m._chunks;
           text = m.content || '';
         } else if (typeof text === 'string' && text.startsWith('{"text":')) {
-          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; m._chunks = chunks; m._reportFiles = p.report_files || m._reportFiles || []; m._reportStatus = p.report_status || m._reportStatus || ''; m.research = p.research || m.research; } catch(e) { chunks = []; }
+          try { var p = JSON.parse(text); text = p.text || ''; chunks = p.chunks || []; m._chunks = chunks; m._reportFiles = p.report_files || m._reportFiles || []; m._reportStatus = p.report_status || m._reportStatus || ''; m.research = p.research || m.research; m.agent = p.native_agent || m.agent; } catch(e) { chunks = []; }
         } else {
           chunks = [];
         }
@@ -447,7 +481,7 @@ Object.assign(App, {
     if (!m || m.role !== 'assistant') return;
     var chunks = m._chunks || [];
     var stream = Streams[this.convId];
-    var streaming = !!(stream && stream.active && !stream.saveUnconfirmed);
+    var streaming = !!(stream && stream.active && stream.msgIdx === idx && !stream.offline && !stream.saveUnconfirmed);
 
     // Ensure _refs is populated from _chunks when missing — renderOne can be
     // called on completion before renderAll has had a chance to build _refs.
@@ -508,13 +542,16 @@ Object.assign(App, {
     // Save open state of fold elements to prevent flicker during re-render
     var openFolds = [];
     if (bubbles[idx]) {
-      bubbles[idx].querySelectorAll('.step-fold[open]').forEach(function(f, i) { openFolds.push(i); });
+      bubbles[idx].querySelectorAll('.step-fold[open],.think-box[open]').forEach(function(f) {
+        var folds = bubbles[idx].querySelectorAll('.step-fold,.think-box');
+        openFolds.push(Array.prototype.indexOf.call(folds, f));
+      });
     }
     bubbles[idx].innerHTML = this.renderQuoteTags(this._glossifyTerms(this._linkifyReports(this._renderMsg(displayChunks, displayContent || m.content, streaming, m))));
     this._sanitizeRenderedArtifacts(bubbles[idx]);
     // Restore open state
     if (openFolds.length) {
-      var newFolds = bubbles[idx].querySelectorAll('.step-fold');
+      var newFolds = bubbles[idx].querySelectorAll('.step-fold,.think-box');
       openFolds.forEach(function(i) { if (newFolds[i]) newFolds[i].setAttribute('open', ''); });
     }
     this._addCopyButtons(bubbles[idx]);
@@ -1008,8 +1045,8 @@ Object.assign(App, {
               stream.error = streamError;
             }
             if (p.pulse) { /* loading pulse */ }
-            if (p.status) chunks.push({t:'status', c:self._nativeStatusLabel(p.status)});
-            else if (p.agent && stream.agentStatusChanged) chunks.push({t:'status', c:self._nativeStatusLabel(p.agent.status)});
+            if (p.status) chunks.push({t:'status', c:self._nativeStatusLabel(p.status), state:p.agent && p.agent.status});
+            else if (p.agent && stream.agentStatusChanged) chunks.push({t:'status', c:self._nativeStatusLabel(p.agent.status), state:p.agent.status});
             if (p.tool) {
               var toolName = ChatRender.clean(p.tool || '');
               if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
@@ -1059,7 +1096,7 @@ Object.assign(App, {
   },
 
   _nativeStatusLabel: function(status) {
-    return {queued:'Prism 正在准备研究',running:'Prism 正在研究',awaiting_user:'等待补充研究信息',completed:'研究已保存',done:'研究已保存',partial:'已保存已有结果，研究尚未完整完成',failed:'研究未完成，已有记录已保留',cancelled:'研究已停止，已有记录已保留'}[status] || ChatRender.clean(status);
+    return {queued:'准备中',running:'研究中',awaiting_user:'等待补充研究信息',completed:'研究已保存',done:'研究已保存',partial:'已保存已有结果，研究尚未完整完成',failed:'研究未完成，已有记录已保留',cancelled:'研究已停止，已有记录已保留'}[status] || ChatRender.clean(status);
   },
 
   _acceptNativeFrame: function(stream, frame) {
@@ -1269,6 +1306,7 @@ Object.assign(App, {
       stream.msgs[msgIdx].content = full + (full ? '\n\n' : '') + errorMsg;
       chunks.push({t:'text', c:(full ? '\n\n' : '') + errorMsg});
       stream.msgs[msgIdx]._chunks = chunks;
+      stream.offline = true;
       if (App.convId === sid) App.renderAll();
     }
     stream.following = false;
