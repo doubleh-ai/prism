@@ -58,6 +58,11 @@ def init_projects_db():
     from .scheduling import init_scheduling_db
 
     init_scheduling_db()
+    from .approvals import init_approvals_db
+    from .attachments import init_attachments_db
+
+    init_attachments_db()
+    init_approvals_db()
 
 
 def _project(db, owner, project_id):

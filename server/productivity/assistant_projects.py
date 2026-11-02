@@ -8,19 +8,24 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import Field, model_validator
 
 from ..database import get_db
-from . import collaboration, projects, scheduling, store
+from . import approvals, attachments, collaboration, projects, scheduling, store
 from .assistant_changes import Clarification, TaskFields
 from .models import ClosedModel, CreateTask, TaskPriority, UpdateTask, clean_text
 
 
 class Selector(ClosedModel):
     project_name: str = Field(min_length=1, max_length=100)
+
+
+class ProjectRead(Selector):
+    section: Literal["summary", "tasks", "attachments", "approvals"] = "summary"
 
 
 class ProjectTaskChange(Selector):
@@ -70,7 +75,17 @@ class ProjectCalendar(Selector):
     config: scheduling.Config
 
 
+class ProjectApproval(Selector):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=4000)
+    reviewer: str = Field(min_length=1, max_length=100)
+    task_title: str | None = Field(default=None, min_length=1, max_length=200)
+    attachment_names: list[str] = Field(default_factory=list, max_length=10)
+
+
 SCHEMAS = {
+    "read_project": ProjectRead,
+    "create_project_approval": ProjectApproval,
     "create_project_task": ProjectTaskCreate,
     "update_project_task": ProjectTaskChange,
     "plan_project_task": ProjectTaskPlan,
@@ -82,6 +97,31 @@ SCHEMAS = {
 def parse(text, zone):
     if len(text) > 400 or any(w in text for w in ("不要", "别", "如果", "例如", "示例", "然后", "；", "\n")):
         return None
+    match = re.fullmatch(r"(?:查看|查询)项目「([^」]+)」(?:的(进度|任务|附件|审批))?", text)
+    if match:
+        return {
+            "actions": [
+                {
+                    "kind": "read_project",
+                    "fields": {
+                        "project_name": match[1],
+                        "section": {"任务": "tasks", "附件": "attachments", "审批": "approvals"}.get(
+                            match[2], "summary"
+                        ),
+                    },
+                }
+            ]
+        }
+    match = re.fullmatch(r"在项目「([^」]+)」中发起审批「([^」]+)」[，,]?交给「([^」]+)」", text)
+    if match:
+        return {
+            "actions": [
+                {
+                    "kind": "create_project_approval",
+                    "fields": {"project_name": match[1], "title": match[2], "reviewer": match[3]},
+                }
+            ]
+        }
     match = re.fullmatch(r"在项目「([^」]+)」中(?:添加|创建)任务「([^」]+)」", text)
     if match:
         return {
@@ -164,13 +204,13 @@ def resolve(actor, kind, fields, zone):
         selected = _one(
             db.execute(
                 "SELECT DISTINCT p.id FROM work_projects p JOIN users u ON u.username=p.owner LEFT JOIN work_project_members m ON m.project_id=p.id AND m.username=? "
-                "WHERE p.name=? AND u.disabled_at IS NULL AND (p.owner=? OR m.role='editor') LIMIT 2",
-                [actor, clean_text(body.project_name), actor],
+                "WHERE p.name=? AND u.disabled_at IS NULL AND (p.owner=? OR m.role='editor' OR (? AND m.role='viewer')) LIMIT 2",
+                [actor, clean_text(body.project_name), actor, kind == "read_project"],
             ).fetchall(),
             "项目",
         )
-        parent, role = collaboration.access(db, actor, selected[0], write=True)
-        if parent["status"] != "active":
+        parent, role = collaboration.access(db, actor, selected[0], write=kind != "read_project")
+        if parent["status"] != "active" and kind != "read_project":
             raise Clarification("项目已结束或归档，请先明确是否重新激活。")
         state = scheduling.state(db, parent["id"])
         target = {
@@ -184,7 +224,44 @@ def resolve(actor, kind, fields, zone):
             "timezone": state["config"]["timezone"],
         }
         operation_id = str(uuid4())
-        if kind == "create_project_task":
+        if kind == "read_project":
+            target["title"] = parent["name"]
+            return {
+                "kind": kind,
+                "operation_id": operation_id,
+                "target": target,
+                "before": {},
+                "fields": {"section": body.section},
+            }
+        if kind == "create_project_approval":
+            title = clean_text(body.title)
+            reviewer = clean_text(body.reviewer)
+            if actor == reviewer or reviewer not in approvals.reviewers(db, parent):
+                raise Clarification("请明确另一位已接受编辑邀请的成员或项目负责人账号，不能自己审批。")
+            task_id = _task(db, parent, body.task_title)["id"] if body.task_title else None
+            selected_files = []
+            for name in body.attachment_names:
+                row = _one(
+                    db.execute(
+                        "SELECT id FROM work_project_attachments WHERE project_id=? AND filename=? AND state='active' LIMIT 2",
+                        [parent["id"], clean_text(name)],
+                    ).fetchall(),
+                    "附件",
+                )
+                selected_files.append(row["id"])
+            validated = approvals.Create(
+                request_id=operation_id,
+                title=title,
+                description=body.description,
+                reviewer=reviewer,
+                task_id=task_id,
+                attachment_ids=selected_files,
+            ).model_dump()
+            pinned = approvals.snapshot(db, actor, parent, task_id, selected_files)
+            identities = approvals.context(db, actor, reviewer, parent["id"])
+            before = {"snapshot": pinned, "context": identities}
+            target.update(title=title, approval_snapshot=pinned)
+        elif kind == "create_project_task":
             before = {}
             content = body.model_dump(exclude={"project_name", "timezone"})
             validated = CreateTask(
@@ -284,7 +361,11 @@ def resolve(actor, kind, fields, zone):
 
 def check_access(actor, action, db):
     target = action["target"]
-    parent, role = collaboration.access(db, actor, target["project_id"], write=True)
+    parent, role = collaboration.access(
+        db, actor, target["project_id"], write=action["kind"] != "read_project"
+    )
+    if action["kind"] == "read_project":
+        return parent
     if (
         parent["version"] != target["project_version"]
         or role != target["role"]
@@ -301,6 +382,8 @@ def preflight(actor, actions, db, *, results=None):
         if action["kind"] not in SCHEMAS:
             continue
         check_access(actor, action, db)
+        if action["kind"] in {"read_project", "create_project_approval"}:
+            continue
         project_id = action["target"]["project_id"]
         expected = (
             action["target"]["schedule_version"] if results is None else results[index]["schedule_version"]
@@ -314,7 +397,36 @@ def preflight(actor, actions, db, *, results=None):
 def apply(actor, action, db):
     target, fields, kind = action["target"], action["fields"], action["kind"]
     project_id = target["project_id"]
-    if kind == "create_project_task":
+    if kind == "read_project":
+        parent, role = collaboration.access(db, actor, project_id)
+        rows = db.execute(
+            "SELECT t.id,t.title,t.status,t.priority,t.due_at FROM work_tasks t JOIN work_project_tasks p ON p.task_id=t.id JOIN work_spaces s ON s.id=t.workspace_id WHERE p.project_id=? AND p.owner=? AND s.owner=? AND s.deleted_at IS NULL ORDER BY t.sequence DESC LIMIT 51",
+            [project_id, parent["owner"], parent["owner"]],
+        ).fetchall()
+        files = attachments.listing(db, actor, project_id)
+        decisions = approvals.listing(db, actor, project_id)
+        result = {
+            "project": collaboration.view(parent, role),
+            "section": fields.get("section", "summary"),
+            "tasks": [dict(r) for r in rows[:50]],
+            "tasks_truncated": len(rows) > 50,
+            "attachments": files["items"],
+            "approvals": [
+                {k: r[k] for k in ("id", "title", "status", "requester", "reviewer", "version")}
+                for r in decisions["items"]
+            ],
+            "approvals_truncated": decisions["next_cursor"] is not None,
+        }
+    elif kind == "create_project_approval":
+        result = approvals.create(
+            actor,
+            project_id,
+            approvals.Create.model_validate(fields),
+            transaction=db,
+            expected_snapshot=action["before"]["snapshot"],
+            expected_context=action["before"]["context"],
+        )
+    elif kind == "create_project_task":
         result = projects.save_project_task(
             actor, project_id, CreateTask.model_validate(fields), transaction=db
         )
@@ -342,7 +454,20 @@ def apply(actor, action, db):
 def undo(actor, action, result, request_id, db):
     target, before, kind = action["target"], action["before"], action["kind"]
     project_id = target["project_id"]
-    if kind == "create_project_task":
+    if kind == "read_project":
+        return {"read_only": True}
+    if kind == "create_project_approval":
+        inverse = approvals.decide(
+            actor,
+            project_id,
+            result["approval"]["id"],
+            collaboration.VersionRequest(
+                request_id=request_id, expected_version=result["approval"]["version"]
+            ),
+            cancelling=True,
+            transaction=db,
+        )
+    elif kind == "create_project_task":
         inverse = projects.save_task(
             actor,
             project_id,

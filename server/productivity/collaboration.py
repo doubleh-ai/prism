@@ -168,7 +168,7 @@ async def members(project_id: str, request: Request):
             "invitations": invitations,
             "can_manage": role == "owner",
             "role": role,
-            "sharing_scope": "仅该项目说明和关联任务，不包含其他工作、日历或投资研究。",
+            "sharing_scope": "仅本项目说明、任务、附件、审批与成员操作记录，不包含其他工作、日历或投资研究。",
         }
 
 

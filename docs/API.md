@@ -43,6 +43,28 @@ research or personal Work payload. Existing accounts remain valid.
   nonnegative working-minute `lag_minutes`. Maximum 1000 tasks / 4000 links;
   cycles, self-links and cross-project references fail closed. This one bounded
   request accepts 512 KiB; other Work writes retain the 32 KiB limit.
+- `GET/POST /api/work/projects/{id}/attachments`: list current project metadata
+  or upload raw `application/octet-stream` bytes. `X-Prism-Upload` contains
+  percent-encoded JSON with UUID `request_id`, plain `filename`, optional
+  canonical `task_id`. Maximum 5 MiB/file, 30 active files/project and 100 MiB
+  across the owner's projects. Only UTF-8 TXT/MD/CSV, PDF, PNG and JPEG are accepted.
+  Bytes stay in the business SQLite store; never in a public tree or model input.
+  `GET /{id}/attachments/{attachment_id}/download` rechecks membership and forces
+  an uncached download. `POST /{id}/attachments/{attachment_id}/remove` requires
+  UUID and expected attachment version; only uploader/editor or owner can remove.
+  Upload replay returns the current removed state instead of recreating a file.
+- `GET/POST /api/work/projects/{id}/approvals`: list bounded requests or create
+  a pending request with UUID, `title`, `description`, explicit `reviewer`, optional
+  project `task_id` and up to ten `attachment_ids`. GET supports `limit`/`before`,
+  returns `next_cursor`, eligible `reviewers`, `can_submit`, and independently
+  bounded `pending_for_me` / `pending_for_me_truncated` so old pending decisions
+  are not hidden by newer history. No self approval. Snapshot pins exact task,
+  selected attachment versions/hashes and requester/reviewer membership versions.
+  `POST /{id}/approvals/{approval_id}/decision` requires UUID, current version,
+  `decision: approved|rejected` and optional comment (required for rejection).
+  Only the designated reviewer can decide. `POST /.../{approval_id}/cancel`
+  uses UUID/version and permits requester or owner to withdraw a pending request.
+  Stale contents/roles cannot be approved; decided requests cannot be undone.
 - `GET /api/work/notifications`: read the current account's in-app reminders.
   `POST /api/work/notifications/{id}/read` marks an owned reminder read.
 - `GET /api/work/notifications/health`: administrator-only scheduler observation.
@@ -54,6 +76,10 @@ every 30 seconds, starting 15 minutes before their scheduled time. Duplicate
 ticks deduplicate by owner, record and version; cancelled or changed records
 invalidate old displayed reminders. Scheduling participates in maintenance drain.
 This channel is in-app only; it does not send mail, SMS or user text to a model.
+The same scheduler handles pending approvals, results and assigned project-task
+deadlines. Reads recheck current project membership. Assigned-task notices bind
+both task and plan versions, so changing task content or reassignment invalidates
+the old notice without altering unrelated personal notifications.
 
 ## Native research chat
 
@@ -780,6 +806,15 @@ versions, schedule version and before-images; one transactional preflight checks
 external changes before sibling writes. Undo also checks the last completed
 schedule version. Saved proposals stop disclosing project content after access
 is revoked. None of these actions grant sharing or research access.
+
+`read_project` resolves a local project name, returns bounded current tasks,
+attachment metadata and approval summaries, and completes immediately when the
+proposal contains only reads; `proposal.can_undo` is false. No provider receives
+those records. `create_project_approval` accepts names from the submitted text,
+resolves exact task/attachment names locally, pins readable snapshots for preview,
+and creates a pending request after confirmation. Undo only withdraws a still
+pending request. Approval decisions are human-only business operations, never
+model-generated approval authority.
 
 Public PDF reads retain the same DNS/TLS/host policy. Bodies are capped at 8 MiB;
 an isolated Python parser has CPU/memory/time limits, no inherited credentials,

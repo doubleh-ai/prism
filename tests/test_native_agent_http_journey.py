@@ -284,6 +284,73 @@ def test_real_http_project_collaboration_and_agent_schedule_without_model(live_n
     assert owner.get("/__fixture/state").json()["model_calls"] == 0
 
 
+def test_real_http_private_attachment_and_human_approval_without_model(live_native):
+    from urllib.parse import quote
+
+    owner, peer = live_native
+    parent = owner.post(
+        "/api/work/projects", json={"request_id": str(uuid4()), "name": "合成审批项目"}
+    ).json()["project"]
+    base = f"/api/work/projects/{parent['id']}"
+    invite = owner.post(
+        base + "/invitations", json={"request_id": str(uuid4()), "username": "peer", "role": "editor"}
+    ).json()["invitation"]
+    assert (
+        peer.post(
+            f"/api/work/invitations/{invite['id']}/respond",
+            json={"request_id": str(uuid4()), "expected_version": 1, "decision": "accept"},
+        ).status_code
+        == 200
+    )
+    raw = b"synthetic file content"
+    uploaded = peer.post(
+        base + "/attachments",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Prism-Upload": quote(json.dumps({"request_id": str(uuid4()), "filename": "synthetic.txt"})),
+        },
+        content=raw,
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    file = uploaded.json()["attachment"]
+    assert owner.get(base + f"/attachments/{file['id']}/download").content == raw
+    proposed = peer.post(
+        "/api/work/assistant/proposals",
+        json={
+            "request_id": str(uuid4()),
+            "text": "在项目「合成审批项目」中发起审批「材料评审」交给「owner」",
+        },
+    ).json()["proposal"]
+    confirmed = peer.post(
+        f"/api/work/assistant/proposals/{proposed['id']}/confirm", json={"digest": proposed["digest"]}
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    row = confirmed.json()["proposal"]["results"][0]["result"]["approval"]
+    result = owner.post(
+        base + f"/approvals/{row['id']}/decision",
+        json={
+            "request_id": str(uuid4()),
+            "expected_version": 1,
+            "decision": "approved",
+            "comment": "核对通过",
+        },
+    )
+    assert result.status_code == 200 and result.json()["approval"]["status"] == "approved"
+    assert (
+        peer.post(
+            f"/api/work/assistant/proposals/{proposed['id']}/undo", json={"digest": proposed["digest"]}
+        ).status_code
+        == 409
+    )
+    read = peer.post(
+        "/api/work/assistant/proposals",
+        json={"request_id": str(uuid4()), "text": "查看项目「合成审批项目」的附件"},
+    ).json()["proposal"]
+    assert read["state"] == "completed" and read["can_undo"] is False
+    assert read["results"][0]["result"]["attachments"][0]["sha256"] == file["sha256"]
+    assert owner.get("/__fixture/state").json()["model_calls"] == 0
+
+
 def test_real_http_work_edits_repeat_exception_and_undo_without_model(live_native):
     owner, peer = live_native
     created = owner.post("/api/work/spaces", json={"request_id": str(uuid4()), "name": "合成工作区"})

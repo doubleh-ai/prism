@@ -81,8 +81,10 @@ from .portfolio import init_portfolio_db
 from .portfolio import router as portfolio_router
 from .preferences import init_preferences_db
 from .preferences import router as preferences_router
+from .productivity.approvals import router as approvals_router
 from .productivity.assistant import init_assistant_db
 from .productivity.assistant import router as work_assistant_router
+from .productivity.attachments import router as attachments_router
 from .productivity.calendar import init_calendar_db
 from .productivity.calendar import router as calendar_router
 from .productivity.collaboration import router as collaboration_router
@@ -739,6 +741,8 @@ app.include_router(calendar_router)
 app.include_router(projects_router)
 app.include_router(collaboration_router)
 app.include_router(scheduling_router)
+app.include_router(attachments_router)
+app.include_router(approvals_router)
 app.include_router(notifications_router)
 app.include_router(work_assistant_router)
 app.include_router(futures_router)

@@ -47,9 +47,24 @@
     Object.keys(fields).forEach(function(key){if(internal[key])return;if(!names[key]||!Object.prototype.hasOwnProperty.call(before,key)){valid=false;return;}if(before[key]===fields[key])return;changed++;var oldValue=key==='duration_minutes'&&before[key]===null?'默认估算 60 分钟':fieldValue(key,before[key],kind,target.timezone),newValue=key==='duration_minutes'&&fields[key]===null?'默认估算 60 分钟':fieldValue(key,fields[key],kind,target.timezone);row.append(element('p',names[key]+'：'+oldValue+' → '+newValue));});
     return {row:row,valid:valid&&changed>0};
   }
+  function approvalPreview(action){
+    var row=element('li'),target=action.target||{},fields=action.fields||{},snapshot=target.approval_snapshot,valid=true;
+    if(typeof target.project_name!=='string'||!target.project_name||typeof fields.title!=='string'||!fields.title||typeof fields.reviewer!=='string'||!fields.reviewer||fields.reviewer===state.user||!snapshot||typeof snapshot!=='object'||!Object.prototype.hasOwnProperty.call(snapshot,'task')||!Array.isArray(snapshot.attachments)||!Array.isArray(fields.attachment_ids)||!Object.prototype.hasOwnProperty.call(fields,'task_id'))return {row:row,valid:false};
+    row.append(element('strong','发起审批：'+target.project_name+' · '+fields.title),element('p','审批人：'+fields.reviewer));
+    if(typeof fields.description==='string'&&fields.description)row.append(element('p','说明：'+fields.description));
+    if(fields.task_id!==null){if(!snapshot.task||String(snapshot.task.id)!==String(fields.task_id)||typeof snapshot.task.title!=='string'||!snapshot.task.title)valid=false;else row.append(element('p','关联任务：'+snapshot.task.title));}
+    else if(snapshot.task)valid=false;
+    var selected=fields.attachment_ids.map(String),files=snapshot.attachments;
+    if(new Set(selected).size!==selected.length||files.length!==selected.length)valid=false;
+    files.forEach(function(file){if(!file||!selected.includes(String(file.id))||typeof file.filename!=='string'||!file.filename||typeof file.sha256!=='string'||!/^[a-f0-9]{64}$/i.test(file.sha256)||!Number.isSafeInteger(file.version))valid=false;else row.append(element('p','附件：'+file.filename+' · 指纹 '+file.sha256.slice(0,12)+'…'));});
+    if(new Set(files.map(function(file){return file&&String(file.id);})).size!==files.length)valid=false;
+    row.append(element('p','提交会固定所选任务版本与附件指纹，内容变化后需重新发起。'));
+    return {row:row,valid:valid};
+  }
   function previewAction(action){
     var fields=action.fields||{},kind=action.kind||'',update=kind.indexOf('update_')===0,before=action.before||{},target=action.target||{},zone=target.timezone||before.timezone||fields.timezone,row=element('li');
     if(kind==='plan_project_task'||kind==='set_project_dependencies'||kind==='set_project_calendar')return projectPreview(action);
+    if(kind==='create_project_approval')return approvalPreview(action);
     var types={create_task:'任务',create_project_task:'项目任务',create_event:'日程',create_project:'项目',update_task:'修改任务',update_project_task:'修改项目任务',update_project:'修改项目',update_event:before.recurrence?'修改整组重复日程':'修改日程',update_occurrence:'只调整这一次日程'};
     if(!types[kind])return {row:row,valid:false};
     row.append(element('strong',types[kind]+'：'+(target.project_name?target.project_name+' · ':'')+(update?(target.title||before.title||before.name||'未命名'):(fields.title||fields.name||'未命名'))));
@@ -66,10 +81,31 @@
     });
     if(!changed)valid=false;return {row:row,valid:valid};
   }
+  function readProjectSummary(result){
+    var wrap=element('div'),project=result&&result.project;
+    if(!project||typeof project!=='object'){wrap.append(element('p','项目资料不完整，请到项目页核对。'));return wrap;}
+    wrap.append(element('p','项目：'+(project.name||'未命名')));
+    if(project.description)wrap.append(element('p',project.description));
+    var status={active:'进行中',completed:'已完成',archived:'已归档',todo:'待开始',doing:'进行中',done:'已完成',cancelled:'已取消',pending:'待审批',approved:'已通过',rejected:'已拒绝'};
+    if(project.status)wrap.append(element('p','状态：'+(status[project.status]||'未知')));
+    function section(key,title,items,limit,truncated,describe){var details=element('details'),summary=element('summary',title);details.open=result.section===key;details.append(summary);if(!Array.isArray(items)){details.append(element('p','未提供。'));wrap.append(details);return;}if(!items.length)details.append(element('p','暂无'+title+'。'));else{var list=element('ul');items.slice(0,limit).forEach(function(item){list.append(element('li',describe(item||{})));});details.append(list);}if(truncated||items.length>limit)details.append(element('p','还有未显示的记录，请到项目页查看。'));wrap.append(details);}
+    section('tasks','任务',result.tasks,50,result.tasks_truncated,function(item){return (item.title||'未命名')+' · '+(status[item.status]||'状态未知');});
+    section('attachments','附件',result.attachments,30,result.attachments_truncated,function(item){return item.filename||'未命名附件';});
+    if(Array.isArray(result.attachments)&&result.attachments.length>=30&&!result.attachments_truncated)wrap.append(element('p','项目摘要最多展示 30 个附件，完整列表请到项目页核对。'));
+    section('approvals','审批',result.approvals,50,result.approvals_truncated,function(item){return (item.title||'未命名')+' · '+(status[item.status]||'状态未知');});
+    return wrap;
+  }
   function render(proposal){state.proposal=proposal;state.unknown=false;var box=$('assistantDetails');box.replaceChildren();$('assistantPreview').hidden=false;['assistantConfirm','assistantModel','assistantCheck','assistantUndo'].forEach(function(id){button(id,false);});$('assistantModelHelp').hidden=true;$('assistantPreviewTitle').textContent='安排预览';
     if(proposal.state==='ready'){var actions=Array.isArray(proposal.actions)?proposal.actions:[];if(!proposal.id||!proposal.digest||!actions.length){notice('预览不完整，请核对结果。');button('assistantCheck',!!proposal.id);return;}var list=element('ul'),valid=true;actions.forEach(function(action){var item=previewAction(action);list.append(item.row);if(!item.valid)valid=false;});box.append(list);button('assistantConfirm',valid);notice(valid?'请核对后确认安排。':'预览信息不完整，暂无法确认；请重新整理或核对。');}
     else if(proposal.state==='clarification'){box.append(element('p',proposal.clarification||'请补充安排内容。'));button('assistantModel',proposal.can_use_model!==false);$('assistantModelHelp').hidden=proposal.can_use_model===false;notice('可以修改上面的要求后重新整理。');}
-    else if(proposal.state==='completed'){ $('assistantPreviewTitle').textContent='安排已完成';var results=Array.isArray(proposal.results)?proposal.results:[],links={create_task:['查看任务','/work'],update_task:['查看任务','/work'],create_event:['查看日历','/calendar'],update_event:['查看日历','/calendar'],update_occurrence:['查看日历','/calendar'],create_project:['查看项目','/projects'],update_project:['查看项目','/projects'],create_project_task:['查看项目','/projects'],update_project_task:['查看项目','/projects'],plan_project_task:['查看项目','/projects'],set_project_dependencies:['查看项目','/projects'],set_project_calendar:['查看项目','/projects']},seen={},conflicts=0,truncated=false;results.forEach(function(result){var link=links[result.kind],detail=result.result||{};if(link&&!seen[link[1]]){var a=element('a',link[0]);a.href=link[1];a.className='button button-secondary';box.append(a);seen[link[1]]=true;}if(Array.isArray(detail.conflicts))conflicts+=detail.conflicts.length;if(detail.conflicts_truncated)truncated=true;});if(conflicts||truncated)box.append(element('p','存在'+(truncated?'至少 ':' ')+conflicts+' 条日程时间重叠，请查看日历核对。'));button('assistantUndo',!!proposal.digest);notice('');$('workRefresh').click();}
+    else if(proposal.state==='completed'){
+      var results=Array.isArray(proposal.results)?proposal.results:[],onlyReads=results.length>0&&results.every(function(result){return result.kind==='read_project';});
+      $('assistantPreviewTitle').textContent=onlyReads?'项目概览':'安排已完成';
+      var links={create_task:['查看任务','/work'],update_task:['查看任务','/work'],create_event:['查看日历','/calendar'],update_event:['查看日历','/calendar'],update_occurrence:['查看日历','/calendar'],create_project:['查看项目','/projects'],update_project:['查看项目','/projects'],create_project_task:['查看项目','/projects'],update_project_task:['查看项目','/projects'],plan_project_task:['查看项目','/projects'],set_project_dependencies:['查看项目','/projects'],set_project_calendar:['查看项目','/projects'],create_project_approval:['查看项目','/projects'],read_project:['查看项目','/projects']},seen={},conflicts=0,truncated=false;
+      results.forEach(function(result){var link=links[result.kind],detail=result.result||{};if(result.kind==='read_project')box.append(readProjectSummary(detail));if(link&&!seen[link[1]]){var a=element('a',link[0]);a.href=link[1];a.className='button button-secondary';box.append(a);seen[link[1]]=true;}if(Array.isArray(detail.conflicts))conflicts+=detail.conflicts.length;if(detail.conflicts_truncated)truncated=true;});
+      if(conflicts||truncated)box.append(element('p','存在'+(truncated?'至少 ':' ')+conflicts+' 条日程时间重叠，请查看日历核对。'));
+      button('assistantUndo',!!proposal.digest&&proposal.can_undo!==false&&!onlyReads);notice('');if(!onlyReads)$('workRefresh').click();
+    }
     else if(proposal.state==='undone'){ $('assistantPreviewTitle').textContent='已撤销';notice('');$('workRefresh').click();}
     else {state.unknown=true;box.append(element('p',proposal.state==='planning'?'正在整理，请稍后核对。':'结果尚未确定，请先核对。'));button('assistantCheck',true);notice('');}
   }

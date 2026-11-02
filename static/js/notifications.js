@@ -21,6 +21,7 @@
     state.user = me.user; return me.user;
   }
   function formatTime(value) {
+    if (value === null || value === undefined || value === '') return '时间不可用';
     var date = new Date(value);
     if (!Number.isFinite(date.getTime())) return '时间不可用';
     return new Intl.DateTimeFormat('zh-CN', {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(date);
@@ -31,9 +32,11 @@
       var row = document.createElement('article'); row.className = 'project-row';
       var copy = document.createElement('div'); copy.className = 'project-open';
       var title = document.createElement('strong'); title.textContent = item.title;
-      var detail = document.createElement('span'); detail.textContent = (item.kind === 'task' ? '任务截止' : item.kind === 'calendar' ? '日程开始' : '提醒') + ' · ' + formatTime(item.due_at) + (item.read_at == null ? ' · 未读' : ' · 已读');
+      var labels={task:'任务截止',calendar:'日程开始',project_task:'项目任务截止',approval:'待你审批',approval_result:'审批结果'};
+      var detail = document.createElement('span'); detail.textContent = (labels[item.kind] || '提醒') + (['task','calendar','project_task'].includes(item.kind) ? ' · ' + formatTime(item.due_at) : '') + (item.read_at == null ? ' · 未读' : ' · 已读');
       copy.append(title,detail);
-      if (item.href === '/work' || item.href === '/calendar') { var link = document.createElement('a'); link.href = item.href; link.textContent = item.href === '/work' ? '查看任务' : '查看日历'; link.className = 'fine-print'; copy.appendChild(link); }
+      var destinations={task:['/work','查看任务'],calendar:['/calendar','查看日历'],project_task:['/projects','查看项目'],approval:['/projects','查看项目'],approval_result:['/projects','查看项目']},destination=destinations[item.kind];
+      if (destination && item.href === destination[0]) { var link = document.createElement('a'); link.href = destination[0]; link.textContent = destination[1]; link.className = 'fine-print'; copy.appendChild(link); }
       row.appendChild(copy);
       if (item.read_at == null) { var button = document.createElement('button'); button.type = 'button'; button.className = 'button button-secondary'; button.textContent = '标为已读'; button.addEventListener('click', function () { markRead(item.id, button); }); row.appendChild(button); }
       list.appendChild(row);
