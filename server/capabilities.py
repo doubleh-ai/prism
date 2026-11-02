@@ -135,12 +135,89 @@ class WatchUpdateArgs(Arguments):
     items: list[WatchItemArgs] = Field(min_length=1, max_length=200)
 
 
+class ClaimFormula(Arguments):
+    operator: Literal["add", "subtract", "multiply", "divide"]
+    input_claim_ids: list[RecordId] = Field(
+        min_length=2, max_length=2, description="本轮已登记的两个不同输入结论ID，不接受表达式或代码。"
+    )
+
+
+class ResearchClaim(Arguments):
+    kind: Literal["fact", "calculation", "inference", "hypothesis"]
+    statement: str = Field(min_length=1, max_length=3000)
+    supports: list[RecordId] = Field(
+        default_factory=list, max_length=20, description="research_read 返回的本轮段落ID。"
+    )
+    opposes: list[RecordId] = Field(default_factory=list, max_length=20)
+    background: list[RecordId] = Field(default_factory=list, max_length=20)
+    quotes: dict[str, Annotated[str, Field(min_length=1, max_length=600)]] = Field(
+        default_factory=dict, max_length=60, description="段落ID到逐字原文引句的映射；不能自行改写为引文。"
+    )
+    entities: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=20
+    )
+    metric: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        description="数字指标名称，如营业收入或设计年产能；不同指标不能混比。",
+    )
+    value: (
+        Annotated[str, Field(max_length=100)]
+        | Annotated[int, Field(strict=True)]
+        | Annotated[float, Field(strict=True)]
+        | None
+    ) = Field(default=None, description="原始数值，优先使用普通十进制字符串；不可填未知数据。")
+    unit: str | None = Field(default=None, max_length=80, description="原文数量单位；例如万元、万吨、片或%。")
+    currency: str | None = Field(
+        default=None, max_length=30, description="金额明确填写币种；不能默认人民币或自动折汇。"
+    )
+    period: str | None = Field(
+        default=None, max_length=120, description="数据所属期间，优先YYYY、YYYYQ1、YYYYH1或完整ISO日期区间。"
+    )
+    accounting_basis: str | None = Field(
+        default=None,
+        max_length=300,
+        description="数据口径，例如合并报表、设计产能或实际产量；缺失口径不可混比。",
+    )
+    formula: ClaimFormula | None = None
+    limitations: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=20, description="推断、假设的限制及失效条件。"
+    )
+
+
 class ClaimsArgs(Arguments):
-    claims: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+    claims: list[ResearchClaim] = Field(min_length=1, max_length=20)
+
+
+class ResearchRelation(Arguments):
+    from_entity: str = Field(min_length=1, max_length=200)
+    to_entity: str = Field(min_length=1, max_length=200)
+    product: str = Field(min_length=1, max_length=200)
+    dimension: Literal["supply", "certification", "substitution", "cost", "demand"]
+    mechanism: str = Field(
+        min_length=1,
+        max_length=1200,
+        description="解释供给、良率、成本、交期或终端需求怎样传导，说明成立条件。",
+    )
+    relation_type: str | None = Field(default=None, max_length=200)
+    business_stage: str | None = Field(
+        default=None, max_length=200, description="区分送样、验证、量产、订单和已披露供货；未知时不补造。"
+    )
+    valid_period: str | None = Field(
+        default=None, max_length=200, description="关系证据有效期间，优先YYYY、YYYYQ1、YYYYH1或ISO日期区间。"
+    )
+    supporting_claims: list[RecordId] = Field(
+        default_factory=list, max_length=20, description="本轮research_record_claims已返回的结论ID。"
+    )
+    opposing_claims: list[RecordId] = Field(default_factory=list, max_length=20)
+    invalidators: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=20
+    )
 
 
 class RelationsArgs(Arguments):
-    relations: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+    relations: list[ResearchRelation] = Field(min_length=1, max_length=20)
 
 
 class ResearchScopeArgs(Arguments):

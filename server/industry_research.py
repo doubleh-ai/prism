@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from .database import get_db
 from .productivity.store import _active
 from .research import knowledge, ledger
+from .research.quantities import audit_claims, path_checks
 from .source_urls import source_display_payload
 
 DIMENSIONS = {
@@ -44,6 +45,7 @@ def _paths(relations):
             key = tuple(row["relation_id"] for row in combined)
             if key not in seen:
                 seen.add(key)
+                checks = path_checks(combined)
                 results.append(
                     {
                         "relation_ids": list(key),
@@ -51,7 +53,10 @@ def _paths(relations):
                         "products": [row["product"] for row in combined],
                         "mechanisms": [row["mechanism"] for row in combined],
                         "valid_periods": [row["valid_period"] for row in combined],
-                        "status": "hypothesis_requires_cross_link_review",
+                        "status": "incompatible_periods"
+                        if checks["period"]["status"] == "nonoverlap"
+                        else "hypothesis_requires_cross_link_review",
+                        "cross_link_checks": checks,
                         "checks_required": [
                             "产品能否跨环节连接",
                             "有效期间是否重叠",
@@ -98,8 +103,22 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
             [*params, limit + 1],
         ).fetchall()
         items = []
+        run_checks = {}
         now = datetime.now(UTC)
         for row in rows[:limit]:
+            if row["run_id"] not in run_checks:
+                candidates = db.execute(
+                    knowledge._SELECT + " AND c.run_id=?", [owner, row["run_id"]]
+                ).fetchall()
+                excluded = [
+                    c["claim_id"]
+                    for c in candidates
+                    if knowledge._present(c, now=now)["effective_state"]
+                    in {"expired", "disputed", "retracted", "superseded"}
+                ]
+                run_checks[row["run_id"]] = audit_claims(
+                    [json.loads(c["payload"]) for c in candidates], excluded=excluded
+                )
             relation = json.loads(row["payload"])
             blocking, evidence = [], []
             support = relation.get("supporting_claims", [])
@@ -160,6 +179,11 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
                     )
             if relation.get("opposing_claims"):
                 blocking.append("opposing_evidence_requires_review")
+            conflicting = {
+                cid for group in run_checks[row["run_id"]]["conflicts"] for cid in group["claim_ids"]
+            }
+            if conflicting.intersection(relation.get("supporting_claims", [])):
+                blocking.append("numeric_evidence_conflict")
             item = {
                 **relation,
                 "sequence": row["sequence"],
