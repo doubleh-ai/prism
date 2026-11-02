@@ -13,7 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
 
-from . import feedback_monitor
+from . import feedback_monitor, feedback_review
 from .activity import ActivityMiddleware
 from .agent.api import cancel as native_chat_cancel
 from .agent.api import chat_stream as native_chat_stream
@@ -126,6 +126,7 @@ init_research_db()
 init_knowledge_db()
 init_runtime_db()
 init_feedback_db()
+feedback_review.init_review_db()
 init_preferences_db()
 init_portfolio_db()
 init_model_routes_db()
@@ -720,6 +721,7 @@ app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)
 app.include_router(feedback_monitor.router)
+app.include_router(feedback_review.router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)

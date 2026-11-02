@@ -101,6 +101,41 @@ other APIs, execute a repair or deploy a release. Matching release fields are
 not proof of real verification; task activation and production acceptance are
 separate from implementing these endpoints.
 
+### Suggestion-only review candidate
+
+`/api/internal/feedback-review` requires a distinct `PRISM_FEEDBACK_REVIEW_TOKEN`
+via `X-Prism-Review-Token` (32–512 printable ASCII characters), with exactly one
+`X-Prism-Expected-Revision` matching the full served revision. Monitor, worker and
+review secrets must differ; shared values fail closed. Cookie-bearing requests
+are rejected. Responses are `no-store`, authentication is limited per direct peer,
+and mutating requests require the ordinary `X-Requested-With: XMLHttpRequest`.
+No role is configured or cloud consumer started by default.
+
+- `GET /queue?batch_date=YYYY-MM-DD&after_id=0&limit=10`: current Shanghai date
+  only, due from 09:30; at most 10 pending suggestions from enabled accounts.
+  Returns bounded redacted title/description, feature and item revision, without
+  user identity, paths, history, bugs or diagnostics. Earlier pending batches
+  are included. `next_after_id` paginates oldest first.
+- `POST /{id}/decision`: strict JSON containing canonical UUID `request_id`,
+  integer `expected_revision`, `batch_date`, `status` (`accepted`, `deferred`,
+  `declined`, `needs_info`), concrete `reason` (4–1200 characters), `priority`
+  (`low`, `normal`, `high`), up to 8 short `dependencies`, `risk`
+  (`ordinary`, `owner_decision`) and a closed `topic`. Adoption for owner-only
+  impact, email/SMS activation or cross-product private-content linkage is
+  rejected. Fixed/in-progress/release status cannot be written by this identity.
+- `GET /receipts/{request_id}`: exact durable decision receipt. A 404 cannot
+  establish that an earlier POST never happened and must not cause automatic
+  replay. Existing receipts can be read or replayed idempotently after their
+  original batch; changed payloads using the same identifier conflict.
+
+The item update, owner-visible history and receipt commit atomically after
+rechecking active ownership, pending status, item version, due date and runtime
+binding. New writes are capped at 200 per Shanghai day. Accepted replies state
+that adoption enters planning and is not deployment. Deleted accounts/feedback
+purge their receipts. No code, spending, sharing or release right follows from
+an accepted suggestion. See the product principles for the user workflow;
+the independently configured scheduler and model routing remain private ops.
+
 ### Read-only feedback monitoring candidate
 
 `GET /api/internal/feedback-monitor/queue` and
