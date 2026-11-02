@@ -39,11 +39,11 @@ def _query_int(value, default=None):
     return int(value)
 
 
-async def _body(request, model):
+async def _body(request, model, *, maximum=32768):
     content = bytearray()
     async for chunk in request.stream():
         content.extend(chunk)
-        if len(content) > 32768:
+        if len(content) > maximum:
             raise HTTPException(413, "工作内容过长")
 
     def unique(pairs):

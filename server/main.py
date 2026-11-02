@@ -85,6 +85,7 @@ from .productivity.assistant import init_assistant_db
 from .productivity.assistant import router as work_assistant_router
 from .productivity.calendar import init_calendar_db
 from .productivity.calendar import router as calendar_router
+from .productivity.collaboration import router as collaboration_router
 from .productivity.notifications import (
     ReminderScheduler,
     init_notifications_db,
@@ -96,6 +97,7 @@ from .productivity.notifications import (
 from .productivity.projects import init_projects_db
 from .productivity.projects import router as projects_router
 from .productivity.routes import router as work_router
+from .productivity.scheduling import router as scheduling_router
 from .productivity.store import init_productivity_db
 from .productivity.store import require_enabled as require_work_enabled
 from .release import APP_VERSION, release_payload
@@ -735,6 +737,8 @@ app.include_router(feedback_router)
 app.include_router(work_router)
 app.include_router(calendar_router)
 app.include_router(projects_router)
+app.include_router(collaboration_router)
+app.include_router(scheduling_router)
 app.include_router(notifications_router)
 app.include_router(work_assistant_router)
 app.include_router(futures_router)

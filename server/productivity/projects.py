@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import time
 from typing import Literal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field, field_validator
 
 from ..database import get_db
-from . import store
-from .models import ClosedModel, CreateSpace, CreateTask, clean_text
-from .routes import _body, _id, _owner
+from . import collaboration, store
+from .models import ClosedModel, CreateSpace, CreateTask, UpdateTask, clean_text
+from .routes import _body, _id, _owner, _query_int
 
 router = APIRouter(prefix="/api/work/projects", tags=["work"])
 
@@ -54,6 +54,10 @@ def init_projects_db():
             DELETE FROM work_projects WHERE owner=OLD.username;
         END;
         """)
+    collaboration.init_collaboration_db()
+    from .scheduling import init_scheduling_db
+
+    init_scheduling_db()
 
 
 def _project(db, owner, project_id):
@@ -91,6 +95,9 @@ def save_project(owner, body, project_id=None, *, transaction=None):
                 [project_id, owner, body.name, body.description, now],
             )
         response = {"project": _project(db, owner, project_id)}
+        collaboration.audit(
+            db, project_id, owner, "project_updated" if kind == "project_update" else "project_created"
+        )
         store._record_request(db, owner, body, kind, "", project_id, fingerprint, response)
         return {**response, "replayed": False}
 
@@ -102,9 +109,12 @@ async def list_projects(request: Request):
     with get_db() as db:
         store._active(db, owner)
         rows = db.execute(
-            "SELECT id FROM work_projects WHERE owner=? ORDER BY updated_at DESC,id LIMIT 200", [owner]
+            "SELECT DISTINCT p.id FROM work_projects p JOIN users u ON u.username=p.owner "
+            "LEFT JOIN work_project_members m ON m.project_id=p.id AND m.username=? "
+            "WHERE u.disabled_at IS NULL AND (p.owner=? OR m.role IN ('viewer','editor')) ORDER BY p.updated_at DESC,p.id LIMIT 200",
+            [owner, owner],
         ).fetchall()
-        return {"projects": [_project(db, owner, row[0]) for row in rows]}
+        return {"projects": [collaboration.view(*collaboration.access(db, owner, row[0])) for row in rows]}
 
 
 @router.post("")
@@ -129,19 +139,25 @@ async def update_project(project_id: str, request: Request):
 async def project_tasks(project_id: str, request: Request):
     owner = _owner(request)
     init_projects_db()
+    limit = _query_int(request.query_params.get("limit"), 200)
+    before = _query_int(request.query_params.get("before"))
+    if not 1 <= limit <= 200 or (before is not None and before < 1):
+        raise HTTPException(422, "项目任务分页参数无效")
     with get_db() as db:
         store._active(db, owner)
-        project = _project(db, owner, _id(project_id))
+        parent, role = collaboration.access(db, owner, _id(project_id))
+        project = collaboration.view(parent, role)
         tasks = db.execute(
             "SELECT t.* FROM work_tasks t JOIN work_project_tasks p ON p.task_id=t.id "
             "JOIN work_spaces s ON s.id=t.workspace_id WHERE p.project_id=? AND p.owner=? "
-            "AND s.owner=? AND s.deleted_at IS NULL ORDER BY t.sequence DESC LIMIT 201",
-            [project_id, owner, owner],
+            "AND s.owner=? AND s.deleted_at IS NULL AND (? IS NULL OR t.sequence<?) ORDER BY t.sequence DESC LIMIT ?",
+            [project_id, parent["owner"], parent["owner"], before, before, limit + 1],
         ).fetchall()
         return {
             "project": project,
-            "tasks": [store._task(row) for row in tasks[:200]],
-            "truncated": len(tasks) > 200,
+            "tasks": [store._task(row) for row in tasks[:limit]],
+            "truncated": len(tasks) > limit,
+            "next_cursor": tasks[limit - 1]["sequence"] if len(tasks) > limit else None,
         }
 
 
@@ -152,20 +168,37 @@ async def create_project_task(project_id: str, request: Request):
     if _owner(request) != owner:
         raise HTTPException(401, "请重新登录")
     project_id = _id(project_id)
-    init_projects_db()
+    return save_project_task(owner, project_id, body)
+
+
+def save_project_task(owner, project_id, body, *, transaction=None):
+    if transaction is None:
+        init_projects_db()
     fingerprint = store._fingerprint("project_task", project_id, body)
-    with store._transaction(owner) as db:
-        project = _project(db, owner, project_id)
+    with store._transaction(owner, transaction) as db:
+        parent, role = collaboration.access(db, owner, project_id, write=True)
+        project = collaboration.view(parent, role)
         replay = store._replay(db, owner, body.request_id, fingerprint)
         if replay is not None:
             return {**replay, "replayed": True}
         if project["status"] != "active":
             raise HTTPException(409, "项目已结束或归档，请重新激活后添加任务")
         space = db.execute(
-            "SELECT id FROM work_spaces WHERE owner=? AND deleted_at IS NULL", [owner]
+            "SELECT id FROM work_spaces WHERE owner=? AND deleted_at IS NULL", [parent["owner"]]
         ).fetchone()
         if space is None:
-            raise HTTPException(409, "请先启用我的工作台")
+            created = store.create_space(
+                parent["owner"],
+                CreateSpace(
+                    request_id=str(
+                        uuid5(NAMESPACE_URL, "prism-project-space:" + owner + ":" + body.request_id)
+                    ),
+                    name="我的工作台",
+                    timezone=body.timezone,
+                ),
+                transaction=db,
+            )
+            space = (created["workspace"]["id"],)
         task_id, now = str(uuid4()), int(time.time())
         db.execute(
             "INSERT INTO work_tasks(id,workspace_id,title,description,status,priority,due_at,timezone,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -182,8 +215,62 @@ async def create_project_task(project_id: str, request: Request):
                 now,
             ],
         )
-        db.execute("INSERT INTO work_project_tasks VALUES(?,?,?)", [task_id, project_id, owner])
+        db.execute("INSERT INTO work_project_tasks VALUES(?,?,?)", [task_id, project_id, parent["owner"]])
         store._event(db, space[0], task_id, "task_created", 1, ["title", "project"], now)
-        response = {"project": project, "task": store._task(store._owned_task(db, owner, space[0], task_id))}
+        response = {
+            "project": project,
+            "task": store._task(store._owned_task(db, parent["owner"], space[0], task_id)),
+        }
+        collaboration.audit(db, project_id, owner, "task_created", task_id)
+        from .scheduling import bump
+
+        bump(db, project_id)
         store._record_request(db, owner, body, "project_task", space[0], task_id, fingerprint, response)
         return {**response, "replayed": False}
+
+
+@router.get("/{project_id}")
+async def get_project(project_id: str, request: Request):
+    actor = _owner(request)
+    with get_db() as db:
+        return {"project": collaboration.view(*collaboration.access(db, actor, _id(project_id)))}
+
+
+def project_task(db, actor, project_id, task_id, *, write=False):
+    parent, role = collaboration.access(db, actor, project_id, write=write)
+    row = db.execute(
+        "SELECT t.* FROM work_tasks t JOIN work_project_tasks p ON p.task_id=t.id "
+        "JOIN work_spaces s ON s.id=t.workspace_id WHERE p.project_id=? AND p.task_id=? AND p.owner=? "
+        "AND s.owner=? AND s.deleted_at IS NULL",
+        [project_id, task_id, parent["owner"], parent["owner"]],
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "该任务不属于可访问的项目")
+    return parent, role, row
+
+
+def save_task(actor, project_id, task_id, body, *, transaction=None):
+    with store._transaction(actor, transaction) as db:
+        parent, _, row = project_task(db, actor, project_id, task_id, write=True)
+        if parent["status"] != "active":
+            raise HTTPException(409, "请先激活项目再修改任务")
+        result = store._update_task_record(db, row, body)
+        collaboration.audit(db, project_id, actor, "task_updated", task_id)
+        return result
+
+
+@router.patch("/{project_id}/tasks/{task_id}")
+async def edit_project_task(project_id: str, task_id: str, request: Request):
+    actor = _owner(request)
+    body = await _body(request, UpdateTask)
+    if _owner(request) != actor:
+        raise HTTPException(401)
+    return save_task(actor, _id(project_id), _id(task_id), body)
+
+
+@router.get("/{project_id}/tasks/{task_id}")
+async def read_project_task(project_id: str, task_id: str, request: Request):
+    actor = _owner(request)
+    with get_db() as db:
+        parent, role, row = project_task(db, actor, _id(project_id), _id(task_id))
+        return {"project": collaboration.view(parent, role), "task": store._task(row)}

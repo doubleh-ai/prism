@@ -145,6 +145,9 @@ store. It does not add a second model orchestrator.
 |---|---|
 | `productivity/store.py`, `routes.py` | Owned tasks, request deduplication, optimistic versions, transactional account checks |
 | `productivity/calendar.py` | Owned one-off events, UTC instants and IANA zones, overlaps, retained cancellation, escaped ICS |
+| `productivity/projects.py`, `collaboration.py` | Explicit project invitations and accepted viewer/editor roles; linked task access never grants access to another owner's workspace |
+| `productivity/planning.py`, `scheduling.py` | Bounded remaining-work scenarios, local work calendars, dependencies, estimates, milestones and within-project resource ordering; assumptions remain visible |
+| `productivity/assistant.py`, `assistant_changes.py`, `assistant_projects.py` | Local target resolution, typed preview, current account/project/member and version checks, atomic confirm/undo; the model receives only the submitted request |
 | `preferences.py` | Explicit user constraints and a snapshot captured atomically with each Native run |
 | `futures.py` | Fixed public daily feed, bounded HTTP, public cache, deterministic technical calculations and explicit missing fields |
 | `agent/tools.py`, `capabilities.py` | Read-only `futures_snapshot`, recorded through the existing research/capability ledger |
@@ -155,7 +158,8 @@ and profiles; deleting a run removes its profile snapshot. Old-code recovery
 still requires an actual compatibility check and must preserve newly written data.
 
 Research preferences are available to investment research, while private Work
-tasks/events are not automatically sent to it. A future Work Agent needs explicit
-workspace permissions and bounded write proposals. Profile prompts are not a
+tasks/events are not automatically sent to it. The Work assistant uses explicit
+account/project permissions and bounded write proposals; natural language does
+not grant wider access than the same business API. Profile prompts are not a
 deterministic portfolio risk engine. Missing holdings, margins or current
 contract evidence keep risk status `not_evaluated`.

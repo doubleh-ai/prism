@@ -7,14 +7,42 @@ projects, calendar and reminders use `/work`, `/projects`, `/calendar` and
 `/notifications`. `GET /api/platform` returns product availability only, with no
 research or personal Work payload. Existing accounts remain valid.
 
-- `GET/POST /api/work/projects`: list or create owned projects. Creation requires
+- `GET/POST /api/work/projects`: list owned and accepted shared projects, or create an owned project. Creation requires
   a UUID `request_id`, `name` and optional `description`.
 - `PATCH /api/work/projects/{id}`: update with a new `request_id`,
   `expected_version`, `name`, `description` and `active/completed/archived` status.
   Stale versions return 409. Repeated identical request IDs replay the result.
 - `GET/POST /api/work/projects/{id}/tasks`: list project tasks or create one using
-  the regular Work task schema. Creation requires an existing personal workspace
-  and an active project; task and project association commit atomically.
+  the regular Work task schema. Creation requires an active project and provisions the owner workspace if needed; task and project association commit atomically.
+- `GET /api/work/projects/{id}` and `/{id}/tasks/{task_id}`: current permitted
+  project and linked task only. `PATCH /{id}/tasks/{task_id}` uses `UpdateTask`
+  with `expected_version`; it does not accept a mutation UUID. Owners and accepted
+  editors can edit linked tasks, viewers can read. Task list uses `limit` (up to
+  200), `before`, `next_cursor` and `truncated` rather than silently dropping rows.
+- `GET /api/work/projects/{id}/members`, `POST /{id}/invitations`,
+  `POST /{id}/invitations/{invitation_id}/revoke`, `PUT /{id}/members/{username}`,
+  `POST /{id}/leave` and `GET /{id}/activity`: in-app project collaboration.
+  `GET /api/work/invitations` and `POST /api/work/invitations/{id}/respond`
+  belong to the recipient. Invites expire after seven days and grant no access
+  before acceptance. Roles are `viewer` or `editor`; member removal uses
+  `role: removed`. Writes use UUID `request_id`; existing invitation/member
+  mutations require their current `expected_version`. Version numbers remain
+  monotonic across leaving and rejoining.
+- `GET/PUT /api/work/projects/{id}/schedule`: versioned project calendar. PUT
+  requires `request_id`, current schedule `expected_version`, explicit `start_at`,
+  IANA `timezone`, `work_start` / `work_end` (local minutes), weekday indexes
+  (Monday 0) and canonical holiday dates. An unconfigured schedule may already
+  have a nonzero version. GET returns bounded tasks, links, assumptions, gaps,
+  resource-aware critical/float calculations and `can_edit`.
+- `PUT /api/work/projects/{id}/tasks/{task_id}/plan`: estimate, `assignee`,
+  `not_before`, `milestone`, UUID and current plan `expected_version` (0 if absent).
+  Only accepted active editors or the owner may be assigned. Ordinary duration
+  is positive or null/default; milestones use zero. Null clears an optional field.
+- `PUT /api/work/projects/{id}/dependencies`: replace links using the current
+  schedule version and a UUID. Links use `predecessor_id`, `successor_id` and
+  nonnegative working-minute `lag_minutes`. Maximum 1000 tasks / 4000 links;
+  cycles, self-links and cross-project references fail closed. This one bounded
+  request accepts 512 KiB; other Work writes retain the 32 KiB limit.
 - `GET /api/work/notifications`: read the current account's in-app reminders.
   `POST /api/work/notifications/{id}/read` marks an owned reminder read.
 - `GET /api/work/notifications/health`: administrator-only scheduler observation.
@@ -742,6 +770,16 @@ inverse actions commit with their receipts in one transaction. Later edits are
 never overwritten. Task/project/calendar changes can be combined, but duplicate
 changes to one object must be merged. A `can_use_model: false` clarification does
 not offer another redundant model request.
+
+Project planner actions `create_project_task`, `update_project_task`, `plan_project_task`,
+`set_project_dependencies` and `set_project_calendar` use `project_name`, exact
+task names and typed business fields. Dependency proposals add/remove only named
+links; the server constructs the complete replacement locally. Existing project
+records are never sent to the provider. Preview pins current project and member
+versions, schedule version and before-images; one transactional preflight checks
+external changes before sibling writes. Undo also checks the last completed
+schedule version. Saved proposals stop disclosing project content after access
+is revoked. None of these actions grant sharing or research access.
 
 Public PDF reads retain the same DNS/TLS/host policy. Bodies are capped at 8 MiB;
 an isolated Python parser has CPU/memory/time limits, no inherited credentials,

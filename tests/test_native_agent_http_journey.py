@@ -247,6 +247,43 @@ def test_real_http_refresh_cancel_reports_sources_and_owner_isolation(live_nativ
     assert peer.get("/api/reports/library").json()["reports"] == []
 
 
+def test_real_http_project_collaboration_and_agent_schedule_without_model(live_native):
+    owner, peer = live_native
+    project = owner.post(
+        "/api/work/projects", json={"request_id": str(uuid4()), "name": "合成上线项目"}
+    ).json()["project"]
+    base = f"/api/work/projects/{project['id']}"
+    task = owner.post(base + "/tasks", json={"request_id": str(uuid4()), "title": "评审"})
+    assert task.status_code == 200, task.text
+    assert peer.get(base + "/tasks").status_code == 404
+    invitation = owner.post(
+        base + "/invitations", json={"request_id": str(uuid4()), "username": "peer", "role": "editor"}
+    ).json()["invitation"]
+    joined = peer.post(
+        f"/api/work/invitations/{invitation['id']}/respond",
+        json={"request_id": str(uuid4()), "expected_version": invitation["version"], "decision": "accept"},
+    )
+    assert joined.status_code == 200, joined.text
+    proposal = peer.post(
+        "/api/work/assistant/proposals",
+        json={"request_id": str(uuid4()), "text": "把项目「合成上线项目」的任务「评审」工时设为120分钟"},
+    ).json()["proposal"]
+    assert proposal["state"] == "ready"
+    action = f"/api/work/assistant/proposals/{proposal['id']}"
+    result = peer.post(action + "/confirm", json={"digest": proposal["digest"]})
+    assert result.status_code == 200, result.text
+    assert peer.get(base + "/schedule").json()["tasks"][0]["duration_minutes"] == 120
+    assert peer.post(action + "/undo", json={"digest": proposal["digest"]}).status_code == 200
+    assert peer.get(base + "/schedule").json()["tasks"][0]["duration_source"] == "default"
+    removed = owner.put(
+        base + "/members/peer", json={"request_id": str(uuid4()), "expected_version": 1, "role": "removed"}
+    )
+    assert removed.status_code == 200, removed.text
+    assert peer.get(base + "/schedule").status_code == 404
+    assert peer.get(action).status_code == 404
+    assert owner.get("/__fixture/state").json()["model_calls"] == 0
+
+
 def test_real_http_work_edits_repeat_exception_and_undo_without_model(live_native):
     owner, peer = live_native
     created = owner.post("/api/work/spaces", json={"request_id": str(uuid4()), "name": "合成工作区"})

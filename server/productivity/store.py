@@ -249,31 +249,49 @@ def create_task(owner: str, workspace_id: str, body: CreateTask, *, transaction=
 def update_task(owner: str, workspace_id: str, task_id: str, body: UpdateTask, *, transaction=None) -> dict:
     with _transaction(owner, transaction) as db:
         row = _owned_task(db, owner, workspace_id, task_id)
-        if row["version"] != body.expected_version:
-            raise HTTPException(409, "任务已在其他设备更新，请刷新后再修改")
-        changes = body.model_dump(exclude_unset=True, exclude={"expected_version"})
-        zone = changes.get("timezone", row["timezone"])
-        if "due_at" in changes:
-            try:
-                changes["due_at"] = canonical_instant(changes["due_at"], zone)
-            except (ValueError, OverflowError):
-                raise HTTPException(422, "截止时间或时区无效") from None
-        changed = {key: value for key, value in changes.items() if value != row[key]}
-        if not changed:
-            return {"task": _task(row)}
-        now = int(time.time())
-        # Keys can only originate in the closed UpdateTask model above.
-        columns = ",".join(key + "=?" for key in changed)
-        result = db.execute(
-            "UPDATE work_tasks SET "
-            + columns
-            + ",version=version+1,updated_at=? WHERE id=? AND workspace_id=? AND version=?",
-            [*changed.values(), now, task_id, workspace_id, body.expected_version],
+        return _update_task_record(db, row, body)
+
+
+def _update_task_record(db, row, body):
+    workspace_id, task_id = row["workspace_id"], row["id"]
+    if row["version"] != body.expected_version:
+        raise HTTPException(409, "任务已在其他设备更新，请刷新后再修改")
+    changes = body.model_dump(exclude_unset=True, exclude={"expected_version"})
+    zone = changes.get("timezone", row["timezone"])
+    if "due_at" in changes:
+        try:
+            changes["due_at"] = canonical_instant(changes["due_at"], zone)
+        except (ValueError, OverflowError):
+            raise HTTPException(422, "截止时间或时区无效") from None
+    changed = {key: value for key, value in changes.items() if value != row[key]}
+    if not changed:
+        return {"task": _task(row)}
+    from . import scheduling
+
+    if changed.get("status") in {"doing", "done"}:
+        scheduling.guard_status(db, task_id)
+    if row["status"] == "done" and "status" in changed:
+        scheduling.guard_reopen(db, task_id)
+    now = int(time.time())
+    # Keys can only originate in the closed UpdateTask model above.
+    columns = ",".join(key + "=?" for key in changed)
+    result = db.execute(
+        "UPDATE work_tasks SET "
+        + columns
+        + ",version=version+1,updated_at=? WHERE id=? AND workspace_id=? AND version=?",
+        [*changed.values(), now, task_id, workspace_id, body.expected_version],
+    )
+    if result.rowcount != 1:
+        raise HTTPException(409, "任务已在其他设备更新，请刷新后再修改")
+    _event(db, workspace_id, task_id, "task_updated", row["version"] + 1, changed, now)
+    scheduling.task_changed(db, task_id)
+    return {
+        "task": _task(
+            db.execute(
+                "SELECT * FROM work_tasks WHERE id=? AND workspace_id=?", [task_id, workspace_id]
+            ).fetchone()
         )
-        if result.rowcount != 1:
-            raise HTTPException(409, "任务已在其他设备更新，请刷新后再修改")
-        _event(db, workspace_id, task_id, "task_updated", row["version"] + 1, changed, now)
-        return {"task": _task(_owned_task(db, owner, workspace_id, task_id))}
+    }
 
 
 def _validate_page(limit, before=None, status=None):

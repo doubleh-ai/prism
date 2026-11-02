@@ -6,34 +6,43 @@
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="same-origin">
   <title>项目 · Work</title>
-  <link rel="icon" type="image/svg+xml" href="/static/prism-mark.svg?v=100">
-  <link rel="stylesheet" href="/static/css/work.css?v=100">
-  <link rel="stylesheet" href="/static/css/projects.css?v=100">
-  <script src="/static/js/projects.js?v=100" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/static/prism-mark.svg?v=101">
+  <link rel="stylesheet" href="/static/css/work.css?v=101">
+  <link rel="stylesheet" href="/static/css/projects.css?v=101">
+  <script src="/static/js/projects.js?v=101" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳至项目</a>
   <div class="work-shell">
     <aside class="work-sidebar" aria-label="工作区导航">
-      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=100#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
+      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=101#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
       <nav class="project-nav" aria-label="工作导航"><a href="/projects" aria-current="page">项目</a><a href="/work">我的任务</a><a href="/calendar">日历安排</a><a href="/notifications">提醒</a></nav>
-      <div class="project-sidebar-bottom"><a href="/prism?feedback=projects">反馈与建议</a><a href="/">DoubleH</a></div>
+      <div class="project-sidebar-bottom"><a href="/prism?feedback=work">反馈与建议</a><a href="/">DoubleH</a></div>
     </aside>
     <main class="work-main project-main" id="main">
       <header class="work-header"><h1>项目</h1><button class="button button-secondary" type="button" id="refresh">刷新</button></header>
-      <p class="project-account" id="account"></p>
+      <p class="project-account" id="account"></p><p class="project-assistant"><a href="/work">告诉助手安排 →</a></p>
       <div class="work-notice" id="notice" role="status" aria-live="polite" hidden></div>
       <div id="content" hidden>
-        <section class="project-create" aria-labelledby="createTitle"><h2 id="createTitle">新建项目</h2>
+        <section class="project-section" id="invitationSection" hidden aria-labelledby="invitationTitle"><h2 id="invitationTitle">项目邀请</h2><div id="invitations"></div></section>
+        <details class="project-create"><summary id="createTitle">手动新建项目</summary>
           <form id="createForm"><label for="createName">项目名称</label><input id="createName" maxlength="200" required autocomplete="off"><label for="createDescription">说明（可选）</label><textarea id="createDescription" maxlength="4000" rows="2"></textarea><button class="button button-primary" type="submit">创建项目</button></form>
-        </section>
+        </details>
         <section class="project-section" aria-labelledby="listTitle"><h2 id="listTitle">我的项目</h2><div id="projectList"></div><p class="empty-state" id="empty" hidden>还没有项目，可以先创建一个。</p></section>
         <section class="project-detail" id="detail" hidden aria-labelledby="detailTitle"><div class="section-heading"><h2 id="detailTitle">项目详情</h2><button class="button button-quiet" type="button" id="closeDetail">关闭</button></div>
-          <form id="editForm"><label for="editName">项目名称</label><input id="editName" maxlength="200" required><label for="editDescription">说明</label><textarea id="editDescription" maxlength="4000" rows="3"></textarea><label for="editStatus">状态</label><select id="editStatus"><option value="active">进行中</option><option value="completed">已完成</option><option value="archived">已归档</option></select><button class="button button-primary" type="submit">保存更改</button></form>
+          <p class="project-task-message" id="projectRole"></p><p id="projectDescription"></p>
+          <details id="projectSettings" hidden><summary>项目设置</summary><form id="editForm"><label for="editName">项目名称</label><input id="editName" maxlength="200" required><label for="editDescription">说明</label><textarea id="editDescription" maxlength="4000" rows="3"></textarea><label for="editStatus">状态</label><select id="editStatus"><option value="active">进行中</option><option value="completed">已完成</option><option value="archived">已归档</option></select><button class="button button-primary" type="submit">保存更改</button></form></details>
           <div class="project-tasks"><h3>项目任务</h3>
-            <form id="taskForm"><label for="taskTitle">任务名称</label><input id="taskTitle" maxlength="200" required autocomplete="off"><label for="taskPriority">优先级</label><select id="taskPriority"><option value="normal">普通</option><option value="high">重要</option><option value="low">较低</option></select><button class="button button-primary" type="submit">添加任务</button></form>
-            <p class="project-task-message" id="taskHint" hidden></p><div id="taskList" aria-live="polite"></div><p class="project-task-message"><a href="/work">在任务中管理状态</a></p>
+            <details id="taskCreate" hidden><summary>手动添加任务</summary><form id="taskForm"><label for="taskTitle">任务名称</label><input id="taskTitle" maxlength="200" required autocomplete="off"><label for="taskPriority">优先级</label><select id="taskPriority"><option value="normal">普通</option><option value="high">重要</option><option value="low">较低</option></select><button class="button button-primary" type="submit">添加任务</button></form></details>
+            <p class="project-task-message" id="taskHint" hidden></p><div id="taskList" aria-live="polite"></div>
+            <form id="taskEditForm" hidden><h3>编辑任务</h3><label for="taskEditTitle">任务名称</label><input id="taskEditTitle" maxlength="200" required><label for="taskEditStatus">状态</label><select id="taskEditStatus"><option value="todo">待开始</option><option value="doing">进行中</option><option value="done">已完成</option><option value="cancelled">已取消</option></select><label for="taskEditPriority">优先级</label><select id="taskEditPriority"><option value="normal">普通</option><option value="high">重要</option><option value="low">较低</option></select><button class="button button-primary" type="submit">保存任务</button></form>
           </div>
+          <details class="project-extra" id="membersDetails"><summary>成员</summary><p class="project-task-message">共享范围仅限此项目的说明与任务。</p><div id="membersBody"></div><form id="inviteForm" hidden><label for="inviteUser">账号</label><input id="inviteUser" maxlength="100" required autocomplete="off"><label for="inviteRole">权限</label><select id="inviteRole"><option value="viewer">查看</option><option value="editor">编辑任务与安排</option></select><button class="button button-primary" type="submit">发送站内邀请</button></form><div id="activityBody"></div></details>
+          <details class="project-extra" id="scheduleDetails"><summary>时间安排</summary><p class="project-task-message">计划是估算；未填写时长按默认值计算，未分配的任务仍需安排。工作日与假期由项目自行设置。</p><div id="scheduleBody"></div>
+            <form id="scheduleForm" hidden><h3>工作时间</h3><label for="scheduleStart">计划开始</label><input type="datetime-local" id="scheduleStart" step="0.001" required><label id="scheduleStartFoldLabel" hidden>这个时间出现两次，请选择<select id="scheduleStartFold"></select></label><details><summary>高级设置</summary><label for="scheduleZone">时区</label><input id="scheduleZone" required><label for="workStart">工作开始</label><input type="time" id="workStart" required><label for="workEnd">工作结束</label><input type="time" id="workEnd" required><fieldset id="workWeekdays"><legend>工作日</legend><label><input type="checkbox" value="0">周一</label><label><input type="checkbox" value="1">周二</label><label><input type="checkbox" value="2">周三</label><label><input type="checkbox" value="3">周四</label><label><input type="checkbox" value="4">周五</label><label><input type="checkbox" value="5">周六</label><label><input type="checkbox" value="6">周日</label></fieldset><label for="holidays">休息日期（每行一个，YYYY-MM-DD）</label><textarea id="holidays" rows="2"></textarea></details><button class="button button-primary" type="submit">保存工作时间</button></form>
+            <form id="planForm" hidden><h3>任务估算</h3><label for="planTask">选择任务</label><select id="planTask"></select><label for="planDuration">预计时长（分钟）</label><input type="number" id="planDuration" min="0" max="100000" step="1" value="60" required><label for="planAssignee">负责人</label><select id="planAssignee"></select><label class="project-check"><input type="checkbox" id="planMilestone">里程碑（时长为零）</label><details><summary>高级设置</summary><p id="planZone" class="project-task-message"></p><label for="planNotBefore">不早于（可选）</label><input type="datetime-local" id="planNotBefore" step="0.001"><label id="planNotBeforeFoldLabel" hidden>这个时间出现两次，请选择<select id="planNotBeforeFold"></select></label></details><button class="button button-primary" type="submit">保存任务估算</button></form>
+            <details id="dependencyDetails" hidden><summary>任务依赖</summary><p class="project-task-message">前置任务完成后再安排后续任务。</p><div id="dependencyList"></div><form id="dependencyForm"><label for="dependencyBefore">前置任务</label><select id="dependencyBefore"></select><label for="dependencyAfter">后续任务</label><select id="dependencyAfter"></select><label for="dependencyLag">间隔（分钟）</label><input type="number" id="dependencyLag" value="0" min="0" max="43200" step="1"><button class="button button-secondary" type="submit">添加依赖并保存</button></form></details>
+          </details>
         </section>
       </div>
     </main>

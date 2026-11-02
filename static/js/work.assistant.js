@@ -16,18 +16,43 @@
   }
   function fieldValue(key,value,kind,zone){
     if(value===undefined)return '未提供';if(value===null||value==='')return '未设置';
-    if(key==='start_at'||key==='end_at'||key==='due_at')return time(value,zone);
+    if(key==='start_at'||key==='end_at'||key==='due_at'||key==='not_before')return time(value,zone);
+    if(key==='duration_minutes')return value+' 分钟';
+    if(key==='milestone')return value?'是':'否';
     if(key==='recurrence')return recurrence(value);
     if(key==='cancelled')return value?'已取消':'未取消';
     if(key==='status'){var statuses=kind==='update_project'?{active:'进行中',completed:'已完成',archived:'已归档'}:{todo:'待开始',doing:'进行中',done:'已完成',cancelled:'已取消'};return statuses[value]||'状态待核对';}
     if(key==='priority')return ({low:'较低',normal:'普通',high:'重要'})[value]||'优先级待核对';
     return typeof value==='string'||typeof value==='number'?String(value):'内容待核对';
   }
+  function projectPreview(action){
+    var kind=action.kind,fields=action.fields||{},before=action.before||{},target=action.target||{},row=element('li'),valid=true,changed=0;
+    row.append(element('strong',(target.project_name||'项目')+' · '+(target.title||'时间安排')));
+    if(kind==='set_project_dependencies'){
+      var changes=target.dependency_changes;
+      if(!Array.isArray(changes)||!changes.length)return {row:row,valid:false};
+      changes.forEach(function(edge){if(!edge.before_title||!edge.after_title||!Number.isInteger(edge.lag_minutes)||edge.lag_minutes<0){valid=false;return;}row.append(element('p',(target.remove?'移除依赖：':'先后顺序：')+edge.before_title+' → '+edge.after_title+(edge.lag_minutes?'，间隔 '+edge.lag_minutes+' 工作分钟':'')));});
+      return {row:row,valid:valid};
+    }
+    if(kind==='set_project_calendar'){
+      var config=before.config||{},days=['一','二','三','四','五','六','日'];
+      if(!fields.start_at||!fields.timezone||!Array.isArray(fields.weekdays)||!fields.weekdays.length||!Array.isArray(fields.holidays)||!Number.isInteger(fields.work_start)||!Number.isInteger(fields.work_end)||fields.work_end<=fields.work_start)return {row:row,valid:false};
+      row.append(element('p','计划开始：'+(before.configured?time(config.start_at,config.timezone):'未启用')+' → '+time(fields.start_at,fields.timezone)));
+      function clock(n){return String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');}
+      row.append(element('p',fields.timezone+'，'+clock(fields.work_start)+'–'+clock(fields.work_end)+'，'+fields.weekdays.map(function(d){if(!Number.isInteger(d)||d<0||d>6){valid=false;return '待核对';}return '周'+days[d];}).join('、')));
+      row.append(element('p',fields.holidays.length?'额外休息日：'+fields.holidays.join('、'):'未设置额外休息日；请按项目实际日历核对。'));
+      return {row:row,valid:valid};
+    }
+    var names={duration_minutes:'工时',assignee:'负责人',not_before:'不早于',milestone:'里程碑'},internal={request_id:true,expected_version:true};
+    Object.keys(fields).forEach(function(key){if(internal[key])return;if(!names[key]||!Object.prototype.hasOwnProperty.call(before,key)){valid=false;return;}if(before[key]===fields[key])return;changed++;var oldValue=key==='duration_minutes'&&before[key]===null?'默认估算 60 分钟':fieldValue(key,before[key],kind,target.timezone),newValue=key==='duration_minutes'&&fields[key]===null?'默认估算 60 分钟':fieldValue(key,fields[key],kind,target.timezone);row.append(element('p',names[key]+'：'+oldValue+' → '+newValue));});
+    return {row:row,valid:valid&&changed>0};
+  }
   function previewAction(action){
     var fields=action.fields||{},kind=action.kind||'',update=kind.indexOf('update_')===0,before=action.before||{},target=action.target||{},zone=target.timezone||before.timezone||fields.timezone,row=element('li');
-    var types={create_task:'任务',create_event:'日程',create_project:'项目',update_task:'修改任务',update_project:'修改项目',update_event:before.recurrence?'修改整组重复日程':'修改日程',update_occurrence:'只调整这一次日程'};
+    if(kind==='plan_project_task'||kind==='set_project_dependencies'||kind==='set_project_calendar')return projectPreview(action);
+    var types={create_task:'任务',create_project_task:'项目任务',create_event:'日程',create_project:'项目',update_task:'修改任务',update_project_task:'修改项目任务',update_project:'修改项目',update_event:before.recurrence?'修改整组重复日程':'修改日程',update_occurrence:'只调整这一次日程'};
     if(!types[kind])return {row:row,valid:false};
-    row.append(element('strong',types[kind]+'：'+(update?(target.title||before.title||before.name||'未命名'):(fields.title||fields.name||'未命名'))));
+    row.append(element('strong',types[kind]+'：'+(target.project_name?target.project_name+' · ':'')+(update?(target.title||before.title||before.name||'未命名'):(fields.title||fields.name||'未命名'))));
     if(!update){if(fields.start_at)row.append(element('p',time(fields.start_at,fields.timezone)+' 至 '+time(fields.end_at,fields.timezone)));if(fields.due_at)row.append(element('p','截止：'+time(fields.due_at,fields.timezone)));if(fields.recurrence)row.append(element('p','重复：'+recurrence(fields.recurrence)));return {row:row,valid:true};}
     var names={title:'名称',name:'名称',description:'说明',status:'状态',priority:'优先级',due_at:'截止时间',start_at:'开始',end_at:'结束',timezone:'时区',recurrence:'重复',cancelled:'日程状态'},internal={request_id:true,expected_version:true,expected_series_version:true},valid=true,changed=0;
     Object.keys(fields).forEach(function(key){
@@ -44,7 +69,7 @@
   function render(proposal){state.proposal=proposal;state.unknown=false;var box=$('assistantDetails');box.replaceChildren();$('assistantPreview').hidden=false;['assistantConfirm','assistantModel','assistantCheck','assistantUndo'].forEach(function(id){button(id,false);});$('assistantModelHelp').hidden=true;$('assistantPreviewTitle').textContent='安排预览';
     if(proposal.state==='ready'){var actions=Array.isArray(proposal.actions)?proposal.actions:[];if(!proposal.id||!proposal.digest||!actions.length){notice('预览不完整，请核对结果。');button('assistantCheck',!!proposal.id);return;}var list=element('ul'),valid=true;actions.forEach(function(action){var item=previewAction(action);list.append(item.row);if(!item.valid)valid=false;});box.append(list);button('assistantConfirm',valid);notice(valid?'请核对后确认安排。':'预览信息不完整，暂无法确认；请重新整理或核对。');}
     else if(proposal.state==='clarification'){box.append(element('p',proposal.clarification||'请补充安排内容。'));button('assistantModel',proposal.can_use_model!==false);$('assistantModelHelp').hidden=proposal.can_use_model===false;notice('可以修改上面的要求后重新整理。');}
-    else if(proposal.state==='completed'){ $('assistantPreviewTitle').textContent='安排已完成';var results=Array.isArray(proposal.results)?proposal.results:[],links={create_task:['查看任务','/work'],update_task:['查看任务','/work'],create_event:['查看日历','/calendar'],update_event:['查看日历','/calendar'],update_occurrence:['查看日历','/calendar'],create_project:['查看项目','/projects'],update_project:['查看项目','/projects']},seen={},conflicts=0,truncated=false;results.forEach(function(result){var link=links[result.kind],detail=result.result||{};if(link&&!seen[link[1]]){var a=element('a',link[0]);a.href=link[1];a.className='button button-secondary';box.append(a);seen[link[1]]=true;}if(Array.isArray(detail.conflicts))conflicts+=detail.conflicts.length;if(detail.conflicts_truncated)truncated=true;});if(conflicts||truncated)box.append(element('p','存在'+(truncated?'至少 ':' ')+conflicts+' 条日程时间重叠，请查看日历核对。'));button('assistantUndo',!!proposal.digest);notice('');$('workRefresh').click();}
+    else if(proposal.state==='completed'){ $('assistantPreviewTitle').textContent='安排已完成';var results=Array.isArray(proposal.results)?proposal.results:[],links={create_task:['查看任务','/work'],update_task:['查看任务','/work'],create_event:['查看日历','/calendar'],update_event:['查看日历','/calendar'],update_occurrence:['查看日历','/calendar'],create_project:['查看项目','/projects'],update_project:['查看项目','/projects'],create_project_task:['查看项目','/projects'],update_project_task:['查看项目','/projects'],plan_project_task:['查看项目','/projects'],set_project_dependencies:['查看项目','/projects'],set_project_calendar:['查看项目','/projects']},seen={},conflicts=0,truncated=false;results.forEach(function(result){var link=links[result.kind],detail=result.result||{};if(link&&!seen[link[1]]){var a=element('a',link[0]);a.href=link[1];a.className='button button-secondary';box.append(a);seen[link[1]]=true;}if(Array.isArray(detail.conflicts))conflicts+=detail.conflicts.length;if(detail.conflicts_truncated)truncated=true;});if(conflicts||truncated)box.append(element('p','存在'+(truncated?'至少 ':' ')+conflicts+' 条日程时间重叠，请查看日历核对。'));button('assistantUndo',!!proposal.digest);notice('');$('workRefresh').click();}
     else if(proposal.state==='undone'){ $('assistantPreviewTitle').textContent='已撤销';notice('');$('workRefresh').click();}
     else {state.unknown=true;box.append(element('p',proposal.state==='planning'?'正在整理，请稍后核对。':'结果尚未确定，请先核对。'));button('assistantCheck',true);notice('');}
   }

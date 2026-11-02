@@ -14,7 +14,7 @@ def test_official_vibe_workbench_static_contract():
     assert 'id="vibeDepth"' not in template
     assert 'id="vibeHistoryList"' in template
     assert "开始正式研究" not in template
-    assert "app.vibe.js?v=100" in template
+    assert "app.vibe.js?v=101" in template
     assert '#appShell[data-mode="vibe"]' in css
     assert "/api/vibe/plan" in js
     assert "/api/vibe/engine" not in js
