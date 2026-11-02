@@ -98,6 +98,16 @@ PR 自己运行的绿色检查属于开发证据。生产晋级还需独立受�
 
 ## v0.22.0 incremental data compatibility
 
+Work arrangement updates add owner-scoped before-images and calendar time
+exceptions. Before promoting a candidate that writes these fields, use an
+isolated database to create, update, read and undo an arrangement and export a
+changed occurrence with the accepted Native recovery reader as well. Validate
+actual occurrence times, versions and existing mutation receipts, not just table
+presence. Older code must not reset exceptions or discard new Work tables to
+make recovery appear compatible. If the recovery candidate cannot interpret
+the current calendar and proposal data honestly, qualify a suitable Native
+reader before release; a successful schema migration does not prove rollback.
+
 The capability candidate adds personal task/calendar and research-profile tables.
 Its local UI and regression checks do not grant production promotion. In addition
 to the existing gates, validate additive schema initialization, account-deletion

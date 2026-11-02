@@ -695,10 +695,10 @@ the existing CSRF protection and reject account switches.
 | `POST /api/work/assistant/proposals` | UUID `request_id`, `text`, IANA `timezone`, explicit `allow_model` (default false); returns a validated preview or clarification, with no business write |
 | `GET /api/work/assistant/proposals/by-request/{request_id}` | Reconcile a lost response using the original request, without resending a model call |
 | `GET /api/work/assistant/proposals/{id}` | Read the original proposal, execution state and receipt |
-| `POST /api/work/assistant/proposals/{id}/confirm` | Exact preview `digest`, live owner and 15-minute validity; creates only proposed objects, with stable business idempotency IDs |
-| `POST /api/work/assistant/proposals/{id}/undo` | Cancel/archive created objects while original versions still match; preserves records and refuses later edits |
+| `POST /api/work/assistant/proposals/{id}/confirm` | Exact preview `digest`, live owner and 15-minute validity; creates/updates proposed objects and records the whole result in one transaction |
+| `POST /api/work/assistant/proposals/{id}/undo` | Atomically restore original values or cancel/archive newly created objects in reverse order; refuses later edits |
 | `GET /api/work/calendar/{id}` | Original series and recurrence rule for whole-series editing |
-| `PUT /api/work/calendar/{id}/occurrences/{occurrence_id}` | UUID, instance `expected_version` and `cancelled`; does not cancel other occurrences |
+| `PUT /api/work/calendar/{id}/occurrences/{occurrence_id}` | UUID, instance `expected_version`, optional `expected_series_version`; changes `cancelled` and/or an explicit `start_at`/`end_at` pair, preserving other dates; returns actual times and bounded overlaps |
 | `GET/PUT /api/preferences/portfolio` | Own explicit security positions, currency, cash/debt and observation times; writes compare `expected_version` and return deterministic risk rules |
 | `GET /api/knowledge/items?query=...&before=...&limit=30` | Search all accessible persisted structured claims with bounded cursor pagination |
 | `GET /api/knowledge/items/{id}` | Claim, source passages, review history and affected owned research |
@@ -712,7 +712,12 @@ or monthly; `interval` 1–12; weekly `weekdays` 0 (Monday) through 6; exactly o
 ten years). Invalid month dates/DST gaps are skipped; the explicit DTSTART fold
 selects repeated local times. Agenda returns original `events` and actual
 `occurrences`; the latter have separate instance and series versions. ICS uses
-the materialized UTC occurrence set and cancellation exceptions.
+the finite UTC occurrence set and cancellation exceptions. Independently moved
+instances retain the series UID with their original DTSTART as RECURRENCE-ID and
+their actual DTSTART/DTEND; they do not inherit a wrong master duration. Whole
+series edits preserve existing exceptions, refusing silent removal; explicit
+`reset_exceptions: true` resets them. Omitted new fields preserve old mutation
+fingerprints for same-request reconciliation.
 
 Portfolio decimals are strings, not binary floats. At most 100 unique securities
 are accepted. Quotes older than seven days, future observations and mixed
@@ -727,6 +732,16 @@ instructions stay local. A model is used only after explicit selection and a
 configured Work route permitting that data purpose. A model proposal cannot
 execute itself. Unknown, failed and reserved model use is not refunded or reset
 by route edits. Costs and subscription coverage stay unknown until verified.
+
+Planner actions may create or update tasks, projects and events. Update selectors
+use `match_title`, and event selectors optionally use local `on_date` with
+`scope: occurrence` (default) or explicit `series`. The server alone resolves
+owned IDs, current versions and before-images. Missing/duplicate targets clarify
+instead of guessing. Previewed changes are pinned to those versions; confirm and
+inverse actions commit with their receipts in one transaction. Later edits are
+never overwritten. Task/project/calendar changes can be combined, but duplicate
+changes to one object must be merged. A `can_use_model: false` clarification does
+not offer another redundant model request.
 
 Public PDF reads retain the same DNS/TLS/host policy. Bodies are capped at 8 MiB;
 an isolated Python parser has CPU/memory/time limits, no inherited credentials,

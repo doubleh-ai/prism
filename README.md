@@ -25,6 +25,8 @@ Prism 是可自行部署的开源投资研究工作台。你可以在对话中�
 
 开发中的 **v0.23.0 候选** 整合 v0.22.1 修复，增加 DoubleH 产品入口、Work 个人项目和服务器站内提醒，并改善 Native 研究收尾。候选尚未发布，具体支持范围见[功能说明](docs/CAPABILITY_STATUS.md)。维护者与其他 Agent 可从[仓库维护 Skill](.agents/skills/prism-maintenance/SKILL.md)接手。
 
+Work 的任务、项目、日程及 Agent 辅助安排用法见[使用指南](docs/work.md)。
+
 ## 主要能力
 
 - **研究对话**：综合研究、产业链研究、公司研究、期货研究四种内置方法；原生任务可保存进度、按事件回放，并确认后台停止结果。

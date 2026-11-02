@@ -5,7 +5,10 @@ import os
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -22,6 +25,8 @@ def no_external(*args, **kwargs):
     raise AssertionError('isolated HTTP journey forbids outgoing connections')
 socket.socket.connect = no_external
 socket.socket.connect_ex = no_external
+import dotenv
+dotenv.load_dotenv=lambda *args,**kwargs:False
 from server import config
 config.MODELS = {'mock': {'name':'合成模型', 'api_key':'synthetic-only', 'model':'mock',
                           'base_url':'https://api.deepseek.com/anthropic'}}
@@ -240,3 +245,63 @@ def test_real_http_refresh_cancel_reports_sources_and_owner_isolation(live_nativ
     assert report.status_code == 200 and "合成" in report.text
     assert peer.get(f"/api/reports/library/{report_id}").status_code == 404
     assert peer.get("/api/reports/library").json()["reports"] == []
+
+
+def test_real_http_work_edits_repeat_exception_and_undo_without_model(live_native):
+    owner, peer = live_native
+    created = owner.post("/api/work/spaces", json={"request_id": str(uuid4()), "name": "合成工作区"})
+    assert created.status_code == 200
+    space = created.json()["workspace"]["id"]
+    created = owner.post(
+        f"/api/work/spaces/{space}/tasks", json={"request_id": str(uuid4()), "title": "整理材料"}
+    )
+    assert created.status_code == 200
+    task = created.json()["task"]
+    body = {"request_id": str(uuid4()), "text": "把任务「整理材料」标为已完成", "timezone": "Asia/Shanghai"}
+    p = owner.post("/api/work/assistant/proposals", json=body).json()["proposal"]
+    assert p["state"] == "ready" and p["actions"][0]["target"]["id"] == task["id"]
+    path = f"/api/work/assistant/proposals/{p['id']}"
+    assert peer.post(path + "/confirm", json={"digest": p["digest"]}).status_code == 404
+    first = owner.post(path + "/confirm", json={"digest": p["digest"]})
+    assert (
+        first.status_code == 200
+        and owner.post(path + "/confirm", json={"digest": p["digest"]}).json() == first.json()
+    )
+    assert owner.get(f"/api/work/spaces/{space}/tasks/{task['id']}").json()["task"]["status"] == "done"
+    assert owner.post(path + "/undo", json={"digest": p["digest"]}).status_code == 200
+    assert owner.get(f"/api/work/spaces/{space}/tasks/{task['id']}").json()["task"]["status"] == "todo"
+    day = datetime.now(ZoneInfo("Asia/Shanghai")).date() + timedelta(days=1)
+    start = datetime(day.year, day.month, day.day, 10, tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC)
+    created = owner.post(
+        "/api/work/calendar",
+        json={
+            "request_id": str(uuid4()),
+            "title": "周会",
+            "timezone": "Asia/Shanghai",
+            "start_at": start.isoformat(),
+            "end_at": (start + timedelta(hours=1)).isoformat(),
+            "recurrence": {"frequency": "daily", "count": 3},
+        },
+    )
+    assert created.status_code == 200
+    event = created.json()["event"]
+    args = {"start": (start - timedelta(hours=2)).isoformat(), "end": (start + timedelta(days=4)).isoformat()}
+    original = owner.get("/api/work/calendar", params=args).json()["occurrences"]
+    p = owner.post(
+        "/api/work/assistant/proposals",
+        json={"request_id": str(uuid4()), "text": "把明天的周会改到下午3点", "timezone": "Asia/Shanghai"},
+    ).json()["proposal"]
+    assert p["state"] == "ready" and p["actions"][0]["kind"] == "update_occurrence"
+    path = f"/api/work/assistant/proposals/{p['id']}"
+    assert owner.post(path + "/confirm", json={"digest": p["digest"]}).status_code == 200
+    actual = owner.get("/api/work/calendar", params=args).json()["occurrences"]
+    assert actual[0]["start_at"] != original[0]["start_at"] and actual[1:] == original[1:]
+    exported = owner.get(f"/api/work/calendar/{event['id']}.ics")
+    assert exported.status_code == 200 and exported.text.count("BEGIN:VEVENT") == 2
+    assert "RECURRENCE-ID:" + start.strftime("%Y%m%dT%H%M%SZ") in exported.text
+    assert "DTSTART:" + (start + timedelta(hours=5)).strftime("%Y%m%dT%H%M%SZ") in exported.text
+    assert owner.post(path + "/undo", json={"digest": p["digest"]}).status_code == 200
+    restored = owner.get("/api/work/calendar", params=args).json()["occurrences"]
+    assert [r["start_at"] for r in restored] == [r["start_at"] for r in original]
+    assert peer.get(f"/api/work/calendar/{event['id']}").status_code == 404
+    assert owner.get("/__fixture/state").json()["model_calls"] == 0

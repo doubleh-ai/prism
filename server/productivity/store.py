@@ -84,9 +84,15 @@ def _active(db, owner):
 
 
 @contextmanager
-def _transaction(owner):
+def _transaction(owner, existing=None):
     require_enabled()
     with get_db() as db:
+        if existing is not None:
+            if existing is not db or not db.in_transaction:
+                raise RuntimeError("shared Work mutation requires the active connection")
+            _active(db, owner)
+            yield db
+            return
         if db.in_transaction:
             raise RuntimeError("Work mutation requires its own transaction")
         db.execute("BEGIN IMMEDIATE")
@@ -143,8 +149,12 @@ def _owned_task(db, owner, workspace_id, task_id):
     return row
 
 
-def _fingerprint(kind, workspace_id, body):
-    value = {"kind": kind, "workspace_id": workspace_id, "body": body.model_dump(exclude={"request_id"})}
+def _fingerprint(kind, workspace_id, body, *, omit=()):
+    value = {
+        "kind": kind,
+        "workspace_id": workspace_id,
+        "body": body.model_dump(exclude={"request_id", *omit}),
+    }
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -184,9 +194,9 @@ def _event(db, workspace_id, task_id, action, version, fields, now):
     )
 
 
-def create_space(owner: str, body: CreateSpace) -> dict:
+def create_space(owner: str, body: CreateSpace, *, transaction=None) -> dict:
     fingerprint = _fingerprint("space", "", body)
-    with _transaction(owner) as db:
+    with _transaction(owner, transaction) as db:
         replay = _replay(db, owner, body.request_id, fingerprint)
         if replay is not None:
             _workspace(db, owner, replay["workspace"]["id"])
@@ -204,9 +214,9 @@ def create_space(owner: str, body: CreateSpace) -> dict:
         return {**response, "replayed": False}
 
 
-def create_task(owner: str, workspace_id: str, body: CreateTask) -> dict:
+def create_task(owner: str, workspace_id: str, body: CreateTask, *, transaction=None) -> dict:
     fingerprint = _fingerprint("task", workspace_id, body)
-    with _transaction(owner) as db:
+    with _transaction(owner, transaction) as db:
         _workspace(db, owner, workspace_id)
         replay = _replay(db, owner, body.request_id, fingerprint)
         if replay is not None:
@@ -236,8 +246,8 @@ def create_task(owner: str, workspace_id: str, body: CreateTask) -> dict:
         return {**response, "replayed": False}
 
 
-def update_task(owner: str, workspace_id: str, task_id: str, body: UpdateTask) -> dict:
-    with _transaction(owner) as db:
+def update_task(owner: str, workspace_id: str, task_id: str, body: UpdateTask, *, transaction=None) -> dict:
+    with _transaction(owner, transaction) as db:
         row = _owned_task(db, owner, workspace_id, task_id)
         if row["version"] != body.expected_version:
             raise HTTPException(409, "任务已在其他设备更新，请刷新后再修改")

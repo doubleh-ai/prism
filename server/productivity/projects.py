@@ -63,11 +63,12 @@ def _project(db, owner, project_id):
     return {key: value for key, value in dict(row).items() if key != "owner"}
 
 
-def save_project(owner, body, project_id=None):
-    init_projects_db()
+def save_project(owner, body, project_id=None, *, transaction=None):
+    if transaction is None:
+        init_projects_db()
     kind = "project_update" if project_id else "project_create"
     fingerprint = store._fingerprint(kind, project_id or "", body)
-    with store._transaction(owner) as db:
+    with store._transaction(owner, transaction) as db:
         if project_id:
             _project(db, owner, project_id)
         replay = store._replay(db, owner, body.request_id, fingerprint)

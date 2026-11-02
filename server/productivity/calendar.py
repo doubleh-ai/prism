@@ -46,6 +46,7 @@ class EventCreate(ClosedModel):
 class EventUpdate(EventCreate):
     expected_version: int = Field(ge=1)
     cancelled: bool = False
+    reset_exceptions: bool = False
 
 
 def init_calendar_db():
@@ -70,6 +71,14 @@ def init_calendar_db():
         );
         CREATE INDEX IF NOT EXISTS calendar_instances_owner_start
             ON work_calendar_instances(owner,start_at);
+        CREATE TABLE IF NOT EXISTS work_calendar_instance_edits (
+            occurrence_id TEXT PRIMARY KEY,series_id TEXT NOT NULL,owner TEXT NOT NULL,
+            original_start_at TEXT NOT NULL,original_end_at TEXT NOT NULL,
+            start_at TEXT NOT NULL,end_at TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS calendar_edits_account_delete AFTER DELETE ON users BEGIN
+            DELETE FROM work_calendar_instance_edits WHERE owner=OLD.username;
+        END;
         INSERT OR IGNORE INTO work_calendar_instances
             SELECT id,id,owner,start_at,end_at,version,0,updated_at FROM work_calendar c
             WHERE NOT EXISTS(SELECT 1 FROM work_calendar_rules r WHERE r.series_id=c.id);
@@ -116,11 +125,17 @@ def _conflicts(db, owner, body, excluding=""):
     return {"conflicts": [dict(row) for row in rows[:20]], "conflicts_truncated": len(rows) > 20}
 
 
-def save_event(owner, body, event_id=None):
-    init_calendar_db()
+def save_event(owner, body, event_id=None, *, transaction=None):
+    if transaction is None:
+        init_calendar_db()
     kind = "calendar_update" if event_id else "calendar_create"
-    fingerprint = store._fingerprint(kind, event_id or "", body)
-    with store._transaction(owner) as db:
+    fingerprint = store._fingerprint(
+        kind,
+        event_id or "",
+        body,
+        omit={"reset_exceptions"} if isinstance(body, EventUpdate) and not body.reset_exceptions else (),
+    )
+    with store._transaction(owner, transaction) as db:
         if event_id:
             _owned(db, owner, event_id)
         replay = store._replay(db, owner, body.request_id, fingerprint)
@@ -167,6 +182,29 @@ def save_event(owner, body, event_id=None):
             for row in db.execute("SELECT * FROM work_calendar_instances WHERE series_id=?", [event_id])
         }
         instances = expand(event_id, body.start_at, body.end_at, body.timezone, body.recurrence)
+        edits = {
+            r["occurrence_id"]: dict(r)
+            for r in db.execute(
+                "SELECT * FROM work_calendar_instance_edits WHERE series_id=? AND owner=?", [event_id, owner]
+            )
+        }
+        reset = isinstance(body, EventUpdate) and body.reset_exceptions
+        protected = set(edits) | {key for key, value in previous.items() if value["cancelled"]}
+        if not reset and protected - {i["id"] for i in instances}:
+            raise HTTPException(409, "部分日期已有单次调整，请先处理或明确重置这些调整")
+        if reset:
+            db.execute(
+                "DELETE FROM work_calendar_instance_edits WHERE series_id=? AND owner=?", [event_id, owner]
+            )
+            edits = {}
+        for instance in instances:
+            override = edits.get(instance["id"])
+            if override:
+                db.execute(
+                    "UPDATE work_calendar_instance_edits SET original_start_at=?,original_end_at=? WHERE occurrence_id=?",
+                    [instance["start_at"], instance["end_at"], instance["id"]],
+                )
+                instance["start_at"], instance["end_at"] = override["start_at"], override["end_at"]
         total = db.execute(
             "SELECT COUNT(*) FROM work_calendar_instances WHERE owner=? AND series_id<>?", [owner, event_id]
         ).fetchone()[0]
@@ -189,7 +227,7 @@ def save_event(owner, body, event_id=None):
                     instance["start_at"],
                     instance["end_at"],
                     old["version"] + 1 if old else 1,
-                    int(bool(old and old["cancelled"])),
+                    int(bool(old and old["cancelled"] and not reset)),
                     int(time.time()),
                 ],
             )
@@ -219,11 +257,18 @@ async def update_event(event_id: str, request: Request):
 class OccurrenceUpdate(ClosedModel):
     request_id: str = Field(min_length=36, max_length=36)
     expected_version: int = Field(ge=1)
-    cancelled: bool
+    cancelled: bool | None = None
+    start_at: str | None = Field(default=None, max_length=40)
+    end_at: str | None = Field(default=None, max_length=40)
+    expected_series_version: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def valid_request(self):
         CreateSpace.request_uuid(self.request_id)
+        if self.cancelled is None and self.start_at is None and self.end_at is None:
+            raise ValueError("empty occurrence change")
+        if (self.start_at is None) != (self.end_at is None):
+            raise ValueError("provide both occurrence times")
         return self
 
 
@@ -234,10 +279,20 @@ async def update_occurrence(event_id: str, occurrence_id: str, request: Request)
     body = await _body(request, OccurrenceUpdate)
     if _owner(request) != owner:
         raise HTTPException(401, "请重新登录")
-    init_calendar_db()
-    fingerprint = store._fingerprint("calendar_occurrence", occurrence_id, body)
-    with store._transaction(owner) as db:
-        _owned(db, owner, event_id)
+    return save_occurrence(owner, event_id, occurrence_id, body)
+
+
+def save_occurrence(owner, event_id, occurrence_id, body, *, transaction=None):
+    if transaction is None:
+        init_calendar_db()
+    fingerprint = store._fingerprint(
+        "calendar_occurrence",
+        occurrence_id,
+        body,
+        omit={k for k in ("start_at", "end_at", "expected_series_version") if getattr(body, k) is None},
+    )
+    with store._transaction(owner, transaction) as db:
+        parent = _owned(db, owner, event_id)
         row = db.execute(
             "SELECT * FROM work_calendar_instances WHERE id=? AND series_id=? AND owner=?",
             [occurrence_id, event_id, owner],
@@ -249,11 +304,57 @@ async def update_occurrence(event_id: str, occurrence_id: str, request: Request)
             return {**replay, "replayed": True}
         if row["version"] != body.expected_version:
             raise HTTPException(409, "该次日程已更新，请刷新后修改")
+        if body.expected_series_version is not None and parent["version"] != body.expected_series_version:
+            raise HTTPException(409, "整组日程已经改变，请重新预览")
+        start, end = row["start_at"], row["end_at"]
+        cancelled = bool(row["cancelled"]) if body.cancelled is None else body.cancelled
+        if body.start_at is not None:
+            try:
+                validated = EventCreate(
+                    request_id=body.request_id,
+                    title=parent["title"],
+                    start_at=body.start_at,
+                    end_at=body.end_at,
+                    timezone=parent["timezone"],
+                )
+            except ValueError:
+                raise HTTPException(422, "该次日程的时间无效") from None
+            start, end = validated.start_at, validated.end_at
+            previous = db.execute(
+                "SELECT * FROM work_calendar_instance_edits WHERE occurrence_id=?", [occurrence_id]
+            ).fetchone()
+            original_start = previous["original_start_at"] if previous else row["start_at"]
+            original_end = previous["original_end_at"] if previous else row["end_at"]
+            if (start, end) == (original_start, original_end):
+                db.execute("DELETE FROM work_calendar_instance_edits WHERE occurrence_id=?", [occurrence_id])
+            else:
+                db.execute(
+                    "INSERT INTO work_calendar_instance_edits VALUES(?,?,?,?,?,?,?) ON CONFLICT(occurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at",
+                    [occurrence_id, event_id, owner, original_start, original_end, start, end],
+                )
         db.execute(
-            "UPDATE work_calendar_instances SET cancelled=?,version=version+1,updated_at=? WHERE id=?",
-            [int(body.cancelled), int(time.time()), occurrence_id],
+            "UPDATE work_calendar_instances SET start_at=?,end_at=?,cancelled=?,version=version+1,updated_at=? WHERE id=?",
+            [start, end, int(cancelled), int(time.time()), occurrence_id],
         )
-        value = {"occurrence_id": occurrence_id, "cancelled": body.cancelled, "version": row["version"] + 1}
+        conflicts = (
+            db.execute(
+                "SELECT i.id,c.title,i.start_at,i.end_at FROM work_calendar_instances i JOIN work_calendar c ON c.id=i.series_id WHERE i.owner=? AND i.id<>? AND i.cancelled=0 AND c.cancelled=0 AND i.start_at<? AND i.end_at>? ORDER BY i.start_at LIMIT 21",
+                [owner, occurrence_id, end, start],
+            ).fetchall()
+            if not cancelled
+            else []
+        )
+        value = {
+            "occurrence_id": occurrence_id,
+            "series_id": event_id,
+            "start_at": start,
+            "end_at": end,
+            "cancelled": cancelled,
+            "version": row["version"] + 1,
+            "series_version": parent["version"],
+            "conflicts": [dict(r) for r in conflicts[:20]],
+            "conflicts_truncated": len(conflicts) > 20,
+        }
         store._record_request(db, owner, body, "calendar_occurrence", "", occurrence_id, fingerprint, value)
         return {**value, "replayed": False}
 
@@ -309,6 +410,26 @@ async def read_agenda(request: Request):
 
 
 def ics(event, reminder_minutes=0):
+    if event.get("exception_instances"):
+        # RFC 5545 3.8.4.4: keep the master's UID and the instance's original
+        # DTSTART as RECURRENCE-ID even when its actual time/duration changes.
+        base = {k: v for k, v in event.items() if k != "exception_instances"}
+        base["export_instances"] = [
+            {**r, "start_at": r.get("original_start_at") or r["start_at"]} for r in event["export_instances"]
+        ]
+        lines = ics(base, reminder_minutes).split("\r\n")[:-2]
+        for row in event["exception_instances"]:
+            single = {
+                **{k: v for k, v in event.items() if k not in {"export_instances", "exception_instances"}},
+                "start_at": row["start_at"],
+                "end_at": row["end_at"],
+                "recurrence_id": row["original_start_at"],
+                "cancelled": bool(event["cancelled"] or row["cancelled"]),
+                "updated_at": max(event["updated_at"], row["updated_at"]),
+            }
+            lines.extend(ics(single, reminder_minutes).split("\r\n")[3:-2])
+        return "\r\n".join([*lines, "END:VCALENDAR", ""])
+
     def escape(value):
         return (
             value.replace("\\", "\\\\")
@@ -335,6 +456,8 @@ def ics(event, reminder_minutes=0):
         "DESCRIPTION:" + escape(event["description"]),
         "STATUS:" + ("CANCELLED" if event["cancelled"] else "CONFIRMED"),
     ]
+    if event.get("recurrence_id"):
+        lines.append("RECURRENCE-ID:" + stamp(event["recurrence_id"]))
     for row in event.get("export_instances", []):
         if row["start_at"] != event["start_at"] and not row["cancelled"]:
             lines.append("RDATE:" + stamp(row["start_at"]))
@@ -375,10 +498,14 @@ async def export_event(
         event["export_instances"] = [
             dict(row)
             for row in db.execute(
-                "SELECT start_at,cancelled FROM work_calendar_instances WHERE series_id=? ORDER BY start_at",
+                "SELECT i.id,i.start_at,i.end_at,i.cancelled,i.version,i.updated_at,e.original_start_at "
+                "FROM work_calendar_instances i LEFT JOIN work_calendar_instance_edits e ON e.occurrence_id=i.id "
+                "WHERE i.series_id=? ORDER BY i.start_at",
                 [event_id],
             )
         ]
+        event["exception_instances"] = [r for r in event["export_instances"] if r["original_start_at"]]
+        event["version"] += max((r["version"] for r in event["export_instances"]), default=1) - 1
     return Response(
         ics(event, reminder_minutes),
         media_type="text/calendar",
