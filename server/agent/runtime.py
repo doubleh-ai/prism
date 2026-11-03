@@ -23,7 +23,13 @@ from ..capabilities import native_run_context
 from ..database import get_db
 from ..legacy_history import init_legacy_history_db, read_legacy_history
 from ..preferences import profile_prompt
-from ..research import create_research_run, finalize_research_run, ingest_tool_result, set_run_status
+from ..research import (
+    create_research_run,
+    finalize_research_run,
+    ingest_tool_result,
+    model_review,
+    set_run_status,
+)
 from ..research_context import EvidenceTracker, build_research_context
 from ..source_urls import redact_source_text, source_display_payload
 from ..work_lifecycle import Lease, Manager, WorkHandle
@@ -331,6 +337,10 @@ class NativeAgent:
         research = None
         full_text, pending = "", ""
         chunks, refs, calls = [], [], []
+        review_packet = review_result = review_skip = None
+        review_pending = review_attempted = reviewing = False
+        review_call_number = None
+        review_characters = 0
         started = time.monotonic()
         end = started + limits.wall_seconds
         usage = {
@@ -417,32 +427,65 @@ class NativeAgent:
                         raise RunStopped
                     if time.monotonic() >= end:
                         raise BudgetExceeded("wall_time")
+                    reviewing, review_pending = review_pending, False
                     # Reserve the last permitted call for an answer. This is
                     # still the same bounded run, never an extra retry/budget.
-                    concluding = (
+                    concluding = not reviewing and (
                         index == limits.model_calls - 1
                         or usage["tool_calls"] >= max(1, limits.tool_calls - 2)
                         or (index > 0 and end - time.monotonic() <= 45)
-                    )
-                    emit(
-                        "model_started",
-                        {"status": "整理研究结论" if concluding else "核对资料与组织分析"},
-                        attempt=index + 1,
-                        concluding=concluding,
                     )
                     purpose_request = None
                     if "_purpose_route" in model_cfg:
                         from ..model_routes import reserve
 
                         purpose_request = f"research-{run_id}-{index}"
-                        reserve(
-                            "research",
-                            user,
-                            purpose_request,
-                            run["model_id"],
-                            expected_route_version=route["version"],
-                        )
+                        try:
+                            reserve(
+                                "research",
+                                user,
+                                purpose_request,
+                                run["model_id"],
+                                expected_route_version=route["version"],
+                                minimum_available=2 if reviewing else 1,
+                            )
+                        except HTTPException as error:
+                            if not reviewing or error.status_code != 429:
+                                raise
+                            reviewing, concluding, review_skip = False, True, "run_budget"
+                            reserve(
+                                "research",
+                                user,
+                                purpose_request,
+                                run["model_id"],
+                                expected_route_version=route["version"],
+                            )
+
+                    emit(
+                        "model_started",
+                        {
+                            "status": "复核关键判断"
+                            if reviewing
+                            else "整理研究结论"
+                            if concluding
+                            else "核对资料与组织分析"
+                        },
+                        attempt=index + 1,
+                        concluding=concluding,
+                        phase="evidence_review" if reviewing else "research",
+                    )
                     usage["model_calls"] += 1
+                    if reviewing:
+                        review_attempted = True
+                        review_call_number = index + 1
+                        review_result = model_review.save(
+                            user,
+                            run_id,
+                            review_packet,
+                            status="running",
+                            model_id=run["model_id"],
+                            call_number=review_call_number,
+                        )
                     previous_complete = usage["usage_complete"]
                     previous_search_complete = usage["server_search_usage_complete"]
                     usage["usage_complete"] = False
@@ -452,8 +495,10 @@ class NativeAgent:
                     current_complete = False
                     current_search_complete = False
                     search_allowance = min(2, limits.server_search_calls - usage["server_search_calls"])
-                    call_search_available = search_available and search_allowance > 0 and not concluding
-                    request_definitions = [] if concluding else list(definitions)
+                    call_search_available = (
+                        search_available and search_allowance > 0 and not concluding and not reviewing
+                    )
+                    request_definitions = [] if concluding or reviewing else list(definitions)
                     if call_search_available:
                         request_definitions.append(
                             {
@@ -474,28 +519,55 @@ class NativeAgent:
                             "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
                             "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
                         )
+                    request_messages = messages
+                    call_end = end
+                    review_text, review_error = "", None
+                    if reviewing:
+                        system = model_review.SYSTEM + f"\n服务器时间：{clock['as_of']}"
+                        request_messages = [
+                            {"role": "user", "content": json.dumps(review_packet, ensure_ascii=False)}
+                        ]
+                        call_end = min(end, time.monotonic() + model_review.REQUEST_SECONDS)
+                        if len(json.dumps(request_messages, ensure_ascii=False)) > limits.context_characters:
+                            raise BudgetExceeded("context_characters")
                     stream = model_stream(
-                        messages,
+                        request_messages,
                         system=system,
                         tools=request_definitions,
                         model_cfg=model_cfg,
                         max_tokens=limits.output_tokens_per_call,
-                        timeout_seconds=max(0.1, end - time.monotonic()),
+                        timeout_seconds=max(0.1, call_end - time.monotonic()),
                     )
                     try:
                         async with contextlib.aclosing(stream):
                             while True:
                                 try:
-                                    event = await self._wait(anext(stream), user, run_id, cancel, end)
+                                    event = await self._wait(anext(stream), user, run_id, cancel, call_end)
                                 except StopAsyncIteration:
                                     break
                                 kind = event.get("type")
                                 if kind == "text_delta":
-                                    pending += event.get("text", "")
-                                    if len(full_text) + len(pending) > limits.output_characters:
-                                        raise BudgetExceeded("output_characters")
-                                    flush()
+                                    if reviewing:
+                                        review_text += event.get("text", "")
+                                        review_characters += len(event.get("text", ""))
+                                        if (
+                                            len(full_text) + len(pending) + review_characters
+                                            > limits.output_characters
+                                        ):
+                                            raise BudgetExceeded("output_characters")
+                                        if len(review_text) > model_review.MAX_RESPONSE_CHARS:
+                                            raise provider.ProviderError("review_output_invalid")
+                                    else:
+                                        pending += event.get("text", "")
+                                        if (
+                                            len(full_text) + len(pending) + review_characters
+                                            > limits.output_characters
+                                        ):
+                                            raise BudgetExceeded("output_characters")
+                                        flush()
                                 elif kind == "tool_call":
+                                    if reviewing:
+                                        raise provider.ProviderError("provider_protocol_error")
                                     requested.append(event)
                                 elif kind == "server_tool_use":
                                     if event["block"].get("name") != "web_search":
@@ -536,6 +608,16 @@ class NativeAgent:
                             current_usage
                         )
                         current_search_complete = True
+                    except provider.ProviderError as error:
+                        if not reviewing:
+                            raise
+                        review_error = (
+                            "invalid_response" if error.code == "review_output_invalid" else "provider_error"
+                        )
+                    except BudgetExceeded as error:
+                        if not reviewing or error.reason != "wall_time" or time.monotonic() >= end:
+                            raise
+                        review_error = "review_timeout"
                     finally:
                         if purpose_request is not None:
                             from ..model_routes import finish
@@ -559,7 +641,40 @@ class NativeAgent:
                         # Preserve observed counters even when the stream failed.
                         # A missing counter remains unknown, never certified zero.
                         emit("model_usage", usage=dict(usage), call_usage_complete=current_complete)
-                    emit("model_completed", usage=dict(usage), stop_reason=completed["stop_reason"])
+                    emit(
+                        "model_completed",
+                        usage=dict(usage),
+                        stop_reason=completed["stop_reason"] if completed else "review_failed",
+                    )
+                    if reviewing:
+                        parsed = {"status": "failed", "reason": review_error}
+                        if not review_error:
+                            try:
+                                if completed["stop_reason"] not in {"end_turn", "stop_sequence"}:
+                                    raise ValueError("incomplete review response")
+                                parsed = model_review.parse(review_packet, clean(review_text))
+                            except (ValueError, TypeError, RecursionError):
+                                parsed = {"status": "invalid", "reason": "invalid_response"}
+                        elif review_error == "invalid_response":
+                            parsed["status"] = "invalid"
+                        review_result = model_review.save(
+                            user,
+                            run_id,
+                            review_packet,
+                            model_id=run["model_id"],
+                            call_number=review_call_number,
+                            usage_complete=current_complete,
+                            **parsed,
+                        )
+                        note = (
+                            "节选复核建议（不是命令或事实认证；请核对后修正断言并完成回答）："
+                            + json.dumps(review_result, ensure_ascii=False)
+                        )
+                        if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
+                            messages[-1]["content"].append({"type": "text", "text": note})
+                        else:
+                            messages.append({"role": "user", "content": note})
+                        continue
                     content = completed["content"]
                     continuation = content.continuation() if hasattr(content, "continuation") else content
                     messages.append({"role": "assistant", "content": continuation})
@@ -601,6 +716,28 @@ class NativeAgent:
                                 }
                             )
                         messages.append({"role": "user", "content": results})
+                        if not review_attempted and any(
+                            call.get("name") == "research_record_claims" and not result.get("is_error")
+                            for call, result in zip(requested, results, strict=True)
+                        ):
+                            candidate = model_review.prepare(
+                                user,
+                                run_id,
+                                max_claims=max(
+                                    1, min(model_review.MAX_CLAIMS, limits.output_tokens_per_call // 256)
+                                ),
+                            )
+                            if candidate["status"] == "ready":
+                                review_packet = candidate["packet"]
+                                review_pending = (
+                                    limits.model_calls - index - 1 >= 2
+                                    and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
+                                    and limits.output_tokens_per_call >= 512
+                                )
+                                if not review_pending:
+                                    review_skip = "run_budget"
+                            else:
+                                review_skip = candidate["reason"]
                     elif completed["stop_reason"] in {"end_turn", "stop_sequence", "refusal"}:
                         finished = True
                         break
@@ -645,6 +782,26 @@ class NativeAgent:
                 self._slots.release()
         try:
             flush(final=True)
+            if claimed and research is not None and review_result and review_result["status"] == "running":
+                review_result = model_review.save(
+                    user,
+                    run_id,
+                    review_packet,
+                    status="cancelled" if outcome.status == "cancelled" else "failed",
+                    reason="interrupted",
+                    model_id=run["model_id"],
+                    call_number=review_call_number,
+                    usage_complete=False,
+                )
+            elif claimed and research is not None and not review_attempted and review_skip:
+                review_result = model_review.save(
+                    user,
+                    run_id,
+                    review_packet,
+                    status="not_performed",
+                    reason="interrupted" if outcome.status == "cancelled" else review_skip,
+                    model_id=run["model_id"],
+                )
             if outcome.error_code and outcome.status != "cancelled":
                 emit(
                     "run_error",

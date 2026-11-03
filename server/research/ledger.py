@@ -440,6 +440,7 @@ def read_research_run(username: str, run_id: str) -> dict:
     init_research_db()
     from .history_checks import cross_run_checks
     from .knowledge import change_notices, init_knowledge_db
+    from .model_review import present as present_model_review
 
     init_knowledge_db()
     with get_db() as db:
@@ -453,6 +454,7 @@ def read_research_run(username: str, run_id: str) -> dict:
                 "claims": claims,
                 "numerical_checks": audit_claims(claims),
                 "history_checks": cross_run_checks(db, username, run_id),
+                "model_review": present_model_review(run, claims),
                 "report_revisions": _records(db, "research_revisions", run_id),
                 "relations": _records(db, "research_relations", run_id),
                 "gaps": run["gaps"],
@@ -694,6 +696,8 @@ def record_claims(username: str, run_id: str, claims: list[dict]) -> dict:
 
 def finalize_research_run(username: str, run_id: str, text: str, *, error=False, cancelled=False) -> dict:
     """Freeze one report per run. Retrying returns the identical saved revision."""
+    from .model_review import present as present_model_review
+
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -705,7 +709,24 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
             claims = _records(db, "research_claims", run_id)
             relations = _records(db, "research_relations", run_id)
             numerical_checks = audit_claims(claims)
+            if (run.get("model_review") or {}).get("status") == "running":
+                run["model_review"] = {
+                    **run["model_review"],
+                    "status": "failed",
+                    "reason": "interrupted",
+                    "usage_complete": False,
+                    "interrupted_usage_unknown": True,
+                }
+            model_review = present_model_review(run, claims)
             gaps = list(run["gaps"])
+            if model_review:
+                if model_review["status"] != "completed":
+                    gaps.append("model_review_incomplete")
+                else:
+                    if model_review["unreviewed_claims_count"]:
+                        gaps.append("model_review_partial_scope")
+                    if any(a["effective_verdict"] != "supported" for a in model_review["assessments"]):
+                        gaps.append("model_review_disagreement")
             if numerical_checks["conflicts"]:
                 gaps.append("numeric_evidence_conflict")
             if not claims:
@@ -786,6 +807,7 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
                 "acceptance_status": status,
                 "semantic_status": "unreviewed",
                 "numerical_checks": numerical_checks,
+                "model_review": model_review,
                 "gaps": list(dict.fromkeys(gaps)),
             }
             db.execute(

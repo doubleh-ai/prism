@@ -812,6 +812,14 @@ source requests or caching an unfinished result.
 
 ## v0.23.0 completion work (unreleased)
 
+Native runs may include one isolated-context excerpt review within the existing
+research model-call, output, time and daily quotas. `model_review` on the run,
+research read and frozen revision records finite status, packet/method digests,
+assessments bound to real claim/passage IDs, usage completeness and unreviewed
+claim count. Knowledge details retain an advisory per claim without changing
+human review state. No browser/model tool can invoke the review writer or grant
+it permissions. See [excerpt review](research-quality.md) for bounds and semantics.
+
 Research reads, claim registration, structured historical reads and knowledge
 details include live `history_checks`. It compares explicit owner-scoped numeric
 signatures before the bounded conflicting-result window: at most 60 current

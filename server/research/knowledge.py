@@ -86,6 +86,19 @@ def _present(row, *, now=None):
         effective = "expired"
     else:
         effective = state
+    model_review = run.get("model_review")
+    advisory = None
+    if model_review:
+        assessment = next(
+            (a for a in model_review.get("assessments", []) if a.get("claim_id") == row["claim_id"]), None
+        )
+        advisory = {
+            "status": model_review.get("status"),
+            "observed_at": model_review.get("observed_at"),
+            "assessment": assessment,
+            "semantic_verification": False,
+            "independent_sources_verified": False,
+        }
     return {
         "id": row["claim_id"],
         "run_id": row["run_id"],
@@ -111,6 +124,7 @@ def _present(row, *, now=None):
         "limitations": claim.get("limitations", []),
         "target": {"view": "reports", "run_id": row["run_id"]},
         "semantic_status": "owner_reviewed" if effective == "reviewed" else "unreviewed",
+        "model_review": advisory,
     }
 
 

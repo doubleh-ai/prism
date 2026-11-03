@@ -22,4 +22,10 @@ assert.match(app._researchClaimsHTML([claim]),/与历史同口径数值有差异
 assert.doesNotMatch(app._researchClaimsHTML([{...claim,claim_id:'older'}]),/与历史同口径数值有差异/);
 app._researchBundle = {history_checks:{conflicts:[null,{current_claim_ids:'not-an-array'}]}};
 assert.doesNotThrow(()=>app._researchClaimsHTML([claim]));
-process.stdout.write('Research numeric conflict rendering: 9 checks passed\n');
+app._researchBundle = {model_review:{assessments:[{claim_id:'a',effective_verdict:'not_supported',reason:'<img src=x onerror=steal()>'}]}};
+assert.match(app._researchClaimsHTML([claim]),/原文与表述有待核查项/);
+app._researchBundle = {model_review:{assessments:[{claim_id:'a',effective_verdict:'supported'}]}};
+assert.doesNotMatch(app._researchClaimsHTML([claim]),/原文与表述有待核查项/);
+app._researchBundle = {model_review:{assessments:[null,{claim_id:'a',effective_verdict:'unexpected'}]}};
+assert.doesNotThrow(()=>app._researchClaimsHTML([claim]));
+process.stdout.write('Research numeric conflict rendering: 12 checks passed\n');

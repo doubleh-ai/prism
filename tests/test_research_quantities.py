@@ -189,7 +189,7 @@ def test_numeric_conflict_rendering_runs_actual_shipped_javascript():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "9 checks passed" in result.stdout
+    assert "12 checks passed" in result.stdout
 
 
 @pytest.fixture

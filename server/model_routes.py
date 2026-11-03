@@ -98,7 +98,9 @@ def resolve(purpose, *, explicit_model=None, private_work=False):
     return model_id, dict(model), route
 
 
-def reserve(purpose, actor, request_id, model_id, *, expected_route_version):
+def reserve(purpose, actor, request_id, model_id, *, expected_route_version, minimum_available=1):
+    if type(minimum_available) is not int or minimum_available not in {1, 2}:
+        raise HTTPException(422, "模型预留范围无效")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", request_id):
         raise HTTPException(422, "模型请求编号无效")
     init_model_routes_db()
@@ -119,7 +121,7 @@ def reserve(purpose, actor, request_id, model_id, *, expected_route_version):
             count = db.execute(
                 "SELECT COUNT(*) FROM model_request_reservations WHERE purpose=? AND day=?", [purpose, day]
             ).fetchone()[0]
-            if count >= route.get("daily_calls_max", 1000):
+            if count + minimum_available > route.get("daily_calls_max", 1000):
                 raise HTTPException(429, "该用途已达到每日模型请求上限")
             db.execute(
                 "INSERT INTO model_request_reservations VALUES(?,?,?,?,?,?,'unknown',NULL,NULL,?)",
