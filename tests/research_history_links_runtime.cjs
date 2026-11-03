@@ -1,0 +1,37 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const escape = value => String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const drawer = {hidden:true,innerHTML:''};
+const app = {};
+const context = vm.createContext({App:app,esc:escape,escAttr:escape,document:{addEventListener(){},getElementById(){return drawer;}},ChatRender:{stringify:value=>typeof value==='string'?value:JSON.stringify(value)}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../static/js/app.research.js'),'utf8'),context);
+const claim = {claim_id:'current',kind:'fact',statement:'当前判断'};
+function render(review) {
+  app._researchBundle = {claims:[claim],model_review:review};
+  app._showResearchEvidence('claim','current');
+  return drawer.innerHTML;
+}
+const binding = (current_claim_id,historical_claim_id) => ({current_claim_id,historical_claim_id});
+assert.doesNotMatch(render({assessments:[{claim_id:'current'}],history_bindings:[binding('current','old')]}),/查看历史判断/);
+assert.doesNotMatch(render({history_bindings:[binding('current','old')]}),/查看历史判断/);
+assert.doesNotMatch(render({assessments:[{claim_id:'other',history_claim_ids:['old']}],history_bindings:[binding('current','old')]}),/查看历史判断/);
+const hostile = '\"><img src=x onerror=attack()>&';
+let html = render({assessments:[{claim_id:'current',reason:'<script>bad()</script>',history_claim_ids:['old',hostile,'missing']}],history_bindings:[null,binding('other','missing'),binding('current','unlisted'),binding('current','old'),binding('current','old'),binding('current',hostile)]});
+assert.equal((html.match(/查看历史判断/g)||[]).length,2);
+assert.match(html,/href="\/knowledge\?id=old"/);
+assert.ok(html.includes('href="/knowledge?id='+escape(encodeURIComponent(hostile))+'"'));
+assert.doesNotMatch(html,/<script>|<img|unlisted|id=missing/);
+assert.match(html,/&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+assert.match(html,/关闭证据详情/);
+assert.equal(drawer.hidden,false);
+assert.doesNotMatch(render({assessments:[{claim_id:'current',history_claim_ids:['', ' ', '\ud800', 12]}],history_bindings:[{},binding('current',''),binding('current',' '),binding('current','\ud800'),binding('current',12)]}),/查看历史判断/);
+assert.doesNotMatch(render({assessments:[{claim_id:'current',history_claim_ids:'old'}],history_bindings:'invalid'}),/查看历史判断/);
+const ids = Array.from({length:8},(_,i)=>'old'+i);
+html = render({assessments:[{claim_id:'current',history_claim_ids:ids}],history_bindings:ids.map(id=>binding('current',id))});
+assert.equal((html.match(/查看历史判断/g)||[]).length,2);
+assert.match(html,/id=old1/);
+assert.doesNotMatch(html,/id=old2/);
+process.stdout.write('Research history links runtime checks passed\n');

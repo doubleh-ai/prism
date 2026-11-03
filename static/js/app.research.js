@@ -104,7 +104,16 @@
         var claim=list(data.claims).find(function(c){return c.claim_id===id;});if(!claim)return;
         title=kinds[claim.kind] || '候选判断';body='<p>'+text(claim.statement)+'</p><p class="research-notice">引用检查：'+text(claim.citation_status === 'valid' ? '引用结构有效' : claim.citation_status || '未记录')+'；语义仍待核验。</p>'+passages(claim.supports,'支持材料')+passages(claim.opposes,'反方材料')+passages(claim.background,'背景材料')+'<h4>限制与缺口</h4>'+text(claim.limitations || '未记录')+note(claim.gaps);
         var review=data.model_review||{},assessment=list(review.assessments).find(function(a){return a&&a.claim_id===id;});
-        if(assessment){var verdicts={supported:'节选支持该表述',partly_supported:'仅有部分支持',not_supported:'节选不支持该表述',insufficient_evidence:'节选证据不足'};body+='<h4>原文与结论</h4><p>'+text(verdicts[assessment.effective_verdict]||'尚待核查')+'（自动复核意见）</p><p>'+text(assessment.reason)+'</p><p class="research-note">依据已取得的节选，不代表独立事实认证；完整原文和人工复核仍需核对。</p>';}
+        if(assessment){var verdicts={supported:'节选支持该表述',partly_supported:'仅有部分支持',not_supported:'节选不支持该表述',insufficient_evidence:'节选证据不足'};body+='<h4>原文与结论</h4><p>'+text(verdicts[assessment.effective_verdict]||'尚待核查')+'（自动复核意见）</p><p>'+text(assessment.reason)+'</p><p class="research-note">依据已取得的节选，不代表独立事实认证；完整原文和人工复核仍需核对。</p>';
+          var historyIds=list(assessment.history_claim_ids), links=[], seen=new Set();
+          list(review.history_bindings).forEach(function(binding){
+            if(links.length>=2 || !binding || binding.current_claim_id!==id) return;
+            var historicalId=binding.historical_claim_id;
+            if(typeof historicalId!=='string' || !historicalId.trim() || historyIds.indexOf(historicalId)<0 || seen.has(historicalId)) return;
+            try { var encoded=encodeURIComponent(historicalId); seen.add(historicalId); links.push('<a href="/knowledge?id='+escAttr(encoded)+'">查看历史判断 '+(links.length+1)+'</a>'); } catch(error) { /* Invalid Unicode cannot form a link. */ }
+          });
+          if(links.length)body+='<p class="research-note">'+links.join(' · ')+'</p>';
+        }
       } else if(kind==='document'){
         var doc=list(data.documents).find(function(d){return d.document_id===id;});if(!doc)return;
         title=doc.title || '来源资料';var url=safeUrl(doc.url);
