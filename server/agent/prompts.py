@@ -57,6 +57,8 @@ def system_prompt(context: dict, workflow: str, *, search_available: bool) -> st
             "验证送样、量产订单和分析假设；同产业不证明供货。对重要连接给出双方、产品、阶段、"
             "数据期间、出处、传导条件和反证。未经证实的客户关系不得补画为事实。"
             "先读 industry_context/industry_chain 的 evidence_graph 复用本人已登记且仍有效的关系。"
+            "其中的自动节选复核意见、未复核范围与人工复核分别保留；有分歧先回查对应材料，"
+            "不把自动支持当作供货已证实，也不让较早意见覆盖后来新增、过期或撤回的结论。"
             "按其 synthesis 的供给、认证、替代、成本和需求补证清单选最影响结论的缺口，"
             "用 source_find/source_read 查公开披露，读取原文再登记；清单不是已经完成的分析。"
             "用 research_record_claims 与 research_record_relations 留下本轮补证、支持与反证。"

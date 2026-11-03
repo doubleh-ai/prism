@@ -1,5 +1,6 @@
 """Private relationship evidence must not be merged into public seed data."""
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -7,7 +8,7 @@ import pytest
 
 from server.database import get_db
 from server.industry_research import evidence_graph
-from server.research import knowledge, ledger
+from server.research import knowledge, ledger, model_review
 
 
 @pytest.fixture
@@ -92,6 +93,168 @@ def _change_relation(ident, **updates):
         )
         value.update(updates)
         db.execute("UPDATE research_relations SET payload=? WHERE relation_id=?", [json.dumps(value), ident])
+
+
+def _review_packet(*, max_claims=6):
+    """Use the real packet and outcome contracts, with fictional source bodies."""
+    owner = "chain-alice"
+    with get_db() as db:
+        run = json.loads(
+            db.execute("SELECT payload FROM research_runs WHERE run_id=?", [owner]).fetchone()[0]
+        )
+        run["status"] = "running"
+        db.execute("UPDATE research_runs SET payload=? WHERE run_id=?", [json.dumps(run), owner])
+        for index in range(3):
+            cid = f"{owner}-{index}"
+            document = json.loads(
+                db.execute("SELECT payload FROM research_documents WHERE document_id=?", [cid]).fetchone()[0]
+            )
+            document["retrieved_body_sha256"] = hashlib.sha256("合成公告节选".encode()).hexdigest()
+            db.execute(
+                "UPDATE research_documents SET payload=? WHERE document_id=?", [json.dumps(document), cid]
+            )
+            passage = json.loads(
+                db.execute("SELECT payload FROM research_passages WHERE passage_id=?", [cid]).fetchone()[0]
+            )
+            passage["content_scope"] = "tool_returned_text"
+            db.execute(
+                "UPDATE research_passages SET payload=? WHERE passage_id=?", [json.dumps(passage), cid]
+            )
+    return model_review.prepare(owner, owner, max_claims=max_claims)["packet"]
+
+
+def _complete_review(packet, *, flagged=None, verdict="not_supported"):
+    reply = {
+        "packet_id": packet["packet_id"],
+        "assessments": [
+            {
+                "claim_id": c["claim_id"],
+                "verdict": verdict if c["claim_id"] == flagged else "supported",
+                "reason": "合成复核意见，不代表事实认证",
+                "evidence_ids": [c["sources"][0]["passage_id"]],
+            }
+            for c in packet["claims"]
+        ],
+    }
+    parsed = model_review.parse(packet, json.dumps(reply))
+    args = {"model_id": "synthetic", "call_number": 2}
+    model_review.save("chain-alice", "chain-alice", packet, status="running", **args)
+    return model_review.save("chain-alice", "chain-alice", packet, usage_complete=True, **args, **parsed)
+
+
+@pytest.mark.parametrize("verdict", ["not_supported", "partly_supported", "insufficient_evidence"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_advisory_disagreement_survives_graph_reuse_without_changing_human_review(
+    relations, verdict, compact
+):
+    cid = "chain-alice-0"
+    knowledge.review(
+        "chain-alice",
+        cid,
+        knowledge.Review(
+            expected_version=0,
+            state="reviewed",
+            note="合成人工记录",
+            valid_until=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        ),
+    )
+    before = knowledge.detail("chain-alice", cid)["item"]
+    _complete_review(_review_packet(), flagged=cid, verdict=verdict)
+    graph = evidence_graph("chain-alice", compact=compact)
+    row = next(r for r in graph["relations"] if r["relation_id"] == cid)
+    assert row["model_review"]["flagged_claim_ids"] == [cid]
+    assert "model_excerpt_review_disagreement" in row["blocking_gaps"]
+    assert all(cid not in path["relation_ids"] for path in graph["transmission_paths"])
+    assert row["evidence"][0]["model_review"]["assessment"]["effective_verdict"] == verdict
+    assert row["evidence"][0]["effective_state"] == "reviewed"
+    after = knowledge.detail("chain-alice", cid)["item"]
+    assert (after["version"], after["review_note"], after["semantic_status"]) == (
+        before["version"],
+        before["review_note"],
+        before["semantic_status"],
+    )
+    supply = next(d for d in graph["dimensions"] if d["dimension"] == "supply")
+    assert supply["next_action"] == "check_excerpt_assessments"
+    assert all(
+        r["model_review"]["status"] == "not_performed" for r in evidence_graph("chain-bob")["relations"]
+    )
+
+
+def test_positive_advisory_is_still_only_a_hypothesis(relations):
+    _complete_review(_review_packet())
+    graph = evidence_graph("chain-alice")
+    assert graph["transmission_paths"]
+    for row in graph["relations"]:
+        assert row["status"] == "references_require_review"
+        assert row["model_review"]["status"] == "completed"
+        assert row["model_review"]["semantic_verification"] is False
+        assert row["evidence"][0]["semantic_status"] == "unreviewed"
+    assert all(
+        p["status"] == "hypothesis_requires_cross_link_review" and not p["semantic_verification"]
+        for p in graph["transmission_paths"]
+    )
+    knowledge.review(
+        "chain-alice",
+        "chain-alice-0",
+        knowledge.Review(expected_version=0, state="retracted", note="合成撤回"),
+    )
+    after = evidence_graph("chain-alice")
+    row = next(r for r in after["relations"] if r["relation_id"] == "chain-alice-0")
+    assert "support_ineligible" in row["blocking_gaps"]
+    assert all("chain-alice-0" not in p["relation_ids"] for p in after["transmission_paths"])
+
+
+def test_negative_opposing_advisory_does_not_erase_counterevidence(relations):
+    _complete_review(_review_packet(), flagged="chain-alice-1")
+    _change_relation("chain-alice-0", opposing_claims=["chain-alice-1"])
+    row = next(r for r in evidence_graph("chain-alice")["relations"] if r["relation_id"] == "chain-alice-0")
+    assert row["model_review"]["flagged_claim_ids"] == []
+    assert "opposing_evidence_requires_review" in row["blocking_gaps"]
+    opposing = next(c for c in row["evidence"] if c["role"] == "opposing_claims")
+    assert opposing["model_review"]["assessment"]["effective_verdict"] == "not_supported"
+
+
+def test_missing_or_partial_advisory_does_not_inherit_a_reviewed_label(relations):
+    graph = evidence_graph("chain-alice")
+    assert all("model_excerpt_review_missing" in p["review_gaps"] for p in graph["transmission_paths"])
+    packet = _review_packet(max_claims=1)
+    cid = packet["claims"][0]["claim_id"]
+    _complete_review(packet)
+    _change_relation(cid, supporting_claims=[cid, "chain-alice-1"])
+    graph = evidence_graph("chain-alice", compact=True)
+    row = next(r for r in graph["relations"] if r["relation_id"] == cid)
+    assert row["model_review"]["status"] == "partial"
+    assert row["model_review"]["unreviewed_claim_ids"] == ["chain-alice-1"]
+    assert "model_excerpt_review_missing" in row["review_gaps"]
+
+
+@pytest.mark.parametrize("status", ["running", "failed", "invalid", "cancelled", "not_performed"])
+def test_unfinished_advisory_remains_unknown_in_graph(relations, status):
+    packet = _review_packet()
+    args = {"model_id": "synthetic", "call_number": 2}
+    if status != "not_performed":
+        model_review.save("chain-alice", "chain-alice", packet, status="running", **args)
+    if status != "running":
+        model_review.save("chain-alice", "chain-alice", packet, status=status, **args)
+    graph = evidence_graph("chain-alice", compact=True)
+    for row in graph["relations"]:
+        assert row["model_review"]["status"] == "incomplete"
+        assert "model_excerpt_review_incomplete" in row["review_gaps"]
+        assert not row["model_review"]["reviewed_claim_ids"]
+    assert all("model_excerpt_review_incomplete" in p["review_gaps"] for p in graph["transmission_paths"])
+
+
+def test_compact_summary_keeps_disagreement_outside_visible_evidence_window(relations):
+    _complete_review(_review_packet(), flagged="chain-alice-2")
+    _change_relation("chain-alice-0", supporting_claims=[f"chain-alice-{i}" for i in range(3)])
+    row = next(
+        r
+        for r in evidence_graph("chain-alice", compact=True)["relations"]
+        if r["relation_id"] == "chain-alice-0"
+    )
+    assert len(row["evidence"]) == 2
+    assert row["model_review"]["flagged_claim_ids"] == ["chain-alice-2"]
+    assert "model_excerpt_review_disagreement" in row["blocking_gaps"]
 
 
 @pytest.mark.parametrize("dimension", ["substitution", "certification", "cost", "demand"])

@@ -840,6 +840,14 @@ are not material-flow edges. Historical numeric differences block reuse of the
 affected support until the evidence is reconciled; incomplete comparisons stay
 visible as review status, without inventing a conflict.
 
+Graph evidence retains each claim's `model_review` advisory. Relation summaries
+include reviewed, unreviewed, incomplete and flagged support IDs, even when the
+compact response omits that claim's detail. Negative or partial support prevents
+automatic path reuse and directs the existing Agent to check the cited excerpts;
+it does not change human review state. Missing/unfinished reviews remain in
+`review_gaps`, including on path hypotheses. Positive advisory never establishes
+semantic verification, source independence or a commercial relationship.
+
 These additions are development contracts, not proof of a deployed version.
 All private results are owner-scoped and must not be cached. Mutations require
 the existing CSRF protection and reject account switches.

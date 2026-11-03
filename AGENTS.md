@@ -27,6 +27,10 @@ Use only a reviewed Native-only private controller and fixed candidate for autho
 
 ## Development boundaries
 
+Follow [the product principles](docs/product-principles.md) for feature work:
+start from the user's goal, let the Agent perform authorized routine work,
+and keep manual editing and intervention available in the existing workflow.
+
 For UI changes follow [the interface guidelines](docs/ui-guidelines.md). Integrate
 features into existing navigation; do not add persistent announcement cards,
 duplicate shortcuts or implementation commentary to business pages. Preserve

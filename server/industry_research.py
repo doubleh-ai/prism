@@ -39,6 +39,55 @@ CHECKS = {
 }
 
 
+def _excerpt_review(evidence, support):
+    """Retain advisory limits when claims become graph inputs; never certify them."""
+    claims = {item["claim_id"]: item for item in evidence if item["role"] == "supporting_claims"}
+    reviewed, missing, incomplete, flagged = [], [], [], []
+    for cid in dict.fromkeys(support):
+        advisory = claims.get(cid, {}).get("model_review")
+        if not advisory:
+            missing.append(cid)
+            continue
+        assessment = advisory.get("assessment")
+        if advisory.get("status") != "completed":
+            incomplete.append(cid)
+        elif not assessment:
+            missing.append(cid)
+        elif assessment.get("effective_verdict") in {
+            "supported",
+            "partly_supported",
+            "not_supported",
+            "insufficient_evidence",
+        }:
+            reviewed.append(cid)
+            if assessment["effective_verdict"] != "supported":
+                flagged.append(cid)
+        else:
+            incomplete.append(cid)
+    gaps = []
+    if missing:
+        gaps.append("model_excerpt_review_missing")
+    if incomplete:
+        gaps.append("model_excerpt_review_incomplete")
+    if flagged:
+        gaps.append("model_excerpt_review_disagreement")
+    return {
+        "status": "incomplete"
+        if incomplete
+        else "partial"
+        if missing and reviewed
+        else "not_performed"
+        if missing or not support
+        else "completed",
+        "reviewed_claim_ids": reviewed,
+        "unreviewed_claim_ids": missing,
+        "incomplete_claim_ids": incomplete,
+        "flagged_claim_ids": flagged,
+        "semantic_verification": False,
+        "independent_sources_verified": False,
+    }, gaps
+
+
 def _agenda(relations, *, paged):
     """A public-source collection/synthesis brief for the existing Native tools."""
     dimensions = []
@@ -57,7 +106,11 @@ def _agenda(relations, *, paged):
                 if relevant
                 else "not_collected",
                 "checks_required": CHECKS[key],
-                "next_action": "read_and_cross_check_originals" if usable else "collect_original_disclosures",
+                "next_action": "check_excerpt_assessments"
+                if any(row["model_review"]["flagged_claim_ids"] for row in relevant)
+                else "read_and_cross_check_originals"
+                if usable
+                else "collect_original_disclosures",
             }
         )
     return {
@@ -125,6 +178,8 @@ def _paths(relations):
                         if checks["period"]["status"] == "nonoverlap"
                         else "hypothesis_requires_cross_link_review",
                         "cross_link_checks": checks,
+                        "review_gaps": sorted({gap for row in combined for gap in row["review_gaps"]}),
+                        "semantic_verification": False,
                         "checks_required": [
                             "产品能否跨环节连接",
                             "有效期间是否重叠",
@@ -252,6 +307,7 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
                             "citation_status": review["citation_status"],
                             "effective_state": review["effective_state"],
                             "semantic_status": review["semantic_status"],
+                            "model_review": review["model_review"],
                             "sources": refs,
                         }
                     )
@@ -268,21 +324,25 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
             }
             if historic_conflicts.intersection(relation.get("supporting_claims", [])):
                 blocking.append("historical_numeric_evidence_conflict")
+            advisory, review_gaps = _excerpt_review(evidence, support)
+            if advisory["flagged_claim_ids"]:
+                blocking.append("model_excerpt_review_disagreement")
+            if historic["coverage_incomplete"]:
+                review_gaps.append("historical_comparison_incomplete")
             item = {
                 **relation,
                 "sequence": row["sequence"],
                 "run_id": row["run_id"],
                 "blocking_gaps": sorted(set(blocking)),
                 "evidence": evidence,
+                "model_review": advisory,
                 "status": "references_require_review" if not blocking else "needs_evidence",
                 "history_review": {
                     "status": historic["status"],
                     "coverage_incomplete": historic["coverage_incomplete"],
                     "conflicting_support_ids": sorted(historic_conflicts.intersection(support)),
                 },
-                "review_gaps": ["historical_comparison_incomplete"]
-                if historic["coverage_incomplete"]
-                else [],
+                "review_gaps": review_gaps,
                 "target": {"view": "reports", "run_id": row["run_id"]},
             }
             items.append(item)

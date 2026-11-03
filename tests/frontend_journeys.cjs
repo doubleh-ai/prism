@@ -193,4 +193,22 @@ async function normalApiDeadlineAndCallerCancellation() {
   const caller=new AbortController();const cancelled=app.api('/api/vibe/plans/A',{signal:caller.signal});caller.abort();await assert.rejects(cancelled,/aborted/);assert.equal(timers.size,0);
 }
 
-(async()=>{const cases=[analysisUsesNativeOnce,adminDiagnosticFailuresAreUnknown,adminHealthDoesNotCertifyBusiness,normalApiDeadlineAndCallerCancellation,vibeSaveVersionAndSelection,actualChartOrder,klineIdentityAndReverseResponses,lateIndicatorDoesNotApply,savedReportSelection,vibeSelectionAndAction,stoppedVibeRequestCannotReturn,scanSelectionAndReconnect,capabilitySnapshotDoesNotReexecute,accountWatchlistAndFailure,confirmedWatchlistActivityIsPrivate,analysisShowsOnlyObservedStages,researchLedgerAndUntrustedData,researchReverseResponse,configuredModelSelection,analysisStartCannotReplaceHistory,industryGraphSelection];for(const test of cases)await test();console.log('frontend journeys ok: '+cases.length+' scenarios');})().catch(error=>{console.error(error);process.exitCode=1;});
+async function industryAdvisoryStaysInExistingDetails() {
+  const {app,doc}=env();
+  const issue='model_excerpt_review_disagreement';
+  const claim={statement:'合成供货断言',effective_state:'reviewed',semantic_status:'owner_reviewed',sources:[],model_review:{status:'completed',assessment:{effective_verdict:'not_supported',reason:'<img src=x onerror=attack()>尚未量产'}}};
+  app._industryResearchRelations=[{from_entity:'甲',to_entity:'乙',product:'材料',status:'needs_evidence',blocking_gaps:[issue],review_gaps:[issue],evidence:[claim]}];
+  app._renderIndustryResearch();
+  let html=doc.getElementById('industryResearch').innerHTML;
+  assert.match(html,/自动节选复核：不支持/);assert.match(html,/&lt;img/);assert(!html.includes('<img'));
+  assert.match(html,/owner_reviewed/);assert.match(html,/人工记录保持不变/);
+  assert.equal(html.split('原文与表述有待核查项').length-1,1,'one existing gap line, no repeated warning');
+  assert(html.includes('<details>')&&!html.includes('<details open'));
+  assert(!html.includes('<button'),'no additional controls for the advisory');
+  claim.model_review.assessment.effective_verdict='supported';app._renderIndustryResearch();
+  html=doc.getElementById('industryResearch').innerHTML;assert(!html.includes('自动节选复核：'));
+  claim.model_review.status='failed';claim.model_review.assessment.effective_verdict='not_supported';app._renderIndustryResearch();
+  assert(!doc.getElementById('industryResearch').innerHTML.includes('自动节选复核：'));
+}
+
+(async()=>{const cases=[industryAdvisoryStaysInExistingDetails,analysisUsesNativeOnce,adminDiagnosticFailuresAreUnknown,adminHealthDoesNotCertifyBusiness,normalApiDeadlineAndCallerCancellation,vibeSaveVersionAndSelection,actualChartOrder,klineIdentityAndReverseResponses,lateIndicatorDoesNotApply,savedReportSelection,vibeSelectionAndAction,stoppedVibeRequestCannotReturn,scanSelectionAndReconnect,capabilitySnapshotDoesNotReexecute,accountWatchlistAndFailure,confirmedWatchlistActivityIsPrivate,analysisShowsOnlyObservedStages,researchLedgerAndUntrustedData,researchReverseResponse,configuredModelSelection,analysisStartCannotReplaceHistory,industryGraphSelection];for(const test of cases)await test();console.log('frontend journeys ok: '+cases.length+' scenarios');})().catch(error=>{console.error(error);process.exitCode=1;});
