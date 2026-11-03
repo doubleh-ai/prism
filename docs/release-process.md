@@ -115,3 +115,11 @@ triggers, profile snapshot retention and preservation of new Work records when
 returning to compatible old code. Do not drop new tables to make rollback pass.
 The release uses the existing private Native-only controller; no new deployment
 or unrestricted shell execution is added by the application features.
+
+Optional bug progress adds receipt and stage tables plus feedback-deletion cleanup.
+Qualification must exercise an existing user's original feedback view, an uncertain
+write reconciled by its original receipt, manual pause/closure and account deletion.
+The compatible Native recovery reader must retain these additive tables and existing
+feedback history. The private consumer is disabled until its separate identity and
+the exact application revision are verified. CI alone does not enable it or prove
+user-visible delivery; progress cannot mark a fix or authorize deployment.

@@ -51,7 +51,12 @@ def _auth(request: Request) -> None:
     if (
         not 32 <= len(expected) <= 512
         or any(c.isspace() for c in expected)
-        or expected in {worker, os.environ.get("PRISM_FEEDBACK_REVIEW_TOKEN", "")}
+        or expected
+        in {
+            worker,
+            os.environ.get("PRISM_FEEDBACK_REVIEW_TOKEN", ""),
+            os.environ.get("PRISM_FEEDBACK_PROGRESS_TOKEN", ""),
+        }
         or len(supplied) != 1
         or not 32 <= len(supplied[0]) <= 512
     ):

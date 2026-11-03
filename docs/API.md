@@ -214,6 +214,32 @@ purge their receipts. No code, spending, sharing or release right follows from
 an accepted suggestion. See the product principles for the user workflow;
 the independently configured scheduler and model routing remain private ops.
 
+### Restricted bug progress
+
+`POST /api/internal/feedback-progress/{id}/update` uses a separate
+`PRISM_FEEDBACK_PROGRESS_TOKEN` in `X-Prism-Progress-Token`, the current full
+`X-Prism-Expected-Revision`, and `X-Requested-With: XMLHttpRequest`. Browser
+cookies and tokens shared with monitoring, suggestion review or the legacy
+feedback worker are rejected. The identity cannot read report text or accounts,
+review suggestions, call models, mark a fix or deploy code.
+
+The closed body contains canonical UUID `request_id`, integer CAS
+`expected_revision`, the report's 12-hex `reported_revision`, and `stage`:
+`triaging`, `reproducing`, `candidate_validated`, `validating`, `awaiting_review`,
+`awaiting_release`, `needs_info`, `not_reproduced`, `blocked`, or `validation_failed`.
+Public messages are fixed by the server; caller text and verification claims are
+not accepted. Only active bugs from the current reported version are writable.
+Closed, paused, disabled-account, stale-CAS and regressing stages are rejected.
+
+`GET /api/internal/feedback-progress/receipts/{request_id}` returns an immutable,
+bounded receipt for reconciliation. A 404 never proves that an uncertain POST
+was not applied. Identical requests return the same receipt; the same unchanged
+stage under a new UUID does not duplicate history or increment the item version.
+Receipts include `changed`, `stage`, `revision_number`, `fingerprint`, and the
+applied runtime revision; `fixed` and `deployed` are always false. Deleting the
+account or feedback removes related progress and receipts. Actual fix closure
+requires separate deployment and user-flow verification.
+
 ### Read-only feedback monitoring candidate
 
 `GET /api/internal/feedback-monitor/queue` and

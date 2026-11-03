@@ -520,6 +520,7 @@ def _worker_auth(request: Request) -> None:
     if not (permitted and enabled and bounded and same) or expected in {
         monitor,
         os.environ.get("PRISM_FEEDBACK_REVIEW_TOKEN", ""),
+        os.environ.get("PRISM_FEEDBACK_PROGRESS_TOKEN", ""),
     }:
         raise HTTPException(401, "反馈处理身份无效")
 

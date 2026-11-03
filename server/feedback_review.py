@@ -52,7 +52,14 @@ def _auth(request):
         _deny(429, "建议评审较频繁")
     value = os.environ.get("PRISM_FEEDBACK_REVIEW_TOKEN", "")
     supplied = request.headers.getlist("X-Prism-Review-Token")
-    others = [os.environ.get(k, "") for k in ("PRISM_FEEDBACK_MONITOR_TOKEN", "PRISM_FEEDBACK_WORKER_TOKEN")]
+    others = [
+        os.environ.get(k, "")
+        for k in (
+            "PRISM_FEEDBACK_MONITOR_TOKEN",
+            "PRISM_FEEDBACK_WORKER_TOKEN",
+            "PRISM_FEEDBACK_PROGRESS_TOKEN",
+        )
+    ]
     if (
         not 32 <= len(value) <= 512
         or any(not 33 <= ord(c) <= 126 for c in value)
