@@ -21,6 +21,14 @@ Use [interface guidelines](../../../docs/ui-guidelines.md) for UI work. Integrat
 features into the existing navigation. Show errors and uncertainty near the
 affected operation; do not add announcement cards to advertise each change.
 
+Apply [the product principles](../../../docs/product-principles.md) to every
+change: start from the user's goal, reuse available context, and let the Agent
+complete authorized routine steps. Keep direct controls for simple actions;
+do not force users to chat or operate internal stages. Ask only for information
+that is actually missing, group necessary confirmations, and keep results
+editable and long tasks stoppable. Review a complete user flow for unnecessary
+input, navigation and duplicate controls before calling a feature complete.
+
 ## Research changes
 
 Use the Native runner and direct HTTP providers. Never add Claude Code or a CLI
