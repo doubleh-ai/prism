@@ -44,6 +44,7 @@
       var header = '<div class="research-boundary"><span>'+text(states[run.status] || run.status || '状态未知')+'</span><span>研究截至 '+text(ChatRender.formatTime(run.as_of))+'</span><span>数据截至：以各来源为准，缺失则未知</span></div>';
       if (run.information_cutoff) header += '<p class="research-note">信息截止：'+text(run.cutoff_precision === 'day' ? String(run.information_cutoff).slice(0,10)+'（日精度）' : ChatRender.formatTime(run.information_cutoff))+'；观察时间保持本轮实际时间。'+(run.requested_period?' 研究期间：'+text(run.requested_period):'')+'</p>';
       header += '<p class="research-notice">这里保留研究过程、原始线索与候选判断。引用结构匹配不等于语义核验；事实候选仍需核对原文。</p>';
+      if(data.history_checks&&data.history_checks.coverage_incomplete)header+='<p class="research-note">历史数值比较尚不完整，不能据此判断历史结论一致。</p>';
       var changes=list(data.knowledge_changes).filter(function(change){return change && typeof change.source_claim_id==='string' && change.source_claim_id;});
       if(changes.length)header += '<details class="research-notice"><summary>引用的历史结论有更新，查看复核</summary>'+changes.map(function(change){return '<p><a href="/knowledge?id='+escAttr(encodeURIComponent(change.source_claim_id))+'">查看复核</a></p>';}).join('')+'</details>';
       var body = '';
@@ -80,9 +81,10 @@
     },
     _researchClaimsHTML:function(claims) {
       if (!claims.length) return empty('尚未记录候选判断。原始回复不会被自动追认为已核验事实。');
-      var self=this, conflicts=list((this._researchBundle || {}).numerical_checks && this._researchBundle.numerical_checks.conflicts);
+      var self=this,bundle=this._researchBundle||{},conflicts=list(bundle.numerical_checks&&bundle.numerical_checks.conflicts),history=list(bundle.history_checks&&bundle.history_checks.conflicts);
       function hasConflict(id){return conflicts.some(function(group){return group && list(group.claim_ids).indexOf(id)>=0;});}
-      return '<div class="research-claims">'+claims.map(function(claim){return '<article class="research-claim"><div><span class="research-tag">'+text(kinds[claim.kind] || '判断类型未标注')+'</span><span class="research-note">语义待核验</span></div><p>'+text(claim.statement)+'</p>'+(claim.period?'<p class="research-note">所属期间：'+text(claim.period)+'</p>':'')+(claim.value!=null?'<p>数值 '+text(claim.value)+' '+text(claim.unit || '单位未提供')+' '+text(claim.currency || '')+(hasConflict(claim.claim_id)?' <strong class="research-note">同口径数值有差异，需核对原文</strong>':'')+'</p>':'')+(claim.formula?'<p class="research-note">计算式：'+self._researchFormulaText(claim.formula)+'</p>':'')+'<button data-research-claim="'+escAttr(claim.claim_id)+'">查看支持、反方与限制 ↗</button></article>';}).join('')+'</div>';
+      function hasHistoricalConflict(id){return history.some(function(group){return group&&list(group.current_claim_ids).indexOf(id)>=0;});}
+      return '<div class="research-claims">'+claims.map(function(claim){return '<article class="research-claim"><div><span class="research-tag">'+text(kinds[claim.kind] || '判断类型未标注')+'</span><span class="research-note">语义待核验</span></div><p>'+text(claim.statement)+'</p>'+(claim.period?'<p class="research-note">所属期间：'+text(claim.period)+'</p>':'')+(claim.value!=null?'<p>数值 '+text(claim.value)+' '+text(claim.unit || '单位未提供')+' '+text(claim.currency || '')+(hasConflict(claim.claim_id)?' <strong class="research-note">同口径数值有差异，需核对原文</strong>':hasHistoricalConflict(claim.claim_id)?' <strong class="research-note">与历史同口径数值有差异，需核对原文</strong>':'')+'</p>':'')+(claim.formula?'<p class="research-note">计算式：'+self._researchFormulaText(claim.formula)+'</p>':'')+'<button data-research-claim="'+escAttr(claim.claim_id)+'">查看支持、反方与限制 ↗</button></article>';}).join('')+'</div>';
     },
     _researchRelationsHTML:function(data) {
       var dimensions = [['supply','上游供给'],['certification','认证周期'],['substitution','替代路线'],['cost','成本传导'],['demand','下游需求']];

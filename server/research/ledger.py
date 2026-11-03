@@ -438,6 +438,7 @@ def _records(db, table, run_id):
 
 def read_research_run(username: str, run_id: str) -> dict:
     init_research_db()
+    from .history_checks import cross_run_checks
     from .knowledge import change_notices, init_knowledge_db
 
     init_knowledge_db()
@@ -451,6 +452,7 @@ def read_research_run(username: str, run_id: str) -> dict:
                 "passages": _records(db, "research_passages", run_id),
                 "claims": claims,
                 "numerical_checks": audit_claims(claims),
+                "history_checks": cross_run_checks(db, username, run_id),
                 "report_revisions": _records(db, "research_revisions", run_id),
                 "relations": _records(db, "research_relations", run_id),
                 "gaps": run["gaps"],
@@ -651,9 +653,15 @@ def _claim(candidate, passages, documents, existing):
 def record_claims(username: str, run_id: str, claims: list[dict]) -> dict:
     if not isinstance(claims, list) or not 1 <= len(claims) <= 20:
         raise HTTPException(422, "每次登记 1–20 条候选结论")
+    from ..productivity.store import _active
+    from .history_checks import cross_run_checks
+    from .knowledge import init_knowledge_db
+
+    init_knowledge_db()
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            _active(db, username)
             run = _owned(db, username, run_id, writable=True)
             passages = {p["passage_id"]: p for p in _records(db, "research_passages", run_id)}
             documents = {d["document_id"]: d for d in _records(db, "research_documents", run_id)}
@@ -675,11 +683,13 @@ def record_claims(username: str, run_id: str, claims: list[dict]) -> dict:
         except BaseException:
             db.execute("ROLLBACK")
             raise
-    return {
-        "claims": result,
-        "semantic_status": "unreviewed",
-        "numerical_checks": audit_claims(list(existing.values())),
-    }
+    with get_db() as db:
+        return {
+            "claims": result,
+            "semantic_status": "unreviewed",
+            "numerical_checks": audit_claims(list(existing.values())),
+            "history_checks": cross_run_checks(db, username, run_id),
+        }
 
 
 def finalize_research_run(username: str, run_id: str, text: str, *, error=False, cancelled=False) -> dict:

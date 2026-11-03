@@ -116,6 +116,46 @@ def quantity(value, unit, currency):
         return None, "number_unbounded_or_missing"
 
 
+def comparison_input(claim):
+    """An explicit comparison key, value and gaps, without guessing synonyms."""
+    reasons = []
+    entities = claim.get("entities", [])
+    entity = normalized(entities[0], 120) if isinstance(entities, list) and len(entities) == 1 else ""
+    metric = normalized(claim.get("metric"), 80)
+    basis = normalized(claim.get("accounting_basis"), 300)
+    span = period_span(claim.get("period"))
+    numeric, issue = quantity(claim.get("value"), claim.get("unit"), claim.get("currency"))
+    if (
+        claim.get("citation_status") != "valid"
+        or not isinstance(claim.get("kind"), str)
+        or claim["kind"] not in {"fact", "calculation"}
+    ):
+        reasons.append("citation_or_claim_kind_not_eligible")
+    supports, quotes = claim.get("supports", []), claim.get("quotes", {})
+    if claim.get("kind") == "fact" and not any(
+        isinstance(pid, str)
+        and isinstance(quotes, dict)
+        and isinstance(quotes.get(pid), str)
+        and quotes[pid].strip()
+        for pid in (supports if isinstance(supports, list) else [])
+    ):
+        reasons.append("support_quote_missing")
+    for missing, code in (
+        (not entity, "single_entity_missing"),
+        (not metric, "metric_missing"),
+        (not basis, "accounting_basis_missing"),
+        (span is None, "period_not_supported"),
+    ):
+        if missing:
+            reasons.append(code)
+    if issue:
+        reasons.append(issue)
+    if reasons:
+        return None, None, reasons
+    key = (entity, metric, basis, *[d.isoformat() for d in span], numeric["dimension"], numeric["currency"])
+    return key, numeric["value"], []
+
+
 def audit_claims(claims, *, excluded=()):
     groups, unassessed = defaultdict(list), []
     excluded = set(excluded)
@@ -124,42 +164,11 @@ def audit_claims(claims, *, excluded=()):
         cid = claim["claim_id"]
         if cid in excluded:
             continue
-        reasons = []
-        entities = claim.get("entities", [])
-        entity = normalized(entities[0], 120) if isinstance(entities, list) and len(entities) == 1 else ""
-        metric = normalized(claim.get("metric"), 80)
-        basis = normalized(claim.get("accounting_basis"), 300)
-        span = period_span(claim.get("period"))
-        numeric, issue = quantity(claim.get("value"), claim.get("unit"), claim.get("currency"))
-        if claim.get("citation_status") != "valid" or claim.get("kind") not in {"fact", "calculation"}:
-            reasons.append("citation_or_claim_kind_not_eligible")
-        if claim.get("kind") == "fact" and not any(
-            isinstance(claim.get("quotes"), dict) and claim["quotes"].get(pid)
-            for pid in claim.get("supports", [])
-        ):
-            reasons.append("support_quote_missing")
-        for missing, code in (
-            (not entity, "single_entity_missing"),
-            (not metric, "metric_missing"),
-            (not basis, "accounting_basis_missing"),
-            (span is None, "period_not_supported"),
-        ):
-            if missing:
-                reasons.append(code)
-        if issue:
-            reasons.append(issue)
+        key, value, reasons = comparison_input(claim)
         if reasons:
             unassessed.append({"claim_id": cid, "reasons": reasons})
             continue
-        key = (
-            entity,
-            metric,
-            basis,
-            *[d.isoformat() for d in span],
-            numeric["dimension"],
-            numeric["currency"],
-        )
-        groups[key].append({"claim_id": cid, "normalized_value": numeric["value"]})
+        groups[key].append({"claim_id": cid, "normalized_value": value})
     conflicts, comparable = [], 0
     for key, values in groups.items():
         if len(values) < 2:

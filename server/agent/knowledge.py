@@ -168,7 +168,24 @@ def get(user: str, document_id: str) -> dict:
         raise HTTPException(404, "研究记录不存在或不可访问")
     for doc in _documents(user, document_id=document_id):
         if doc["id"] == document_id:
+            checks = {"status": "no_structured_research", "semantic_verification": False}
+            if doc["run_id"]:
+                from ..research.history_checks import cross_run_checks
+                from ..research.knowledge import init_knowledge_db
+
+                init_knowledge_db()
+                try:
+                    with get_db() as db:
+                        checks = cross_run_checks(db, user, doc["run_id"])
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                    checks = {"status": "structured_research_unavailable", "semantic_verification": False}
             return source_display_payload(
-                {"document": doc, "notice": "内部历史研究不是外部原始披露，结论仍为待核验。"}
+                {
+                    "document": doc,
+                    "history_checks": checks,
+                    "notice": "内部历史研究不是外部原始披露，结论仍为待核验。",
+                }
             )
     raise HTTPException(404, "研究记录不存在或不可访问")

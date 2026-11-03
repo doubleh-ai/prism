@@ -7,6 +7,7 @@ not an independent validation of a supplier relationship or bottleneck thesis.
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
@@ -14,7 +15,8 @@ from fastapi import HTTPException
 from .database import get_db
 from .productivity.store import _active
 from .research import knowledge, ledger
-from .research.quantities import audit_claims, path_checks
+from .research.history_checks import cross_run_checks
+from .research.quantities import audit_claims, path_checks, period_span
 from .source_urls import source_display_payload
 
 DIMENSIONS = {
@@ -24,11 +26,72 @@ DIMENSIONS = {
     "cost": "采购成本、定价条款与毛利传导",
     "demand": "终端需求、订单能见度与库存消化",
 }
+CHECKS = {
+    "supply": [
+        "设计产能与可用产能分开",
+        "已分配订单、良率、利用率与交付期",
+        "上下游数量、单位和期间是否可比",
+    ],
+    "certification": ["双方披露及具体产品", "送样、认证、订单与量产分开", "客户验证时间及实际收入兑现条件"],
+    "substitution": ["实际替代产品与供应商", "性能、良率、验证周期和转换成本", "替代何时会解除产能约束"],
+    "cost": ["同规格采购与销售价格", "定价合同与成本转嫁条款", "投入产出转换、毛利及现金流兑现"],
+    "demand": ["已签订单与预测分开", "终端销量、库存和重复订单", "订单取消与需求低于预期的失效条件"],
+}
+
+
+def _agenda(relations, *, paged):
+    """A public-source collection/synthesis brief for the existing Native tools."""
+    dimensions = []
+    for key, question in DIMENSIONS.items():
+        relevant = [row for row in relations if row.get("dimension") == key]
+        usable = [row for row in relevant if not row["blocking_gaps"]]
+        dimensions.append(
+            {
+                "dimension": key,
+                "question": question,
+                "relation_ids": [row["relation_id"] for row in relevant],
+                "eligible_relation_ids": [row["relation_id"] for row in usable],
+                "status": "references_require_review"
+                if usable
+                else "needs_evidence"
+                if relevant
+                else "not_collected",
+                "checks_required": CHECKS[key],
+                "next_action": "read_and_cross_check_originals" if usable else "collect_original_disclosures",
+            }
+        )
+    return {
+        "schema": "prism.industry-synthesis.v1",
+        "scope": "current_owned_relation_window",
+        "coverage_incomplete": paged,
+        "dimensions": dimensions,
+        "collection_order": [
+            d["dimension"] for d in dimensions if d["status"] != "references_require_review"
+        ],
+        "tools": [
+            "source_find",
+            "source_read",
+            "research_record_claims",
+            "research_record_relations",
+            "research_read",
+        ],
+        "reuse_applicable_evidence_first": True,
+        "research_complete": False,
+        "semantic_verification": False,
+        "bottleneck_rule": "同时核对可用产能、替代难度、客户验证、真实订单和定价兑现；任一缺失只保留条件假设。",
+        "output_contract": [
+            "逐环节证据与日期",
+            "产品转换和供需数量约束",
+            "利润兑现条件与反证",
+            "基准、需求转弱或替代改善的条件情景",
+        ],
+        "notice": "已有引用先读原文，再补关键缺口；仅使用公开查询词，不把私有信息发给公开来源。遵守本轮工具和模型预算，未完成项如实保留。",
+    }
 
 
 def _paths(relations):
     """Bounded two/three-link hypotheses; do not turn centrality into monopoly."""
-    candidates = [row for row in relations if not row["blocking_gaps"]]
+    candidates = [row for row in relations if row.get("dimension") == "supply" and not row["blocking_gaps"]]
     by_source = {}
     for row in candidates:
         by_source.setdefault(row["from_entity"].casefold(), []).append(row)
@@ -52,6 +115,11 @@ def _paths(relations):
                         "entities": [combined[0]["from_entity"], *[row["to_entity"] for row in combined]],
                         "products": [row["product"] for row in combined],
                         "mechanisms": [row["mechanism"] for row in combined],
+                        "business_stages": [row.get("business_stage") for row in combined],
+                        "commercial_status": "not_established",
+                        "invalidators": list(
+                            dict.fromkeys(text for row in combined for text in row.get("invalidators", []))
+                        ),
                         "valid_periods": [row["valid_period"] for row in combined],
                         "status": "incompatible_periods"
                         if checks["period"]["status"] == "nonoverlap"
@@ -103,7 +171,8 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
             [*params, limit + 1],
         ).fetchall()
         items = []
-        run_checks = {}
+        run_checks, history_checks = {}, {}
+        history_deadline = time.monotonic() + 1.5
         now = datetime.now(UTC)
         for row in rows[:limit]:
             if row["run_id"] not in run_checks:
@@ -119,8 +188,17 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
                 run_checks[row["run_id"]] = audit_claims(
                     [json.loads(c["payload"]) for c in candidates], excluded=excluded
                 )
+                history_checks[row["run_id"]] = cross_run_checks(
+                    db, owner, row["run_id"], deadline=history_deadline
+                )
             relation = json.loads(row["payload"])
-            blocking, evidence = [], []
+            blocking, evidence = list(relation.get("gaps", [])), []
+            if not relation.get("business_stage"):
+                blocking.append("business_stage_unknown")
+            if period_span(relation.get("valid_period")) is None:
+                blocking.append("period_scope_unresolved")
+            if not relation.get("invalidators"):
+                blocking.append("invalidation_missing")
             support = relation.get("supporting_claims", [])
             if not support:
                 blocking.append("support_missing")
@@ -184,6 +262,12 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
             }
             if conflicting.intersection(relation.get("supporting_claims", [])):
                 blocking.append("numeric_evidence_conflict")
+            historic = history_checks[row["run_id"]]
+            historic_conflicts = {
+                cid for group in historic["conflicts"] for cid in group["current_claim_ids"]
+            }
+            if historic_conflicts.intersection(relation.get("supporting_claims", [])):
+                blocking.append("historical_numeric_evidence_conflict")
             item = {
                 **relation,
                 "sequence": row["sequence"],
@@ -191,10 +275,18 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
                 "blocking_gaps": sorted(set(blocking)),
                 "evidence": evidence,
                 "status": "references_require_review" if not blocking else "needs_evidence",
+                "history_review": {
+                    "status": historic["status"],
+                    "coverage_incomplete": historic["coverage_incomplete"],
+                    "conflicting_support_ids": sorted(historic_conflicts.intersection(support)),
+                },
+                "review_gaps": ["historical_comparison_incomplete"]
+                if historic["coverage_incomplete"]
+                else [],
                 "target": {"view": "reports", "run_id": row["run_id"]},
             }
             items.append(item)
-    dimensions = []
+    synthesis = _agenda(items, paged=len(rows) > limit)
     if compact:
         for item in items:
             item["evidence_detail_scope"] = "bounded_summary_read_original_run_for_full_evidence"
@@ -206,21 +298,12 @@ def evidence_graph(owner, *, query="", before=None, limit=40, compact=False):
                 claim["sources"] = claim["sources"][:1]
                 for source in claim["sources"]:
                     source.pop("excerpt", None)
-    for key, question in DIMENSIONS.items():
-        relevant = [row for row in items if row.get("dimension") == key]
-        dimensions.append(
-            {
-                "dimension": key,
-                "question": question,
-                "relation_ids": [row["relation_id"] for row in relevant],
-                "status": "references_require_review" if relevant else "not_collected",
-            }
-        )
     return source_display_payload(
         {
             "relations": items,
             "transmission_paths": _paths(items)[:8] if compact else _paths(items),
-            "dimensions": dimensions,
+            "dimensions": synthesis["dimensions"],
+            "synthesis": synthesis,
             "next_cursor": rows[limit - 1]["sequence"] if len(rows) > limit else None,
             "scope": "owned_structured_research_relations",
             "evidence_scope": "summary_with_original_links" if compact else "bounded_original_excerpts",

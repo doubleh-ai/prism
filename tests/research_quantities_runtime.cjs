@@ -17,4 +17,9 @@ assert.match(app._researchClaimsHTML([{...claim,statement:'<img src=x onerror=st
 assert.doesNotMatch(app._researchClaimsHTML([{...claim,value:'<script>steal()</script>'}]),/<script>/);
 app._researchBundle = {numerical_checks:{conflicts:[null,{claim_ids:'not-an-array'}]}};
 assert.doesNotThrow(()=>app._researchClaimsHTML([claim]));
-process.stdout.write('Research numeric conflict rendering: 6 checks passed\n');
+app._researchBundle = {history_checks:{conflicts:[{current_claim_ids:['a'],claim_ids:['a','older']}]}};
+assert.match(app._researchClaimsHTML([claim]),/与历史同口径数值有差异/);
+assert.doesNotMatch(app._researchClaimsHTML([{...claim,claim_id:'older'}]),/与历史同口径数值有差异/);
+app._researchBundle = {history_checks:{conflicts:[null,{current_claim_ids:'not-an-array'}]}};
+assert.doesNotThrow(()=>app._researchClaimsHTML([claim]));
+process.stdout.write('Research numeric conflict rendering: 9 checks passed\n');

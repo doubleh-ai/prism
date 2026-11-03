@@ -166,8 +166,13 @@ def test_legacy_reader_does_not_replay_previous_turn_result_or_invent_missing_cl
 
 
 def test_actual_ledger_stores_no_passage_or_publication_from_encrypted_search_metadata(candidate, frames):
+    from server.database import get_db
     from server.research import create_research_run, ingest_tool_result, read_research_run
 
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO users(username,password_hash) VALUES('synthetic-owner','synthetic-ledger-user')"
+        )
     context = candidate["research_context"].build_research_context(
         run_id="synthetic-run", now=datetime(2026, 10, 22, tzinfo=UTC)
     )

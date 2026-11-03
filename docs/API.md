@@ -812,6 +812,26 @@ source requests or caching an unfinished result.
 
 ## v0.23.0 completion work (unreleased)
 
+Research reads, claim registration, structured historical reads and knowledge
+details include live `history_checks`. It compares explicit owner-scoped numeric
+signatures before the bounded conflicting-result window: at most 60 current
+claims, 80 historical differing claims and 20 conflict groups, with a scan-time
+limit. Matching subjects, metric, accounting basis, closed period, dimension and
+currency are required. Ineligible reviews and deleted conversations are excluded;
+unreadable data, timeout and truncation keep `coverage_incomplete` visible.
+`conflicts` contains current/history claim IDs, normalized values and original
+research targets. It never certifies meaning, source independence or correctness,
+and never rewrites a frozen revision. Same values do not constitute verification.
+
+Industrial `evidence_graph.synthesis` supplies a five-dimension collection and
+analysis brief for the existing Native tools. It covers the current relation
+window only, retains missing dimensions and never reports research complete.
+Only eligible supply hypotheses form material-flow paths; commercial stages and
+invalidators remain explicit, and substitution/cost/certification/demand relations
+are not material-flow edges. Historical numeric differences block reuse of the
+affected support until the evidence is reconciled; incomplete comparisons stay
+visible as review status, without inventing a conflict.
+
 These additions are development contracts, not proof of a deployed version.
 All private results are owner-scoped and must not be cached. Mutations require
 the existing CSRF protection and reject account switches.

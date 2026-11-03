@@ -189,7 +189,7 @@ def test_numeric_conflict_rendering_runs_actual_shipped_javascript():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "6 checks passed" in result.stdout
+    assert "9 checks passed" in result.stdout
 
 
 @pytest.fixture
@@ -248,6 +248,31 @@ def test_real_ledger_exposes_and_freezes_conflicts_without_rewriting_sources(own
         db.execute("UPDATE conversations SET deleted_at=1 WHERE id='numeric-alice'")
     with pytest.raises(HTTPException):
         ledger.read_research_run("numeric-alice", "numeric-run")
+
+
+def test_registering_real_receipts_compares_previous_research_without_an_extra_model(owned):
+    context = build_research_context(run_id="previous-run", now=datetime(2026, 11, 3, tzinfo=UTC))
+    ledger.create_research_run("numeric-alice", "numeric-alice", "合成既有研究", context)
+    tracker = EvidenceTracker("previous-run")
+    call = {"id": "old-source", "name": "WebFetch", "input": {"url": "https://www.sse.com.cn/synthetic-old"}}
+    tracker.record_call(call)
+    original = "2025年甲公司产能130万吨。"
+    block = {"tool_use_id": "old-source", "content": original}
+    refs = tracker.record_result(block)
+    pid = ledger.ingest_tool_result("numeric-alice", "previous-run", call, block, refs)[0]["passage_ids"][0]
+    past = ledger.record_claims("numeric-alice", "previous-run", [fact(pid, "130", quotes={pid: original})])[
+        "claims"
+    ][0]
+    frozen = ledger.finalize_research_run("numeric-alice", "previous-run", "固定合成历史报告。")
+    current_text = "2025年甲公司产能120万吨。"
+    pid = receipt(current_text)
+    result = ledger.record_claims(
+        "numeric-alice", "numeric-run", [fact(pid, "120", quotes={pid: current_text})]
+    )
+    assert result["history_checks"]["status"] == "conflicts_require_review"
+    conflict = result["history_checks"]["conflicts"][0]
+    assert set(conflict["claim_ids"]) == {past["claim_id"], result["claims"][0]["claim_id"]}
+    assert ledger.finalize_research_run("numeric-alice", "previous-run", "不应覆盖") == frozen
 
 
 def test_research_arithmetic_does_not_round_29_digit_addition_or_double_count_input(owned):

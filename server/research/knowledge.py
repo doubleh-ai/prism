@@ -152,6 +152,8 @@ def search(owner, *, query="", before=None, limit=30, exclude_run_id=None, reusa
 
 def detail(owner, claim_id):
     init_knowledge_db()
+    from .history_checks import cross_run_checks
+
     with get_db() as db:
         _active(db, owner)
         row = _row(db, owner, claim_id)
@@ -203,6 +205,7 @@ def detail(owner, claim_id):
             "sources": sources,
             "review_history": events,
             "affected_runs": affected,
+            "history_checks": cross_run_checks(db, owner, row["run_id"]),
         }
 
 
