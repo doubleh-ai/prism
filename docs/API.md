@@ -806,6 +806,18 @@ checks the report's actual date; collected reports are retained while another
 source checks an older date. `source_attempts`, `observation_dates`,
 `report_date_basis: bounded_calendar_window` and `date_alignment` preserve this
 distinction. A mixed-date snapshot must not be treated as a same-day comparison.
+
+For RB/CU/AU/SC, `contract_dates` and `exchange_parameters` independently read
+SHFE's combined dated business reports. The first returns per-contract
+`listed_on`, `listed_expiry_date`, `delivery_start` and `delivery_end`; the
+second returns separately named speculative/hedge long/short margin percentages
+and upper/lower limit percentages. Missing ratios remain null; special limits
+set `additional_limit_notice_required`. Both retain source URL, body hash and
+actual report/update dates. These are exchange observations, not confirmed
+current broker requirements or delivery eligibility. `calendar_adjustments_status`
+remains unassessed: the published calendar excludes holiday adjustments. Neither
+source updates portfolio records. Details are in [futures research](futures-research.md).
+
 Error metadata is a finite code and optional HTTP status, never upstream error
 text, response bodies or headers. Cancellation propagates without starting more
 source requests or caching an unfinished result.

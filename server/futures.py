@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from . import exchange_futures, warehouse_receipts
+from . import exchange_futures, futures_parameters, warehouse_receipts
 from .auth import require_auth
 from .data_availability import source_failure
 from .database import check_rate_limit
@@ -281,6 +281,8 @@ async def _reports(client, symbol, day, deadline):
     readers = {
         "warehouse_receipt": warehouse_receipts.read_report,
         "exchange_daily": exchange_futures.read_daily,
+        "contract_dates": futures_parameters.read_contract_dates,
+        "exchange_parameters": futures_parameters.read_exchange_parameters,
     }
     reports, attempts, pending = {}, [], list(readers)
     loop = asyncio.get_running_loop()

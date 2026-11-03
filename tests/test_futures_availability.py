@@ -74,7 +74,7 @@ async def test_series_failure_still_reads_and_returns_actual_exchange_contracts(
             return httpx.Response(
                 500 if series_mode == "http_failure" else 200,
                 json={"bad": "schema"},
-                headers={"set-cookie": "public_tracking=must-not-forward; Domain=.com.cn; Path=/"},
+                headers=[("set-cookie", "public_tracking=must-not-forward; Domain=.com.cn; Path=/")],
             )
         assert request.url.host == "www.shfe.com.cn"
         if "stockdata" in request.url.path:
@@ -92,7 +92,8 @@ async def test_series_failure_still_reads_and_returns_actual_exchange_contracts(
     assert value["exchange_daily"]["contracts"][0]["settlement"] == 3490
     assert value["exchange_daily"]["data_as_of"] == "2026-11-03"
     assert value["warehouse_receipt"]["error_code"] == "access_denied"
-    assert len(calls) == 4 and value["cache_ttl_seconds"] == 30
+    assert len(calls) == 6 and value["cache_ttl_seconds"] == 30
+    assert value["contract_dates"]["status"] == value["exchange_parameters"]["status"] == "unavailable"
     assert value["report_date_basis"] == "bounded_calendar_window"
     from server import capabilities
 
@@ -103,7 +104,7 @@ async def test_series_failure_still_reads_and_returns_actual_exchange_contracts(
     assert result["exchange_daily"]["contracts"][0]["settlement"] == 3490
     assert target["href"] == "/futures?symbol=RB"
     assert "部分" in summary and "连续日线" not in summary
-    assert len(calls) == 4
+    assert len(calls) == 6
 
 
 @pytest.mark.parametrize(
@@ -169,6 +170,8 @@ async def test_dated_404_queries_an_earlier_report_without_overwriting_a_collect
     assert [x["requested_date"] for x in value["source_attempts"]] == [
         "2026-11-03",
         "2026-11-03",
+        "2026-11-03",
+        "2026-11-03",
         "2026-11-02",
     ]
 
@@ -202,7 +205,7 @@ async def test_missing_reports_have_a_bounded_three_date_window_and_never_invent
     install(monkeypatch, handler)
     with pytest.raises(HTTPException) as result:
         await futures.snapshot("RB")
-    assert result.value.status_code == 503 and len(requests) == 7
+    assert result.value.status_code == 503 and len(requests) == 13
     urls = [str(r.url) for r in requests]
     assert len(urls) == len(set(urls)) and futures._cache == {}
     assert all(any(f"2026110{day}" in str(r.url) for day in (1, 2, 3)) for r in requests[1:])
@@ -222,7 +225,7 @@ async def test_stale_continuous_date_does_not_prevent_reading_newer_official_rep
     install(monkeypatch, handler)
     value = await futures.snapshot("RB")
     assert value["series_status"] == "collected" and value["data_as_of"] == "2026-11-02"
-    assert value["latest"]["close"] == 3510 and len(requests) == 4
+    assert value["latest"]["close"] == 3510 and len(requests) == 6
     assert value["exchange_daily"]["data_as_of"] == "2026-11-03"
     assert value["report_date_basis"] == "bounded_calendar_window"
     assert all(item["requested_date"] == "2026-11-03" for item in value["source_attempts"])
@@ -245,11 +248,11 @@ async def test_partial_cache_is_short_lived_and_cannot_be_changed_by_a_caller(mo
     first["latest"]["close"] = 999999
     second = await futures.snapshot("RB")
     assert second["cached"] is True and second["latest"]["close"] == 3510
-    assert len(calls) == 3
+    assert len(calls) == 5
     _, value = futures._cache["RB"]
     futures._cache["RB"] = (futures.time.monotonic() - 31, value)
     third = await futures.snapshot("RB")
-    assert third["cached"] is False and len(calls) == 6
+    assert third["cached"] is False and len(calls) == 10
 
 
 async def test_cancelled_series_does_not_start_official_requests_or_populate_cache(monkeypatch):
@@ -268,3 +271,55 @@ async def test_cancelled_series_does_not_start_official_requests_or_populate_cac
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(requests) == 1 and futures._cache == {}
+
+
+async def test_only_calendar_source_is_retained_and_shared_with_native_tool(monkeypatch):
+    from server import capabilities
+    from tests.test_futures_parameters import document
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if "ContractBaseInfo20261103" in request.url.path:
+            return httpx.Response(404)
+        if "ContractBaseInfo20261102" in request.url.path:
+            return httpx.Response(200, json=document("contract_dates"))
+        return httpx.Response(403)
+
+    install(monkeypatch, handler)
+    value = await futures.snapshot("RB")
+    assert value["status"] == "partial" and value["latest"]["close"] is None
+    assert value["contract_dates"]["contracts"][0]["listed_expiry_date"] == "2027-01-15"
+    assert value["observation_dates"] == ["2026-11-02"] and value["date_alignment"] == "not_compared"
+    assert value["exchange_parameters"]["error_code"] == "access_denied"
+    assert len(calls) == 6 and len({str(r.url) for r in calls}) == 6
+    actual, _, summary = await capabilities._execute(
+        "futures_snapshot", capabilities.FuturesArgs(symbol="RB"), {"username": "synthetic-owner"}
+    )
+    assert actual["contract_dates"] == value["contract_dates"] and len(calls) == 6
+    assert "部分" in summary and actual["portfolio_risk_status"] == "not_evaluated"
+
+
+async def test_parameter_files_keep_separate_observation_dates_and_404_scope(monkeypatch):
+    from tests.test_futures_parameters import document
+
+    def handler(request):
+        if "ContractBaseInfo20261103" in request.url.path:
+            return httpx.Response(404)
+        if "ContractBaseInfo20261102" in request.url.path:
+            return httpx.Response(200, json=document("contract_dates"))
+        if "ContractDailyTradeArgument20261103" in request.url.path:
+            doc = document("exchange_parameters")
+            doc["report_date"], doc["update_date"] = "20261103", "20261103 16:20:06"
+            doc["ContractDailyTradeArgument"][0]["TRADINGDAY"] = "20261103"
+            return httpx.Response(200, json=doc)
+        return httpx.Response(403)
+
+    install(monkeypatch, handler)
+    value = await futures.snapshot("RB")
+    assert value["contract_dates"]["data_as_of"] == "2026-11-02"
+    assert value["exchange_parameters"]["data_as_of"] == "2026-11-03"
+    assert value["date_alignment"] == "mixed" and value["observation_dates"] == ["2026-11-02", "2026-11-03"]
+    requests = value["source_attempts"]
+    assert [r["source"] for r in requests if r["requested_date"] == "2026-11-02"] == ["contract_dates"]

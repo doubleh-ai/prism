@@ -255,7 +255,17 @@
         ['volume','long','short'].forEach(function(key){var side=sides[key],rows=side&&Array.isArray(side.members)?side.members:[];memberDetails.append(node('h3',labels[key]));if(rows.length)memberDetails.append(makeTable(['排名','会员','数量','增减'],rows.map(function(m){return [m.rank,m.member,m.quantity,m.change];})));else memberDetails.append(node('p','未提供会员明细。','muted'));});
         var memberSource=sourceLink(members.source_url,'查看交易所原表 ↗');if(memberSource)memberDetails.append(memberSource);market.append(memberDetails);
       }else{var memberStatus={unavailable:'未取得会员持仓数据。',not_covered:'该品种的会员持仓数据尚未覆盖。',not_reported:'交易所未披露该合约的会员持仓。'};market.append(node('p',memberStatus[members.status]||'会员持仓数据状态未知。','muted'));if(members.notice)market.append(node('p',members.notice,'muted'));}
-      root.append(market);
+      var dates=value.contract_dates||{},params=value.exchange_parameters||{},terms=node('details');terms.append(node('summary','合约日期与交易所参数'));
+      [[dates,'合约日期'],[params,'交易参数']].forEach(function(pair){var report=pair[0],label=pair[1];terms.append(node('h3',label));
+        if(report.status!=='collected'){terms.append(node('p',report.status==='not_covered'?'该品种尚未覆盖。':'本次未取得。','muted'));return;}
+        terms.append(node('p','资料日期 '+display(report.data_as_of),'muted'));var rows=Array.isArray(report.contracts)?report.contracts:[];
+        if(label==='合约日期')terms.append(makeTable(['合约','上市日','列示到期日','交割开始','交割结束'],rows.map(function(c){return [c.contract,c.listed_on,c.listed_expiry_date,c.delivery_start,c.delivery_end];})));
+        else terms.append(makeTable(['合约','一般买保证金（%）','一般卖保证金（%）','套保买保证金（%）','套保卖保证金（%）','涨停幅度（%）','跌停幅度（%）','另有特殊限制'],rows.map(function(c){return [c.contract,c.spec_long_margin_pct,c.spec_short_margin_pct,c.hedge_long_margin_pct,c.hedge_short_margin_pct,c.upper_limit_pct,c.lower_limit_pct,c.additional_limit_notice_required?'须查原公告':'未报告'];})));
+        terms.append(node('p',report.notice,'muted'));var link=sourceLink(report.reference_url,'查看官方参数页面 ↗');if(link)terms.append(link);
+      });
+      if(dates.status==='collected'||params.status==='collected')market.append(node('p','已取得'+(dates.status==='collected'?'合约日期':'')+(dates.status==='collected'&&params.status==='collected'?'及':'')+(params.status==='collected'?'交易所参数':'')+'；实际经纪商要求与交割资格仍须核对。','muted'));
+      else market.append(node('p','合约日期与交易参数暂缺。','muted'));
+      market.append(terms);root.append(market);
       var fund=node('section',undefined,'card');
       fund.append(node('h2','基本面'));
       var receipt=value.warehouse_receipt;

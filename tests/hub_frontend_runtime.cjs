@@ -83,4 +83,15 @@ async function showDifferentSourceDatesInOneNotice(){
  await run;const rendered=JSON.stringify(e.els.futuresResult);
  assert.match(e.els.notice.textContent,/资料日期不同/);assert(rendered.includes('2026-11-02')&&rendered.includes('2026-10-30')&&rendered.includes('70000'));
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();console.log('hub journeys ok: 8 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showDatedParametersWithinExistingDetails(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='RB';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'RB',name:'螺纹钢',series_status:'unavailable',collected_at:'2026-11-03T14:00:00+08:00',latest:{},source:{},fundamentals:[],gaps:[],
+  contract_dates:{status:'collected',data_as_of:'2026-11-02',reference_url:'https://www.shfe.com.cn/reports/businessdata/prmsummary/',notice:'未含法定节假日调整',contracts:[{contract:'rb2701',listed_on:'2026-01-16',listed_expiry_date:'2027-01-15',delivery_start:'2027-01-18',delivery_end:'2027-01-19'}]},
+  exchange_parameters:{status:'collected',data_as_of:'2026-11-03',reference_url:'javascript:alert(1)',notice:'非经纪商保证金',contracts:[{contract:'rb2701',spec_long_margin_pct:7,spec_short_margin_pct:null,hedge_long_margin_pct:6,hedge_short_margin_pct:6.5,upper_limit_pct:5,lower_limit_pct:4,additional_limit_notice_required:true}]}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const s of ['合约日期与交易所参数','2026-11-02','2026-11-03','2027-01-15','一般买保证金（%）','套保卖保证金（%）','未提供','须查原公告','未含法定节假日调整','非经纪商保证金'])assert(rendered.includes(s),s);
+ assert(!rendered.includes('javascript:')&&!rendered.includes('设置参数')&&!rendered.includes('undefined'));
+ assert.equal(e.requests.length,2);assert(!e.submit.disabled);
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();console.log('hub journeys ok: 9 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
