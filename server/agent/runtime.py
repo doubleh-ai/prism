@@ -461,6 +461,8 @@ class NativeAgent:
                                 expected_route_version=route["version"],
                             )
 
+                    if reviewing and not model_review.history_current(user, run_id, review_packet):
+                        reviewing, concluding, review_skip = False, True, "history_changed"
                     emit(
                         "model_started",
                         {

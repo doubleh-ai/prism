@@ -256,10 +256,15 @@ def record_usage(owner, consumer_run_id, items):
 
 def change_notices(db, owner, run_id):
     rows = db.execute(
-        "SELECT u.source_claim_id,u.review_version,v.version,v.state,v.valid_until,v.superseded_by "
-        "FROM knowledge_uses u JOIN knowledge_reviews v ON v.claim_id=u.source_claim_id AND v.owner=u.owner "
-        "WHERE u.owner=? AND u.consumer_run_id=? AND (v.version>u.review_version OR "
-        "v.state IN ('disputed','retracted') OR v.valid_until<=?) LIMIT 100",
+        "SELECT u.source_claim_id,u.review_version,v.version,v.state,v.valid_until,v.superseded_by,"
+        "CASE WHEN r.run_id IS NOT NULL AND (r.conv_id IS NULL OR EXISTS(SELECT 1 FROM conversations conv "
+        "WHERE conv.id=r.conv_id AND conv.username=r.username AND conv.deleted_at IS NULL)) "
+        "THEN 1 ELSE 0 END AS source_available "
+        "FROM knowledge_uses u LEFT JOIN knowledge_reviews v ON v.claim_id=u.source_claim_id AND v.owner=u.owner "
+        "LEFT JOIN research_claims c ON c.claim_id=u.source_claim_id "
+        "LEFT JOIN research_runs r ON r.run_id=c.run_id AND r.username=u.owner "
+        "WHERE u.owner=? AND u.consumer_run_id=? AND (source_available=0 OR v.version>u.review_version OR "
+        "v.state IN ('disputed','retracted') OR v.superseded_by IS NOT NULL OR v.valid_until<=?) LIMIT 100",
         [owner, run_id, datetime.now(UTC).isoformat().replace("+00:00", "Z")],
     ).fetchall()
     return [dict(row) for row in rows]

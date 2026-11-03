@@ -38,14 +38,23 @@ SYSTEM = (
     '"evidence_ids":["输入的段落ID"],"reason":"具体指出支持范围、矛盾或缺失，最多400字"}]}。'
     "逐项返回且不得新增或省略结论ID。supported仅表示所给节选支持该表述，"
     "不能当作事实认证；推断和假设仍须解释成立条件。"
+    "若结论带有historical_context，同时比较其中历史表述与双方原始节选，在同一reason中解释变化、矛盾或缺口。"
+    "历史结论不是事实依据；shared_body为true表示复用同一正文，不能称为独立佐证。"
+    "此时还须返回history_verdict（consistent|changed_context|potential_conflict|insufficient_evidence）和"
+    "history_claim_ids（全部所给历史结论ID）。期间或口径不同使用changed_context或证据不足，不判为同口径冲突。"
+    "一致或潜在冲突须引用本轮及每条历史的段落ID；没有历史材料时省略这两个字段。"
 )
 
 
 class Assessment(ClosedModel):
     claim_id: str = Field(min_length=1, max_length=100)
     verdict: Literal["supported", "partly_supported", "not_supported", "insufficient_evidence"]
-    evidence_ids: list[str] = Field(max_length=3)
+    evidence_ids: list[str] = Field(max_length=7)
     reason: str = Field(min_length=1, max_length=400)
+    history_verdict: Literal[
+        "not_compared", "consistent", "changed_context", "potential_conflict", "insufficient_evidence"
+    ] = "not_compared"
+    history_claim_ids: list[str] = Field(default_factory=list, max_length=2)
 
     @field_validator("reason")
     @classmethod
@@ -160,6 +169,29 @@ def prepare(user, run_id, *, max_claims=MAX_CLAIMS):
                 "reason": "eligible_excerpts_missing",
                 "claim_count": len(claims),
             }
+        from . import history_review
+
+        related, historical_scope = history_review.candidates(db, user, run, selected)
+        if any(related.values()):
+            # History adds response bindings and comparison work to the same
+            # finite call. Leave output room instead of increasing any budget.
+            selected.sort(key=lambda c: not bool(related[c["claim_id"]]))
+            selected = selected[: max(1, max_claims * 2 // 3)]
+        for claim in selected:
+            claim["historical_context"] = []
+        count = 0
+        for window in range(history_review.MAX_PER_CLAIM):
+            for claim in selected:
+                peers = related[claim["claim_id"]]
+                if len(peers) <= window:
+                    continue
+                peer = peers[window]
+                claim["historical_context"].append(peer)
+                if count >= history_review.MAX_TOTAL or len(_json(selected)) > MAX_PACKET_CHARS - 2000:
+                    claim["historical_context"].pop()
+                    historical_scope["complete"] = False
+                else:
+                    count += 1
         packet = source_display_payload(
             {
                 "schema": "prism.excerpt-review-input.v1",
@@ -169,6 +201,7 @@ def prepare(user, run_id, *, max_claims=MAX_CLAIMS):
                 "scope": "owned_server_fetched_excerpts",
                 "selection_complete": len(selected) == len(claims)
                 and not any(c["references_omitted"] for c in selected),
+                "historical_scope": historical_scope,
                 "independent_sources_verified": False,
             }
         )
@@ -197,23 +230,59 @@ def parse(packet, text):
     assessments = []
     for assessment in value.assessments:
         claim = claims[assessment.claim_id]
-        allowed = {s["passage_id"] for s in claim["sources"]}
+        current_ids = {s["passage_id"] for s in claim["sources"]}
+        historical = claim.get("historical_context", [])
+        old_ids = {p["claim_id"] for p in historical}
+        allowed = current_ids | {s["passage_id"] for p in historical for s in p["sources"]}
         if (
             len(assessment.evidence_ids) != len(set(assessment.evidence_ids))
             or not set(assessment.evidence_ids) <= allowed
             or assessment.verdict in {"supported", "partly_supported"}
-            and not assessment.evidence_ids
+            and not set(assessment.evidence_ids) & current_ids
         ):
             raise ValueError("invalid evidence binding")
+        if (
+            len(assessment.history_claim_ids) != len(set(assessment.history_claim_ids))
+            or set(assessment.history_claim_ids) != old_ids
+            or bool(historical) == (assessment.history_verdict == "not_compared")
+        ):
+            raise ValueError("invalid history binding")
+        if assessment.history_verdict in {"consistent", "potential_conflict"} and (
+            not all(p["context_matches"] for p in historical)
+            or not set(assessment.evidence_ids) & current_ids
+            or any(
+                not set(assessment.evidence_ids) & {s["passage_id"] for s in p["sources"]} for p in historical
+            )
+        ):
+            raise ValueError("unbound history comparison")
         data = assessment.model_dump()
-        data["effective_verdict"] = (
-            "partly_supported"
-            if claim["references_omitted"] and assessment.verdict == "supported"
-            else assessment.verdict
+        incomplete = bool(claim["references_omitted"]) or assessment.history_verdict in {
+            "potential_conflict",
+            "insufficient_evidence",
+        }
+        incomplete = (
+            incomplete
+            or bool(historical)
+            and (
+                not packet.get("historical_scope", {}).get("complete", False)
+                or any(p["references_omitted"] for p in historical)
+            )
         )
-        data["scope_incomplete"] = bool(claim["references_omitted"])
+        data["effective_verdict"] = (
+            "partly_supported" if incomplete and assessment.verdict == "supported" else assessment.verdict
+        )
+        data["scope_incomplete"] = incomplete
         assessments.append(data)
     return {"status": "completed", "assessments": source_display_payload(assessments)}
+
+
+def history_current(user, run_id, packet):
+    from . import history_review
+    from .ledger import _owned
+
+    with get_db() as db:
+        _active(db, user)
+        return history_review.current(db, user, _owned(db, user, run_id, writable=True), packet["claims"])
 
 
 def save(
@@ -243,17 +312,40 @@ def save(
         "provider_error",
         "review_timeout",
         "interrupted",
+        "history_changed",
     }:
         raise ValueError("invalid review reason")
     packet_id = packet.get("packet_id") if packet else None
     selected = packet.get("claims", []) if packet else []
     if status == "completed":
-        expected = {"claim_id", "verdict", "evidence_ids", "reason", "effective_verdict", "scope_incomplete"}
+        expected = {
+            "claim_id",
+            "verdict",
+            "evidence_ids",
+            "reason",
+            "history_verdict",
+            "history_claim_ids",
+            "effective_verdict",
+            "scope_incomplete",
+        }
         if not isinstance(assessments, list) or any(
             not isinstance(a, dict) or set(a) != expected for a in assessments
         ):
             raise ValueError("unvalidated review outcome")
-        base = [{k: a[k] for k in ("claim_id", "verdict", "evidence_ids", "reason")} for a in assessments]
+        base = [
+            {
+                k: a[k]
+                for k in (
+                    "claim_id",
+                    "verdict",
+                    "evidence_ids",
+                    "reason",
+                    "history_verdict",
+                    "history_claim_ids",
+                )
+            }
+            for a in assessments
+        ]
         assessments = parse(packet, _json({"packet_id": packet_id, "assessments": base}))["assessments"]
     elif assessments:
         raise ValueError("unexpected review assessments")
@@ -282,6 +374,18 @@ def save(
             for s in c["sources"]
         ],
         "assessments": assessments or [],
+        "historical_scope": packet.get("historical_scope") if packet else None,
+        "history_bindings": [
+            {
+                "current_claim_id": c["claim_id"],
+                "historical_claim_id": p["claim_id"],
+                "run_id": p["run_id"],
+                "binding_sha256": p["binding_sha256"],
+                "review_version": p["review_version"],
+            }
+            for c in selected
+            for p in c.get("historical_context", [])
+        ],
         "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
     record = source_display_payload(record)
@@ -290,6 +394,13 @@ def save(
         try:
             _active(db, user)
             run = _owned(db, user, run_id, writable=True)
+            from . import history_review
+
+            if not history_review.current(db, user, run, selected):
+                if status == "running":
+                    raise HTTPException(409, "历史研究已变化，请保留本轮资料缺口")
+                if status == "completed":
+                    record.update(status="invalid", reason="history_changed", assessments=[])
             old = run.get("model_review")
             if old and (old.get("status") != "running" or old.get("packet_id") != packet_id):
                 raise HTTPException(409, "本轮复核结果已固定")
@@ -303,6 +414,12 @@ def save(
                 ).fetchone():
                     raise HTTPException(404, "复核结论不存在")
             # Force finite data serialization before the transaction writes.
+            if status == "running":
+                for binding in record["history_bindings"]:
+                    db.execute(
+                        "INSERT OR IGNORE INTO knowledge_uses VALUES(?,?,?,?)",
+                        [user, binding["historical_claim_id"], run_id, binding["review_version"]],
+                    )
             ledger_json(record)
             run["model_review"] = record
             _save_run(db, run)
