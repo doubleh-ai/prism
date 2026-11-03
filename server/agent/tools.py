@@ -117,10 +117,19 @@ def _custom_definitions():
         },
         {
             "name": "source_read",
-            "description": "读取获准公开来源的实际页面节选；未取得原文时保留缺口，节选不代表事实已核验。",
+            "description": "读取获准公开来源的实际节选。PDF 默认前10页；可先查目录，再指定物理页 first_page 和 page_count 读取相关章节，勿要求用户提供页码。节选不代表全文已读或事实已核验。",
             "input_schema": {
                 "type": "object",
-                "properties": {"url": {"type": "string", "maxLength": 2048, "format": "uri"}},
+                "properties": {
+                    "url": {"type": "string", "maxLength": 2048, "format": "uri"},
+                    "first_page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2000,
+                        "description": "仅用于 PDF，从1开始的物理页码，不是文中印刷页码。",
+                    },
+                    "page_count": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
                 "required": ["url"],
                 "additionalProperties": False,
             },
@@ -148,10 +157,10 @@ def native_catalog() -> list[dict]:
     return rows
 
 
-def _fetch_source(url, *, allowed_hosts):
+def _fetch_source(url, *, allowed_hosts, **page_selection):
     from .sources import fetch_public_source
 
-    return fetch_public_source(url, allowed_hosts=allowed_hosts)
+    return fetch_public_source(url, allowed_hosts=allowed_hosts, **page_selection)
 
 
 def _find_sources(arguments):
@@ -309,7 +318,14 @@ class NativeTools:
                 validate(arguments)
             except (ValueError, TypeError, OverflowError):
                 raise NativeToolError("invalid_arguments") from None
-        elif set(arguments) != {"url"} or not _valid_url(arguments["url"]):
+        elif (
+            not {"url"} <= set(arguments) <= {"url", "first_page", "page_count"}
+            or not _valid_url(arguments["url"])
+            or any(
+                key in arguments and (type(arguments[key]) is not int or not 1 <= arguments[key] <= maximum)
+                for key, maximum in (("first_page", 2000), ("page_count", 20))
+            )
+        ):
             raise NativeToolError("invalid_arguments")
 
     def _error(self, code, *, source_kind="unknown", call=None):
@@ -426,6 +442,7 @@ class NativeTools:
             arguments["url"],
             parent=self.lease,
             allowed_hosts=self.allowed_source_hosts,
+            **{key: arguments[key] for key in ("first_page", "page_count") if key in arguments},
         )
         if type(value) is not dict:
             raise NativeToolError("source_unavailable")

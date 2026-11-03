@@ -495,6 +495,55 @@ async def test_successful_source_result_creates_actual_owned_ledger_receipt(nati
     assert changed["error"]["code"] == "conflict" and len(calls) == 1
 
 
+async def test_pdf_windows_are_owned_separate_evidence_and_keep_call_idempotency(native, monkeypatch):
+    calls = []
+
+    def fetch(url, *, allowed_hosts, first_page, page_count):
+        calls.append((url, first_page, page_count, allowed_hosts))
+        return fetched(
+            url=url,
+            text=f"[第{first_page}页]\n合成章节 {first_page}：产能120万吨。",
+            page_range=list(range(first_page, first_page + page_count)),
+            total_pages=15,
+            body_sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(T, "_fetch_source", fetch)
+    url = "https://www.sse.com.cn/report.pdf"
+    first = {"url": url, "first_page": 1, "page_count": 1}
+    later = {"url": url, "first_page": 12, "page_count": 1}
+    one = await native.tools.execute("source_read", first, "pdf-first")
+    two = await native.tools.execute("source_read", later, "pdf-later")
+    assert one["ok"] and two["ok"] and len(calls) == 2
+    assert calls == [(url, 1, 1, ()), (url, 12, 1, ())]
+    assert one["refs"][0]["document_id"] != two["refs"][0]["document_id"]
+    docs = read_research_run(native.context["username"], native.context["run_id"])
+    assert [document["pdf_page_range"] for document in docs["documents"]] == [[1], [12]]
+    assert {document["retrieved_body_sha256"] for document in docs["documents"]} == {"c" * 64}
+    assert any("第12页" in passage["excerpt"] for passage in docs["passages"])
+    assert await native.tools.execute("source_read", later, "pdf-later") == two
+    changed = await native.tools.execute("source_read", first, "pdf-later")
+    assert changed["error"]["code"] == "conflict" and len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [{"first_page": value} for value in (0, 2001, True, "2", 1.5, None)]
+    + [{"page_count": value} for value in (0, 21, True, "2", 1.5, None)]
+    + [{"page": 2}],
+)
+async def test_invalid_pdf_tool_arguments_never_fetch(native, monkeypatch, selection):
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("invalid page selection must not perform a read")
+
+    monkeypatch.setattr(T, "_fetch_source", unexpected)
+    value = await native.tools.execute(
+        "source_read", {"url": "https://www.sse.com.cn/report.pdf", **selection}, "pdf-invalid"
+    )
+    assert value["error"]["code"] == "invalid_arguments"
+    assert read_research_run(native.context["username"], native.context["run_id"])["documents"] == []
+
+
 @pytest.mark.parametrize(
     "value",
     [

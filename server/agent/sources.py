@@ -74,6 +74,9 @@ _CODES = frozenset(
         "pdf_no_text",
         "pdf_unavailable",
         "pdf_timeout",
+        "invalid_page_selection",
+        "pdf_required",
+        "pdf_page_out_of_range",
         "empty_content",
         "invalid_html",
         "invalid_json",
@@ -445,7 +448,7 @@ def _extract(raw, content_type, *, links_out=None):
     return redact_source_text(text), redact_source_text(title.strip()), published, truncated
 
 
-def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
+def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None, first_page=None, page_count=None):
     """Return an untrusted extracted excerpt, never an automatically verified fact.
 
     allowed_hosts is deployment configuration, not untrusted tool input. No
@@ -457,8 +460,16 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
     source_class = None
     redirects = 0
     http_status = None
+    pdf_fields = {}
     try:
         _need(type(timeout_seconds) in (int, float) and 0 < timeout_seconds <= 10, "invalid_timeout")
+        _need(
+            all(
+                value is None or type(value) is int and 1 <= value <= maximum
+                for value, maximum in ((first_page, 2000), (page_count, 20))
+            ),
+            "invalid_page_selection",
+        )
         deadline = time.monotonic() + timeout_seconds
         extras = _extra_hosts(allowed_hosts)
         candidate = url
@@ -495,7 +506,14 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                     from .pdf_text import MAX_PDF_BYTES, extract_pdf
 
                     raw = _body(response, headers, deadline, MAX_PDF_BYTES)
-                    pdf = extract_pdf(raw, timeout_seconds=min(5, _remaining(deadline)))
+                    pdf = extract_pdf(
+                        raw,
+                        timeout_seconds=min(5, _remaining(deadline)),
+                        first_page=first_page if first_page is not None else 1,
+                        page_count=page_count if page_count is not None else 10,
+                    )
+                    if pdf["status"] == "pdf_page_out_of_range":
+                        pdf_fields = {"total_pages": pdf["page_count"]}
                     _need(pdf["status"] == "ok", pdf["status"])
                     full_text = redact_source_text(
                         "\n\n".join(f"[第{p['page']}页]\n{p['text']}" for p in pdf["pages"])
@@ -509,8 +527,12 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                     pdf_fields = {
                         "page_range": [p["page"] for p in pdf["pages"]],
                         "total_pages": pdf["page_count"],
+                        "next_page": pdf["pages"][-1]["page"] + 1
+                        if pdf["pages"][-1]["page"] < pdf["page_count"]
+                        else None,
                     }
                 else:
+                    _need(first_page is None and page_count is None, "pdf_required")
                     raw = _body(response, headers, deadline)
                     text, title, published, truncated = _extract(raw, content_type, links_out=raw_links)
                 _remaining(deadline)
@@ -580,6 +602,7 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
         "http_status": http_status,
         "redirect_count": redirects,
         "automatic_retry": False,
+        **pdf_fields,
     }
 
 

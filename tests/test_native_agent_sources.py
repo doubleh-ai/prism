@@ -1,5 +1,6 @@
 """Synthetic DNS/socket/TLS fixtures only; no external request is performed."""
 
+import hashlib
 import io
 import json
 import socket
@@ -8,6 +9,55 @@ import ssl
 import pytest
 
 from server.agent import sources
+
+
+def test_pdf_late_disclosure_uses_selected_physical_pages_and_original_body_hash(network):
+    from test_pdf_source import pdf
+
+    raw = pdf(pages=15)
+    network["wires"] = [wire(raw, content_type="application/pdf") for _ in range(3)]
+    url = "https://www.sse.com.cn/report.pdf"
+    initial = sources.fetch_public_source(url)
+    assert initial["status"] == "ok" and initial["page_range"] == list(range(1, 11))
+    assert initial["next_page"] == 11 and initial["text_truncated"] is True
+    later = sources.fetch_public_source(url, first_page=12, page_count=2)
+    assert later["status"] == "ok" and later["page_range"] == [12, 13]
+    assert "[第12页]" in later["text"] and "page 12:" in later["text"]
+    assert "page 1:" not in later["text"] and later["next_page"] == 14
+    assert later["total_pages"] == 15 and later["text_truncated"] is True
+    assert initial["body_sha256"] == later["body_sha256"] == hashlib.sha256(raw).hexdigest()
+    final = sources.fetch_public_source(url, first_page=15, page_count=2)
+    assert final["page_range"] == [15] and final["next_page"] is None
+    assert final["text_truncated"] is True  # A selected last page is still only a document excerpt.
+    assert len(network["requests"]) == network["closed"] == 3
+
+
+def test_pdf_page_out_of_range_is_not_an_invalid_document_or_empty_success(network):
+    from test_pdf_source import pdf
+
+    network["wires"] = [wire(pdf(pages=2), content_type="application/pdf")]
+    value = sources.fetch_public_source("https://www.sse.com.cn/report.pdf", first_page=3)
+    assert value["status"] == "pdf_page_out_of_range" and value["total_pages"] == 2
+    assert value["text"] == "" and value["original_obtained"] is False
+    assert len(network["requests"]) == network["closed"] == 1
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [{"first_page": value} for value in (0, -1, 2001, True, "2", 1.5)]
+    + [{"page_count": value} for value in (0, -1, 21, True, "2", 1.5)],
+)
+def test_invalid_page_selection_fails_before_any_network(network, selection):
+    value = sources.fetch_public_source("https://www.sse.com.cn/report.pdf", **selection)
+    assert value["status"] == "invalid_page_selection"
+    assert network["dns_calls"] == network["connects"] == network["requests"] == []
+
+
+@pytest.mark.parametrize("selection", [{"first_page": 1}, {"page_count": 1}])
+def test_page_selection_is_never_silently_ignored_on_html(network, selection):
+    value = sources.fetch_public_source("https://www.sse.com.cn/disclosure", **selection)
+    assert value["status"] == "pdf_required" and value["text"] == ""
+    assert len(network["requests"]) == network["closed"] == 1
 
 
 def test_json_index_retains_pinned_transport_and_never_sends_authentication(network):

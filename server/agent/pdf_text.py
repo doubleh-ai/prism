@@ -36,7 +36,8 @@ try:
     total=len(reader.pages)
     if total>2000: raise ValueError()
     first,count=int(sys.argv[2]),int(sys.argv[3])
-    if first>total: raise ValueError()
+    if first>total:
+        print(json.dumps({'status':'pdf_page_out_of_range','page_count':total}));raise SystemExit(0)
     parts=[];size=0
     for number in range(first-1,min(total,first-1+count)):
         text=reader.pages[number].extract_text() or ''
@@ -87,6 +88,7 @@ def extract_pdf(raw, *, timeout_seconds=5, first_page=1, page_count=10):
             "pdf_invalid",
             "pdf_encrypted",
             "pdf_no_text",
+            "pdf_page_out_of_range",
         }:
             return {"status": "pdf_invalid"}
         return value
