@@ -26,6 +26,65 @@ def test_json_index_retains_pinned_transport_and_never_sends_authentication(netw
     assert network["closed"] == 1 and result["automatic_retry"] is False
 
 
+def disclosure_query(**changes):
+    return {
+        "seDate": ["2026-11-01", "2026-11-03"],
+        "channelCode": ["listedNotice_disc"],
+        "pageSize": 25,
+        "pageNum": 1,
+        "stock": ["000001"],
+        "searchKey": ["公开合成"],
+        **changes,
+    }
+
+
+def test_disclosure_post_is_a_fixed_pinned_public_query_without_authentication(network):
+    network["wires"] = [wire(b'{"announceCount":0,"data":[]}', content_type="application/json")]
+    query = disclosure_query()
+    result = sources.fetch_public_index(
+        "https://www.szse.cn/api/disc/announcement/annList", disclosure_query=query
+    )
+    assert result["status"] == "ok" and result["data"] == {"announceCount": 0, "data": []}
+    headers, body = network["requests"][0].split(b"\r\n\r\n", 1)
+    assert headers.startswith(b"POST /api/disc/announcement/annList HTTP/1.1")
+    assert b"Host: www.szse.cn" in headers and b"Content-Type: application/json" in headers
+    assert f"Content-Length: {len(body)}".encode() in headers and json.loads(body) == query
+    assert all(h not in headers for h in (b"Authorization:", b"Cookie:", b"Proxy-"))
+    assert network["connects"] == [("8.8.8.8", 443)] and network["sni"] == ["www.szse.cn"]
+    assert network["closed"] == 1 and result["automatic_retry"] is False
+
+
+@pytest.mark.parametrize(
+    "url,changes",
+    [
+        ("https://www.sse.com.cn/api/disc/announcement/annList", {}),
+        ("https://www.szse.cn/api/account/update", {}),
+        ("https://www.szse.cn/api/disc/announcement/annList?extra=1", {}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"cookie": "synthetic"}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"pageNum": True}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"pageSize": 10000}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"channelCode": ["other"]}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"stock": ["https://127.0.0.1/"]}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"searchKey": ["token=synthetic"]}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"searchKey": ["header\r\ninjection"]}),
+        ("https://www.szse.cn/api/disc/announcement/annList", {"seDate": ["2026-13-01", "2026-11-03"]}),
+    ],
+)
+def test_query_transport_cannot_send_general_posts_or_private_parameters(network, url, changes):
+    result = sources.fetch_public_index(url, disclosure_query=disclosure_query(**changes))
+    assert result["status"] == "invalid_headers"
+    assert network["dns_calls"] == network["connects"] == network["requests"] == []
+
+
+def test_disclosure_post_redirect_is_not_followed_or_reissued(network):
+    network["wires"] = [wire(b"", status=307, headers=[("Location", "https://www.szse.cn/another")])]
+    result = sources.fetch_public_index(
+        "https://www.szse.cn/api/disc/announcement/annList", disclosure_query=disclosure_query()
+    )
+    assert result["status"] == "redirect_limit"
+    assert len(network["requests"]) == network["closed"] == 1
+
+
 @pytest.mark.parametrize("body", [b'{"a":1,"a":2}', b'{"x":NaN}', b"null", b"1", b"callback({})", b"\xff"])
 def test_index_requires_pure_unambiguous_json_and_cannot_execute_jsonp(network, body):
     network["wires"] = [wire(body, content_type="application/json")]

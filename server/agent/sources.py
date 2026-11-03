@@ -219,7 +219,18 @@ def _tls_socket(host, address, deadline):
 
 
 @contextlib.contextmanager
-def _open_response(host, address, target, deadline, *, json_index=False, referer=None):
+def _open_response(host, address, target, deadline, *, json_index=False, referer=None, query_body=None):
+    _need(
+        query_body is None
+        or (
+            json_index is True
+            and host == "www.szse.cn"
+            and target == "/api/disc/announcement/annList"
+            and type(query_body) is bytes
+            and 0 < len(query_body) <= 2048
+        ),
+        "invalid_headers",
+    )
     sock = _tls_socket(host, address, deadline)
     response = None
     try:
@@ -230,16 +241,22 @@ def _open_response(host, address, target, deadline, *, json_index=False, referer
             "invalid_headers",
         )
         accept = "application/json" if json_index else "text/html, text/plain;q=0.9"
+        method = "POST" if query_body is not None else "GET"
         request = (
-            f"GET {target} HTTP/1.1\r\nHost: {host}\r\n"
+            f"{method} {target} HTTP/1.1\r\nHost: {host}\r\n"
             f"User-Agent: PrismResearch/1.0\r\nAccept: {accept}\r\n"
             + (f"Referer: {referer}\r\n" if referer else "")
+            + (
+                f"Content-Type: application/json\r\nContent-Length: {len(query_body)}\r\n"
+                if query_body is not None
+                else ""
+            )
             + "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
-        ).encode("ascii")
+        ).encode("ascii") + (query_body or b"")
         sock.settimeout(_remaining(deadline))
         sock.sendall(request)
         sock.settimeout(_remaining(deadline))
-        response = http.client.HTTPResponse(_DeadlineSocket(sock, deadline), method="GET")
+        response = http.client.HTTPResponse(_DeadlineSocket(sock, deadline), method=method)
         response.begin()
         # The socket remains owned here throughout body reads, including when
         # the response declares Connection: close. No implicit hostname lookup.
@@ -566,7 +583,55 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
     }
 
 
-def fetch_public_index(url, *, timeout_seconds=8, referer=None):
+def _disclosure_query(query):
+    """One fixed public search operation, never a general POST or header adapter."""
+    _need(
+        type(query) is dict
+        and set(query) == {"seDate", "channelCode", "pageSize", "pageNum", "stock", "searchKey"},
+        "invalid_headers",
+    )
+    days = query["seDate"]
+    _need(
+        type(days) is list
+        and len(days) == 2
+        and all(type(x) is str and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", x) for x in days),
+        "invalid_headers",
+    )
+    try:
+        _need(date.fromisoformat(days[0]) <= date.fromisoformat(days[1]), "invalid_headers")
+    except ValueError:
+        raise _Rejected("invalid_headers") from None
+    _need(
+        query["channelCode"] == ["listedNotice_disc"]
+        and type(query["pageSize"]) is int
+        and query["pageSize"] == 25
+        and type(query["pageNum"]) is int
+        and 1 <= query["pageNum"] <= 5,
+        "invalid_headers",
+    )
+    stocks, words = query["stock"], query["searchKey"]
+    _need(
+        type(stocks) is list
+        and len(stocks) <= 1
+        and all(type(x) is str and re.fullmatch(r"[0-9]{6}", x) for x in stocks)
+        and type(words) is list
+        and len(words) <= 1
+        and all(
+            type(x) is str
+            and 1 <= len(x) <= 80
+            and all(ord(c) >= 32 for c in x)
+            and redact_source_text(x) == x
+            and not re.search(r"(?i)\b(?:api[_-]?key|password|token|secret)\s*[:=]", x)
+            for x in words
+        ),
+        "invalid_headers",
+    )
+    body = json.dumps(query, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    _need(len(body) <= 2048, "invalid_headers")
+    return body
+
+
+def fetch_public_index(url, *, timeout_seconds=8, referer=None, disclosure_query=None):
     """Internal JSON index transport; the model cannot choose headers or hosts.
 
     Fixed discovery adapters consume the returned data, not arbitrary URLs from
@@ -577,6 +642,10 @@ def fetch_public_index(url, *, timeout_seconds=8, referer=None):
     try:
         _need(type(timeout_seconds) in (int, float) and 0 < timeout_seconds <= 8, "invalid_timeout")
         deadline = time.monotonic() + timeout_seconds
+        query_body = None
+        if disclosure_query is not None:
+            _need(url == "https://www.szse.cn/api/disc/announcement/annList", "invalid_headers")
+            query_body = _disclosure_query(disclosure_query)
         if referer is not None:
             referer, _, _ = _admit_url(referer, set())
         candidate = url
@@ -585,12 +654,14 @@ def fetch_public_index(url, *, timeout_seconds=8, referer=None):
             addresses = _resolve(host, deadline)
             parsed = urlsplit(current)
             target = parsed.path + ("?" + parsed.query if parsed.query else "")
-            with _open_response(
-                host, addresses[0], target, deadline, json_index=True, referer=referer
-            ) as response:
+            options = {"json_index": True, "referer": referer}
+            if query_body is not None:
+                options["query_body"] = query_body
+            with _open_response(host, addresses[0], target, deadline, **options) as response:
                 http_status = response.status
                 headers = _headers(response)
                 if http_status in _REDIRECTS:
+                    _need(query_body is None, "redirect_limit")
                     _need(redirects < MAX_REDIRECTS, "redirect_limit")
                     _need(bool(headers.get("location")), "redirect_missing_location")
                     candidate = urljoin(current, headers["location"])

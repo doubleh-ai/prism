@@ -5,8 +5,10 @@ import copy
 import json
 import sqlite3
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -116,6 +118,91 @@ async def test_source_discovery_ingests_each_index_receipt_then_original_with_se
     assert full["retrieved_body_sha256"] == "b" * 64 and full["source_index"]["body_sha256"] == "a" * 64
     assert full["published_at"] == "2020-01-10" and "original_not_verified" in full["gaps"]
     assert full["original_obtained"] is False and full["independence_status"] == "not_assessed"
+
+
+@pytest.mark.parametrize("provider", ["szse", "cls"])
+async def test_new_provider_runs_through_native_dispatch_original_read_and_owned_ledger(
+    native, monkeypatch, provider
+):
+    from server.agent import discovery as D
+
+    now = datetime(2026, 11, 3, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(D, "datetime", Clock)
+    calls = []
+    index_url = D.SZSE if provider == "szse" else D.CLS
+    article = (
+        "https://disc.static.szse.cn/disc/fixture.pdf"
+        if provider == "szse"
+        else "https://www.cls.cn/detail/12345"
+    )
+
+    def index(url, **options):
+        calls.append((url, options))
+        assert url == index_url
+        if provider == "szse":
+            assert options["disclosure_query"]["stock"] == ["000001"]
+            payload = {
+                "announceCount": 1,
+                "data": [
+                    {
+                        "secCode": ["000001"],
+                        "secName": ["合成公司"],
+                        "title": "合成产能披露",
+                        "publishTime": "2026-11-02 09:00:00",
+                        "attachPath": "/disc/fixture.pdf",
+                    }
+                ],
+            }
+        else:
+            assert "disclosure_query" not in options
+            payload = {
+                "errno": 0,
+                "data": {
+                    "roll_data": [
+                        {
+                            "id": 12345,
+                            "title": "",
+                            "content": "合成行业新闻",
+                            "ctime": int(now.timestamp()) - 60,
+                        }
+                    ]
+                },
+            }
+        return {
+            "status": "ok",
+            "url": url,
+            "data": payload,
+            "body_sha256": "a" * 64,
+            "retrieved_at": now.isoformat(),
+        }
+
+    monkeypatch.setattr(D, "fetch_public_index", index)
+    arguments = {"query": "合成", "providers": [provider]}
+    if provider == "szse":
+        arguments["stock_code"] = "000001"
+    result = await native.tools.execute("source_find", arguments, "new-source-index")
+    assert result["ok"] and len(result["refs"]) == 1
+    assert result["refs"][0]["url"] == article
+    assert result == await native.tools.execute("source_find", arguments, "new-source-index")
+    assert len(calls) == 1
+    monkeypatch.setattr(
+        T, "_fetch_source", lambda *a, **k: fetched(url=article, published_at=None, body_sha256="b" * 64)
+    )
+    original = await native.tools.execute("source_read", {"url": article}, "new-source-original")
+    assert original["ok"] and original["data"]["published_at_basis"] == "source_index_metadata"
+    docs = read_research_run(native.context["username"], native.context["run_id"])["documents"]
+    snippets = [d for d in docs if d["content_scope"] == "search_snippet"]
+    originals = [d for d in docs if d["content_scope"] == "tool_returned_text"]
+    assert len(snippets) == len(originals) == 1
+    assert all(d["source_index"] == {"url": index_url, "body_sha256": "a" * 64} for d in docs)
+    assert originals[0]["retrieved_body_sha256"] == "b" * 64
+    assert "original_not_verified" in originals[0]["gaps"]
 
 
 async def test_discovery_no_match_and_unavailable_are_distinct_no_fake_references(native, monkeypatch):

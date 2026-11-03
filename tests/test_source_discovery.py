@@ -74,7 +74,7 @@ def sina(rows=None, **kw):
         {"query": "synthetic api_key=abcd1234abcde"},
         {"url": "https://attacker.example/"},
         {"providers": ["sse", "sse"]},
-        {"providers": ["cls"]},
+        {"providers": ["unconfigured"]},
         {"providers": [["sse"]]},
         {"page": True},
         {"page": 6},
