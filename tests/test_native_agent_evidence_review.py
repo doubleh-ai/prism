@@ -171,6 +171,13 @@ async def run_script(engine, monkeypatch, *, review_mode="valid", late_claim=Fal
                 packet = json.loads(messages[0]["content"])
                 if review_mode == "provider_error":
                     raise runtime.provider.ProviderError("provider_unavailable")
+                if review_mode in {
+                    "provider_auth_error",
+                    "provider_rate_limited",
+                    "provider_configuration_error",
+                    "provider_input_error",
+                }:
+                    raise runtime.provider.ProviderError(review_mode)
                 if review_mode == "timeout":
                     await asyncio.Event().wait()
                 if review_mode == "tool":
@@ -429,3 +436,15 @@ def test_unfinished_review_on_exclusive_restart_is_unknown_not_success(engine):
     assert saved["model_review"]["usage_complete"] is False
     assert saved["report_revisions"][0]["model_review"]["status"] == "failed"
     assert "model_review_incomplete" in saved["report_revisions"][0]["gaps"]
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["provider_auth_error", "provider_rate_limited", "provider_configuration_error", "provider_input_error"],
+)
+async def test_fatal_provider_failure_stops_after_review_without_another_request(engine, monkeypatch, code):
+    outcome, calls, closed, saved = await run_script(engine, monkeypatch, review_mode=code)
+    assert calls == ["main", "review"] and len(closed) == 2
+    assert outcome.error_code == code and last_usage(engine)["model_calls"] == 2
+    assert saved["model_review"]["status"] == "failed" and saved["model_review"]["reason"] == "provider_error"
+    assert len(saved["claims"]) == 1 and last_usage(engine)["usage_complete"] is False

@@ -609,7 +609,12 @@ class NativeAgent:
                         )
                         current_search_complete = True
                     except provider.ProviderError as error:
-                        if not reviewing:
+                        if not reviewing or error.code in {
+                            "provider_auth_error",
+                            "provider_rate_limited",
+                            "provider_configuration_error",
+                            "provider_input_error",
+                        }:
                             raise
                         review_error = (
                             "invalid_response" if error.code == "review_output_invalid" else "provider_error"
@@ -788,7 +793,9 @@ class NativeAgent:
                     run_id,
                     review_packet,
                     status="cancelled" if outcome.status == "cancelled" else "failed",
-                    reason="interrupted",
+                    reason="provider_error"
+                    if outcome.error_code and outcome.error_code.startswith("provider_")
+                    else "interrupted",
                     model_id=run["model_id"],
                     call_number=review_call_number,
                     usage_complete=False,
