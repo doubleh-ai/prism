@@ -14,4 +14,4 @@ def test_hub_handlers_preserve_identity_and_drafts():
         [node, "tests/hub_frontend_runtime.cjs"], cwd=root, capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "hub journeys ok: 6 scenarios" in result.stdout
+    assert "hub journeys ok: 8 scenarios" in result.stdout

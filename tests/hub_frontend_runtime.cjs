@@ -67,4 +67,20 @@ async function showMissingFuturesData(){
  const run=e.form.onsubmit({preventDefault(){}});respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'unavailable'},member_positioning:{status:'not_reported'}});await run;
  const rendered=JSON.stringify(e.els.futuresResult);assert.match(rendered,/未取得交易所合约数据/);assert.match(rendered,/交易所未披露该合约的会员持仓/);
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();console.log('hub journeys ok: 6 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showRetainedOfficialDataWithoutContinuousPrices(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'CU',name:'铜',series_status:'unavailable',data_as_of:null,collected_at:'2026-11-03T12:00:00+08:00',latest:{close:null},technical:null,positioning:null,fundamentals:[],gaps:['现货数据尚未取得'],source:{},warehouse_receipt:{status:'collected',data_as_of:'2026-11-02',table:'铜',row:'总计',quantity:7,change:-1,unit:'吨',source_url:'https://www.shfe.com.cn/source'},exchange_daily:{status:'unavailable'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ assert.match(e.els.notice.textContent,/连续日线暂未取得/);assert.match(rendered,/总计 7 吨/);
+ assert(!rendered.includes('最近收盘')&&!rendered.includes('20日均值')&&!rendered.includes('null')&&!rendered.includes('undefined'));
+ assert(!e.submit.disabled);
+}
+async function showDifferentSourceDatesInOneNotice(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'CU',name:'铜',series_status:'collected',data_as_of:'2026-11-02',collected_at:'2026-11-03T12:00:00+08:00',latest:{close:70000},technical:{},positioning:{},fundamentals:[],gaps:[],source:{name:'合成公开行情',url:'https://finance.sina.com.cn/fixture'},date_alignment:'mixed',warehouse_receipt:{status:'collected',data_as_of:'2026-10-30',table:'铜',row:'总计',quantity:7,change:-1,unit:'吨',source_url:'https://www.shfe.com.cn/source'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ assert.match(e.els.notice.textContent,/资料日期不同/);assert(rendered.includes('2026-11-02')&&rendered.includes('2026-10-30')&&rendered.includes('70000'));
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();console.log('hub journeys ok: 8 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

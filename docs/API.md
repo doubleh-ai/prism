@@ -782,11 +782,33 @@ short/medium/long, integer `max_position_pct` 1-100, integer
 stable profile version; current preferences never rewrite existing runs. Actual
 holdings are not assumed and `portfolio_risk_status` remains `not_evaluated`.
 
-`futures_snapshot` accepts RB/CU/AU/M/SC only. Five-minute public cache retains
+`futures_snapshot` accepts RB/CU/AU/M/SC only. Its public cache retains
 collection time. Continuous series are not executable contracts; missing
 fundamentals and capital flow are explicit. Trading and Work write tools are not
 in the research Agent catalog. Native feedback accepts `work`, `calendar`,
 `futures` and `preferences` as additional closed-enum feature names.
+
+Futures sources are independent: unavailable continuous prices leave `latest`
+and technical values null, without discarding collected exchange or warehouse
+reports. `coverage` describes the market-data components, `status: partial`
+retains usable components for 30 seconds, and fully collected market components
+use a 300-second cache. This status does not certify fundamental research or
+portfolio suitability. No source collected returns 503 with
+`X-Prism-Data-Status: unavailable` and `Retry-After: 30`, without caching a result.
+
+Official reports start from the server's Shanghai calendar date, independently
+of a missing or stale secondary price feed. Only an actual dated HTTP 404 permits
+a query for the preceding date, at most three distinct calendar dates per
+source within the shared 15-second budget. Network, TLS, access, rate-limit and
+schema errors do not trigger earlier-date queries. This bounded window is not
+a trading calendar or a guarantee of the latest published report. Each parser
+checks the report's actual date; collected reports are retained while another
+source checks an older date. `source_attempts`, `observation_dates`,
+`report_date_basis: bounded_calendar_window` and `date_alignment` preserve this
+distinction. A mixed-date snapshot must not be treated as a same-day comparison.
+Error metadata is a finite code and optional HTTP status, never upstream error
+text, response bodies or headers. Cancellation propagates without starting more
+source requests or caching an unfinished result.
 
 ## v0.23.0 completion work (unreleased)
 

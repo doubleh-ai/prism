@@ -260,7 +260,9 @@ async def test_real_futures_http_parser_and_cache_without_external_calls(monkeyp
     first = await futures.snapshot("RB")
     first["latest"]["close"] = 0
     again = await futures.snapshot("RB")
-    assert len(requests) == 3 and again["cached"] and again["latest"]["close"] == 170
+    assert len(requests) == 7 and again["cached"] and again["latest"]["close"] == 170
+    assert len({str(request.url) for request in requests}) == 7
+    assert len({item["requested_date"] for item in again["source_attempts"]}) == 3
     assert again["warehouse_receipt"]["status"] == "unavailable"
     assert again["exchange_daily"]["status"] == "unavailable"
 

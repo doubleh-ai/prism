@@ -7,6 +7,8 @@ from datetime import date
 import httpx
 from bs4 import BeautifulSoup
 
+from .data_availability import source_failure
+
 # Match the published table and row exactly. In particular, CU excludes BC copper
 # and the RB warehouse table excludes the separately reported factory warrants.
 TABLES = {
@@ -71,6 +73,7 @@ async def read_report(client, symbol, day, deadline):
     try:
         async with asyncio.timeout_at(deadline):
             raw = bytearray()
+            client.cookies.clear()
             async with client.stream(
                 "GET", report_url(day), headers={"Accept-Encoding": "identity"}
             ) as response:
@@ -82,5 +85,10 @@ async def read_report(client, symbol, day, deadline):
                         raise ValueError("report size")
                     raw.extend(chunk)
             return await asyncio.to_thread(parse_report, bytes(raw), symbol, day)
-    except (ValueError, httpx.HTTPError, TimeoutError, RecursionError):
-        return {"status": "unavailable", "requested_date": day.isoformat(), "source_url": report_url(day)}
+    except (ValueError, httpx.HTTPError, TimeoutError, RecursionError) as error:
+        return {
+            "status": "unavailable",
+            "requested_date": day.isoformat(),
+            "source_url": report_url(day),
+            **source_failure(error),
+        }

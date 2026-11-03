@@ -206,14 +206,17 @@
   function metric(label,value){var box=node('div',undefined,'metric');box.append(node('span',label),node('strong',value===null||value===undefined?'待核查':String(value)));return box;}
   async function loadFutures(event){
     if(event)event.preventDefault();var ticket=++epoch,form=$('futuresForm'),button=form.querySelector('button');button.disabled=true;
-    $('futuresResult').replaceChildren();notice('正在读取日线和计算指标…');
+    $('futuresResult').replaceChildren();notice('正在读取研究资料…');
     try {
       var value=await api('/api/futures/'+$('futureSymbol').value+'/snapshot');if(ticket!==epoch)return;
-      notice(value.calendar_age_days>4?'最新数据距当前已有 '+value.calendar_age_days+' 个日历日，请核查停市或来源延迟。':'');
-      var root=$('futuresResult'),overview=node('section',undefined,'card');overview.append(node('h2',value.name+' · 连续日线'));
-      overview.append(node('p','数据日期 '+value.data_as_of+' · 采集 '+value.collected_at+(value.cached?' · 5分钟内缓存':''),'muted'));
-      var metrics=node('div',undefined,'metrics');metrics.append(metric('最近收盘',value.latest.close),metric('日变动（%）',value.technical.change_pct),metric('20日均值',value.technical.sma20));overview.append(metrics,node('p',value.notice,'muted'));root.append(overview);
-      var tech=node('section',undefined,'card');tech.append(node('h2','技术与成交持仓'));var values=node('div',undefined,'metrics');values.append(metric('60日均值',value.technical.sma60),metric('成交量',value.positioning.volume),metric('持仓量变化',value.positioning.open_interest_change));tech.append(values,node('p',value.positioning.notice,'muted'));root.append(tech);
+      var hasSeries=value.series_status!=='unavailable'&&value.latest&&typeof value.latest.close==='number'&&Number.isFinite(value.latest.close),warnings=[];
+      if(!hasSeries)warnings.push('连续日线暂未取得，技术指标未计算；已取得的其他资料仍可查看。');
+      if(hasSeries&&value.calendar_age_days>4)warnings.push('最新日线距当前已有 '+value.calendar_age_days+' 个日历日，请核查停市或来源延迟。');
+      if(value.date_alignment==='mixed')warnings.push('资料日期不同，请按各自日期比较。');notice(warnings.join(' '));
+      var root=$('futuresResult'),overview=node('section',undefined,'card');overview.append(node('h2',value.name+(hasSeries?' · 连续日线':' · 研究数据')));
+      overview.append(node('p',(hasSeries?'日线日期 '+value.data_as_of+' · ':'')+'采集 '+value.collected_at+(value.cached?' · 缓存数据':''),'muted'));
+      if(hasSeries){var metrics=node('div',undefined,'metrics');metrics.append(metric('最近收盘',value.latest.close),metric('日变动（%）',value.technical.change_pct),metric('20日均值',value.technical.sma20));overview.append(metrics,node('p',value.notice,'muted'));}root.append(overview);
+      if(hasSeries){var tech=node('section',undefined,'card');tech.append(node('h2','技术与成交持仓'));var values=node('div',undefined,'metrics');values.append(metric('60日均值',value.technical.sma60),metric('成交量',value.positioning.volume),metric('持仓量变化',value.positioning.open_interest_change));tech.append(values,node('p',value.positioning.notice,'muted'));root.append(tech);}
       var exchange=value.exchange_daily||{},curve=exchange.curve||{},members=exchange.member_positioning||value.member_positioning||{};
       var display=function(v){return v===null||v===undefined||v===''?'未提供':String(v);};
       var sourceLink=function(url,label){try{var parsed=new URL(url);if(parsed.protocol!=='https:'||parsed.username||parsed.password)return null;var a=node('a',label);a.href=parsed.href;a.target='_blank';a.rel='noopener noreferrer';return a;}catch(_){return null;}};
@@ -249,10 +252,10 @@
         reportLink.href=receipt.source_url;reportLink.target='_blank';reportLink.rel='noopener noreferrer';
         fund.append(reportLink,node('p','仅覆盖该表已登记仓单，社会库存仍待核查。','muted'));
       }else if(receipt){
-        fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得对应交易日的官方仓单，保留行情结果。','muted'));
+        fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
       }
       fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/prism?futures='+value.symbol;fund.append(action);root.append(fund);
-      var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);
+      if(hasSeries){var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);}
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }
   async function init(){

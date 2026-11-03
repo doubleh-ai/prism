@@ -16,6 +16,8 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
+from .data_availability import source_failure
+
 HOSTS = {"RB": "www.shfe.com.cn", "CU": "www.shfe.com.cn", "AU": "www.shfe.com.cn", "SC": "www.ine.cn"}
 PRODUCTS = {"RB": ("rb_f", "螺纹钢"), "CU": ("cu_f", "铜"), "AU": ("au_f", "黄金"), "SC": ("sc_f", "原油")}
 LIMIT = 2 * 1024 * 1024
@@ -190,6 +192,7 @@ async def _fetch(client, url, day, deadline):
         raise TimeoutError()
     async with asyncio.timeout_at(deadline):
         raw = bytearray()
+        client.cookies.clear()
         async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
             response.raise_for_status()
             if response.headers.get("content-encoding", "identity").casefold() != "identity":
@@ -208,21 +211,23 @@ async def read_daily(client, symbol, day, deadline):
     try:
         raw = await _fetch(client, report_url(symbol, day), day, deadline)
         value = parse_contracts(raw, symbol, day)
-    except errors:
+    except errors as error:
         return {
             "status": "unavailable",
             "requested_date": day.isoformat(),
             "source_url": report_url(symbol, day),
             "member_positioning": {"status": "unavailable"},
+            **source_failure(error),
         }
     try:
         ranks = await _fetch(client, report_url(symbol, day, rankings=True), day, deadline)
         value["member_positioning"] = parse_rankings(ranks, symbol, day, value["active_contract"])
-    except errors:
+    except errors as error:
         value["member_positioning"] = {
             "status": "unavailable",
             "requested_date": day.isoformat(),
             "source_url": report_url(symbol, day, rankings=True),
             "contract": value["active_contract"],
+            **source_failure(error),
         }
     return value

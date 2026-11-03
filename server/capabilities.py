@@ -932,7 +932,10 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
 
         value = await snapshot(data["symbol"])
         target["href"] = "/futures?symbol=" + data["symbol"]
-        return value, target, "取得期货连续日线及研究缺口"
+        summary = (
+            "已取得部分期货资料，缺失项见结果" if value.get("status") == "partial" else "已取得期货研究资料"
+        )
+        return value, target, summary
     if name.startswith("market_"):
         from .market.factory import get_chain
 
