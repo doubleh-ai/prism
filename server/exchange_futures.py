@@ -204,7 +204,7 @@ async def _fetch(client, url, day, deadline):
         return bytes(raw)
 
 
-async def read_daily(client, symbol, day, deadline):
+async def read_settlements(client, symbol, day, deadline):
     if symbol not in HOSTS:
         return {"status": "not_covered", "member_positioning": {"status": "not_covered"}}
     errors = (httpx.HTTPError, ValueError, TypeError, KeyError, OverflowError, TimeoutError, RecursionError)
@@ -219,6 +219,14 @@ async def read_daily(client, symbol, day, deadline):
             "member_positioning": {"status": "unavailable"},
             **source_failure(error),
         }
+    return value
+
+
+async def read_daily(client, symbol, day, deadline):
+    value = await read_settlements(client, symbol, day, deadline)
+    if value["status"] != "collected":
+        return value
+    errors = (httpx.HTTPError, ValueError, TypeError, KeyError, OverflowError, TimeoutError, RecursionError)
     try:
         ranks = await _fetch(client, report_url(symbol, day, rankings=True), day, deadline)
         value["member_positioning"] = parse_rankings(ranks, symbol, day, value["active_contract"])

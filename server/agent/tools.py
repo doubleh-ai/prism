@@ -43,12 +43,15 @@ PLATFORM_TOOLS = (
 MAX_ARGUMENT_BYTES = 32768
 MAX_OUTPUT_BYTES = 120000
 _CUSTOM = {
+    "portfolio_risk": ("核对我的持仓风险", "portfolio_snapshot"),
     "knowledge_search": ("检索我的历史研究", "historical_research"),
     "knowledge_get": ("读取我的历史研究", "historical_research"),
     "source_read": ("读取公开资料节选", "external_web"),
     "source_find": ("查找公开资料", "external_web"),
 }
 _ERRORS = {
+    "risk_permission_required": "请先在持仓与风险检查中允许公开行情对价及新研究风险摘要，再新建研究；本次未查询行情",
+    "risk_snapshot_changed": "持仓、授权或研究状态已变化，请核对后新建研究；本次结果未返回",
     "unknown_tool": "该工具不可用",
     "invalid_arguments": "工具参数无效",
     "unavailable_context": "当前研究授权不可用",
@@ -77,6 +80,11 @@ def _custom_definitions():
     from .discovery import SCHEMA
 
     return [
+        {
+            "name": "portfolio_risk",
+            "description": "在本人已允许行情对价及风险摘要分享时，按本轮固定持仓版本核对风险。只返回汇总金额、规则和行情日期，不返回代码、数量或持仓明细；保留缺项与假设，不连接券商、不下单。一轮只采集一次；变更或撤销授权需新建研究。",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
         {
             "name": "source_find",
             "description": "用短的公开关键词或沪深六位证券代码查找公告与新闻线索，不需猜测URL或提供搜索密钥。覆盖上交所和深交所公告、新浪滚动索引及财联社最新电报首页；新浪和财联社仅在有界列表内匹配，非全文历史搜索。每次最多两个来源，保留日期、分页、来源和缺口，随后用source_read读原文。不要发送用户持仓、个人信息或凭证。",
@@ -232,6 +240,7 @@ class NativeTools:
         self.allowed_source_hosts = tuple(h.lower() for h in allowed_source_hosts)
         self._cache = {}
         self._source_dates = {}
+        self._risk_result = None
         self._lock = asyncio.Lock()
         self._authorize()
 
@@ -273,6 +282,9 @@ class NativeTools:
                 spec.schema.model_validate(arguments)
             except Exception:
                 raise NativeToolError("invalid_arguments") from None
+        elif name == "portfolio_risk":
+            if arguments:
+                raise NativeToolError("invalid_arguments")
         elif name == "knowledge_search":
             if (
                 not {"query"} <= set(arguments) <= {"query", "limit"}
@@ -342,7 +354,13 @@ class NativeTools:
             "created_at": started,
             "completed_at": int(time.time()),
             "input_summary": label,
-            "result_summary": "已读取资料，内容仍待语义核验" if ok else "未形成可用资料，保留研究缺口",
+            "result_summary": (
+                "已返回风险估算摘要，缺项仍保留；不是实际账户认证"
+                if name == "portfolio_risk"
+                else "已读取资料，内容仍待语义核验"
+            )
+            if ok
+            else "未形成可用资料，保留研究缺口",
         }
 
     def _persist_custom_call(self, call, fingerprint):
@@ -571,6 +589,47 @@ class NativeTools:
                 output["error"] = self._error(code)["error"]
             output["evidence_status"] = "platform_result_not_external_verification"
             return output
+        if name == "portfolio_risk":
+            from ..portfolio_valuation import agent_inputs, reprice
+
+            try:
+                version, frozen = agent_inputs(self.context["username"], self.context["run_id"])
+            except Exception as error:
+                from fastapi import HTTPException
+
+                if isinstance(error, HTTPException) and error.status_code in {403, 409}:
+                    raise NativeToolError(
+                        "risk_permission_required" if error.status_code == 403 else "risk_snapshot_changed"
+                    ) from None
+                raise
+            if self._risk_result is not None:
+                cached = copy.deepcopy(self._risk_result)
+                if cached.get("ok"):
+                    cached["data"]["cached_for_this_run"] = True
+                return cached
+            # A failed/unknown read cannot restart with a new model call ID.
+            self._risk_result = self._error("unavailable", source_kind="portfolio_snapshot")
+            value = await reprice(
+                self.context["username"], version, frozen_profile=frozen, authorize=self._authorize
+            )
+            self._risk_result = {
+                "ok": True,
+                "data": self._safe(
+                    {
+                        "risk": value["risk"],
+                        "portfolio_version": value["portfolio_version"],
+                        "profile_version": value["profile_version"],
+                        "observed_at": value["observed_at"],
+                        "snapshot_as_of": value["snapshot_as_of"],
+                        "market_basis": value["market_basis"],
+                        "notice": "仅为原持仓不变的对价估算，非券商账户或下单依据。",
+                        "fixed_for_this_run": True,
+                    }
+                ),
+                "refs": [],
+                "source_kind": "portfolio_snapshot",
+            }
+            return copy.deepcopy(self._risk_result)
         if name == "source_read":
             return await self._read_source(arguments, call_id)
         if name == "source_find":

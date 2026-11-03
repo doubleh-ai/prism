@@ -8,7 +8,7 @@ import io
 from fastapi import HTTPException
 from pydantic import Field, ValidationError
 
-from .portfolio import Currency, FuturesPosition, Position
+from .portfolio import Currency, FuturesPosition, Position, _position_key
 from .productivity.models import ClosedModel
 
 MAX_CSV_BYTES = 65536
@@ -99,9 +99,9 @@ def parse_preview(body: ImportPreview):
                 raise HTTPException(
                     422, f"第{reader.line_num}行的类型、数量、价格、时间或合约字段无效；请核对原始值"
                 ) from None
-            key = (position.asset_id.casefold(), getattr(position, "side", None))
+            key = _position_key(position.model_dump())
             if key in seen:
-                raise HTTPException(422, f"第{reader.line_num}行重复；同一合约同一方向请先合并核对")
+                raise HTTPException(422, f"第{reader.line_num}行重复；同一标的或合约同方向请先合并核对")
             seen.add(key)
             positions.append(position.model_dump())
     except (csv.Error, StopIteration, IndexError):

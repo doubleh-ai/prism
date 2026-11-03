@@ -28,6 +28,46 @@ Currency = Literal["CNY", "USD", "HKD"]
 _DECIMAL = re.compile(r"(?:0|[1-9]\d{0,14})(?:\.\d{1,8})?\Z", re.ASCII)
 
 
+async def _portfolio_body(request):
+    try:
+        return await _body(request, PortfolioUpdate, maximum=131072)
+    except HTTPException as error:
+        if error.status_code == 422:
+            raise HTTPException(
+                422, "持仓格式无效，请检查重复代码、数量、价格、币种和时间；期货权益须对应明确的参考价格时点"
+            ) from None
+        raise
+
+
+def security_identity(asset_id, currency):
+    """Recognize mainland aliases without conflating foreign instruments."""
+    if currency != "CNY":
+        return None
+    match = re.fullmatch(r"(?:(SH|SZ|BJ):?)?(\d{6})(?:\.(SH|SZ|BJ))?", asset_id.upper())
+    if not match:
+        return None
+    before, code, after = match.groups()
+    market = (
+        "SH"
+        if code.startswith(("5", "6"))
+        else "SZ"
+        if code.startswith(("0", "1", "3"))
+        else "BJ"
+        if code.startswith(("4", "8", "92"))
+        else None
+    )
+    if not market or before not in {None, market} or after not in {None, market}:
+        return None
+    return market, code
+
+
+def _position_key(position):
+    if position.get("asset_class") == "futures":
+        return position["asset_id"].upper(), position.get("side")
+    identity = security_identity(position["asset_id"], position["currency"])
+    return (":".join(identity) if identity else position["asset_id"].casefold()), None
+
+
 def _amount(value, *, positive=False, signed=False):
     raw = value[1:] if signed and value.startswith("-") else value
     if not _DECIMAL.fullmatch(raw) or (positive and Decimal(value) <= 0):
@@ -125,6 +165,8 @@ class PortfolioUpdate(ClosedModel):
     positions: list[Position | FuturesPosition] = Field(max_length=100)
     futures_equity: str | None = Field(default=None, max_length=24)
     share_with_agent: bool = False
+    allow_market_pricing: bool = False
+    futures_equity_basis: Literal["unverified", "marked_to_reference_prices"] = "unverified"
     equity_peak: str | None = Field(default=None, max_length=24)
     peak_as_of: str | None = Field(default=None, max_length=40)
     net_flows_since_peak: str = Field(default="0", max_length=25)
@@ -151,9 +193,16 @@ class PortfolioUpdate(ClosedModel):
             self.peak_as_of = canonical_instant(self.peak_as_of, "UTC")
             if self.peak_as_of > self.observed_at:
                 raise ValueError("peak cannot follow portfolio observation")
-        keys = [(p.asset_id.casefold(), getattr(p, "side", None)) for p in self.positions]
+        keys = [_position_key(p.model_dump()) for p in self.positions]
         if len(set(keys)) != len(keys):
             raise ValueError("duplicate asset")
+        futures = [p for p in self.positions if p.asset_class == "futures"]
+        if (
+            futures
+            and self.futures_equity_basis == "marked_to_reference_prices"
+            and (self.futures_equity is None or any(p.price_as_of != self.observed_at for p in futures))
+        ):
+            raise ValueError("marked futures equity requires the same reference instant and account equity")
         return self
 
 
@@ -324,7 +373,9 @@ def _evaluate(profile, portfolio, *, now=None):
     securities_value = sum((Decimal(p["quantity"]) * Decimal(p["price"]) for p in securities), Decimal(0))
     values = [
         (
-            re.sub(r"[0-9]{4}$", "", p["asset_id"]) if p.get("asset_class") == "futures" else p["asset_id"],
+            re.sub(r"[0-9]{4}$", "", p["asset_id"])
+            if p.get("asset_class") == "futures"
+            else _position_key(p)[0],
             Decimal(p["quantity"])
             * Decimal(p["price"])
             * (Decimal(p["multiplier"]) if p.get("asset_class") == "futures" else 1),
@@ -437,6 +488,28 @@ async def preview_portfolio(request: Request):
     return parse_preview(body)
 
 
+class PricingRequest(ClosedModel):
+    expected_version: int = Field(ge=1)
+
+
+@router.post("/portfolio/reprice")
+async def reprice_portfolio(request: Request):
+    from fastapi.responses import JSONResponse
+
+    from .auth import verify_csrf
+    from .portfolio_valuation import reprice
+
+    owner = _owner(request)
+    verify_csrf(request)
+    body = await _body(request, PricingRequest)
+    if _owner(request) != owner:
+        raise HTTPException(401, "请重新登录")
+    value = await reprice(owner, body.expected_version)
+    if _owner(request) != owner:
+        raise HTTPException(401, "请重新登录")
+    return JSONResponse(value, headers={"Cache-Control": "no-store"})
+
+
 @router.put("/portfolio")
 async def save_portfolio(request: Request):
     from .auth import verify_csrf
@@ -444,7 +517,7 @@ async def save_portfolio(request: Request):
 
     owner = _owner(request)
     verify_csrf(request)
-    body = await _body(request, PortfolioUpdate, maximum=131072)
+    body = await _portfolio_body(request)
     if _owner(request) != owner:
         raise HTTPException(401, "请重新登录")
     init_portfolio_db()

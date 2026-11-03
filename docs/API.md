@@ -812,6 +812,36 @@ source requests or caching an unfinished result.
 
 ## v0.23.0 completion work (unreleased)
 
+### Portfolio repricing (unreleased)
+
+`PortfolioUpdate` adds `allow_market_pricing` (default false) and
+`futures_equity_basis` (`unverified` or `marked_to_reference_prices`). The marked
+basis requires futures equity and reference prices at the snapshot instant.
+Mainland code aliases cannot be used to split the same security into separate
+concentration buckets; new duplicate holdings are rejected.
+
+`POST /api/preferences/portfolio/reprice` takes only `expected_version` and needs
+session, CSRF and matching account identity. The saved permission is checked
+before any source request and again before returning; portfolio/profile changes
+conflict. It returns a no-store, read-only estimate with `positions`, actual
+market dates/bases, missing coverage, preserved assumptions and deterministic
+`risk`. It does not replace saved prices, balances or history. It uses at most
+four concurrent source tasks and ten seconds of caller waiting per batch, at most six batches per
+account per minute. Already-started blocking work remains owned by the lifecycle
+manager after a caller timeout; timeout is not proof that it stopped. Missing/expired/ambiguous prices are unavailable, not zero;
+partial coverage cannot silently mix new quotes and old inputs into a passed
+portfolio assessment. Unknown broker rules remain not evaluated.
+
+The Native-only `portfolio_risk` tool takes no arguments. Both the run's initial
+sharing permission and the current matching portfolio version are required,
+in addition to market-pricing permission. It returns financial summary amounts
+and rules without asset IDs, quantities or per-position URLs. The first result,
+including failed/unknown acquisition, is fixed for the run; a new call ID cannot
+restart it. Cancellation and current authorization are checked before starting
+additional sources and before returning. See [portfolio risk](portfolio-risk.md).
+
+### Research evidence
+
 Native runs may include one isolated-context excerpt review within the existing
 research model-call, output, time and daily quotas. `model_review` on the run,
 research read and frozen revision records finite status, packet/method digests,
