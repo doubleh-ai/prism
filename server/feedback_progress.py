@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
@@ -21,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import feedback
 from .database import check_rate_limit, get_db
+from .internal_tokens import load_tokens
 from .release import APP_VERSION, _read_deployed_revision
 
 router = APIRouter(prefix="/api/internal/feedback-progress", tags=["internal-progress"])
@@ -66,16 +66,10 @@ def _auth(request):
     peer = request.client.host if request.client else "unix"
     if not check_rate_limit("feedback-progress:" + peer, 60, 60):
         _deny(429, "进度更新较频繁")
-    expected = os.environ.get(ENV, "")
+    tokens = load_tokens()
+    expected = tokens["progress"]
     supplied = request.headers.getlist(HEADER)
-    others = [
-        os.environ.get(k, "")
-        for k in (
-            "PRISM_FEEDBACK_MONITOR_TOKEN",
-            "PRISM_FEEDBACK_REVIEW_TOKEN",
-            "PRISM_FEEDBACK_WORKER_TOKEN",
-        )
-    ]
+    others = [tokens[k] for k in ("monitor", "review", "worker")]
     if not (
         32 <= len(expected) <= 512
         and all(33 <= ord(c) <= 126 for c in expected)

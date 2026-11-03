@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import secrets
 import time
@@ -13,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from . import feedback
 from .database import check_rate_limit, get_db
+from .internal_tokens import load_tokens
 from .release import APP_VERSION, _read_deployed_revision
 
 router = APIRouter()
@@ -44,9 +44,10 @@ def _auth(request: Request) -> None:
     host = request.client.host if request.client else "local-unix-socket"
     if not check_rate_limit("feedback-monitor-auth:" + host, 60, 60):
         _deny()
-    expected = os.environ.get(_ENV, "")
+    tokens = load_tokens()
+    expected = tokens["monitor"]
     supplied = request.headers.getlist(_HEADER)
-    worker = os.environ.get("PRISM_FEEDBACK_WORKER_TOKEN", "")
+    worker = tokens["worker"]
     # A configured write token can never also be the monitoring identity.
     if (
         not 32 <= len(expected) <= 512
@@ -54,8 +55,8 @@ def _auth(request: Request) -> None:
         or expected
         in {
             worker,
-            os.environ.get("PRISM_FEEDBACK_REVIEW_TOKEN", ""),
-            os.environ.get("PRISM_FEEDBACK_PROGRESS_TOKEN", ""),
+            tokens["review"],
+            tokens["progress"],
         }
         or len(supplied) != 1
         or not 32 <= len(supplied[0]) <= 512

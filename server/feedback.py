@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
@@ -18,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .auth import require_admin, require_auth, verify_csrf
 from .database import check_rate_limit, get_db
+from .internal_tokens import load_tokens
 from .release import APP_VERSION, _read_deployed_revision
 from .source_urls import redact_source_text
 
@@ -507,8 +507,9 @@ def _worker_auth(request: Request) -> None:
     permitted = check_rate_limit("feedback-worker-auth:" + host, 60, 60)
     if not permitted:
         raise HTTPException(401, "反馈处理身份无效")
-    expected = os.environ.get("PRISM_FEEDBACK_WORKER_TOKEN", "")
-    monitor = os.environ.get("PRISM_FEEDBACK_MONITOR_TOKEN", "")
+    tokens = load_tokens()
+    expected = tokens["worker"]
+    monitor = tokens["monitor"]
     supplied = request.headers.get(_WORKER_HEADER, "")
     enabled = 32 <= len(expected) <= 512 and not any(c.isspace() for c in expected)
     bounded = len(supplied) <= 1024
@@ -519,8 +520,8 @@ def _worker_auth(request: Request) -> None:
     )
     if not (permitted and enabled and bounded and same) or expected in {
         monitor,
-        os.environ.get("PRISM_FEEDBACK_REVIEW_TOKEN", ""),
-        os.environ.get("PRISM_FEEDBACK_PROGRESS_TOKEN", ""),
+        tokens["review"],
+        tokens["progress"],
     }:
         raise HTTPException(401, "反馈处理身份无效")
 

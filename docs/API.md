@@ -181,6 +181,12 @@ separate from implementing these endpoints.
 
 ### Suggestion-only review candidate
 
+All four internal feedback roles also support fixed private token files selected
+by the service operator through `PRISM_INTERNAL_TOKEN_DIRECTORY`. This explicit
+mode has no environment fallback; roles and HTTP permissions are unchanged.
+See [restricted service access](FEEDBACK.md#定期任务的受限接入) for filenames,
+permissions and rotation. Request parameters cannot select a credential path.
+
 `/api/internal/feedback-review` requires a distinct `PRISM_FEEDBACK_REVIEW_TOKEN`
 via `X-Prism-Review-Token` (32–512 printable ASCII characters), with exactly one
 `X-Prism-Expected-Revision` matching the full served revision. Monitor, worker and
