@@ -541,12 +541,34 @@ document.addEventListener('click', function(e) {
 });
 (function bindComposerKeys(input) {
   var composing = false;
-  input.addEventListener('compositionstart', function() { composing = true; });
-  input.addEventListener('compositionend', function() { composing = false; });
-  input.addEventListener('blur', function() { composing = false; });
+  var imeEnterDown = false;
+  var compositionEndedAt = 0;
+  input.addEventListener('compositionstart', function() {
+    composing = true; imeEnterDown = false; compositionEndedAt = 0;
+  });
+  input.addEventListener('compositionend', function() {
+    composing = false; compositionEndedAt = Date.now();
+  });
+  input.addEventListener('blur', function() {
+    composing = false; imeEnterDown = false; compositionEndedAt = 0;
+  });
+  input.addEventListener('keyup', function() {
+    imeEnterDown = false; compositionEndedAt = 0;
+  });
   input.addEventListener('keydown', function(e) {
-    // WebKit can report the confirming keydown after compositionend, with keyCode 229.
-    if (composing || e.isComposing || e.keyCode === 229) return;
+    var enter = e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.keyCode === 13;
+    if (composing || e.isComposing || e.keyCode === 229) {
+      if (enter) imeEnterDown = true;
+      return;
+    }
+    // The same confirmation may emit an unflagged Enter after compositionend.
+    // Hold it until keyup; a short grace also covers composition-end-first order.
+    var sinceCompositionEnd = Date.now() - compositionEndedAt;
+    if (enter && !e.shiftKey && (imeEnterDown ||
+        (compositionEndedAt && sinceCompositionEnd >= 0 && sinceCompositionEnd < 80))) {
+      e.preventDefault(); imeEnterDown = true; return;
+    }
+    if (!enter) { imeEnterDown = false; compositionEndedAt = 0; }
 
     var key = e.key || e.code || '';
     if (key === 'Enter' && !e.shiftKey) {

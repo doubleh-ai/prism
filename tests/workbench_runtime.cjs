@@ -52,11 +52,15 @@ function imeEnterCommitsWithoutSending() {
   assert.ok(keydown('Enter', {keyCode:13}), 'an active composition owns Enter even without a flag');
   input.dispatchEvent(new Event('compositionend'));
   assert.ok(keydown('Enter', {isComposing:false, keyCode:229}), 'WebKit may end composition before keydown');
+  assert.equal(keydown('Enter', {isComposing:false, keyCode:13}), false,
+    'a late unflagged Enter from the same IME confirmation must not send');
+  assert.deepEqual(sent, [], 'confirming an IME letter keeps it in the draft');
   assert.equal(keydown('Enter', {repeat:true}), false);
   assert.equal(autocompleteChecks, 0);
   assert.deepEqual(sent, []);
   assert.equal(input.value, 'a');
 
+  input.dispatchEvent(Object.assign(new Event('keyup'), {key:'Enter', keyCode:13}));
   assert.equal(keydown('Enter', {keyCode:13}), false);
   assert.deepEqual(sent, ['a'], 'the next deliberate Enter sends immediately');
   assert.ok(keydown('Enter', {shiftKey:true}), 'Shift+Enter keeps the native newline');
@@ -69,6 +73,27 @@ function imeEnterCommitsWithoutSending() {
   input.value = 'new draft';
   assert.equal(keydown('Enter'), false);
   assert.deepEqual(sent, ['a', 'new draft']);
+
+  // Some IMEs finish composition before their unflagged confirming keydown.
+  const next = environment(), nextInput = next.doc.getElementById('input');
+  let now = 1000, sends = 0;
+  next.context.Date = class extends Date { static now() { return now; } };
+  next.app.send = () => { sends++; };
+  const nextKey = (type, key='Enter') => nextInput.dispatchEvent(
+    Object.assign(new Event(type, {cancelable:true}), {key, keyCode:key==='Enter'?13:65}));
+  nextInput.dispatchEvent(new Event('compositionstart'));
+  nextInput.dispatchEvent(new Event('compositionend'));
+  assert.equal(nextKey('keydown'), false);
+  assert.equal(sends, 0, 'composition-end-first confirmation retains the draft');
+  nextKey('keyup');
+  assert.equal(nextKey('keydown'), false);
+  assert.equal(sends, 1, 'the next physical Enter works without a waiting period');
+  nextKey('keyup');
+  nextInput.dispatchEvent(new Event('compositionstart'));
+  nextInput.dispatchEvent(new Event('compositionend'));
+  now += 200;
+  nextKey('keydown');
+  assert.equal(sends, 2, 'a later intentional Enter is not consumed after mouse/programmatic commit');
 }
 
 async function conversationOrder() {
