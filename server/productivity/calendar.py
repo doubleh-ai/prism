@@ -82,6 +82,29 @@ def init_calendar_db():
         INSERT OR IGNORE INTO work_calendar_instances
             SELECT id,id,owner,start_at,end_at,version,0,updated_at FROM work_calendar c
             WHERE NOT EXISTS(SELECT 1 FROM work_calendar_rules r WHERE r.series_id=c.id);
+        CREATE TABLE IF NOT EXISTS work_calendar_export_versions (
+            series_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL CHECK(sequence>=1)
+        );
+        INSERT OR IGNORE INTO work_calendar_export_versions
+            SELECT c.id,c.version+COALESCE(MAX(i.version),1)-1 FROM work_calendar c
+            LEFT JOIN work_calendar_instances i ON i.series_id=c.id GROUP BY c.id;
+        CREATE TRIGGER IF NOT EXISTS calendar_export_created AFTER INSERT ON work_calendar BEGIN
+            INSERT OR IGNORE INTO work_calendar_export_versions VALUES(NEW.id,NEW.version);
+        END;
+        CREATE TRIGGER IF NOT EXISTS calendar_export_updated
+            AFTER UPDATE OF title,description,start_at,end_at,timezone,version,cancelled ON work_calendar BEGIN
+            INSERT INTO work_calendar_export_versions VALUES(NEW.id,NEW.version)
+                ON CONFLICT(series_id) DO UPDATE SET sequence=MAX(sequence+1,excluded.sequence);
+        END;
+        CREATE TRIGGER IF NOT EXISTS calendar_export_occurrence_updated
+            AFTER UPDATE OF start_at,end_at,cancelled,version ON work_calendar_instances BEGIN
+            INSERT INTO work_calendar_export_versions
+                SELECT id,version+1 FROM work_calendar WHERE id=NEW.series_id
+                ON CONFLICT(series_id) DO UPDATE SET sequence=MAX(sequence+1,excluded.sequence);
+        END;
+        CREATE TRIGGER IF NOT EXISTS calendar_export_deleted AFTER DELETE ON work_calendar BEGIN
+            DELETE FROM work_calendar_export_versions WHERE series_id=OLD.id;
+        END;
         CREATE TRIGGER IF NOT EXISTS calendar_instances_account_delete AFTER DELETE ON users BEGIN
             DELETE FROM work_calendar_rules WHERE series_id IN
                 (SELECT series_id FROM work_calendar_instances WHERE owner=OLD.username);
@@ -505,7 +528,15 @@ async def export_event(
             )
         ]
         event["exception_instances"] = [r for r in event["export_instances"] if r["original_start_at"]]
-        event["version"] += max((r["version"] for r in event["export_instances"]), default=1) - 1
+        # A maximum occurrence version misses independent edits to different
+        # instances. The durable sequence advances in the same write transaction
+        # and survives recurrence rebuilds and compatible older writers.
+        revision = db.execute(
+            "SELECT sequence FROM work_calendar_export_versions WHERE series_id=?", [event_id]
+        ).fetchone()
+        if revision is None:
+            raise HTTPException(503, "日程导出版本暂不可用，请稍后重试")
+        event["version"] = revision["sequence"]
     return Response(
         ics(event, reminder_minutes),
         media_type="text/calendar",
