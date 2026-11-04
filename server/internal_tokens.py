@@ -12,6 +12,8 @@ import os
 import stat
 from pathlib import Path
 
+from .credential_permissions import is_private_file
+
 DIRECTORY_ENV = "PRISM_INTERNAL_TOKEN_DIRECTORY"
 SLOTS = {
     "monitor": ("PRISM_FEEDBACK_MONITOR_TOKEN", "feedback-monitor-token"),
@@ -63,7 +65,7 @@ def _files(directory):
                 not stat.S_ISREG(before.st_mode)
                 or before.st_uid not in owners
                 or before.st_nlink != 1
-                or before.st_mode & 0o7077
+                or not is_private_file(fd, parent)
                 or not 32 <= before.st_size <= 513
             ):
                 raise ValueError()
