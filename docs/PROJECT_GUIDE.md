@@ -121,7 +121,7 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8088 --workers 1
 
 打开 `http://127.0.0.1:8088`，用 `local-admin` 和刚输入的密码登录。初始化只创建不存在的账号，不会覆盖已有密码。保持单进程运行；开发自动重载会中断当前任务，不用于检验发布或长期后台研究。
 
-没有模型 Key 时仍能启动并查看页面。需要真实研究时，可在启动前通过密钥管理或隐藏输入注入 `DEEPSEEK_API_KEY` 或 `MINIMAX_API_KEY`。OpenAI 可选接入需同时设置 `OPENAI_API_KEY` 与账号支持的具体 `OPENAI_MODEL`，对应模型槽位为 `openai`；没有默认猜测的模型，也不继承旧通用 Key。按需设置 `PRISM_DEFAULT_MODEL`，管理员再在模型设置中按用途选择。支持的端点与模型配置以 [`server/config.py`](../server/config.py) 和 [`provider.py`](../server/agent/provider.py) 为准；配置存在不保证提供方实际接受调用或套餐覆盖。
+没有模型 Key 时仍能启动并查看页面。需要真实研究时，可在启动前通过密钥管理或隐藏输入注入 `DEEPSEEK_API_KEY` 或 `MINIMAX_API_KEY`。各提供方使用独立凭证；旧 `LLM_API_KEY` 仅兼容原有 DeepSeek 配置，不作为 MiniMax 或 OpenAI 的凭证。OpenAI 可选接入需同时设置 `OPENAI_API_KEY` 与账号支持的具体 `OPENAI_MODEL`，对应模型槽位为 `openai`；没有默认猜测的模型。按需设置 `PRISM_DEFAULT_MODEL`，管理员再在模型设置中按用途选择。支持的端点与模型配置以 [`server/config.py`](../server/config.py) 和 [`provider.py`](../server/agent/provider.py) 为准；配置存在不保证提供方实际接受调用或套餐覆盖。
 
 `.env.example` 是变量模板，应用通过 `os.environ` 取值，**不会自动加载 `.env`**。不要复制生产配置和数据库来开发。实时行情的可选依赖见 `requirements-extra.txt`。旧 Astock 模型编排已移除，不再安装它来恢复个股分析。整个 Prism 不安装、不调用或回退到 Claude Code CLI，也不读取外部 Skill。`install.sh` 只准备本地 Python 环境，不启动服务或执行生产部署。
 
