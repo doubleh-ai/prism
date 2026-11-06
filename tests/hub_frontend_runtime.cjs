@@ -101,4 +101,20 @@ async function showDatedParametersWithinExistingDetails(){
  assert(!rendered.includes('javascript:')&&!rendered.includes('设置参数')&&!rendered.includes('undefined'));
  assert.equal(e.requests.length,2);assert(!e.submit.disabled);
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();console.log('hub journeys ok: 10 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showDceAccessRestrictionWithoutDiscardingAvailablePrices(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='M';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'M',name:'豆粕',series_status:'collected',data_as_of:'2026-11-06',collected_at:'2026-11-07T10:00:00+08:00',latest:{close:3000},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'unavailable',error_code:'automated_access_restricted',member_positioning:{status:'not_covered'}},warehouse_receipt:{status:'unavailable',error_code:'automated_access_restricted'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['最近收盘','3000','交易所限制自动读取，合约资料暂未取得','交易所限制自动读取，仓单资料暂未取得'])assert(rendered.includes(text),text);
+ assert.equal(e.requests.length,2);assert(!e.submit.disabled);
+}
+async function showDceQueryDateAndKeepUnverifiedSourceExplicit(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='M';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'M',name:'豆粕',series_status:'unavailable',latest:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'collected',data_as_of:'2026-11-06',date_provenance:'request_parameter',transport_authenticated:false,active_contract:'m2701',contracts:[],curve:{status:'insufficient'},notice:'日期来自查询参数，原始内容尚未独立核验。',source_url:'http://www.dce.com.cn/dcereport/publicweb/dailystat/dayQuotes',member_positioning:{status:'not_covered'}},warehouse_receipt:{status:'collected',data_as_of:'2026-11-06',date_provenance:'request_parameter',table:'豆粕',row:'小计',quantity:30,change:2,unit:'手',source_url:'javascript:alert(1)',notice:'仓单仅为手数，未换算吨数。'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['查询日期 2026-11-06','公开来源未独立核验','日期来自查询参数','仓单仅为手数'])assert(rendered.includes(text),text);
+ assert(!rendered.includes('javascript:')&&!rendered.includes('交易所日期 2026-11-06'));
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();console.log('hub journeys ok: 12 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

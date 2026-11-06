@@ -162,6 +162,24 @@ async def test_short_futures_direction_and_same_product_collection_are_not_netti
     assert len(value["positions"]) == 3
 
 
+async def test_dce_research_coverage_does_not_enable_unqualified_portfolio_prices(owned, market):
+    await configure_profile(owned)
+    positions = snapshot()["positions"]
+    positions[1] = {**positions[1], "asset_id": "DCE:M2701", "multiplier": "10"}
+    for position in positions:
+        position["price_as_of"] = (NOW - timedelta(days=1)).isoformat()
+    await save(owned, positions=positions)
+    with get_db() as db:
+        before = tuple(db.execute("SELECT * FROM portfolio_snapshots").fetchone())
+    value = (await price(owned)).json()
+    assert value["positions"][1]["reason"] == "instrument_not_covered"
+    assert value["risk"]["overall"] == "not_evaluated"
+    assert market.calls == [("quote", "600000")]
+    assert not any(rule["id"] == "net_equity" for rule in value["risk"]["rules"])
+    with get_db() as db:
+        assert tuple(db.execute("SELECT * FROM portfolio_snapshots").fetchone()) == before
+
+
 @pytest.mark.parametrize("change,status", [({"allow_market_pricing": False}, 403), ({}, 409)])
 async def test_no_external_read_without_current_consent_and_matching_version(owned, market, change, status):
     await save(owned, **change)

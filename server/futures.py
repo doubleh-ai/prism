@@ -349,7 +349,12 @@ async def snapshot(symbol):
                 if value["exchange_daily"]["status"] == "collected":
                     value["positioning"]["member_rankings"] = value["exchange_daily"]["member_positioning"]
                     value["gaps"][1 if not has_series else 0] = (
-                        "社会库存和同日同规格现货基差尚需原始数据；已取得的合约期限结构与会员排名见各自日期和范围"
+                        "社会库存和同日同规格现货基差尚需原始数据；合约资料见其日期和范围。"
+                        + (
+                            "会员排名已取得，见对应披露范围。"
+                            if value["exchange_daily"]["member_positioning"].get("status") == "collected"
+                            else "会员排名尚未取得，不据成交或持仓手数推断资金方向。"
+                        )
                     )
                 coverage = {
                     "continuous_series": value["series_status"],
@@ -373,11 +378,24 @@ async def snapshot(symbol):
                 dates.extend(
                     item["data_as_of"]
                     for item in reports.values()
-                    if item["status"] == "collected" and item.get("data_as_of")
+                    if item["status"] == "collected"
+                    and item.get("data_as_of")
+                    and item.get("date_provenance") != "request_parameter"
                 )
+                value["observation_date_gaps"] = [
+                    key
+                    for key, item in reports.items()
+                    if item["status"] == "collected" and item.get("date_provenance") == "request_parameter"
+                ]
                 value["observation_dates"] = sorted(set(dates))
                 value["date_alignment"] = (
-                    "mixed" if len(set(dates)) > 1 else "same_day" if len(dates) >= 2 else "not_compared"
+                    "mixed"
+                    if len(set(dates)) > 1
+                    else "unverified"
+                    if value["observation_date_gaps"]
+                    else "same_day"
+                    if len(dates) >= 2
+                    else "not_compared"
                 )
             _cache[symbol] = (time.monotonic(), value)
             return copy.deepcopy({**value, "cached": False})

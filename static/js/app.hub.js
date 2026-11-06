@@ -240,15 +240,16 @@
       var makeTable=function(headers,rows){var wrap=node('div',undefined,'table-scroll'),table=node('table'),head=node('thead'),hr=node('tr'),body=node('tbody');headers.forEach(function(h){hr.append(node('th',h));});head.append(hr);rows.forEach(function(row){var tr=node('tr');row.forEach(function(cell){tr.append(node('td',display(cell)));});body.append(tr);});table.append(head,body);wrap.append(table);return wrap;};
       var market=node('section',undefined,'card');market.append(node('h2','期限结构与会员持仓'));
       if(exchange.status==='collected'){
-        market.append(node('h3','期限结构'),node('p','交易所日期 '+display(exchange.data_as_of)+' · 当日成交量最高合约 '+display(exchange.active_contract)+'（非交易建议）','muted'));
+        var exchangeDate=exchange.date_provenance==='request_parameter'?'查询日期 ':'交易所日期 ';
+        market.append(node('h3','期限结构'),node('p',exchangeDate+display(exchange.data_as_of)+' · 当日成交量最高合约 '+display(exchange.active_contract)+'（非交易建议）'+(exchange.transport_authenticated===false?' · 公开来源未独立核验':''),'muted'));
         if(curve.status==='collected'){
           var shapes={contango:'远月升水',backwardation:'远月贴水',flat:'平水'};
           market.append(node('p',display(curve.near_contract)+'（结算 '+display(curve.near_settlement)+'） → '+display(curve.far_contract)+'（结算 '+display(curve.far_settlement)+'）'),node('p','远月减近月：'+display(curve.far_minus_near)+(exchange.quote_unit?' '+exchange.quote_unit:'')+' · '+(shapes[curve.shape]||'结构未知')));
         }else market.append(node('p',curve.status==='insufficient'?'可比较的合约不足，期限结构未计算。':'期限结构状态未知。','muted'));
         var contracts=Array.isArray(exchange.contracts)?exchange.contracts:[],contractDetails=node('details');contractDetails.append(node('summary','合约明细与原表'));
         if(contracts.length)contractDetails.append(makeTable(['合约','交割月','收盘','结算','成交量','持仓量'],contracts.map(function(c){return [c.contract,c.delivery_month,c.close,c.settlement,c.volume,c.open_interest];})));else contractDetails.append(node('p','未提供合约明细。','muted'));
-        var dailySource=sourceLink(exchange.source_url,'查看交易所原表 ↗');if(dailySource)contractDetails.append(dailySource);market.append(contractDetails);
-      }else market.append(node('h3','期限结构'),node('p',exchange.status==='not_covered'?'该品种的交易所合约数据尚未覆盖。':exchange.status==='unavailable'?'未取得交易所合约数据。':'交易所合约数据状态未知。','muted'));
+        var dailySource=sourceLink(exchange.source_url,'查看交易所原表 ↗');if(dailySource)contractDetails.append(dailySource);if(exchange.transport_authenticated===false&&exchange.notice)contractDetails.append(node('p',exchange.notice,'muted'));market.append(contractDetails);
+      }else market.append(node('h3','期限结构'),node('p',exchange.error_code==='automated_access_restricted'?'交易所限制自动读取，合约资料暂未取得；已取得的其他资料仍可查看。':exchange.status==='not_covered'?'该品种的交易所合约数据尚未覆盖。':exchange.status==='unavailable'?'未取得交易所合约数据。':'交易所合约数据状态未知。','muted'));
       market.append(node('h3','会员持仓'));
       if(members.status==='collected'){
         market.append(node('p','交易所日期 '+display(members.data_as_of)+' · 合约 '+display(members.contract),'muted'));
@@ -274,12 +275,12 @@
       fund.append(node('h2','基本面'));
       var receipt=value.warehouse_receipt;
       if(receipt && receipt.status==='collected'){
-        fund.append(node('h3','交易所仓单 · '+receipt.table),node('p',receipt.data_as_of+' · '+receipt.row+' '+receipt.quantity+' '+receipt.unit+'，较上一期变化 '+receipt.change+' '+receipt.unit));
-        var reportLink=node('a','查看当日仓单原表 ↗');
-        reportLink.href=receipt.source_url;reportLink.target='_blank';reportLink.rel='noopener noreferrer';
-        fund.append(reportLink,node('p','仅覆盖该表已登记仓单，社会库存仍待核查。','muted'));
+        fund.append(node('h3','交易所仓单 · '+receipt.table),node('p',(receipt.date_provenance==='request_parameter'?'查询日期 ':'')+receipt.data_as_of+' · '+receipt.row+' '+receipt.quantity+' '+receipt.unit+'，较上一期变化 '+receipt.change+' '+receipt.unit));
+        var reportLink=sourceLink(receipt.source_url,'查看当日仓单原表 ↗');
+        if(reportLink)fund.append(reportLink);
+        fund.append(node('p',receipt.notice||'仅覆盖该表已登记仓单，社会库存仍待核查。','muted'));
       }else if(receipt){
-        fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
+        fund.append(node('p',receipt.error_code==='automated_access_restricted'?'交易所限制自动读取，仓单资料暂未取得；已取得的其他资料仍保留。':receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
       }
       fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});root.append(fund);
       if(hasSeries){var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);}

@@ -811,11 +811,23 @@ of a missing or stale secondary price feed. Only an actual dated HTTP 404 permit
 a query for the preceding date, at most three distinct calendar dates per
 source within the shared 15-second budget. Network, TLS, access, rate-limit and
 schema errors do not trigger earlier-date queries. This bounded window is not
-a trading calendar or a guarantee of the latest published report. Each parser
-checks the report's actual date; collected reports are retained while another
-source checks an older date. `source_attempts`, `observation_dates`,
+a trading calendar or a guarantee of the latest published report. SHFE/INE
+parsers check the report's actual date; collected reports are retained while
+another source checks an older date. `source_attempts`, `observation_dates`,
 `report_date_basis: bounded_calendar_window` and `date_alignment` preserve this
 distinction. A mixed-date snapshot must not be treated as a same-day comparison.
+
+For M, the DCE public protocol uses fixed HTTP POST endpoints with no credentials,
+cookies, redirects, access-challenge handling or automatic retries. Its metadata
+retains `transport_authenticated: false` and `original_verified: false`. Echoed
+dates must match; when none is provided, `date_provenance: request_parameter`
+identifies a query date rather than a confirmed report date. Those components
+appear in `observation_date_gaps`, are excluded from `observation_dates`, and
+cannot establish `date_alignment: same_day`. HTTP 412 is
+`automated_access_restricted`, not a missing report or permission to query an
+older date. Warehouse totals retain the reported lot unit; member rankings are
+not covered by this protocol. This adapter does not expand portfolio repricing
+coverage or certify live DCE data availability.
 
 For RB/CU/AU/SC, `contract_dates` and `exchange_parameters` independently read
 SHFE's combined dated business reports. The first returns per-contract
