@@ -19,11 +19,11 @@ Prism 是可自行部署的开源投资研究工作台。你可以在对话中�
 
 ## 版本与上线状态
 
-当前版本为 **v0.22.0**，包含 Native 研究对话、个人任务与单次日程、期货快照及版本化研究偏好。功能范围与缺口见 [功能完成度](docs/CAPABILITY_STATUS.md)，验证边界见 [v0.22.0 功能说明](docs/releases/native-v0.22.0-candidate.md)。
+当前源码版本为 **v0.23.0**，整合 DoubleH 统一入口、Prism 研究与 Work 项目日程、站内提醒及 Native 研究改进。源码支持范围与待完成事项见 [功能完成度](docs/CAPABILITY_STATUS.md)，本版概览见 [v0.23.0 版本说明](docs/releases/v0.23.0.md)，完整变更见 [更新日志](CHANGELOG.md)。
 
-版本标签描述一组确定的源码。每个部署实例仍需独立验证实际版本、用户流程与外部服务；模型对话验收通过不能代替日程、期货等功能的逐项验收。源码同步不会自动部署或重启服务。
+版本标签固定一组源码，各部署实例仍需分别验证实际版本、用户流程与外部服务。Native 对话验收不能替代 Work 跨设备、期货外部数据及其他模型提供方的逐项验收。源码同步不会自动部署或重启服务。
 
-开发中的 **v0.23.0 候选** 整合 v0.22.1 修复，增加 DoubleH 产品入口、Work 个人项目和服务器站内提醒，并改善 Native 研究收尾。候选尚未发布，具体支持范围见[功能说明](docs/CAPABILITY_STATUS.md)。维护者与其他 Agent 可从[仓库维护 Skill](.agents/skills/prism-maintenance/SKILL.md)接手。
+维护者与其他 Agent 可从[仓库维护 Skill](.agents/skills/prism-maintenance/SKILL.md)接手。邮件与设备推送、云端自动修复及产品间数据联动的状态与限制在功能清单中单独说明。
 
 Work 的任务、项目、日程及 Agent 辅助安排用法见[使用指南](docs/work.md)。
 

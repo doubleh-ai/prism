@@ -4,7 +4,7 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
-## [v0.23.0]
+## [v0.23.0] - 2026-11-07
 
 ### DoubleH 与 Work
 - 新增 DoubleH 统一入口；Prism 研究与 Work 个人工作使用同一账号、独立导航。原研究页面迁至 `/prism`，旧反馈链接继续跳转。
@@ -46,6 +46,8 @@ follows [Semantic Versioning](https://semver.org/).
 - 历史报告与研究先按关键词筛选所属账号的全部历史，再读取有界匹配窗口；旧记录不再仅因排在最近200条之外而无法被找到。
 
 ## [v0.22.1]
+
+本节修复未单独发布，随 v0.23.0 一并提供。
 
 ### 界面清理
 - 管理页面使用单一侧栏导航，移除发布推广卡、重复标签和常驻账号创建表单；创建账号移至账号管理。
