@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '111',
+  _clientAssetVersion: '114',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -150,7 +150,12 @@ var App = {
     // If a previous analysis was running, auto-restore it (P5 persistence)
     var saved;
     try { saved = sessionStorage.getItem('prism_analysis'); } catch(e) {}
-    if (saved) {
+    var libraryParams = new URLSearchParams(location.search);
+    if (libraryParams.get('mode') === 'reports') {
+      this._researchLibraryTab = libraryParams.get('library') === 'knowledge' ? 'knowledge' : 'reports';
+      this.switchMode('reports');
+      if (this._researchLibraryTab === 'knowledge' && libraryParams.get('claim')) this._openKnowledgeClaim(libraryParams.get('claim'));
+    } else if (saved) {
       var st;
       try { st = JSON.parse(saved); } catch(e) {}
       if (st && st.id) {

@@ -1,9 +1,12 @@
 (function () {
   'use strict';
-  var $ = function (id) { return document.getElementById(id); };
+  var dialog = document.getElementById('workNotifications');
+  if (!dialog) return;
+  var trigger = null;
+  var $ = function (id) { return document.getElementById('notification' + id.charAt(0).toUpperCase() + id.slice(1)); };
   var state = {user:null, epoch:0, busy:false, locked:false};
   function message(text) { $('notice').textContent = text; $('notice').hidden = !text; }
-  function clear() { $('content').hidden = true; $('list').replaceChildren(); $('account').textContent = ''; }
+  function clear() { $('content').hidden = true; $('list').replaceChildren(); }
   async function request(path, method) {
     var controller = new AbortController(), timer = setTimeout(function () { controller.abort(); }, 30000);
     var headers = {Accept:'application/json'};
@@ -48,7 +51,7 @@
       var user = await identify(), data = await request('/api/work/notifications'); await identify();
       if (epoch !== state.epoch || user !== state.user) return;
       if (!data || !Array.isArray(data.notifications)) throw new Error('invalid response');
-      state.locked = false; $('account').textContent = user; render(data.notifications); $('content').hidden = false; message('');
+      state.locked = false; render(data.notifications); $('content').hidden = false; message('');
     } catch (error) {
       if (epoch !== state.epoch && error.message !== 'account changed') return;
       clear();
@@ -73,6 +76,28 @@
     } finally { state.busy = false; button.disabled = false; }
   }
   $('refresh').addEventListener('click', load);
-  document.addEventListener('visibilitychange', function () { if (document.hidden) { ++state.epoch; clear(); message('请刷新以核对当前账号。'); } });
-  load();
+  function open(button) {
+    trigger = button || trigger;
+    if (!dialog.open) dialog.showModal();
+    load();
+  }
+  document.querySelectorAll('[data-work-notifications]').forEach(function (button) {
+    button.addEventListener('click', function () { open(button); });
+  });
+  $('close').addEventListener('click', function () { dialog.close(); });
+  dialog.addEventListener('close', function () {
+    ++state.epoch; clear();
+    if (trigger && trigger.isConnected) trigger.focus();
+    var url = new URL(location.href);
+    if (url.searchParams.get('panel') === 'notifications') {
+      url.searchParams.delete('panel'); history.replaceState(null, '', url.pathname + url.search + url.hash);
+    }
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { ++state.epoch; clear(); message('请刷新以核对当前账号。'); }
+    else if (dialog.open) load();
+  });
+  if (new URLSearchParams(location.search).get('panel') === 'notifications') {
+    open(document.querySelector('[data-work-notifications]'));
+  }
 }());

@@ -2,11 +2,38 @@
 Object.assign(App, {
   _savedReports: [],
   _activeSavedReportId: '',
+  _researchLibraryTab: 'reports',
 
   _initReports: function() {
     var shell = document.getElementById('appShell');
     if (shell) shell.classList.remove('collapsed');
-    this._loadReportLibrary();
+    this._setResearchLibraryTab(this._researchLibraryTab);
+  },
+
+  _setResearchLibraryTab: function(tab) {
+    this._researchLibraryTab = tab === 'knowledge' ? 'knowledge' : 'reports';
+    var knowledge = this._researchLibraryTab === 'knowledge';
+    document.getElementById('appShell').setAttribute('data-library', this._researchLibraryTab);
+    document.getElementById('researchReportsTab').setAttribute('aria-pressed', String(!knowledge));
+    document.getElementById('researchKnowledgeTab').setAttribute('aria-pressed', String(knowledge));
+    document.getElementById('reportsPanelInner').hidden = knowledge;
+    document.getElementById('researchKnowledge').hidden = !knowledge;
+    document.getElementById('reportsSidebarList').hidden = knowledge;
+    document.getElementById('reportsSidebarCount').hidden = knowledge;
+    if (window.PrismKnowledge) {
+      PrismKnowledge.setActive(knowledge);
+      if (knowledge) PrismKnowledge.open();
+    }
+    if (!knowledge) this._loadReportLibrary();
+  },
+
+  _openKnowledgeClaim: function(id) {
+    if (this._mode !== 'reports') {
+      this._researchLibraryTab = 'knowledge';
+      this.switchMode('reports');
+    } else this._setResearchLibraryTab('knowledge');
+    this._closeMobileSidebar();
+    return window.PrismKnowledge && PrismKnowledge.open(id);
   },
 
   _loadReportLibrary: async function() {
@@ -66,12 +93,12 @@ Object.assign(App, {
     if (!inner) return;
     var reports = this._savedReports || [];
     if (!reports.length) {
-      inner.innerHTML = '<div class="market-empty-state">完成一键分析后，可将结果保存到报告库</div>';
+      inner.innerHTML = '<div class="market-empty-state">还没有保存的研究记录。</div>';
       return;
     }
     var self = this;
     inner.innerHTML = '<div class="reports-lib">' +
-      '<div class="reports-lib-head"><div><h2>报告库</h2><p>沉淀一键分析结论，便于复盘、对比和后续追踪</p></div>' +
+      '<div class="reports-lib-head"><div><h2>研究记录</h2></div>' +
       '<button class="admin-secondary" onclick="App._loadReportLibrary()">刷新</button></div>' +
       '<div class="reports-lib-grid">' + reports.map(function(rep) {
         var sig = self._reportText(rep.signal || '') || '未评级';
@@ -87,6 +114,17 @@ Object.assign(App, {
 
   _openSavedReport: async function(id) {
     if (!id) return;
+    if (this._researchLibraryTab === 'knowledge') {
+      this._researchLibraryTab = 'reports';
+      document.getElementById('appShell').setAttribute('data-library', 'reports');
+      document.getElementById('researchReportsTab').setAttribute('aria-pressed', 'true');
+      document.getElementById('researchKnowledgeTab').setAttribute('aria-pressed', 'false');
+      document.getElementById('reportsPanelInner').hidden = false;
+      document.getElementById('researchKnowledge').hidden = true;
+      document.getElementById('reportsSidebarList').hidden = false;
+      document.getElementById('reportsSidebarCount').hidden = false;
+      if (window.PrismKnowledge) PrismKnowledge.setActive(false);
+    }
     var sequence = this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
     this._activeSavedReportId = id;
     this._closeMobileSidebar();

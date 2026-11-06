@@ -15,3 +15,19 @@ def test_hub_handlers_preserve_identity_and_drafts():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "hub journeys ok: 9 scenarios" in result.stdout
+
+
+def test_research_library_stays_in_the_existing_workspace():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [node, "tests/research_library_runtime.cjs"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "research library runtime ok" in result.stdout

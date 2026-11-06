@@ -326,7 +326,14 @@ def render_template(name: str) -> str:
     """Read and return a template file."""
     path = TEMPLATE_DIR / name
     if path.exists():
-        return path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
+        markup = path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
+        for marker, fragment in (
+            ("__RESEARCH_KNOWLEDGE__", "partials/research-knowledge.html"),
+            ("__WORK_NOTIFICATIONS__", "partials/work-notifications.html"),
+        ):
+            if marker in markup:
+                markup = markup.replace(marker, (TEMPLATE_DIR / fragment).read_text(encoding="utf-8"))
+        return markup
     return ""
 
 
@@ -396,7 +403,10 @@ async def preferences_page(request: Request):
 async def knowledge_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
-    return HTMLResponse(render_template("knowledge.html"), headers={"Cache-Control": "no-store"})
+    query = [("mode", "reports"), ("library", "knowledge")]
+    if request.query_params.get("id"):
+        query.append(("claim", request.query_params["id"]))
+    return RedirectResponse("/prism?" + urlencode(query), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/calendar", response_class=HTMLResponse)
@@ -420,7 +430,7 @@ async def notifications_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
     require_work_enabled()
-    return HTMLResponse(render_template("notifications.html"), headers={"Cache-Control": "no-store"})
+    return RedirectResponse("/work?panel=notifications", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/futures", response_class=HTMLResponse)

@@ -27,8 +27,11 @@ Full field names, meanings and limits are in [the portfolio guide](portfolio-ris
 ## DoubleH and personal Work
 
 `/` is the shared authenticated product entrance; `/prism` opens research. Work,
-projects, calendar and reminders use `/work`, `/projects`, `/calendar` and
-`/notifications`. `GET /api/platform` returns product availability only, with no
+projects and calendar use `/work`, `/projects` and `/calendar`. Reminders open
+inside the current Work page; `/notifications` redirects to `/work?panel=notifications`.
+Research records and claim review share the Prism research library;
+`/knowledge?id=...` redirects to `/prism?mode=reports&library=knowledge&claim=...`.
+These capabilities are not additional products. `GET /api/platform` returns product availability only, with no
 research or personal Work payload. Existing accounts remain valid.
 
 - `GET/POST /api/work/projects`: list owned and accepted shared projects, or create an owned project. Creation requires

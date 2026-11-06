@@ -1,0 +1,6 @@
+<dialog id="workNotifications" class="work-notifications" aria-labelledby="notificationHeading">
+  <header class="notification-header"><h2 id="notificationHeading">提醒</h2><div><button type="button" id="notificationRefresh">刷新</button><button type="button" id="notificationClose" autofocus>关闭</button></div></header>
+  <p id="notificationNotice" role="status" aria-live="polite" hidden></p>
+  <p id="notificationLoginPrompt" hidden>登录已失效，请<a href="/login">重新登录</a>。</p>
+  <section id="notificationContent" hidden aria-label="提醒列表"><div id="notificationList"></div><p id="notificationEmpty" hidden>暂无提醒。</p></section>
+</dialog>

@@ -21,8 +21,8 @@ assert.doesNotMatch(render({assessments:[{claim_id:'other',history_claim_ids:['o
 const hostile = '\"><img src=x onerror=attack()>&';
 let html = render({assessments:[{claim_id:'current',reason:'<script>bad()</script>',history_claim_ids:['old',hostile,'missing']}],history_bindings:[null,binding('other','missing'),binding('current','unlisted'),binding('current','old'),binding('current','old'),binding('current',hostile)]});
 assert.equal((html.match(/查看历史判断/g)||[]).length,2);
-assert.match(html,/href="\/knowledge\?id=old"/);
-assert.ok(html.includes('href="/knowledge?id='+escape(encodeURIComponent(hostile))+'"'));
+assert.match(html,/href="\/prism\?mode=reports&amp;library=knowledge&amp;claim=old"/);
+assert.ok(html.includes('href="/prism?mode=reports&amp;library=knowledge&amp;claim='+escape(encodeURIComponent(hostile))+'"'));
 assert.doesNotMatch(html,/<script>|<img|unlisted|id=missing/);
 assert.match(html,/&lt;script&gt;bad\(\)&lt;\/script&gt;/);
 assert.match(html,/关闭证据详情/);
@@ -32,6 +32,6 @@ assert.doesNotMatch(render({assessments:[{claim_id:'current',history_claim_ids:'
 const ids = Array.from({length:8},(_,i)=>'old'+i);
 html = render({assessments:[{claim_id:'current',history_claim_ids:ids}],history_bindings:ids.map(id=>binding('current',id))});
 assert.equal((html.match(/查看历史判断/g)||[]).length,2);
-assert.match(html,/id=old1/);
-assert.doesNotMatch(html,/id=old2/);
+assert.match(html,/claim=old1/);
+assert.doesNotMatch(html,/claim=old2/);
 process.stdout.write('Research history links runtime checks passed\n');

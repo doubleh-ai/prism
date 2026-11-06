@@ -47,7 +47,7 @@ async function savedReportSelection() {
   app._renderSavedReportDetail=report=>{rendered=report.id;};
   const a=app._openSavedReport('A'),b=app._openSavedReport('B');queue[1].resolve(response({id:'B'}));await b;queue[0].resolve(response({id:'A'}));await a;
   assert.equal(app._activeSavedReportId,'B');assert.equal(rendered,'B');
-  const c=app._openSavedReport('C');app._activeSavedReportId='';app._renderReportLibraryHome();queue[2].resolve(response({id:'C'}));await c;assert.notEqual(rendered,'C');assert.match(doc.getElementById('reportsPanelInner').innerHTML,/完成/);
+  const c=app._openSavedReport('C');app._activeSavedReportId='';app._renderReportLibraryHome();queue[2].resolve(response({id:'C'}));await c;assert.notEqual(rendered,'C');assert.match(doc.getElementById('reportsPanelInner').innerHTML,/还没有保存的研究记录/);
 }
 async function vibeSelectionAndAction() {
   const {app}=env(),queue=delayed(app);app._renderVibeHistory=()=>{};

@@ -1,0 +1,15 @@
+.app-shell[data-mode=reports][data-library=knowledge] .sidebar{display:none}
+.research-library-tabs{display:flex;gap:24px;margin:0 0 22px;border-bottom:1px solid var(--border)}
+.research-library-tabs button{padding:12px 0;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text2);font:inherit;cursor:pointer}
+.research-library-tabs button[aria-pressed=true]{border-bottom-color:var(--accent);color:var(--accent);font-weight:600}
+.research-knowledge{color:var(--text);font-size:14px;line-height:1.7;max-width:100%;overflow-wrap:anywhere}
+.research-knowledge [hidden]{display:none!important}
+.knowledge-search,.knowledge-actions{display:flex;align-items:end;gap:12px;flex-wrap:wrap}
+.knowledge-search{margin-bottom:24px}.knowledge-search label{flex:1;min-width:0}.knowledge-actions h3{margin:0 auto 0 0}.knowledge-actions{margin:16px 0}
+.research-knowledge input,.research-knowledge select,.research-knowledge textarea{display:block;width:100%;margin-top:6px;padding:10px 12px;border:1px solid var(--border2);border-radius:var(--r);color:var(--text);background:var(--bg);font:inherit}
+.research-knowledge textarea{resize:vertical}.research-knowledge label{display:block;margin:12px 0}
+.knowledge-result{padding:16px 0;border-bottom:1px solid var(--border)}.knowledge-result button{background:transparent;border:0;color:var(--text);padding:0;text-align:left;font:inherit;font-weight:600;cursor:pointer}
+.knowledge-result p,.knowledge-muted,.research-knowledge .muted{color:var(--text2);font-size:13px}
+.knowledge-detail{margin-top:28px;border-top:1px solid var(--border);padding-top:8px}.knowledge-detail h4{margin:20px 0 8px}.knowledge-detail details{margin:16px 0}.knowledge-detail summary{cursor:pointer}.knowledge-source{padding:10px 0;border-bottom:1px solid var(--border)}
+.research-knowledge a{color:var(--accent)}.knowledge-notice{color:var(--text2);margin:12px 0}.knowledge-notice:empty{display:none}
+@media(max-width:600px){.knowledge-search label{flex-basis:100%}.research-knowledge input,.research-knowledge select,.research-knowledge textarea{font-size:16px}.research-knowledge button{min-height:44px}.knowledge-actions{align-items:center}}
