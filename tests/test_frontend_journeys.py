@@ -20,4 +20,20 @@ def test_frontend_journeys_actual_asset_order():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "frontend journeys ok: 21 scenarios" in result.stdout
+    assert "frontend journeys ok: 22 scenarios" in result.stdout
+
+
+def test_research_history_links_runtime():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    result = subprocess.run(
+        [node, str(ROOT / "tests" / "research_history_links_runtime.cjs")],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Research history links runtime checks passed" in result.stdout

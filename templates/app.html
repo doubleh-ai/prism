@@ -4,19 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 研究工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=93">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%233b5d8a'/><stop offset='100%' stop-color='%236b95c8'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='%231c1a16'/><circle cx='16' cy='16' r='9' fill='none' stroke='url(%23g)' stroke-width='1.8'/><circle cx='16' cy='16' r='3.5' fill='url(%23g)' opacity='.9'/></svg>">
+  <link rel="stylesheet" href="/static/css/app.css?v=111">
+  <style>#modelRoutes{margin-top:18px}#modelRoutes summary{cursor:pointer;font-weight:600}#modelRoutesBody>p{margin:12px 0;color:var(--text-muted,inherit)}#modelRoutesBody section{padding:16px 0;border-bottom:1px solid var(--border,#dfe4eb)}#modelRoutesBody form{display:grid;gap:12px;max-width:620px}#modelRoutesBody label{display:flex;align-items:center;gap:9px;flex-wrap:wrap}#modelRoutesBody select,#modelRoutesBody input[type=number]{padding:7px;border:1px solid var(--border,#dfe4eb);border-radius:6px;background:var(--bg2,#fff);color:var(--text,#202a38)}#modelRoutesBody details label{margin-top:10px}</style>
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=111">
 </head>
 <body>
 <div class="app-shell" id="appShell">
   <nav class="icon-rail" id="iconRail" aria-label="工作区导航">
     <div class="icon-rail-brand" title="Prism 研究工作台">
-      <svg viewBox="0 0 32 32" width="24" height="24" aria-hidden="true"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".4"/><circle cx="16" cy="16" r="4" fill="currentColor"/></svg>
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=111#mark"/></svg>
       <span class="rail-brand-word">Prism<small>研究工作台</small></span>
     </div>
-    <a class="icon-rail-btn" href="/work"><span aria-hidden="true">◷</span><span class="rail-label">日程与任务</span></a>
-    <a class="icon-rail-btn" href="/futures"><span aria-hidden="true">↗</span><span class="rail-label">期货研究</span></a>
-    <a class="icon-rail-btn" href="/preferences"><span aria-hidden="true">◎</span><span class="rail-label">研究偏好</span></a>
     <span class="rail-section-label">研究空间</span>
     <button class="icon-rail-btn active" data-mode="chat" title="对话" onclick="App.switchMode('chat')">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 5h16v10H8l-4 4V5z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
@@ -26,6 +24,7 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 19V5m0 14h16M8 16l3-4 3 2 4-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="rail-label">行情工作区</span>
     </button>
+    <a class="icon-rail-btn" href="/futures"><span aria-hidden="true">↗</span><span class="rail-label">期货研究</span></a>
     <button class="icon-rail-btn" data-mode="vibe" title="Vibe Trading" onclick="App.switchMode('vibe')">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 15c3.5-7 7.5 7 11-1.5 1.1-2.7 2.6-4.2 5-4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M18.2 5.5L20 9l-3.7 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="17" r="1.8" fill="currentColor"/><circle cx="14" cy="13" r="1.8" fill="currentColor"/></svg>
           <span class="rail-label">深度研究</span>
@@ -45,10 +44,13 @@
     <span class="rail-section-label rail-section-second">筛选与验证</span>
     <button class="icon-rail-btn" data-workbench-view="screener" title="全市场选股" onclick="App._showMarketWorkspace('screener')"><span class="rail-symbol" aria-hidden="true">≋</span><span class="rail-label">全市场选股</span></button>
     <button class="icon-rail-btn" data-workbench-view="indicators" title="指标实验室" onclick="App._showMarketWorkspace('library')"><span class="rail-symbol" aria-hidden="true">ƒ</span><span class="rail-label">指标实验室</span></button>
+    <a class="icon-rail-btn" href="/knowledge"><span aria-hidden="true">◇</span><span class="rail-label">研究知识</span></a>
+    <a class="icon-rail-btn" href="/preferences"><span aria-hidden="true">◎</span><span class="rail-label">研究偏好</span></a>
+    <a class="icon-rail-btn rail-product-link" href="/"><span aria-hidden="true">◈</span><span class="rail-label">DoubleH</span></a>
   </nav>
 
   <aside class="sidebar">
-    <div class="sidebar-head"><div><span class="logo" id="workbenchSidebarTitle">研究会话</span><small class="sidebar-head-note">参数、历史与上下文</small></div><button class="sidebar-close" onclick="App._closeMobileSidebar()" aria-label="关闭侧栏">×</button></div>
+    <div class="sidebar-head"><span class="logo" id="workbenchSidebarTitle">研究会话</span><button class="sidebar-close" onclick="App._closeMobileSidebar()" aria-label="关闭侧栏">×</button></div>
 
     <button class="new-chat-btn" onclick="App.newConv()"><span>＋ 新建研究对话</span></button>
     <div class="bulk-bar" id="bulkBar"></div>
@@ -69,15 +71,6 @@
     </div>
 
     <div class="sidebar-vibe" id="sidebarVibe" style="display:none">
-      <p class="sidebar-mode-title">Vibe 深度研究</p>
-      <textarea id="vibePrompt" class="vibe-prompt" rows="7" placeholder="输入主题、新闻或模糊直觉，例如：存储产业现在真正的卡点在哪里？"></textarea>
-      <div class="vibe-controls">
-        <select id="vibeMarket"><option value="A股">A股</option><option value="港股">港股</option><option value="美股">美股</option><option value="全球">全球</option></select>
-        <select id="vibeHorizon"><option value="swing">波段</option><option value="position">中线</option><option value="long">长期</option><option value="intraday">日内</option></select>
-        <select id="vibeRisk"><option value="balanced">均衡</option><option value="defensive">防守</option><option value="aggressive">进攻</option></select>
-        <select id="vibeDepth"><option value="deep">深度研究</option><option value="focused">聚焦研究</option><option value="swarm">多 Agent</option></select>
-      </div>
-      <button class="analysis-run-btn" onclick="App._runVibePlan()">开始正式研究</button>
       <div class="watchlist-head"><span>历史</span><span class="watchlist-count" id="vibeHistoryCount"></span></div>
       <div class="vibe-history-list" id="vibeHistoryList"></div>
     </div>
@@ -88,7 +81,6 @@
         <input type="text" id="analysisQ" placeholder="输入代码或名称" autocomplete="off" class="market-q-input">
       </div>
       <div class="market-sidebar-results" id="analysisSearchResults"></div>
-      <p class="sidebar-mode-title">使用 Prism Native，在独立研究对话中查看过程、来源与结果。</p>
       <button class="analysis-run-btn" onclick="App._runAnalysis()">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="flex-shrink:0"><path d="M12 2a10 10 0 1010 10A10 10 0 0012 2zm4.5 10.5l-6 3.5v-7l6 3.5z" fill="currentColor"/></svg>
         <span>一键分析</span>
@@ -107,14 +99,7 @@
     </div>
 
     <div class="sidebar-admin" id="sidebarAdmin" style="display:none">
-      <button class="admin-operations-entry" onclick="App._adminSetTab('operations')">发布控制台 <span>流程状态与介入入口 ↗</span></button>
-      <p class="sidebar-mode-title">账号管理</p>
-      <div class="admin-create-box">
-        <input type="text" id="adminNewUser" class="market-q-input" placeholder="用户名" autocomplete="off">
-        <input type="password" id="adminNewPass" class="market-q-input" placeholder="初始密码" autocomplete="new-password">
-        <button class="analysis-run-btn" onclick="App._adminCreateUser()">创建账号</button>
-      </div>
-      <div class="admin-side-note" id="adminSidebarStatus"></div>
+      <nav id="adminNavigation" aria-label="管理导航"></nav>
     </div>
 
     <div class="sidebar-foot">
@@ -132,7 +117,8 @@
     <div class="loading-bar" id="loadingBar"></div>
     <div class="topbar">
       <button class="tb" onclick="App.toggleSidebar()" title="打开侧边栏"><svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M2 3.5h11M2 7.5h11M2 11.5h11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>
-      <div class="workbench-page-title"><span>PRISM / WORKSPACE</span><h1 id="workbenchPageTitle">研究对话</h1></div><button class="workbench-tools-btn" onclick="App._openWorkbenchPanel('capabilities')">平台能力</button><span class="sep"></span>
+      <div class="workbench-page-title"><h1 id="workbenchPageTitle">研究对话</h1></div>
+      <button id="workbenchHistoryEntry" class="workbench-history-btn" onclick="App._openWorkbenchPanel('history')" hidden>调用记录 <span id="workbenchCallCount">0</span></button>
       <button class="tb" onclick="App.toggleTheme()" title="主题"><svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M7.5 2a5.5 5.5 0 000 11V2z" fill="currentColor" opacity=".35"/></svg></button>
       <button type="button" class="feedback-entry" id="feedbackEntry" onclick="App._openFeedback()">反馈与建议</button>
       <button class="tb" onclick="App._toggleTour()" title="操作指引">?</button>
@@ -140,10 +126,6 @@
 
     <div class="feedback-error-hint" id="feedbackErrorHint" hidden role="status"><span>遇到问题？可以提交反馈并跟踪处理进度。</span><button type="button" onclick="App._openFeedback('bug')">反馈此问题</button><button type="button" onclick="document.getElementById('feedbackErrorHint').hidden=true" aria-label="关闭反馈提示">×</button></div>
 
-    <section class="workbench-context" id="workbenchContext" aria-label="能力调用记录">
-      <div><strong id="workbenchContextTitle">从对话开始研究</strong><span id="workbenchContextDescription">能力调用、研究时间与来源会随本轮对话保留。</span></div>
-      <button class="workbench-history-btn" onclick="App._openWorkbenchPanel('history')">调用记录 <span id="workbenchCallCount">0</span> ↗</button>
-    </section>
     <div class="msgs-wrap">
       <div class="msgs" id="msgList"></div>
       <div class="scroll-track" id="scrollTrack"></div>
@@ -173,14 +155,14 @@
           </button>
         </div>
       </div>
-      <div class="input-hint">Enter 发送 · Shift+Enter 换行 · 采集结果仍需核验</div>
+      <div class="input-hint">Enter 发送 · Shift+Enter 换行</div>
     </div>
 
     <div class="market-panel" id="marketPanel" style="display:none">
       <div class="market-workbench" id="marketWorkbench">
         <header class="market-workbench-head">
           <div class="market-workbench-title">
-            <span>MARKET LAB</span>
+
             <div><h2>行情与选股</h2><p>个股复盘、全市场指标扫描与参数化指标库</p></div>
           </div>
           <div class="market-workbench-tabs" role="tablist" aria-label="行情工作区">
@@ -203,7 +185,7 @@
         <section class="market-workspace-view" data-market-view="screener">
           <div class="market-screener">
             <div class="market-section-head">
-              <div><span>SCREENER</span><h3>全市场指标选股</h3><p>后台扫描沪深京股票池，离开页面后任务仍会继续。</p></div>
+              <div><h3>全市场指标选股</h3><p>后台扫描沪深京股票池，离开页面后任务仍会继续。</p></div>
               <div class="market-scan-state" id="marketScanState">等待配置</div>
             </div>
             <div class="market-screener-layout">
@@ -242,7 +224,7 @@
         <section class="market-workspace-view" data-market-view="library">
           <div class="indicator-library-pane">
             <div class="market-section-head">
-              <div><span>INDICATOR STUDIO</span><h3>参数化指标库</h3><p>用大白话或常见公式生成指标，再通过可视化参数精确微调。</p></div>
+              <div><h3>参数化指标库</h3><p>用大白话或常见公式生成指标，再通过可视化参数精确微调。</p></div>
             </div>
             <div class="indicator-translate-bar">
               <input type="text" id="indicatorInput" placeholder="例如：5日线上穿10日线，10日线上穿20日线，成交量大于前5日均量3倍" autocomplete="off">
@@ -311,7 +293,7 @@
 </div>
 
 <dialog id="workbenchDialog" class="workbench-dialog" aria-labelledby="workbenchDialogTitle">
-  <header><div><span class="workbench-kicker">RESEARCH WORKSPACE</span><h2 id="workbenchDialogTitle">平台能力</h2></div><button onclick="App._closeWorkbenchPanel()" aria-label="关闭能力与记录">×</button></header>
+  <header><div><h2 id="workbenchDialogTitle">平台能力</h2></div><button onclick="App._closeWorkbenchPanel()" aria-label="关闭能力与记录">×</button></header>
   <div class="workbench-dialog-tabs" role="tablist"><button role="tab" id="workbenchCapabilityTab" onclick="App._openWorkbenchPanel('capabilities')">平台能力</button><button role="tab" id="workbenchHistoryTab" onclick="App._openWorkbenchPanel('history')">调用记录</button></div>
   <div id="workbenchDialogBody" class="workbench-dialog-body"></div>
 </dialog>
@@ -325,7 +307,7 @@
   <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
 </dialog>
 <dialog id="feedbackDialog" class="workbench-dialog feedback-dialog" aria-labelledby="feedbackTitle">
-  <header><div><span class="workbench-kicker">FEEDBACK</span><h2 id="feedbackTitle">反馈与建议</h2></div><button type="button" onclick="document.getElementById('feedbackDialog').close()" aria-label="关闭反馈">×</button></header>
+  <header><div><h2 id="feedbackTitle">反馈与建议</h2></div><button type="button" onclick="document.getElementById('feedbackDialog').close()" aria-label="关闭反馈">×</button></header>
   <nav class="workbench-dialog-tabs" aria-label="反馈视图"><button type="button" onclick="App._feedbackView('new')">提交反馈</button><button type="button" onclick="App._feedbackView('mine')">我的反馈与进度</button><button type="button" id="feedbackReviewEntry" hidden onclick="App._feedbackView('admin')">反馈评审</button></nav>
   <div class="workbench-dialog-body">
     <form id="feedbackForm" class="feedback-form" onsubmit="App._submitFeedback(event)">
@@ -339,28 +321,29 @@
     <div id="feedbackContent" hidden></div>
   </div>
 </dialog>
-<script src="/static/lib/marked.min.js?v=93"></script>
-<script src="/static/lib/echarts.min.js?v=93"></script>
-<script src="/static/js/app.util.js?v=93"></script>
-<script src="/static/js/app.chat-render.js?v=93"></script>
-<script src="/static/js/app.core.js?v=93"></script>
-<script src="/static/js/app.diagnostics.js?v=93"></script>
-<script src="/static/js/app.feedback.js?v=93"></script>
-<script src="/static/js/app.chat.js?v=93"></script>
-<script src="/static/js/app.market.js?v=93"></script>
-<script src="/static/js/app.vibe.js?v=93"></script>
-<script src="/static/js/app.analysis.js?v=93"></script>
-<script src="/static/js/app.reports.js?v=93"></script>
-<script src="/static/js/app.industry.js?v=93"></script>
-<script src="/static/js/app.indicators.js?v=93"></script>
-<script src="/static/js/app.screener.js?v=93"></script>
-<script src="/static/js/app.indicator-chart.js?v=93"></script>
-<script src="/static/js/app.admin.js?v=93"></script>
-<script src="/static/js/app.release.js?v=93"></script>
-<script src="/static/js/app.tour.js?v=93"></script>
-<script src="/static/js/app.workbench.js?v=93"></script>
-<script src="/static/js/app.research.js?v=93"></script>
-<script src="/static/js/app.operations.js?v=93"></script>
-<script src="/static/js/app.handoff.js?v=93"></script>
+<script src="/static/lib/marked.min.js?v=111"></script>
+<script src="/static/lib/echarts.min.js?v=111"></script>
+<script src="/static/js/app.util.js?v=111"></script>
+<script src="/static/js/app.chat-render.js?v=111"></script>
+<script src="/static/js/app.core.js?v=111"></script>
+<script src="/static/js/app.diagnostics.js?v=111"></script>
+<script src="/static/js/app.feedback.js?v=111"></script>
+<script src="/static/js/app.chat.js?v=111"></script>
+<script src="/static/js/app.market.js?v=111"></script>
+<script src="/static/js/app.vibe.js?v=111"></script>
+<script src="/static/js/app.analysis.js?v=111"></script>
+<script src="/static/js/app.reports.js?v=111"></script>
+<script src="/static/js/app.industry.js?v=111"></script>
+<script src="/static/js/app.indicators.js?v=111"></script>
+<script src="/static/js/app.screener.js?v=111"></script>
+<script src="/static/js/app.indicator-chart.js?v=111"></script>
+<script src="/static/js/app.admin.js?v=111"></script>
+<script src="/static/js/app.model-routes.js?v=111"></script>
+<script src="/static/js/app.release.js?v=111"></script>
+<script src="/static/js/app.tour.js?v=111"></script>
+<script src="/static/js/app.workbench.js?v=111"></script>
+<script src="/static/js/app.research.js?v=111"></script>
+<script src="/static/js/app.operations.js?v=111"></script>
+<script src="/static/js/app.handoff.js?v=111"></script>
 </body>
 </html>

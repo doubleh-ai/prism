@@ -135,12 +135,89 @@ class WatchUpdateArgs(Arguments):
     items: list[WatchItemArgs] = Field(min_length=1, max_length=200)
 
 
+class ClaimFormula(Arguments):
+    operator: Literal["add", "subtract", "multiply", "divide"]
+    input_claim_ids: list[RecordId] = Field(
+        min_length=2, max_length=2, description="本轮已登记的两个不同输入结论ID，不接受表达式或代码。"
+    )
+
+
+class ResearchClaim(Arguments):
+    kind: Literal["fact", "calculation", "inference", "hypothesis"]
+    statement: str = Field(min_length=1, max_length=3000)
+    supports: list[RecordId] = Field(
+        default_factory=list, max_length=20, description="research_read 返回的本轮段落ID。"
+    )
+    opposes: list[RecordId] = Field(default_factory=list, max_length=20)
+    background: list[RecordId] = Field(default_factory=list, max_length=20)
+    quotes: dict[str, Annotated[str, Field(min_length=1, max_length=600)]] = Field(
+        default_factory=dict, max_length=60, description="段落ID到逐字原文引句的映射；不能自行改写为引文。"
+    )
+    entities: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=20
+    )
+    metric: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        description="数字指标名称，如营业收入或设计年产能；不同指标不能混比。",
+    )
+    value: (
+        Annotated[str, Field(max_length=100)]
+        | Annotated[int, Field(strict=True)]
+        | Annotated[float, Field(strict=True)]
+        | None
+    ) = Field(default=None, description="原始数值，优先使用普通十进制字符串；不可填未知数据。")
+    unit: str | None = Field(default=None, max_length=80, description="原文数量单位；例如万元、万吨、片或%。")
+    currency: str | None = Field(
+        default=None, max_length=30, description="金额明确填写币种；不能默认人民币或自动折汇。"
+    )
+    period: str | None = Field(
+        default=None, max_length=120, description="数据所属期间，优先YYYY、YYYYQ1、YYYYH1或完整ISO日期区间。"
+    )
+    accounting_basis: str | None = Field(
+        default=None,
+        max_length=300,
+        description="数据口径，例如合并报表、设计产能或实际产量；缺失口径不可混比。",
+    )
+    formula: ClaimFormula | None = None
+    limitations: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=20, description="推断、假设的限制及失效条件。"
+    )
+
+
 class ClaimsArgs(Arguments):
-    claims: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+    claims: list[ResearchClaim] = Field(min_length=1, max_length=20)
+
+
+class ResearchRelation(Arguments):
+    from_entity: str = Field(min_length=1, max_length=200)
+    to_entity: str = Field(min_length=1, max_length=200)
+    product: str = Field(min_length=1, max_length=200)
+    dimension: Literal["supply", "certification", "substitution", "cost", "demand"]
+    mechanism: str = Field(
+        min_length=1,
+        max_length=1200,
+        description="解释供给、良率、成本、交期或终端需求怎样传导，说明成立条件。",
+    )
+    relation_type: str | None = Field(default=None, max_length=200)
+    business_stage: str | None = Field(
+        default=None, max_length=200, description="区分送样、验证、量产、订单和已披露供货；未知时不补造。"
+    )
+    valid_period: str | None = Field(
+        default=None, max_length=200, description="关系证据有效期间，优先YYYY、YYYYQ1、YYYYH1或ISO日期区间。"
+    )
+    supporting_claims: list[RecordId] = Field(
+        default_factory=list, max_length=20, description="本轮research_record_claims已返回的结论ID。"
+    )
+    opposing_claims: list[RecordId] = Field(default_factory=list, max_length=20)
+    invalidators: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=20
+    )
 
 
 class RelationsArgs(Arguments):
-    relations: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+    relations: list[ResearchRelation] = Field(min_length=1, max_length=20)
 
 
 class ResearchScopeArgs(Arguments):
@@ -187,7 +264,7 @@ _TOOLS = (
     Capability(
         "futures_snapshot",
         "期货研究数据",
-        "查询支持品种的连续日线、技术指标与成交持仓；缺失基本面保留缺口，不等于资金净流入。",
+        "读取连续日线、技术指标、成交持仓、已覆盖品种的同日交易所仓单、具体合约结算曲线和分别披露的会员排名。保留来源、日期和缺口。",
         FuturesArgs,
         "platform_market",
         "market",
@@ -682,6 +759,9 @@ def safe_result(value: Any, depth: int = 0) -> Any:
 def _public_call(row) -> dict:
     result = dict(row)
     tool = REGISTRY.get(result["capability_id"])
+    from .agent.tools import _CUSTOM
+
+    native_label, native_kind = _CUSTOM.get(result["capability_id"], (result["capability_id"], "unknown"))
     return {
         k: result[k]
         for k in (
@@ -696,8 +776,8 @@ def _public_call(row) -> dict:
             "completed_at",
         )
     } | {
-        "label": tool.label if tool else result["capability_id"],
-        "source_kind": tool.source_kind if tool else "unknown",
+        "label": tool.label if tool else native_label,
+        "source_kind": tool.source_kind if tool else native_kind,
         "target": json.loads(result["target_json"]),
     }
 
@@ -718,6 +798,10 @@ def list_calls(
         args.append(run_id)
     if view:
         ids = [t.id for t in _TOOLS if t.view == view]
+        if view == "reports":
+            from .agent.tools import _CUSTOM
+
+            ids.extend(_CUSTOM)
         if not ids:
             return []
         clauses.append("capability_id IN (" + ",".join("?" for _ in ids) + ")")
@@ -848,7 +932,10 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
 
         value = await snapshot(data["symbol"])
         target["href"] = "/futures?symbol=" + data["symbol"]
-        return value, target, "取得期货连续日线及研究缺口"
+        summary = (
+            "已取得部分期货资料，缺失项见结果" if value.get("status") == "partial" else "已取得期货研究资料"
+        )
+        return value, target, summary
     if name.startswith("market_"):
         from .market.factory import get_chain
 
@@ -990,6 +1077,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         return result, target, "指标已计算；结果仅对应本次取得的数据"
     if name.startswith("industry_"):
         from .industry_context import build_industry_context
+        from .industry_research import evidence_graph
         from .industry_router import overview, ticker_chain
 
         if name == "industry_overview":
@@ -998,6 +1086,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
             value = await ticker_chain(data["ticker"])
         else:
             value = build_industry_context(user)
+        value["evidence_graph"] = evidence_graph(user, query=data.get("ticker", ""), limit=6, compact=True)
         value["evidence_notice"] = "现有种子连线未经商业关系核验；平台研究动态不是原始披露。"
         return value, target, "已读取现有产业图谱与研究动态"
     if name.startswith("report_"):

@@ -23,6 +23,7 @@ Object.assign(App, {
 
   _leaveIndustry: function() {
     this._industryChainSeq = (this._industryChainSeq || 0) + 1;
+    this._industryResearchSeq = (this._industryResearchSeq || 0) + 1;
     if (this._industryContextTimer) {
       clearTimeout(this._industryContextTimer);
       this._industryContextTimer = null;
@@ -244,10 +245,11 @@ Object.assign(App, {
     var context = this._industryContext || {};
     var summary = context.summary || {};
     var ready = Number(context.generated_at || 0) > 0;
+    if (!ready) return "";
     return '<div class="industry-sync' + (ready ? " ready" : "") + '">' +
-      '<span><i></i>' + (ready ? "跨模块已同步" : "等待数据联动") + '</span>' +
+      '<span><i></i>' + (ready ? "相关研究已更新" : "暂无相关研究") + '</span>' +
       '<em>' + esc(this._industryRelativeTime(context.generated_at)) + (ready ? " · " + Number(summary.linked_tickers || 0) + " 已归链" : "") + '</em>' +
-      '<button type="button" title="刷新跨模块数据" aria-label="刷新跨模块数据" onclick="App._refreshIndustryContext(this)">↻</button>' +
+      '<button type="button" title="刷新相关研究" aria-label="刷新相关研究" onclick="App._refreshIndustryContext(this)">↻</button>' +
     '</div>';
   },
 
@@ -320,14 +322,15 @@ Object.assign(App, {
     var context = this._industryContext || {};
     var events = context.recent_events || [];
     var unlinked = context.unlinked || [];
+    if (!events.length && !unlinked.length) return "";
     return '<section class="industry-context-grid">' +
-      '<div class="industry-section"><div class="industry-section-hd"><h3>跨模块动态</h3><span>' + esc(String(events.length)) + ' 条</span></div>' +
+      '<div class="industry-section"><div class="industry-section-hd"><h3>相关研究</h3><span>' + esc(String(events.length)) + ' 条</span></div>' +
         '<div class="industry-context-events">' + (events.length ? events.slice(0, 8).map(function(event) {
           var category = (event.categories || [])[0] || "";
           return '<button type="button" data-c="' + escAttr(category) + '" data-t="' + escAttr(event.ticker || "") + '" onclick="App._openIndustryContext(this.dataset.c,this.dataset.t)">' +
             '<i class="source-' + escAttr(event.source || "") + '"></i><span><b>' + esc(event.name || event.ticker) + '</b><em>' + esc(event.source_label + (event.signal ? " · " + event.signal : "")) + '</em></span><time>' + esc(App._industryRelativeTime(event.at)) + '</time>' +
           '</button>';
-        }).join("") : '<div class="ind-empty small">暂无跨模块动态</div>') + '</div>' +
+        }).join("") : '<div class="ind-empty small">暂无相关研究</div>') + '</div>' +
       '</div>' +
       '<div class="industry-section"><div class="industry-section-hd"><h3>待归链</h3><span>' + esc(String((((context.summary || {}).unlinked_tickers) || 0))) + ' 个标的</span></div>' +
         '<div class="industry-unlinked">' + (unlinked.length ? unlinked.slice(0, 8).map(function(item) {
@@ -359,7 +362,7 @@ Object.assign(App, {
     var latest = (live.signals || [])[0] || {};
     return '<button class="industry-chain-card" data-c="' + escAttr(c.category) + '" onclick="App._selectIndustryChain(this.dataset.c)">' +
       '<div class="industry-chain-card-hd"><strong>' + esc(c.category) + '</strong><span>' + esc(String(c.node_count || 0)) + ' 节点</span></div>' +
-      (live.active_tickers ? '<div class="industry-chain-live"><i></i><span>' + esc(String(live.active_tickers)) + ' 个联动标的</span>' + (latest.signal ? '<em class="tone-' + escAttr(latest.tone || "neutral") + '">' + esc(latest.ticker + " " + latest.signal) + '</em>' : '<em>' + esc(this._industryRelativeTime(live.latest_at)) + '</em>') + '</div>' : '') +
+      (live.active_tickers ? '<div class="industry-chain-live"><i></i><span>' + esc(String(live.active_tickers)) + ' 个相关标的</span>' + (latest.signal ? '<em class="tone-' + escAttr(latest.tone || "neutral") + '">' + esc(latest.ticker + " " + latest.signal) + '</em>' : '<em>' + esc(this._industryRelativeTime(live.latest_at)) + '</em>') + '</div>' : '') +
       '<div class="industry-chain-bars"><i style="width:' + up + '%"></i><b style="width:' + mid + '%"></b><em style="width:' + down + '%"></em></div>' +
       '<div class="industry-chain-card-meta">' + esc(String(c.edge_count || 0)) + ' 关系 · ' + esc(String(c.country_count || 0)) + ' 国 · ' + esc(String(c.ticker_count || 0)) + ' 标的</div>' +
       '<div class="industry-chain-card-nodes">' + nodes + '</div>' +
@@ -437,6 +440,7 @@ Object.assign(App, {
   },
 
   _renderIndustryChain: async function(cat, focusNodeId) {
+    this._industryResearchSeq = (this._industryResearchSeq || 0) + 1;
     var sequence = this._industryChainSeq = (this._industryChainSeq || 0) + 1;
     var inner = document.getElementById("industryPanelInner");
     if (!inner) return;
@@ -451,11 +455,13 @@ Object.assign(App, {
       this._renderIndustryChainDetail(cat, d.nodes || [], d.edges || [], d.summary || {}, focusNodeId);
     } catch (e) {
       if (sequence !== this._industryChainSeq) return;
-      inner.innerHTML = this._industryShell("chain", '<div class="ind-empty">产业链加载失败</div>');
+      inner.innerHTML = this._industryShell("chain", '<div class="ind-empty">背景产业链加载失败</div><section class="industry-research" id="industryResearch" aria-live="polite"></section>');
+      this._loadIndustryResearch(cat);
     }
   },
 
   _renderIndustryChainByTicker: async function(ticker) {
+    this._industryResearchSeq = (this._industryResearchSeq || 0) + 1;
     var sequence = this._industryChainSeq = (this._industryChainSeq || 0) + 1;
     var inner = document.getElementById("industryPanelInner");
     if (!inner) return;
@@ -478,6 +484,8 @@ Object.assign(App, {
     if (!inner) return;
     if (!nodes.length) {
       inner.innerHTML = this._industryShell("chain", '<div class="ind-empty">暂无「' + esc(cat) + '」产业链数据</div>');
+      inner.insertAdjacentHTML("beforeend", '<section class="industry-research" id="industryResearch" aria-live="polite"></section>');
+      this._loadIndustryResearch(highlightTicker || cat);
       return;
     }
     this._industryCategory = cat;
@@ -495,7 +503,7 @@ Object.assign(App, {
     }
     var body =
       '<section class="industry-chain-hero">' +
-        '<div><span>INDUSTRY CHAIN</span><h3>' + esc(cat) + '</h3><p>' + esc(this._industryChainThesis(nodes, edges)) + '</p></div>' +
+        '<div><h3>' + esc(cat) + '</h3><p>' + esc(this._industryChainThesis(nodes, edges)) + '</p></div>' +
         '<div class="industry-chain-actions"><button onclick="App._backToMap()">返回总览</button><button onclick="App._industryAskChain()">交给 AI 深挖</button></div>' +
       '</section>' +
       '<section class="industry-kpis compact">' +
@@ -505,6 +513,7 @@ Object.assign(App, {
         this._industryKpi("标的", Object.keys(tickerSet).length, "可联动行情") +
       '</section>' +
       this._renderIndustryChainLive(cat) +
+      '<section class="industry-research" id="industryResearch" aria-live="polite"></section>' +
       '<section class="industry-chain-layout">' +
         '<div class="industry-stage-board"><div class="industry-stage-cols" id="industryStageCols">' +
           tiers.map(function(arr, idx) { return App._renderIndustryTier(idx, arr, focusNodeId, highlightTicker); }).join("") +
@@ -516,10 +525,58 @@ Object.assign(App, {
         '</aside>' +
       '</section>';
     inner.innerHTML = this._industryShell("chain", body);
+    this._loadIndustryResearch(highlightTicker || cat);
     var self = this;
     requestAnimationFrame(function() { requestAnimationFrame(function() { self._drawIndustryStageEdges(); }); });
     this._renderIndustryMiniMap(nodes);
     if (focusNodeId) setTimeout(function() { self._showIndustryNode(focusNodeId); }, 100);
+  },
+
+  _loadIndustryResearch: async function(query, before) {
+    query=String(query || '').trim().slice(0,160);
+    var box=document.getElementById('industryResearch');if(!box||!query)return;
+    var app=this,sequence=this._industryResearchSeq=(this._industryResearchSeq||0)+1,expected=this.user;
+    if(!before){this._industryResearchQuery=query;this._industryResearchRelations=[];this._industryResearchPaths=[];box.innerHTML='<h3>本人研究关系</h3><p>正在读取…</p>';}
+    else {var more=box.querySelector('[data-industry-more]');if(more)more.disabled=true;}
+    try {
+      var first=await this.api('/api/me');if(!first.ok)throw new Error('account');var me=await first.json();
+      if(!expected||!me.user||me.user!==expected)throw new Error('account');
+      var url='/api/industry/research?q='+encodeURIComponent(query)+'&limit=20'+(before?'&before='+encodeURIComponent(before):'');
+      var response=await this.api(url);if(!response.ok)throw new Error('request');var data=await response.json();
+      var last=await this.api('/api/me');if(!last.ok)throw new Error('account');var current=await last.json();
+      if(sequence!==this._industryResearchSeq||this._mode!=='industry'||this._industryResearchQuery!==query||!document.getElementById('industryResearch'))return;
+      if(current.user!==expected||this.user!==expected)throw new Error('account');
+      if(!data||!Array.isArray(data.relations)||!Array.isArray(data.transmission_paths))throw new Error('response');
+      this._industryResearchRelations=(this._industryResearchRelations||[]).concat(data.relations);
+      this._industryResearchPaths=(this._industryResearchPaths||[]).concat(data.transmission_paths);
+      this._industryResearchCursor=Number.isInteger(data.next_cursor)&&data.next_cursor>0?data.next_cursor:null;
+      this._renderIndustryResearch(data.notice);
+    }catch(error){
+      if(sequence!==this._industryResearchSeq||this._mode!=='industry'||!document.getElementById('industryResearch'))return;
+      if(error.message==='account'){this._industryResearchRelations=[];this._industryResearchPaths=[];box.innerHTML='<h3>本人研究关系</h3><p>账号状态已变化，请刷新后重新读取。</p>';return;}
+      var failure='<p class="industry-research-error" role="status">读取研究关系失败，结果未知。 <button type="button" data-industry-retry>重试</button></p>';
+      if(before){var previous=box.querySelector('.industry-research-error');if(previous)previous.remove();box.insertAdjacentHTML('beforeend',failure);var more=box.querySelector('[data-industry-more]');if(more)more.disabled=false;}
+      else box.innerHTML='<h3>本人研究关系</h3>'+failure;
+      var retry=box.querySelector('[data-industry-retry]');if(retry)retry.onclick=function(){app._loadIndustryResearch(query,before);};
+    }
+  },
+
+  _renderIndustryResearch: function(notice) {
+    var box=document.getElementById('industryResearch');if(!box)return;
+    var relations=this._industryResearchRelations||[],paths=this._industryResearchPaths||[],self=this;
+    var array=function(value){return Array.isArray(value)?value:[];};
+    var labels={supporting_claims:'支持',opposing_claims:'反方'},status={references_require_review:'引用待核验',needs_evidence:'证据不足'};
+    var gaps={support_missing:'缺少支持材料',claim_inaccessible:'引用不可用',cross_run_reference_invalid:'跨研究引用需核查',support_ineligible:'支持结论不适用或需复核',original_passage_missing:'缺少原文摘录',opposing_evidence_requires_review:'反方材料需核对',numeric_evidence_conflict:'同口径数字存在差异',historical_numeric_evidence_conflict:'与历史同口径数字存在差异',period_scope_unresolved:'有效期间尚不能对齐',business_stage_unknown:'商业阶段未知',invalidation_missing:'失效条件未明确',citation_checks_incomplete:'引用尚未核对',historical_comparison_incomplete:'历史数值比较尚不完整，不能视为一致',model_excerpt_review_missing:'部分材料尚无自动节选复核',model_excerpt_review_incomplete:'自动节选复核尚未完成',model_excerpt_review_disagreement:'原文与表述有待核查项'};
+    function source(item){var url=String(item.url||''),safe=/^https:\/\//i.test(url)?safeUrl(url):'';return '<div class="industry-research-source"><p>'+esc(item.title||'来源未命名')+' · '+esc(item.published_at||'日期未知')+' · '+esc(item.content_scope||'范围未知')+'</p><blockquote>'+esc(item.excerpt||'未提供摘录')+'</blockquote>'+(array(item.document_gaps).length?'<p>资料缺口：'+array(item.document_gaps).map(esc).join('、')+'</p>':'')+(safe?'<a href="'+escAttr(safe)+'" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>':'')+'</div>';}
+    function modelAdvice(claim){var review=claim.model_review||{},assessment=review.assessment||{},labels={partly_supported:'部分支持',not_supported:'不支持',insufficient_evidence:'证据不足'},label=labels[assessment.effective_verdict];if(review.status!=='completed'||!label)return '';return '<p>自动节选复核：'+esc(label)+'。'+esc(String(assessment.reason||'').slice(0,400))+'（自动意见，人工记录保持不变）</p>'; }
+    function relation(row){var evidence=array(row.evidence),target=row.target&&row.target.run_id,checks=array(row.blocking_gaps).concat(array(row.review_gaps)).filter(function(value,index,items){return items.indexOf(value)===index;});return '<article class="industry-research-row"><h4>'+esc(row.from_entity||'未知')+' → '+esc(row.to_entity||'未知')+'</h4><p>'+esc(row.product||'产品未明确')+' · '+esc(status[row.status]||'状态未知')+' · 语义待核验</p>'+(row.mechanism?'<p>'+esc(row.mechanism)+'</p>':'')+'<details><summary>证据与限制</summary><p>阶段：'+esc(row.business_stage||'未知')+' · 有效期：'+esc(row.valid_period||'未知')+'</p>'+(row.invalidators?'<p>失效条件：'+esc(row.invalidators)+'</p>':'')+(checks.length?'<p>待核对：'+checks.map(function(gap){return esc(gaps[gap]||gap);}).join('、')+'</p>':'')+(evidence.length?evidence.map(function(claim){return '<div class="industry-research-evidence"><strong>'+esc(labels[claim.role]||'相关材料')+' · '+esc(claim.effective_state||'状态未知')+'</strong><p>'+esc(claim.statement||'结论未提供')+'</p><p>期间：'+esc(claim.period||'未知')+' · 引用：'+esc(claim.citation_status||'未知')+' · 语义：'+esc(claim.semantic_status||'待核验')+'</p>'+modelAdvice(claim)+array(claim.sources).map(source).join('')+'</div>';}).join(''):'<p>暂无关联证据。</p>')+'</details>'+(target?'<a href="/prism?run_id='+escAttr(encodeURIComponent(target))+'">查看原研究 ↗</a>':'')+'</article>';}
+    var html='<h3>本人研究关系</h3><p>以下是本人研究中的候选关系，与背景图分开；引用仍需语义核验。</p>';
+    if(!relations.length)html+='<p>暂无相关研究关系。<a href="/prism">前往研究对话继续核查</a>。</p>';
+    else html+=relations.map(relation).join('');
+    if(paths.length)html+='<details class="industry-research-paths"><summary>传导链假设</summary><p>各环节仍须交叉核对，不能视为已证实。</p>'+paths.map(function(path){return '<div><strong>'+array(path.entities).map(esc).join(' → ')+'</strong><p>'+array(path.products).map(esc).join(' → ')+'</p><p>'+array(path.mechanisms).map(esc).join('；')+'</p><p>有效期间：'+array(path.valid_periods).map(esc).join('；')+'</p><p>待核对：'+array(path.checks_required).concat(array(path.review_gaps).map(function(gap){return gaps[gap]||gap;})).map(esc).join('、')+'</p></div>';}).join('')+'</details>';
+    if(notice)html+='<details><summary>阅读说明</summary><p>'+esc(notice)+'</p></details>';
+    if(this._industryResearchCursor)html+='<button type="button" data-industry-more>加载更多</button>';
+    box.innerHTML=html;var more=box.querySelector('[data-industry-more]');if(more)more.onclick=function(){self._loadIndustryResearch(self._industryResearchQuery,self._industryResearchCursor);};
   },
 
   _industryChainThesis: function(nodes, edges) {
@@ -709,7 +766,7 @@ Object.assign(App, {
   _renderIndustryDrawerContext: function(context) {
     if (!context) return '';
     var evidence = context.evidence || [];
-    return '<div class="industry-drawer-context"><div class="industry-drawer-context-hd"><span>跨模块动态</span><em>' + esc(this._industryRelativeTime(context.latest_at)) + '</em></div>' +
+    return '<div class="industry-drawer-context"><div class="industry-drawer-context-hd"><span>相关研究</span><em>' + esc(this._industryRelativeTime(context.latest_at)) + '</em></div>' +
       (context.latest_signal ? '<div class="industry-drawer-signal tone-' + escAttr(context.signal_tone || "neutral") + '"><span>最新评级</span><strong>' + esc(context.latest_signal) + '</strong></div>' : '') +
       '<div class="industry-drawer-evidence">' + evidence.slice(0, 5).map(function(item) {
         return '<div><i class="source-' + escAttr(item.source || "") + '"></i><span><b>' + esc(item.label || item.source_label || "联动记录") + '</b><em>' + esc((item.detail || item.source_label || "") + " · " + App._industryRelativeTime(item.at)) + '</em></span></div>';
@@ -752,3 +809,5 @@ Object.assign(App, {
     }
   }
 });
+
+document.addEventListener("visibilitychange",function(){var box=document.getElementById("industryResearch");if(!box)return;if(document.hidden){App._industryResearchSeq=(App._industryResearchSeq||0)+1;App._industryResearchRelations=[];App._industryResearchPaths=[];box.textContent="";return;}if(App._mode==="industry"&&App._industryResearchQuery)App._loadIndustryResearch(App._industryResearchQuery);});

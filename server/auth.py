@@ -36,7 +36,7 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
-def verify_password(password: str, hashed: str) -> bool:
+def verify_password(password: str, hashed: str, *, migrate: bool = True) -> bool:
     # 兼容旧 SHA-256 格式 (64 hex chars)
     if len(hashed) == 64 and all(c in "0123456789abcdef" for c in hashed):
         import hashlib
@@ -44,6 +44,8 @@ def verify_password(password: str, hashed: str) -> bool:
         from .config import SECRET_KEY
 
         if hashed == hashlib.sha256((password + SECRET_KEY).encode()).hexdigest():
+            if not migrate:
+                return True
             # 迁移到 bcrypt
             new_hash = hash_password(password)
             with get_db() as db:
@@ -51,6 +53,35 @@ def verify_password(password: str, hashed: str) -> bool:
             return True
         return False
     return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def authenticated_session(username: str, password: str) -> str | None:
+    """Recheck the verified hash atomically with session issuance after slow hashing."""
+    with get_db() as db:
+        row = db.execute(
+            "SELECT password_hash, disabled_at FROM users WHERE username=?", [username]
+        ).fetchone()
+    if not row or row["disabled_at"] is not None:
+        return None
+    old_hash = row["password_hash"]
+    if not verify_password(password, old_hash, migrate=False):
+        return None
+    new_hash = hash_password(password) if len(old_hash) == 64 else None
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            current = db.execute(
+                "SELECT password_hash FROM users WHERE username=? AND disabled_at IS NULL", [username]
+            ).fetchone()
+            valid = current and secrets.compare_digest(current["password_hash"], old_hash)
+            if valid and new_hash:
+                db.execute("UPDATE users SET password_hash=? WHERE username=?", [new_hash, username])
+            token = create_session(username) if valid else None
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+    return token
 
 
 def require_auth(request: Request, optional: bool = False) -> str | None:
@@ -128,11 +159,8 @@ async def login(request: Request):
             request=request,
         )
         raise HTTPException(status_code=429, detail="请求过于频繁")
-    with get_db() as db:
-        row = db.execute(
-            "SELECT password_hash, disabled_at FROM users WHERE username=?", [username]
-        ).fetchone()
-    if not row or row["disabled_at"] is not None or not verify_password(password, row["password_hash"]):
+    token = authenticated_session(username, password)
+    if token is None:
         Event.auth(username, "failed").warn()
         record_activity(
             username=username,
@@ -146,7 +174,6 @@ async def login(request: Request):
         )
         raise HTTPException(status_code=403)
     Event.auth(username, "ok").info()
-    token = create_session(username)
     record_activity(
         username=username,
         feature="auth",

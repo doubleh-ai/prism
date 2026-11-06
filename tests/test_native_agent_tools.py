@@ -3,9 +3,12 @@
 import asyncio
 import copy
 import json
+import sqlite3
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -51,6 +54,266 @@ def fetched(**changes):
         "text_truncated": False,
         **changes,
     }
+
+
+def discovery_result(**kw):
+    return {
+        "status": "ok",
+        "as_of": "2020-01-20T12:00:00+08:00",
+        "items": [
+            {
+                "url": "https://www.sse.com.cn/disclosure",
+                "title": "合成披露",
+                "snippet": "合成产能公告，仍需核对原文。",
+                "published_at": "2020-01-10",
+                "published_at_basis": "source_index_metadata",
+                "index_url": "https://query.sse.com.cn/fixture",
+                "index_body_sha256": "a" * 64,
+                "retrieved_at": "2020-01-20T12:00:00+08:00",
+                "source_class": "official_disclosure",
+                "original_obtained": False,
+                "original_verified": False,
+                "content_scope": "search_snippet",
+            }
+        ],
+        "coverage": [{"provider": "sse", "status": "collected", "complete_search": False}],
+        "complete_search": False,
+        **kw,
+    }
+
+
+async def test_source_discovery_ingests_each_index_receipt_then_original_with_separate_hash_and_date(
+    native, monkeypatch
+):
+    calls = []
+
+    def find(arguments):
+        calls.append(arguments)
+        return discovery_result()
+
+    monkeypatch.setattr(T, "_find_sources", find)
+    inputs = {"query": "合成", "providers": ["sse"], "start_date": "2020-01-01", "end_date": "2020-01-20"}
+    result = await native.tools.execute("source_find", inputs, "discovery-one")
+    assert result["ok"] and len(result["refs"]) == 1
+    assert result["refs"][0]["original_obtained"] is False
+    again = await native.tools.execute("source_find", inputs, "discovery-one")
+    assert result == again and len(calls) == 1
+    assert (await native.tools.execute("source_find", {**inputs, "query": "different"}, "discovery-one"))[
+        "error"
+    ]["code"] == "conflict"
+    data = read_research_run(native.context["username"], native.context["run_id"])
+    doc = data["documents"][0]
+    assert doc["content_scope"] == "search_snippet" and doc["publication_basis"] == "source_index_metadata"
+    assert doc["source_index"] == {"url": "https://query.sse.com.cn/fixture", "body_sha256": "a" * 64}
+    assert doc["retrieved_body_sha256"] is None
+    monkeypatch.setattr(T, "_fetch_source", lambda *a, **k: fetched(published_at=None, body_sha256="b" * 64))
+    original = await native.tools.execute(
+        "source_read", {"url": "https://www.sse.com.cn/disclosure"}, "read-one"
+    )
+    assert original["ok"] and original["data"]["published_at"] == "2020-01-10"
+    assert original["data"]["published_at_basis"] == "source_index_metadata"
+    assert original["data"]["publication_index"]["body_sha256"] == "a" * 64
+    docs = read_research_run(native.context["username"], native.context["run_id"])["documents"]
+    full = next(d for d in docs if d["content_scope"] == "tool_returned_text")
+    assert full["retrieved_body_sha256"] == "b" * 64 and full["source_index"]["body_sha256"] == "a" * 64
+    assert full["published_at"] == "2020-01-10" and "original_not_verified" in full["gaps"]
+    assert full["original_obtained"] is False and full["independence_status"] == "not_assessed"
+
+
+@pytest.mark.parametrize("provider", ["szse", "cls"])
+async def test_new_provider_runs_through_native_dispatch_original_read_and_owned_ledger(
+    native, monkeypatch, provider
+):
+    from server.agent import discovery as D
+
+    now = datetime(2026, 11, 3, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(D, "datetime", Clock)
+    calls = []
+    index_url = D.SZSE if provider == "szse" else D.CLS
+    article = (
+        "https://disc.static.szse.cn/disc/fixture.pdf"
+        if provider == "szse"
+        else "https://www.cls.cn/detail/12345"
+    )
+
+    def index(url, **options):
+        calls.append((url, options))
+        assert url == index_url
+        if provider == "szse":
+            assert options["disclosure_query"]["stock"] == ["000001"]
+            payload = {
+                "announceCount": 1,
+                "data": [
+                    {
+                        "secCode": ["000001"],
+                        "secName": ["合成公司"],
+                        "title": "合成产能披露",
+                        "publishTime": "2026-11-02 09:00:00",
+                        "attachPath": "/disc/fixture.pdf",
+                    }
+                ],
+            }
+        else:
+            assert "disclosure_query" not in options
+            payload = {
+                "errno": 0,
+                "data": {
+                    "roll_data": [
+                        {
+                            "id": 12345,
+                            "title": "",
+                            "content": "合成行业新闻",
+                            "ctime": int(now.timestamp()) - 60,
+                        }
+                    ]
+                },
+            }
+        return {
+            "status": "ok",
+            "url": url,
+            "data": payload,
+            "body_sha256": "a" * 64,
+            "retrieved_at": now.isoformat(),
+        }
+
+    monkeypatch.setattr(D, "fetch_public_index", index)
+    arguments = {"query": "合成", "providers": [provider]}
+    if provider == "szse":
+        arguments["stock_code"] = "000001"
+    result = await native.tools.execute("source_find", arguments, "new-source-index")
+    assert result["ok"] and len(result["refs"]) == 1
+    assert result["refs"][0]["url"] == article
+    assert result == await native.tools.execute("source_find", arguments, "new-source-index")
+    assert len(calls) == 1
+    monkeypatch.setattr(
+        T, "_fetch_source", lambda *a, **k: fetched(url=article, published_at=None, body_sha256="b" * 64)
+    )
+    original = await native.tools.execute("source_read", {"url": article}, "new-source-original")
+    assert original["ok"] and original["data"]["published_at_basis"] == "source_index_metadata"
+    docs = read_research_run(native.context["username"], native.context["run_id"])["documents"]
+    snippets = [d for d in docs if d["content_scope"] == "search_snippet"]
+    originals = [d for d in docs if d["content_scope"] == "tool_returned_text"]
+    assert len(snippets) == len(originals) == 1
+    assert all(d["source_index"] == {"url": index_url, "body_sha256": "a" * 64} for d in docs)
+    assert originals[0]["retrieved_body_sha256"] == "b" * 64
+    assert "original_not_verified" in originals[0]["gaps"]
+
+
+async def test_discovery_no_match_and_unavailable_are_distinct_no_fake_references(native, monkeypatch):
+    monkeypatch.setattr(T, "_find_sources", lambda *a: discovery_result(items=[]))
+    result = await native.tools.execute("source_find", {"query": "合成"}, "empty-search")
+    assert result["ok"] and result["refs"] == [] and result["data"]["complete_search"] is False
+    monkeypatch.setattr(T, "_find_sources", lambda *a: discovery_result(items=[], status="unavailable"))
+    result = await native.tools.execute("source_find", {"query": "合成"}, "failed-search")
+    assert result["ok"] is False and result["error"]["code"] == "source_unavailable"
+    assert read_research_run(native.context["username"], native.context["run_id"])["documents"] == []
+
+
+async def test_custom_source_receipt_is_owned_persistent_history_without_query_or_document_duplication(
+    native, monkeypatch
+):
+    monkeypatch.setattr(T, "_find_sources", lambda *a: discovery_result())
+    result = await native.tools.execute("source_find", {"stock_code": "600001"}, "metadata-history")
+    assert result["ok"]
+    call = result["call"]
+    owner = native.context["username"]
+    assert cap.list_calls(owner, conv_id=native.context["conv_id"])[0]["call_id"] == call["call_id"]
+    assert cap.list_calls(owner, view="reports")[0]["label"] == "查找公开资料"
+    snapshot = cap.get_call_snapshot(owner, call["call_id"])
+    assert snapshot["params"] == {} and snapshot["result"] == {"research_run_id": native.context["run_id"]}
+    assert snapshot["target"] == {"view": "reports", "run_id": native.context["run_id"]}
+    assert "合成产能公告" not in json.dumps(snapshot, ensure_ascii=False)
+    with pytest.raises(Exception) as denied:
+        cap.get_call_snapshot("other", call["call_id"])
+    assert getattr(denied.value, "status_code", None) == 404
+    with get_db() as db:
+        db.execute("UPDATE conversations SET deleted_at=1 WHERE id=?", [native.context["conv_id"]])
+    assert cap.list_calls(owner) == []
+    with pytest.raises(Exception) as removed:
+        cap.get_call_snapshot(owner, call["call_id"])
+    assert getattr(removed.value, "status_code", None) == 404
+
+
+async def test_missing_custom_audit_terminal_is_not_ignored_or_automatically_refetched(native, monkeypatch):
+    calls = []
+
+    def find(*a):
+        calls.append(1)
+        return discovery_result()
+
+    monkeypatch.setattr(T, "_find_sources", find)
+    with get_db() as db:
+        db.execute(
+            "CREATE TRIGGER reject_custom_audit BEFORE INSERT ON capability_calls BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        await native.tools.execute("source_find", {"query": "合成"}, "unconfirmed-audit")
+    result = await native.tools.execute("source_find", {"query": "合成"}, "unconfirmed-audit")
+    assert result["execution_status"] == "unknown" and calls == [1]
+    assert cap.list_calls(native.context["username"]) == []
+
+
+async def test_original_page_metadata_wins_and_redirect_cannot_borrow_index_date(native, monkeypatch):
+    monkeypatch.setattr(T, "_find_sources", lambda *a: discovery_result())
+    await native.tools.execute("source_find", {"query": "合成"}, "lookup")
+    monkeypatch.setattr(
+        T,
+        "_fetch_source",
+        lambda *a, **k: fetched(published_at="2020-01-12", published_at_basis="page_metadata"),
+    )
+    result = await native.tools.execute(
+        "source_read", {"url": "https://www.sse.com.cn/disclosure"}, "dated-original"
+    )
+    assert (
+        result["data"]["published_at"] == "2020-01-12"
+        and result["data"]["published_at_basis"] == "page_metadata"
+    )
+    monkeypatch.setattr(
+        T,
+        "_fetch_source",
+        lambda *a, **k: fetched(url="https://www.sse.com.cn/redirected", published_at=None),
+    )
+    result = await native.tools.execute(
+        "source_read", {"url": "https://www.sse.com.cn/disclosure"}, "redirected-original"
+    )
+    assert result["data"]["published_at"] is None and result["refs"][0]["published_at"] is None
+
+
+async def test_cancelled_discovery_keeps_worker_owned_and_does_not_refetch_same_call(native, monkeypatch):
+    entered, released = threading.Event(), threading.Event()
+    calls = []
+
+    def blocking(arguments):
+        calls.append(arguments)
+        entered.set()
+        released.wait(3)
+        return discovery_result()
+
+    monkeypatch.setattr(T, "_find_sources", blocking)
+    task = asyncio.create_task(native.tools.execute("source_find", {"query": "合成"}, "stopped-lookup"))
+    for _ in range(200):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert entered.is_set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sum(native.manager.observe()["leases"].values()) > 1
+    result = await native.tools.execute("source_find", {"query": "合成"}, "stopped-lookup")
+    assert result["execution_status"] == "unknown" and len(calls) == 1
+    released.set()
+    for _ in range(200):
+        if sum(native.manager.observe()["leases"].values()) == 1:
+            break
+        await asyncio.sleep(0.005)
+    assert sum(native.manager.observe()["leases"].values()) == 1
 
 
 def report(user, conv, source_id, **payload):
@@ -116,6 +379,26 @@ def test_real_binding_and_exact_owner_lease_are_required(native):
     ):
         with pytest.raises(T.NativeToolError):
             T.NativeTools(context, parent, tracker)
+
+
+async def test_futures_exchange_report_reaches_the_owned_agent(native, monkeypatch):
+    from server import futures
+
+    report = {
+        "table": "铜",
+        "status": "collected",
+        "unit": "吨",
+        "quantity": 17,
+        "change": -2,
+        "data_as_of": "2026-10-30",
+        "source_url": "https://www.shfe.com.cn/data/tradedata/future/stockdata/dailystock_20261030/ZH/all.html",
+    }
+    monkeypatch.setattr(
+        futures, "snapshot", AsyncMock(return_value={"symbol": "CU", "warehouse_receipt": report})
+    )
+    result = await native.tools.execute("futures_snapshot", {"symbol": "CU"}, "synthetic-copper")
+    assert result["ok"] and result["data"]["warehouse_receipt"] == report
+    assert result["call"]["target"]["href"] == "/futures?symbol=CU"
 
 
 async def test_platform_dispatch_is_durable_idempotent_and_not_external_evidence(native):
@@ -210,6 +493,55 @@ async def test_successful_source_result_creates_actual_owned_ledger_receipt(nati
         "source_read", {"url": "https://www.sse.com.cn/changed"}, "source-one"
     )
     assert changed["error"]["code"] == "conflict" and len(calls) == 1
+
+
+async def test_pdf_windows_are_owned_separate_evidence_and_keep_call_idempotency(native, monkeypatch):
+    calls = []
+
+    def fetch(url, *, allowed_hosts, first_page, page_count):
+        calls.append((url, first_page, page_count, allowed_hosts))
+        return fetched(
+            url=url,
+            text=f"[第{first_page}页]\n合成章节 {first_page}：产能120万吨。",
+            page_range=list(range(first_page, first_page + page_count)),
+            total_pages=15,
+            body_sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(T, "_fetch_source", fetch)
+    url = "https://www.sse.com.cn/report.pdf"
+    first = {"url": url, "first_page": 1, "page_count": 1}
+    later = {"url": url, "first_page": 12, "page_count": 1}
+    one = await native.tools.execute("source_read", first, "pdf-first")
+    two = await native.tools.execute("source_read", later, "pdf-later")
+    assert one["ok"] and two["ok"] and len(calls) == 2
+    assert calls == [(url, 1, 1, ()), (url, 12, 1, ())]
+    assert one["refs"][0]["document_id"] != two["refs"][0]["document_id"]
+    docs = read_research_run(native.context["username"], native.context["run_id"])
+    assert [document["pdf_page_range"] for document in docs["documents"]] == [[1], [12]]
+    assert {document["retrieved_body_sha256"] for document in docs["documents"]} == {"c" * 64}
+    assert any("第12页" in passage["excerpt"] for passage in docs["passages"])
+    assert await native.tools.execute("source_read", later, "pdf-later") == two
+    changed = await native.tools.execute("source_read", first, "pdf-later")
+    assert changed["error"]["code"] == "conflict" and len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [{"first_page": value} for value in (0, 2001, True, "2", 1.5, None)]
+    + [{"page_count": value} for value in (0, 21, True, "2", 1.5, None)]
+    + [{"page": 2}],
+)
+async def test_invalid_pdf_tool_arguments_never_fetch(native, monkeypatch, selection):
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("invalid page selection must not perform a read")
+
+    monkeypatch.setattr(T, "_fetch_source", unexpected)
+    value = await native.tools.execute(
+        "source_read", {"url": "https://www.sse.com.cn/report.pdf", **selection}, "pdf-invalid"
+    )
+    assert value["error"]["code"] == "invalid_arguments"
+    assert read_research_run(native.context["username"], native.context["run_id"])["documents"] == []
 
 
 @pytest.mark.parametrize(

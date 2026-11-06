@@ -157,7 +157,7 @@ def test_search_excludes_current_run_and_deduplicates_saved_versions(owners):
 
 
 @pytest.mark.parametrize("kind", ["report", "research"])
-def test_exact_owned_id_can_retrieve_beyond_recent_200_search_window(owners, kind):
+def test_search_and_exact_id_retrieve_old_matches_beyond_recent_200_records(owners, kind):
     if kind == "report":
         report("oldest", title="OnlyOldMarker", text="OldestSource", updated=1)
         for index in range(205):
@@ -166,9 +166,18 @@ def test_exact_owned_id_can_retrieve_beyond_recent_200_search_window(owners, kin
         research("oldest", question="OnlyOldMarker", text="OldestSource", created="1999-01-01")
         for index in range(205):
             research(f"new-{index}", question="NewMarker", text="Recent", created=f"2000-{index:04d}")
-    assert knowledge.search("alice", "OnlyOldMarker", limit=20)["results"] == []
+    assert knowledge.search("alice", "OnlyOldMarker", limit=20)["results"][0]["id"] == kind + ":oldest"
     exact = knowledge.get("alice", kind + ":oldest")["document"]
     assert exact["id"] == kind + ":oldest" and exact["text"] == "OldestSource"
+
+
+def test_unicode_json_and_literal_wildcards_use_owned_visible_text(owners):
+    report("old-chinese", title="旧记录", text="华东库存大幅下降", updated=1)
+    report("literal", title="Literal_Identifier", text="Percent%Marker", updated=2)
+    for index in range(205):
+        report(f"irrelevant-{index}", title="其他", text="无关", updated=1000 + index)
+    assert knowledge.search("alice", "华东库存")["results"][0]["id"] == "report:old-chinese"
+    assert knowledge.search("alice", "Literal_Identifier")["results"][0]["id"] == "report:literal"
 
 
 @pytest.mark.parametrize(

@@ -40,7 +40,17 @@ flowchart TD
 | Vibe | `server/vibe.py` | 新研究与追问固定 503，仅保留账号内已保存历史 |
 | 健康观察 | `server/health.py` | 检查 Native 入口、目录与本地模型配置；不调用模型或 CLI |
 
-提供方采用 Anthropic 兼容 Messages 协议，只表示 HTTP 消息与流事件格式；不依赖 Claude Code。现有 DeepSeek / MiniMax 模型配置继续使用。
+`provider.py` 按已配置协议显式分派：DeepSeek / MiniMax 使用 Anthropic 兼容
+Messages HTTP，OpenAI 使用 `provider_openai.py` 的 Responses HTTP。协议名不代表
+依赖任何 CLI。网络或模型失败后不会切换协议、模型或提供方。
+
+OpenAI 槽位必须同时配置独立 Key 和具体模型 ID，未配置时保持不可用。
+Responses 请求使用 `store: false`，不创建提供方会话，不依赖远端响应 ID 回取历史；
+续接所需的加密推理项仅在本轮内存使用，公开事件、报告和历史只保存公开文本、
+实际工具调用及来源。这里描述应用保存行为，不替代提供方的数据保留政策。
+工具只有在完整响应终态核对后才能交给本地调度；内置搜索按实际调用计数并保留
+原始 URL。为在公开文本中附上可点击的真实引用，Responses 文本按已完成内容项
+提交，不承诺逐 token 展示。现有停止、权限、用量未知及最终持久化合同不变。
 
 ## 控制面：开始、运行、观察、停止
 
@@ -89,6 +99,11 @@ SQLite 路径由 `server/config.py` 的 `STOCK_DATA_DIR` 和 `server/database.py
 **执行状态与证据状态分开。** 模型循环 `completed` 表示执行收尾，不表示报告内容已通过语义审查。引用存在、所属本轮、节选匹配、计算口径等结构检查，也不能直接证明结论语义正确。当前研究修订可能因证据缺口为 `partial` / 待核验，而任务执行已完成。
 
 来源页面不会获得执行指令的地位。`sources.py` 限定公开 HTTPS 主机、解析大小、时间和连接地址；`research_context.py` / `source_urls.py` 处理来源展示和清理；`research/ledger.py` 保留来源、日期、节选、主张与反证的联系。取得节选不等于取得完整原件，搜索线索也不能补成原文。
+
+`agent/discovery.py` 为没有内置搜索的模型提供固定公开索引发现；与 `source_read`
+共用真实任务归属及网络边界。上交所查询按实际代码和日期复核，新浪仅匹配返回的
+有界滚动列表。索引日期和原文日期分别保存，链接、网页和索引内容都不能授予权限。
+来源范围与协议见[资料发现与日期](source-discovery.md)。
 
 最终公开消息和报告写入时再次校验账号有效、会话未删除且仍属该用户。删除或停用不会授权运行器重建内容。`public_text.py` 从历史结构中提取公开回答，过滤私有思考、签名和不支持的结构；提供方续接所需的私有块只在当轮内存中使用。
 
@@ -145,6 +160,9 @@ store. It does not add a second model orchestrator.
 |---|---|
 | `productivity/store.py`, `routes.py` | Owned tasks, request deduplication, optimistic versions, transactional account checks |
 | `productivity/calendar.py` | Owned one-off events, UTC instants and IANA zones, overlaps, retained cancellation, escaped ICS |
+| `productivity/projects.py`, `collaboration.py` | Explicit project invitations and accepted viewer/editor roles; linked task access never grants access to another owner's workspace |
+| `productivity/planning.py`, `scheduling.py` | Bounded remaining-work scenarios, local work calendars, dependencies, estimates, milestones and within-project resource ordering; assumptions remain visible |
+| `productivity/assistant.py`, `assistant_changes.py`, `assistant_projects.py` | Local target resolution, typed preview, current account/project/member and version checks, atomic confirm/undo; the model receives only the submitted request |
 | `preferences.py` | Explicit user constraints and a snapshot captured atomically with each Native run |
 | `futures.py` | Fixed public daily feed, bounded HTTP, public cache, deterministic technical calculations and explicit missing fields |
 | `agent/tools.py`, `capabilities.py` | Read-only `futures_snapshot`, recorded through the existing research/capability ledger |
@@ -155,7 +173,8 @@ and profiles; deleting a run removes its profile snapshot. Old-code recovery
 still requires an actual compatibility check and must preserve newly written data.
 
 Research preferences are available to investment research, while private Work
-tasks/events are not automatically sent to it. A future Work Agent needs explicit
-workspace permissions and bounded write proposals. Profile prompts are not a
+tasks/events are not automatically sent to it. The Work assistant uses explicit
+account/project permissions and bounded write proposals; natural language does
+not grant wider access than the same business API. Profile prompts are not a
 deterministic portfolio risk engine. Missing holdings, margins or current
 contract evidence keep risk status `not_evaluated`.

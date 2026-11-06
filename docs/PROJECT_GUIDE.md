@@ -44,11 +44,16 @@ Prism 目前是一个带账号隔离的研究工作台，不是自动交易系�
 
 ### 个人工作、期货与研究偏好
 
+期货页面按日线日期查找交易所仓单，并展示数量、变化、单位和原表链接。螺纹钢列出仓库表，豆粕暂未接入仓单。交易所原表无法核对时仍保留可用的行情。
+
 完整状态及操作步骤见 [功能完成度清单](CAPABILITY_STATUS.md)。`/work` 管理个人任务，`/calendar` 查看日程和任务截止，`/futures` 读取公开期货日线，`/preferences` 保存个人研究约束。
 
-日程按设备时区展示，夏令时重复时刻需要明确选择。服务端以 UTC 时点加 IANA 时区保存；并发编辑冲突拒绝覆盖，未保存草稿只在当前页，离开会提示。它不是离线同步应用，重复日程、推送和团队项目尚未接入。
+日程按设备时区展示，夏令时重复时刻需要明确选择。服务端以 UTC 时点加 IANA 时区保存；并发编辑冲突拒绝覆盖，未保存草稿只在当前页，离开会提示。候选支持重复日程、项目协作及站内提醒；离线编辑、邮件和设备推送尚未启用，具体范围见 [Work 指南](work.md)。
 
 偏好只影响之后创建的研究，历史及正在运行的轮次保持原快照。期货“继续研究”先预填问题，用户发送才调用模型。个人工作内容不自动进入投资模型上下文。新页面的“反馈与进度”进入统一面板，不自动上传私人表单。
+
+持仓可以预览导入 CSV 或表格文本；证券与明确国内线性期货分开计算。主动选择后，
+新研究只使用固定的风险摘要，明细不自动交给模型。字段、计算与边界见[持仓与风险检查](portfolio-risk.md)。
 
 ### 来源与时间怎样看
 
@@ -116,11 +121,11 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8088 --workers 1
 
 打开 `http://127.0.0.1:8088`，用 `local-admin` 和刚输入的密码登录。初始化只创建不存在的账号，不会覆盖已有密码。保持单进程运行；开发自动重载会中断当前任务，不用于检验发布或长期后台研究。
 
-没有模型 Key 时仍能启动并查看页面。需要真实研究时，可在启动前通过本地密钥管理或隐藏输入导出 `DEEPSEEK_API_KEY` 或 `MINIMAX_API_KEY`，并按需设置 `PRISM_DEFAULT_MODEL`。支持的端点与模型配置以 [`server/config.py`](../server/config.py) 和 [`provider.py`](../server/agent/provider.py) 为准；配置存在不保证提供方实际接受调用。
+没有模型 Key 时仍能启动并查看页面。需要真实研究时，可在启动前通过密钥管理或隐藏输入注入 `DEEPSEEK_API_KEY` 或 `MINIMAX_API_KEY`。各提供方使用独立凭证；旧 `LLM_API_KEY` 仅兼容原有 DeepSeek 配置，不作为 MiniMax 或 OpenAI 的凭证。OpenAI 可选接入需同时设置 `OPENAI_API_KEY` 与账号支持的具体 `OPENAI_MODEL`，对应模型槽位为 `openai`；没有默认猜测的模型。按需设置 `PRISM_DEFAULT_MODEL`，管理员再在模型设置中按用途选择。支持的端点与模型配置以 [`server/config.py`](../server/config.py) 和 [`provider.py`](../server/agent/provider.py) 为准；配置存在不保证提供方实际接受调用或套餐覆盖。
 
 `.env.example` 是变量模板，应用通过 `os.environ` 取值，**不会自动加载 `.env`**。不要复制生产配置和数据库来开发。实时行情的可选依赖见 `requirements-extra.txt`。旧 Astock 模型编排已移除，不再安装它来恢复个股分析。整个 Prism 不安装、不调用或回退到 Claude Code CLI，也不读取外部 Skill。`install.sh` 只准备本地 Python 环境，不启动服务或执行生产部署。
 
-DeepSeek / MiniMax 继续通过直接 HTTP 使用；Anthropic 兼容 Messages 是协议格式，不是 Claude Code 运行时。术语解释、标题、指标翻译等辅助模型同样使用 `server/services/auxiliary_model.py`，失败明确返回错误，不换执行后端。健康页只检查本地 Native 模块、工具目录和模型配置，不能证明真实模型调用成功。
+DeepSeek / MiniMax 使用直接 Messages HTTP，OpenAI 使用直接 Responses HTTP；均不依赖 Claude Code 运行时。术语解释、标题、指标翻译等辅助模型使用相同的显式协议分派，失败明确返回错误，不换执行后端。健康页只检查本地 Native 模块、工具目录和模型配置，不能证明真实模型调用成功。OpenAI 在此候选中的离线协议和合成用户流程验证不等于实际模型质量、额度或生产验收。
 
 ### 验证修改
 

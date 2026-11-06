@@ -27,15 +27,16 @@ else:
         os.chmod(SECRET_KEY_FILE, 0o600)
 
 # ── LLM API Keys（每个平台独立配置）──
-# 兼容旧变量 LLM_API_KEY 作为 fallback
+# 旧 LLM_API_KEY 仅兼容原有 DeepSeek 配置，不跨提供方继承凭证。
 _LEGACY_KEY = os.environ.get("LLM_API_KEY", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", _LEGACY_KEY)
-MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", _LEGACY_KEY)
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # ── 模型列表 ──
-# 每个模型需配置：provider 的 Anthropic 兼容端点 + model ID
+# 每个模型需配置：明确的 HTTP 协议、提供方端点和 model ID
 # name 是前端显示的标签
-# api_key 优先使用平台专属 key，fallback 到 LLM_API_KEY（兼容旧配置）
+# api_key 按提供方独立配置；仅 DeepSeek 保留旧通用变量兼容。
 MODELS = {
     # ── DeepSeek ──
     "deepseek-v4": {
@@ -69,10 +70,22 @@ MODELS = {
         "api_key": MINIMAX_API_KEY,
         "model": "MiniMax-M2.7-highspeed",
     },
+    # Explicit opt-in: no guessed model, inherited key or provider fallback.
+    "openai": {
+        "name": "OpenAI GPT",
+        "protocol": "openai_responses",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": OPENAI_API_KEY,
+        "model": os.environ.get("OPENAI_MODEL", ""),
+    },
 }
 _PREFERRED_MODEL = os.environ.get("PRISM_DEFAULT_MODEL", "minimax-m3")
 DEFAULT_MODEL = next(
-    (key for key in [_PREFERRED_MODEL, *MODELS] if key in MODELS and MODELS[key].get("api_key")),
+    (
+        key
+        for key in [_PREFERRED_MODEL, *MODELS]
+        if key in MODELS and MODELS[key].get("api_key") and MODELS[key].get("model")
+    ),
     "minimax-m3",
 )
 

@@ -213,6 +213,7 @@ Object.assign(App, {
     if (this._pauseOperations) this._pauseOperations();
     this._adminTab = tab || 'overview';
     this._renderAdminUsers(this._adminCurrentUser || this.user);
+    if (this._closeMobileSidebar) this._closeMobileSidebar();
     if (this._adminTab === 'operations' && this._activateOperations) this._activateOperations();
   },
 
@@ -245,6 +246,7 @@ Object.assign(App, {
     var native = checks.native_core || {};
     var tools = checks.tool_catalog || {};
     var provider = checks.provider_configuration || {};
+    var reminder = h.background && h.background.work_reminders;
     var models = h.models || [];
     var configuredModels = models.filter(function(m){ return !!m.configured; }).length;
     var cards = [
@@ -254,6 +256,11 @@ Object.assign(App, {
       this._adminStatusPill(tools.status === 'ok', '工具注册', (tools.count || 0) + ' 项'),
       this._adminStatusPill(provider.status === 'ok', '模型配置', configuredModels + ' / ' + models.length + ' 已配置'),
     ].join('');
+    if (reminder) {
+      var fresh = reminder.last_success && Date.now()/1000 - reminder.last_success < 90;
+      var reminderLabel = !reminder.enabled ? '未启用' : reminder.last_failure ? '最近生成失败' : reminder.running && fresh ? '最近生成检查正常' : '尚未取得有效运行记录';
+      cards += this._adminStatusPill(!!(reminder.enabled && reminder.running && fresh && !reminder.last_failure), '站内提醒', reminderLabel);
+    }
     var modelRows = models.map(function(m) {
       return '<tr>' +
         '<td>' + esc(m.name || m.id) + '</td>' +
@@ -266,6 +273,7 @@ Object.assign(App, {
       '<div class="admin-empty">业务验收：待验证。此检查不执行研究、行情查询、指标试算或选股任务，也不验证报告质量。深度研究当前仅开放历史读取。</div>' +
       '<div class="admin-health-grid">' + cards + '</div>' +
       '<div class="admin-table-wrap admin-health-table"><table class="admin-table"><thead><tr><th>模型</th><th>配置</th><th>接入</th></tr></thead><tbody>' + modelRows + '</tbody></table></div>' +
+      '<details id="modelRoutes"><summary>按用途设置</summary><div id="modelRoutesBody"></div></details>' +
     '</section>';
   },
 
@@ -602,8 +610,8 @@ Object.assign(App, {
       ['overview', '概览'], ['operations', '发布控制台'], ['features', '功能分析'], ['activity', '用户行为'],
       ['diagnostics', '异常诊断'], ['feedback', '反馈评审'], ['accounts', '账号管理'], ['health', '系统健康']
     ];
-    return '<div class="admin-tabs" role="tablist">' + tabs.map(function(tab) {
-      return '<button role="tab" aria-selected="' + (App._adminTab === tab[0] ? 'true' : 'false') + '" class="admin-tab ' + (App._adminTab === tab[0] ? 'active' : '') + '" onclick="App._adminSetTab(\'' + tab[0] + '\')">' + tab[1] + '</button>';
+    return '<div class="admin-nav-list">' + tabs.map(function(tab) {
+      return '<button type="button" ' + (App._adminTab === tab[0] ? 'aria-current="page" ' : '') + 'class="admin-nav-item ' + (App._adminTab === tab[0] ? 'active' : '') + '" onclick="App._adminSetTab(\'' + tab[0] + '\')">' + tab[1] + '</button>';
     }).join('') + '</div>';
   },
 
@@ -662,7 +670,7 @@ Object.assign(App, {
     }).join('');
     return '<section class="admin-tab-section">' +
       '<div class="admin-section-row admin-tab-heading"><div><div class="admin-section-title">异常诊断</div><p>区分当前、历史和版本未知记录。历史记录需复测；归档不代表修复完成。匿名 401/403 与未匹配路径请求在诊断包中单独分类。</p></div>' +
-      '<button class="admin-btn primary" onclick="App._adminCopyDiagnosticBundle()">复制 Codex 诊断包</button></div>' +
+      '<button class="admin-btn primary" onclick="App._adminCopyDiagnosticBundle()">复制诊断信息</button></div>' +
       '<div class="admin-stat-grid">' + cards + '</div>' +
       (rows ? '<div class="admin-table-wrap admin-scroll-table"><table class="admin-table admin-diagnostic-table"><thead><tr><th>时间</th><th>级别</th><th>组件</th><th>异常</th><th>次数</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="admin-empty">未收到未处理的异常记录；不代表所有功能正常</div>') +
     '</section>';
@@ -687,7 +695,7 @@ Object.assign(App, {
       area.value = text; area.style.position = 'fixed'; area.style.opacity = '0';
       document.body.appendChild(area); area.select(); document.execCommand('copy'); area.remove();
     }
-    this._toast && this._toast('Codex 诊断包已复制');
+    this._toast && this._toast('诊断信息已复制');
   },
 
   _renderAdminAccounts: function(currentUser) {
@@ -712,7 +720,7 @@ Object.assign(App, {
         '</div></td>' +
       '</tr>';
     }, this).join('');
-    return '<section class="admin-tab-section"><div class="admin-section-row"><div><div class="admin-section-title">账号控制</div><p>创建入口位于左侧，仅管理员可重置、禁用或删除账号</p></div></div>' +
+    return '<section class="admin-tab-section"><form class="admin-create-box admin-account-create" onsubmit="event.preventDefault();App._adminCreateUser()"><h3>创建账号</h3><label>用户名<input type="text" id="adminNewUser" class="market-q-input" required autocomplete="off"></label><label>初始密码<input type="password" id="adminNewPass" class="market-q-input" required minlength="8" autocomplete="new-password"></label><button type="submit" class="admin-btn primary">创建账号</button><p id="adminSidebarStatus" role="status" aria-live="polite"></p></form><details class="admin-account-help"><summary>密码与账号安全</summary><p>密码加密保存，无法查看原密码。<a href="/recover">管理员邮箱找回</a></p></details>' +
       (users.length ? '<div class="admin-table-wrap"><table class="admin-table"><thead><tr>' +
         '<th style="width:24%">账号</th><th style="width:10%">状态</th><th style="width:12%">会话</th><th style="width:12%">对话</th><th>创建时间</th><th style="width:230px;text-align:right">操作</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="admin-empty">暂无账号</div>') +
@@ -734,10 +742,14 @@ Object.assign(App, {
     else if (this._adminTab === 'accounts') content = this._renderAdminAccounts(this._adminCurrentUser);
     else if (this._adminTab === 'health') content = this._renderAdminHealth();
     else { this._adminTab = 'overview'; content = this._renderAdminStats() + this._renderAdminAnalytics(); }
+    var nav = document.getElementById('adminNavigation');
+    if (nav) nav.innerHTML = this._renderAdminTabs();
+    var titles = {overview:'概览',operations:'发布控制台',features:'功能分析',activity:'用户行为',diagnostics:'异常诊断',feedback:'反馈评审',accounts:'账号管理',health:'系统健康'};
     inner.innerHTML = '<div class="admin-console">' +
-      '<div class="admin-head"><div><h2>管理看板</h2><div class="admin-head-meta">运营、功能、用户行为、账号与系统状态</div></div>' +
-      '<div class="admin-toolbar"><button class="admin-btn" onclick="App.openReleaseNotes()">更新日志</button><button class="admin-btn primary" onclick="'+(this._adminTab === 'operations' ? 'App._loadOperations()' : 'App._loadAdminUsers()')+'">刷新</button></div></div>' +
-      this._renderAdminTabs() + content + '</div>';
+      '<div class="admin-head"><h2>' + esc(titles[this._adminTab] || '概览') + '</h2>' +
+      '<div class="admin-toolbar"><button class="admin-btn" onclick="'+(this._adminTab === 'operations' ? 'App._loadOperations()' : 'App._loadAdminUsers()')+'">刷新</button></div></div>' +
+      content + '</div>';
+    if (this._adminTab === 'health' && window.ModelRoutes) window.ModelRoutes.attach();
     if (this._adminTab === 'overview') {
       var self = this;
       setTimeout(function(){ self._renderAdminCharts(); }, 0);
@@ -763,9 +775,9 @@ Object.assign(App, {
     }
     if (userEl) userEl.value = '';
     if (passEl) passEl.value = '';
-    this._adminSetStatus('已创建 ' + username);
     if (this._toast) this._toast('账号已创建');
-    this._loadAdminUsers();
+    await this._loadAdminUsers();
+    this._adminSetStatus('已创建 ' + username);
   },
 
   _adminResetPassword: async function(username) {

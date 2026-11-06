@@ -43,11 +43,15 @@ PLATFORM_TOOLS = (
 MAX_ARGUMENT_BYTES = 32768
 MAX_OUTPUT_BYTES = 120000
 _CUSTOM = {
+    "portfolio_risk": ("核对我的持仓风险", "portfolio_snapshot"),
     "knowledge_search": ("检索我的历史研究", "historical_research"),
     "knowledge_get": ("读取我的历史研究", "historical_research"),
     "source_read": ("读取公开资料节选", "external_web"),
+    "source_find": ("查找公开资料", "external_web"),
 }
 _ERRORS = {
+    "risk_permission_required": "请先在持仓与风险检查中允许公开行情对价及新研究风险摘要，再新建研究；本次未查询行情",
+    "risk_snapshot_changed": "持仓、授权或研究状态已变化，请核对后新建研究；本次结果未返回",
     "unknown_tool": "该工具不可用",
     "invalid_arguments": "工具参数无效",
     "unavailable_context": "当前研究授权不可用",
@@ -73,7 +77,19 @@ def _platform():
 
 
 def _custom_definitions():
+    from .discovery import SCHEMA
+
     return [
+        {
+            "name": "portfolio_risk",
+            "description": "在本人已允许行情对价及风险摘要分享时，按本轮固定持仓版本核对风险。只返回汇总金额、规则和行情日期，不返回代码、数量或持仓明细；保留缺项与假设，不连接券商、不下单。一轮只采集一次；变更或撤销授权需新建研究。",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "source_find",
+            "description": "用短的公开关键词或沪深六位证券代码查找公告与新闻线索，不需猜测URL或提供搜索密钥。覆盖上交所和深交所公告、新浪滚动索引及财联社最新电报首页；新浪和财联社仅在有界列表内匹配，非全文历史搜索。每次最多两个来源，保留日期、分页、来源和缺口，随后用source_read读原文。不要发送用户持仓、个人信息或凭证。",
+            "input_schema": copy.deepcopy(SCHEMA),
+        },
         {
             "name": "knowledge_search",
             "description": "检索当前账号的历史研究；排除本轮，历史观点不等于最新事实。",
@@ -101,10 +117,19 @@ def _custom_definitions():
         },
         {
             "name": "source_read",
-            "description": "读取获准公开来源的实际页面节选；未取得原文时保留缺口，节选不代表事实已核验。",
+            "description": "读取获准公开来源的实际节选。PDF 默认前10页；可先查目录，再指定物理页 first_page 和 page_count 读取相关章节，勿要求用户提供页码。节选不代表全文已读或事实已核验。",
             "input_schema": {
                 "type": "object",
-                "properties": {"url": {"type": "string", "maxLength": 2048, "format": "uri"}},
+                "properties": {
+                    "url": {"type": "string", "maxLength": 2048, "format": "uri"},
+                    "first_page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2000,
+                        "description": "仅用于 PDF，从1开始的物理页码，不是文中印刷页码。",
+                    },
+                    "page_count": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
                 "required": ["url"],
                 "additionalProperties": False,
             },
@@ -132,19 +157,30 @@ def native_catalog() -> list[dict]:
     return rows
 
 
-def _fetch_source(url, *, allowed_hosts):
+def _fetch_source(url, *, allowed_hosts, **page_selection):
     from .sources import fetch_public_source
 
-    return fetch_public_source(url, allowed_hosts=allowed_hosts)
+    return fetch_public_source(url, allowed_hosts=allowed_hosts, **page_selection)
+
+
+def _find_sources(arguments):
+    from .discovery import find
+
+    return find(arguments)
 
 
 def _knowledge_call(name, username, arguments, run_id):
     from . import knowledge
 
     if name == "knowledge_search":
-        return knowledge.search(
+        value = knowledge.search(
             username, arguments["query"], limit=arguments.get("limit", 8), exclude_run_id=run_id
         )
+        if value.get("reviewed_claims"):
+            from ..research.knowledge import record_usage
+
+            record_usage(username, run_id, value["reviewed_claims"])
+        return value
     value = knowledge.get(username, arguments["id"])
     if (
         isinstance(value, dict)
@@ -212,6 +248,8 @@ class NativeTools:
         self.lease, self.evidence = lease, evidence
         self.allowed_source_hosts = tuple(h.lower() for h in allowed_source_hosts)
         self._cache = {}
+        self._source_dates = {}
+        self._risk_result = None
         self._lock = asyncio.Lock()
         self._authorize()
 
@@ -253,6 +291,9 @@ class NativeTools:
                 spec.schema.model_validate(arguments)
             except Exception:
                 raise NativeToolError("invalid_arguments") from None
+        elif name == "portfolio_risk":
+            if arguments:
+                raise NativeToolError("invalid_arguments")
         elif name == "knowledge_search":
             if (
                 not {"query"} <= set(arguments) <= {"query", "limit"}
@@ -270,7 +311,21 @@ class NativeTools:
                 or re.fullmatch(r"(?:research|report):[A-Za-z0-9_-]{1,128}", arguments["id"]) is None
             ):
                 raise NativeToolError("invalid_arguments")
-        elif set(arguments) != {"url"} or not _valid_url(arguments["url"]):
+        elif name == "source_find":
+            from .discovery import validate
+
+            try:
+                validate(arguments)
+            except (ValueError, TypeError, OverflowError):
+                raise NativeToolError("invalid_arguments") from None
+        elif (
+            not {"url"} <= set(arguments) <= {"url", "first_page", "page_count"}
+            or not _valid_url(arguments["url"])
+            or any(
+                key in arguments and (type(arguments[key]) is not int or not 1 <= arguments[key] <= maximum)
+                for key, maximum in (("first_page", 2000), ("page_count", 20))
+            )
+        ):
             raise NativeToolError("invalid_arguments")
 
     def _error(self, code, *, source_kind="unknown", call=None):
@@ -315,8 +370,67 @@ class NativeTools:
             "created_at": started,
             "completed_at": int(time.time()),
             "input_summary": label,
-            "result_summary": "已读取资料，内容仍待语义核验" if ok else "未形成可用资料，保留研究缺口",
+            "result_summary": (
+                "已返回风险估算摘要，缺项仍保留；不是实际账户认证"
+                if name == "portfolio_risk"
+                else "已读取资料，内容仍待语义核验"
+            )
+            if ok
+            else "未形成可用资料，保留研究缺口",
         }
+
+    def _persist_custom_call(self, call, fingerprint):
+        """Indexed shared history keeps metadata, not query text or documents.
+
+        Evidence stays in the owned research. A persistence failure propagates
+        rather than presenting an unrecorded operation as recorded success.
+        """
+        from ..database import get_db
+
+        self._authorize()
+        context = self.context
+        receipt = {
+            "ok": call["status"] == "completed",
+            "call": call,
+            "data": {"research_run_id": context["run_id"]},
+            "source_kind": call["source_kind"],
+        }
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if not db.execute(
+                    "SELECT c.id FROM conversations c JOIN users u ON u.username=c.username "
+                    "WHERE c.id=? AND c.username=? AND c.deleted_at IS NULL AND u.disabled_at IS NULL",
+                    [context["conv_id"], context["username"]],
+                ).fetchone():
+                    raise NativeToolError("unavailable_context")
+                db.execute(
+                    "INSERT INTO capability_calls(call_id,run_id,username,conv_id,request_id,capability_id,"
+                    "arguments_hash,status,input_summary,result_summary,target_json,response_json,created_at,"
+                    "completed_at,arguments_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        call["call_id"],
+                        context["run_id"],
+                        context["username"],
+                        context["conv_id"],
+                        "native-" + call["call_id"],
+                        call["capability_id"],
+                        fingerprint,
+                        call["status"],
+                        call["input_summary"],
+                        call["result_summary"],
+                        json.dumps(call["target"]),
+                        json.dumps(receipt, ensure_ascii=False),
+                        call["created_at"],
+                        call["completed_at"],
+                        "{}",
+                    ],
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
 
     async def _read_source(self, arguments, call_id):
         existing = self.evidence.calls.get(call_id)
@@ -328,10 +442,18 @@ class NativeTools:
             arguments["url"],
             parent=self.lease,
             allowed_hosts=self.allowed_source_hosts,
+            **{key: arguments[key] for key in ("first_page", "page_count") if key in arguments},
         )
         if type(value) is not dict:
             raise NativeToolError("source_unavailable")
         data = self._safe(value)
+        if data.get("published_at") and not data.get("published_at_basis"):
+            data["published_at_basis"] = "tool_metadata"
+        index = self._source_dates.get(value.get("url"))
+        if index and not data.get("published_at"):
+            data["published_at"] = index["published_at"]
+            data["published_at_basis"] = "source_index_metadata"
+            data["publication_index"] = {"url": index["index_url"], "body_sha256": index["index_body_sha256"]}
         data["semantic_status"], data["original_verified"] = "unreviewed", False
         if isinstance(value.get("text"), str) and isinstance(data.get("text"), str):
             data["text_truncated"] = bool(value.get("text_truncated")) or len(data["text"]) < len(
@@ -359,11 +481,17 @@ class NativeTools:
                 **ref,
                 "title": data.get("title") or ref["url"],
                 "published_at": data.get("published_at"),
+                "published_at_basis": data.get("published_at_basis"),
+                "index_source_url": index.get("index_url") if index else None,
+                "index_body_sha256": index.get("index_body_sha256") if index else None,
                 "semantic_status": "unreviewed",
                 "original_obtained": False,
                 "original_verified": False,
                 "original_preserved": False,
                 "content_scope": "server_extracted_excerpt",
+                "body_sha256": value.get("body_sha256"),
+                "page_range": value.get("page_range"),
+                "total_pages": value.get("total_pages"),
             }
             for ref in refs
         ]
@@ -375,6 +503,74 @@ class NativeTools:
             call,
             block,
             refs,
+            parent=self.lease,
+        )
+        return {"ok": True, "data": data, "refs": self._safe(refs), "source_kind": "external_web"}
+
+    async def _discover(self, arguments, call_id):
+        value = await self.lease.manager.run_blocking(
+            "auxiliary", _find_sources, arguments, parent=self.lease
+        )
+        if type(value) is not dict or type(value.get("items")) is not list or len(value["items"]) > 20:
+            raise NativeToolError("source_unavailable")
+        data = self._safe(value)
+        if value.get("status") != "ok":
+            return {
+                "ok": False,
+                "data": data,
+                "refs": [],
+                "source_kind": "external_web",
+                "error": {"code": "source_unavailable", "message": _ERRORS["source_unavailable"]},
+            }
+        items = data.get("items", [])
+        if any(
+            type(i) is not dict or not _valid_url(i.get("url")) or type(i.get("title")) is not str
+            for i in items
+        ):
+            raise NativeToolError("source_unavailable")
+        if not items:
+            return {"ok": True, "data": data, "refs": [], "source_kind": "external_web"}
+        call = {
+            "type": "tool_use",
+            "id": call_id,
+            "name": "WebSearch",
+            "input": {"query": arguments.get("query") or arguments.get("stock_code")},
+        }
+        block = {
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": json.dumps({"results": items}, ensure_ascii=False),
+        }
+        self.evidence.record_call(call)
+        refs = self.evidence.record_result(block, retrieved_at=value.get("as_of"))
+        indexed = {i["url"]: i for i in items}
+        enriched = []
+        for ref in refs:
+            item = indexed.get(ref["url"])
+            if not item:
+                continue
+            self._source_dates[item["url"]] = item
+            enriched.append(
+                {
+                    **ref,
+                    "published_at": item.get("published_at"),
+                    "published_at_basis": "source_index_metadata",
+                    "index_source_url": item.get("index_url"),
+                    "index_body_sha256": item.get("index_body_sha256"),
+                    "retrieved_at": item.get("retrieved_at") or ref.get("retrieved_at"),
+                    "original_obtained": False,
+                    "original_verified": False,
+                    "content_scope": "search_snippet",
+                }
+            )
+        refs = await self.lease.manager.run_blocking(
+            "auxiliary",
+            _ingest,
+            self.context["username"],
+            self.context["run_id"],
+            call,
+            block,
+            enriched,
             parent=self.lease,
         )
         return {"ok": True, "data": data, "refs": self._safe(refs), "source_kind": "external_web"}
@@ -410,8 +606,51 @@ class NativeTools:
                 output["error"] = self._error(code)["error"]
             output["evidence_status"] = "platform_result_not_external_verification"
             return output
+        if name == "portfolio_risk":
+            from ..portfolio_valuation import agent_inputs, reprice
+
+            try:
+                version, frozen = agent_inputs(self.context["username"], self.context["run_id"])
+            except Exception as error:
+                from fastapi import HTTPException
+
+                if isinstance(error, HTTPException) and error.status_code in {403, 409}:
+                    raise NativeToolError(
+                        "risk_permission_required" if error.status_code == 403 else "risk_snapshot_changed"
+                    ) from None
+                raise
+            if self._risk_result is not None:
+                cached = copy.deepcopy(self._risk_result)
+                if cached.get("ok"):
+                    cached["data"]["cached_for_this_run"] = True
+                return cached
+            # A failed/unknown read cannot restart with a new model call ID.
+            self._risk_result = self._error("unavailable", source_kind="portfolio_snapshot")
+            value = await reprice(
+                self.context["username"], version, frozen_profile=frozen, authorize=self._authorize
+            )
+            self._risk_result = {
+                "ok": True,
+                "data": self._safe(
+                    {
+                        "risk": value["risk"],
+                        "portfolio_version": value["portfolio_version"],
+                        "profile_version": value["profile_version"],
+                        "observed_at": value["observed_at"],
+                        "snapshot_as_of": value["snapshot_as_of"],
+                        "market_basis": value["market_basis"],
+                        "notice": "仅为原持仓不变的对价估算，非券商账户或下单依据。",
+                        "fixed_for_this_run": True,
+                    }
+                ),
+                "refs": [],
+                "source_kind": "portfolio_snapshot",
+            }
+            return copy.deepcopy(self._risk_result)
         if name == "source_read":
             return await self._read_source(arguments, call_id)
+        if name == "source_find":
+            return await self._discover(arguments, call_id)
         value = await self.lease.manager.run_blocking(
             "auxiliary",
             _knowledge_call,
@@ -469,6 +708,7 @@ class NativeTools:
                 result = self._error(code, source_kind=_CUSTOM.get(name, (None, "unknown"))[1])
             if name in _CUSTOM:
                 result["call"] = self._custom_call(name, call_id, started, ok=result.get("ok") is True)
+                self._persist_custom_call(result["call"], fingerprint)
             result = self._final(result)
             self._cache[call_id] = (fingerprint, copy.deepcopy(result))
             return result

@@ -14,9 +14,11 @@ created here. This module performs no network operation at import time.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import io
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -43,7 +45,7 @@ _OFFICIAL = (
     "dce.com.cn",
     "ine.cn",
 )
-_NEWS = ("cls.cn", "jin10.com", "finance.sina.com.cn")
+_NEWS = ("cls.cn", "jin10.com", "finance.sina.com.cn", "feed.mix.sina.com.cn")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 _REDIRECTS = {301, 302, 303, 307, 308}
 _CHARSETS = {"utf-8", "utf8", "gb18030", "gbk", "gb2312", "big5", "iso-8859-1", "windows-1252"}
@@ -67,8 +69,17 @@ _CODES = frozenset(
         "unsupported_content_encoding",
         "unsupported_content_type",
         "unsupported_pdf",
+        "pdf_invalid",
+        "pdf_encrypted",
+        "pdf_no_text",
+        "pdf_unavailable",
+        "pdf_timeout",
+        "invalid_page_selection",
+        "pdf_required",
+        "pdf_page_out_of_range",
         "empty_content",
         "invalid_html",
+        "invalid_json",
     }
 )
 
@@ -211,19 +222,44 @@ def _tls_socket(host, address, deadline):
 
 
 @contextlib.contextmanager
-def _open_response(host, address, target, deadline):
+def _open_response(host, address, target, deadline, *, json_index=False, referer=None, query_body=None):
+    _need(
+        query_body is None
+        or (
+            json_index is True
+            and host == "www.szse.cn"
+            and target == "/api/disc/announcement/annList"
+            and type(query_body) is bytes
+            and 0 < len(query_body) <= 2048
+        ),
+        "invalid_headers",
+    )
     sock = _tls_socket(host, address, deadline)
     response = None
     try:
+        _need(type(json_index) is bool, "invalid_headers")
+        _need(
+            referer is None
+            or (type(referer) is str and len(referer) <= 2048 and all(32 <= ord(c) < 127 for c in referer)),
+            "invalid_headers",
+        )
+        accept = "application/json" if json_index else "text/html, text/plain;q=0.9"
+        method = "POST" if query_body is not None else "GET"
         request = (
-            f"GET {target} HTTP/1.1\r\nHost: {host}\r\n"
-            "User-Agent: PrismResearch/1.0\r\nAccept: text/html, text/plain;q=0.9\r\n"
-            "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
-        ).encode("ascii")
+            f"{method} {target} HTTP/1.1\r\nHost: {host}\r\n"
+            f"User-Agent: PrismResearch/1.0\r\nAccept: {accept}\r\n"
+            + (f"Referer: {referer}\r\n" if referer else "")
+            + (
+                f"Content-Type: application/json\r\nContent-Length: {len(query_body)}\r\n"
+                if query_body is not None
+                else ""
+            )
+            + "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        ).encode("ascii") + (query_body or b"")
         sock.settimeout(_remaining(deadline))
         sock.sendall(request)
         sock.settimeout(_remaining(deadline))
-        response = http.client.HTTPResponse(_DeadlineSocket(sock, deadline), method="GET")
+        response = http.client.HTTPResponse(_DeadlineSocket(sock, deadline), method=method)
         response.begin()
         # The socket remains owned here throughout body reads, including when
         # the response declares Connection: close. No implicit hostname lookup.
@@ -276,22 +312,22 @@ def _headers(response):
     return {name: rows[0] for name, rows in values.items()}
 
 
-def _body(response, headers, deadline):
+def _body(response, headers, deadline, maximum=MAX_BODY_BYTES):
     length = headers.get("content-length")
     if length is not None:
         _need(length.isdecimal(), "invalid_headers")
-        _need(int(length) <= MAX_BODY_BYTES, "body_too_large")
+        _need(int(length) <= maximum, "body_too_large")
     chunks, size = [], 0
     while True:
         response._prism_socket.settimeout(_remaining(deadline))
         # read1 returns after at most one underlying buffered read. A slow peer
         # cannot restart the total budget with a series of small chunks.
-        chunk = response.read1(min(16384, MAX_BODY_BYTES + 1 - size))
+        chunk = response.read1(min(16384, maximum + 1 - size))
         _remaining(deadline)
         if not chunk:
             break
         size += len(chunk)
-        _need(size <= MAX_BODY_BYTES, "body_too_large")
+        _need(size <= maximum, "body_too_large")
         chunks.append(chunk)
     if length is not None:
         _need(size == int(length), "network_failed")
@@ -323,6 +359,9 @@ class _Excerpt(HTMLParser):
         self.characters = 0
         self.truncated = False
         self.published_at = None
+        self.links = []
+        self.anchor = None
+        self.links_truncated = False
 
     def _append(self, text):
         remaining = MAX_TEXT_CHARS - self.characters
@@ -337,6 +376,10 @@ class _Excerpt(HTMLParser):
             self.hidden.append(tag)
         if self.hidden:
             return
+        if tag == "a":
+            attrs = dict(attrs)
+            href = attrs.get("href")
+            self.anchor = {"url": href, "title": ""} if type(href) is str and 0 < len(href) <= 2048 else None
         if tag == "title":
             self.in_title = True
         elif tag == "meta":
@@ -365,19 +408,27 @@ class _Excerpt(HTMLParser):
             return
         if tag == "title":
             self.in_title = False
+        if tag == "a" and self.anchor is not None:
+            if len(self.links) < 200:
+                self.links.append(self.anchor)
+            else:
+                self.links_truncated = True
+            self.anchor = None
         if tag in self._BLOCKS:
             self._append("\n")
 
     def handle_data(self, data):
         if self.hidden:
             return
+        if self.anchor is not None:
+            self.anchor["title"] = (self.anchor["title"] + data)[:160]
         if self.in_title:
             self.title = (self.title + data)[:500]
         else:
             self._append(data)
 
 
-def _extract(raw, content_type):
+def _extract(raw, content_type, *, links_out=None):
     match = re.search(r"charset\s*=\s*[\"']?([^;\s\"']+)", content_type, re.I)
     charset = match.group(1).casefold() if match else "utf-8"
     charset = charset if charset in _CHARSETS else "utf-8"
@@ -390,12 +441,14 @@ def _extract(raw, content_type):
         parser.close()
         text = "".join(parser.parts)
         title, published, truncated = parser.title, parser.published_at, parser.truncated
+        if links_out is not None:
+            links_out.extend(parser.links)
     text = re.sub(r"[ \t\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     return redact_source_text(text), redact_source_text(title.strip()), published, truncated
 
 
-def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
+def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None, first_page=None, page_count=None):
     """Return an untrusted extracted excerpt, never an automatically verified fact.
 
     allowed_hosts is deployment configuration, not untrusted tool input. No
@@ -407,8 +460,16 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
     source_class = None
     redirects = 0
     http_status = None
+    pdf_fields = {}
     try:
         _need(type(timeout_seconds) in (int, float) and 0 < timeout_seconds <= 10, "invalid_timeout")
+        _need(
+            all(
+                value is None or type(value) is int and 1 <= value <= maximum
+                for value, maximum in ((first_page, 2000), (page_count, 20))
+            ),
+            "invalid_page_selection",
+        )
         deadline = time.monotonic() + timeout_seconds
         extras = _extra_hosts(allowed_hosts)
         candidate = url
@@ -431,17 +492,68 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                 _need(200 <= http_status < 300, "http_error")
                 content_type = headers.get("content-type", "").strip()
                 mime = content_type.partition(";")[0].strip().casefold()
-                _need(mime != "application/pdf", "unsupported_pdf")
                 _need(
-                    mime in {"text/html", "text/plain", "application/xhtml+xml"}, "unsupported_content_type"
+                    mime in {"text/html", "text/plain", "application/xhtml+xml", "application/pdf"},
+                    "unsupported_content_type",
                 )
                 _need(
                     headers.get("content-encoding", "identity").strip().casefold() in {"", "identity"},
                     "unsupported_content_encoding",
                 )
-                raw = _body(response, headers, deadline)
-                text, title, published, truncated = _extract(raw, content_type)
+                pdf_fields = {}
+                raw_links = []
+                if mime == "application/pdf":
+                    from .pdf_text import MAX_PDF_BYTES, extract_pdf
+
+                    raw = _body(response, headers, deadline, MAX_PDF_BYTES)
+                    pdf = extract_pdf(
+                        raw,
+                        timeout_seconds=min(5, _remaining(deadline)),
+                        first_page=first_page if first_page is not None else 1,
+                        page_count=page_count if page_count is not None else 10,
+                    )
+                    if pdf["status"] == "pdf_page_out_of_range":
+                        pdf_fields = {"total_pages": pdf["page_count"]}
+                    _need(pdf["status"] == "ok", pdf["status"])
+                    full_text = redact_source_text(
+                        "\n\n".join(f"[第{p['page']}页]\n{p['text']}" for p in pdf["pages"])
+                    )
+                    text = full_text[:MAX_TEXT_CHARS]
+                    title, published, truncated = (
+                        "PDF 公告节选",
+                        None,
+                        pdf["truncated"] or len(full_text) > MAX_TEXT_CHARS,
+                    )
+                    pdf_fields = {
+                        "page_range": [p["page"] for p in pdf["pages"]],
+                        "total_pages": pdf["page_count"],
+                        "next_page": pdf["pages"][-1]["page"] + 1
+                        if pdf["pages"][-1]["page"] < pdf["page_count"]
+                        else None,
+                    }
+                else:
+                    _need(first_page is None and page_count is None, "pdf_required")
+                    raw = _body(response, headers, deadline)
+                    text, title, published, truncated = _extract(raw, content_type, links_out=raw_links)
                 _remaining(deadline)
+            links, seen, link_bytes = [], set(), 0
+            links_truncated = False
+            for link in raw_links:
+                try:
+                    link_url, _, link_class = _admit_url(urljoin(current, link["url"]), extras)
+                except _Rejected:
+                    continue
+                title_text = redact_source_text(re.sub(r"\s+", " ", link["title"]).strip())
+                if not title_text or link_url in seen or len(link_url) > 2048:
+                    continue
+                item = {"url": link_url, "title": title_text, "source_class": link_class}
+                size = len(json.dumps(item, ensure_ascii=False).encode())
+                if len(links) >= 20 or link_bytes + size > 8192:
+                    links_truncated = True
+                    break
+                seen.add(link_url)
+                link_bytes += size
+                links.append(item)
             return {
                 "status": "ok" if text else "empty_content",
                 "url": current,
@@ -459,8 +571,12 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
                 "trust_level": "untrusted_external_content",
                 "http_status": http_status,
                 "body_bytes": len(raw),
+                "body_sha256": hashlib.sha256(raw).hexdigest(),
+                **pdf_fields,
                 "redirect_count": redirects,
                 "automatic_retry": False,
+                "links": links,
+                "links_truncated": links_truncated or len(raw_links) >= 200,
             }
     except _Rejected as exc:
         code = exc.args[0] if exc.args and exc.args[0] in _CODES else "network_failed"
@@ -485,5 +601,145 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None):
         "trust_level": "untrusted_external_content",
         "http_status": http_status,
         "redirect_count": redirects,
+        "automatic_retry": False,
+        **pdf_fields,
+    }
+
+
+def _disclosure_query(query):
+    """One fixed public search operation, never a general POST or header adapter."""
+    _need(
+        type(query) is dict
+        and set(query) == {"seDate", "channelCode", "pageSize", "pageNum", "stock", "searchKey"},
+        "invalid_headers",
+    )
+    days = query["seDate"]
+    _need(
+        type(days) is list
+        and len(days) == 2
+        and all(type(x) is str and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", x) for x in days),
+        "invalid_headers",
+    )
+    try:
+        _need(date.fromisoformat(days[0]) <= date.fromisoformat(days[1]), "invalid_headers")
+    except ValueError:
+        raise _Rejected("invalid_headers") from None
+    _need(
+        query["channelCode"] == ["listedNotice_disc"]
+        and type(query["pageSize"]) is int
+        and query["pageSize"] == 25
+        and type(query["pageNum"]) is int
+        and 1 <= query["pageNum"] <= 5,
+        "invalid_headers",
+    )
+    stocks, words = query["stock"], query["searchKey"]
+    _need(
+        type(stocks) is list
+        and len(stocks) <= 1
+        and all(type(x) is str and re.fullmatch(r"[0-9]{6}", x) for x in stocks)
+        and type(words) is list
+        and len(words) <= 1
+        and all(
+            type(x) is str
+            and 1 <= len(x) <= 80
+            and all(ord(c) >= 32 for c in x)
+            and redact_source_text(x) == x
+            and not re.search(r"(?i)\b(?:api[_-]?key|password|token|secret)\s*[:=]", x)
+            for x in words
+        ),
+        "invalid_headers",
+    )
+    body = json.dumps(query, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    _need(len(body) <= 2048, "invalid_headers")
+    return body
+
+
+def fetch_public_index(url, *, timeout_seconds=8, referer=None, disclosure_query=None):
+    """Internal JSON index transport; the model cannot choose headers or hosts.
+
+    Fixed discovery adapters consume the returned data, not arbitrary URLs from
+    its payload. This retains the public DNS, pinned TLS, total deadline, size,
+    redirect and no-credentials contract of source excerpts.
+    """
+    current, source_class, http_status = None, None, None
+    try:
+        _need(type(timeout_seconds) in (int, float) and 0 < timeout_seconds <= 8, "invalid_timeout")
+        deadline = time.monotonic() + timeout_seconds
+        query_body = None
+        if disclosure_query is not None:
+            _need(url == "https://www.szse.cn/api/disc/announcement/annList", "invalid_headers")
+            query_body = _disclosure_query(disclosure_query)
+        if referer is not None:
+            referer, _, _ = _admit_url(referer, set())
+        candidate = url
+        for redirects in range(MAX_REDIRECTS + 1):
+            current, host, source_class = _admit_url(candidate, set())
+            addresses = _resolve(host, deadline)
+            parsed = urlsplit(current)
+            target = parsed.path + ("?" + parsed.query if parsed.query else "")
+            options = {"json_index": True, "referer": referer}
+            if query_body is not None:
+                options["query_body"] = query_body
+            with _open_response(host, addresses[0], target, deadline, **options) as response:
+                http_status = response.status
+                headers = _headers(response)
+                if http_status in _REDIRECTS:
+                    _need(query_body is None, "redirect_limit")
+                    _need(redirects < MAX_REDIRECTS, "redirect_limit")
+                    _need(bool(headers.get("location")), "redirect_missing_location")
+                    candidate = urljoin(current, headers["location"])
+                    _admit_url(candidate, set())
+                    continue
+                _need(200 <= http_status < 300, "http_error")
+                mime = headers.get("content-type", "").partition(";")[0].strip().casefold()
+                _need(mime in {"application/json", "text/json", "text/plain"}, "unsupported_content_type")
+                _need(
+                    headers.get("content-encoding", "identity").strip().casefold() in {"", "identity"},
+                    "unsupported_content_encoding",
+                )
+                raw = _body(response, headers, deadline)
+
+            def pairs(values):
+                result = {}
+                for key, value in values:
+                    _need(key not in result, "invalid_json")
+                    result[key] = value
+                return result
+
+            def invalid_constant(_):
+                raise _Rejected("invalid_json")
+
+            try:
+                data = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+            except (ValueError, UnicodeError, RecursionError):
+                raise _Rejected("invalid_json") from None
+            _need(type(data) in (dict, list), "invalid_json")
+            _remaining(deadline)
+            return {
+                "status": "ok",
+                "data": data,
+                "url": current,
+                "source_class": source_class,
+                "retrieved_at": _now(),
+                "body_sha256": hashlib.sha256(raw).hexdigest(),
+                "body_bytes": len(raw),
+                "automatic_retry": False,
+            }
+        raise _Rejected("redirect_limit")
+    except _Rejected as exc:
+        code = exc.args[0] if exc.args and exc.args[0] in _CODES else "network_failed"
+    except TimeoutError:
+        code = "timeout"
+    except ssl.SSLError:
+        code = "tls_failed"
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError, RecursionError):
+        code = "network_failed"
+    return {
+        "status": code,
+        "url": current,
+        "data": None,
+        "source_class": source_class,
+        "retrieved_at": _now(),
+        "http_status": http_status,
         "automatic_retry": False,
     }

@@ -3,6 +3,7 @@
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -12,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import StreamingResponse
 
+from . import feedback_monitor, feedback_progress, feedback_review
 from .activity import ActivityMiddleware
 from .agent.api import cancel as native_chat_cancel
 from .agent.api import chat_stream as native_chat_stream
@@ -71,12 +73,33 @@ from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
 from .market.router import router as market_router
 from .middleware import configure_logging, install_error_handlers, install_request_id_middleware
+from .model_routes import init_model_routes_db
+from .model_routes import router as model_routes_router
 from .operations import router as operations_router
+from .password_recovery import router as password_recovery_router
+from .portfolio import init_portfolio_db
+from .portfolio import router as portfolio_router
 from .preferences import init_preferences_db
 from .preferences import router as preferences_router
+from .productivity.approvals import router as approvals_router
+from .productivity.assistant import init_assistant_db
+from .productivity.assistant import router as work_assistant_router
+from .productivity.attachments import router as attachments_router
 from .productivity.calendar import init_calendar_db
 from .productivity.calendar import router as calendar_router
+from .productivity.collaboration import router as collaboration_router
+from .productivity.notifications import (
+    ReminderScheduler,
+    init_notifications_db,
+    reminder_health,
+)
+from .productivity.notifications import (
+    router as notifications_router,
+)
+from .productivity.projects import init_projects_db
+from .productivity.projects import router as projects_router
 from .productivity.routes import router as work_router
+from .productivity.scheduling import router as scheduling_router
 from .productivity.store import init_productivity_db
 from .productivity.store import require_enabled as require_work_enabled
 from .release import APP_VERSION, release_payload
@@ -85,6 +108,8 @@ from .reports import list_saved_reports_for_conv
 from .reports import router as reports_router
 from .research import init_research_db, recover_interrupted_runs
 from .research import router as research_router
+from .research.knowledge import init_knowledge_db
+from .research.knowledge import router as knowledge_router
 from .vibe import router as vibe_router
 from .watchlist import router as watchlist_router
 from .work_adapters import WorkAdmissionMiddleware
@@ -102,11 +127,19 @@ log = configure_logging(str(LOG_PATH), level=log_level)
 # ── Init ──
 init_db()
 init_research_db()
+init_knowledge_db()
 init_runtime_db()
 init_feedback_db()
+feedback_review.init_review_db()
+feedback_progress.init_progress_db()
 init_preferences_db()
+init_portfolio_db()
+init_model_routes_db()
 init_productivity_db()
 init_calendar_db()
+init_projects_db()
+init_notifications_db()
+init_assistant_db()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -140,17 +173,21 @@ ensure_configured_admin_user()
 @asynccontextmanager
 async def lifespan(application):
     runtime = await open_runtime(producers={kind: kind != "vibe" for kind in KINDS})
+    reminders = ReminderScheduler(runtime.manager)
     try:
         bind_manager(application, runtime.manager)
         application.state.work_runtime = runtime
+        application.state.work_reminders = reminders
         if runtime.controlled and os.environ.get("PRISM_SINGLE_WORKER") == "1":
             from .agent.store import recover_interrupted_runs as recover_native_runs
 
             # The private control listener has been exclusively acquired before
             # classifying old runs; ordinary reads never replay/recover execution.
             recover_native_runs(exclusive_startup=True)
+        reminders.start()
         yield
     finally:
+        await reminders.close()
         await runtime.aclose()
 
 
@@ -293,7 +330,40 @@ async def index(request: Request):
     u = require_auth(request, optional=True)
     if not u:
         return RedirectResponse("/login")
+    # Retain bookmarked research/feedback links while the root becomes the
+    # shared product entrance. Destinations are always local and fixed.
+    query = [
+        (key, value)
+        for key, value in request.query_params.multi_items()
+        if key in {"feedback", "conv", "mode", "run_id", "futures"}
+    ]
+    if query:
+        return RedirectResponse("/prism?" + urlencode(query))
+    return HTMLResponse(render_template("portal.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/prism", response_class=HTMLResponse)
+async def prism_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
     return HTMLResponse(render_template("app.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/platform")
+async def api_platform(request: Request):
+    require_auth(request)
+    from .productivity.store import enabled
+
+    return JSONResponse(
+        {
+            "version": APP_VERSION,
+            "products": [
+                {"id": "prism", "name": "Prism", "href": "/prism", "available": True},
+                {"id": "work", "name": "Work", "href": "/work", "available": enabled()},
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/work", response_class=HTMLResponse)
@@ -311,12 +381,35 @@ async def preferences_page(request: Request):
     return HTMLResponse(render_template("preferences.html"), headers={"Cache-Control": "no-store"})
 
 
+@app.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    return HTMLResponse(render_template("knowledge.html"), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/calendar", response_class=HTMLResponse)
 async def calendar_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
     require_work_enabled()
     return HTMLResponse(render_template("calendar.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/projects", response_class=HTMLResponse)
+async def projects_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    require_work_enabled()
+    return HTMLResponse(render_template("projects.html"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/notifications", response_class=HTMLResponse)
+async def notifications_page(request: Request):
+    if not require_auth(request, optional=True):
+        return RedirectResponse("/login")
+    require_work_enabled()
+    return HTMLResponse(render_template("notifications.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/futures", response_class=HTMLResponse)
@@ -413,7 +506,9 @@ async def api_admin_stats(request: Request):
 @app.get("/api/admin/health")
 async def api_admin_health(request: Request):
     require_admin(request)
-    return admin_health_payload()
+    result = admin_health_payload()
+    result["background"] = {"work_reminders": await reminder_health(request)}
+    return result
 
 
 @app.get("/api/admin/analytics/overview")
@@ -590,11 +685,13 @@ async def api_batch_delete_convs(request: Request):
 
 @app.get("/api/models")
 async def api_models():
+    from .agent.provider import configuration_status
+
     return [
         {
             "id": key,
             "name": model["name"],
-            "configured": bool(model.get("api_key")),
+            "configured": configuration_status(model)["configured"],
             "default": key == DEFAULT_MODEL,
         }
         for key, model in MODELS.items()
@@ -626,9 +723,13 @@ async def api_chat_cancel(request: Request):
 
 # ── Market data (v0.6) ──
 
+app.include_router(password_recovery_router)
 app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)
+app.include_router(feedback_monitor.router)
+app.include_router(feedback_review.router)
+app.include_router(feedback_progress.router)
 app.include_router(graph_router)
 app.include_router(industry_router)
 app.include_router(indicators_router)
@@ -636,12 +737,22 @@ app.include_router(reports_router)
 app.include_router(vibe_router)
 app.include_router(watchlist_router)
 app.include_router(research_router)
+app.include_router(knowledge_router)
 app.include_router(diagnostics_router)
 app.include_router(feedback_router)
 app.include_router(work_router)
 app.include_router(calendar_router)
+app.include_router(projects_router)
+app.include_router(collaboration_router)
+app.include_router(scheduling_router)
+app.include_router(attachments_router)
+app.include_router(approvals_router)
+app.include_router(notifications_router)
+app.include_router(work_assistant_router)
 app.include_router(futures_router)
 app.include_router(preferences_router)
+app.include_router(portfolio_router)
+app.include_router(model_routes_router)
 app.include_router(operations_router)
 
 

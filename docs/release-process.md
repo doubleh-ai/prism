@@ -54,6 +54,14 @@ PR 自己运行的绿色检查属于开发证据。生产晋级还需独立受�
 
 取消会阻止后续阶段，不能证明已经完成的动作被撤销。连接断开时对账同一操作的私有记录和实际现场，不能把断开连接当作远端停止。诊断失败保留失败事实，不可转写为准备或发布成功。
 
+## 后期中断与受控续接
+
+若固定候选已通过内部验收、入口恢复已完成，仅最后的独立公网检查中断，应先保留失败记录并核对真实现场。不要直接重新执行整个发布、重复发送模型请求或重新停止服务。
+
+续接必须使用已审且通过同提交检查的执行器、新的有限窗口、独立停止检查与唯一写锁。重新打开原请求、阶段回执和完整日志链，确认候选、环境、备份恢复、业务凭据及当前进程均匹配；任何变化或证据缺口都阻止续接。已用或未知用量继续计入原限额，旧许可不得自动续期。
+
+仅完成最后公网回读的动作不得同时提供模型调用、服务重启、入口替换或数据恢复能力。只有再次核对实际公网版本、专用合成账号的保存回放和退出结果后，才能生成单独的完成记录，明确关联原失败操作。原失败日志保持原样；文件名、CI 结果或未完成的续接记录均不能代替真实验证。
+
 ## 备份、恢复与数据
 
 备份覆盖应用现场、运行数据、环境依赖和离线来源，凭证采用独立受限保存。备份需加密、验证完整性，并在隔离位置实际恢复验证；仅创建压缩包或文件存在不构成可恢复证明。
@@ -81,11 +89,32 @@ PR 自己运行的绿色检查属于开发证据。生产晋级还需独立受�
 
 ## 发布完成的判定
 
+建议自动评审需要与监测、通用 worker 分离的最小权限身份。候选的建议接口按条目
+版本、批次和固定运行提交验证更新，在一个事务中保存用户历史和幂等回执；不允许
+写成修复完成。上线前实际验证账号隔离、停用/删除、重启与未知写入对账，以及用户
+在原反馈记录中查看决定。默认没有评审凭证，不因应用升级自行启动模型或云端调度。
+
+反馈监测新增独立只读接口候选，认证与可写 worker 分离，仅输出有界元数据和诊断代码；
+参见 [API 契约](API.md#read-only-feedback-monitoring-candidate)。它不提供修复、建议决策
+或发布权限，也没有部署云端消费服务。启用前需通过私有受控流程配置独立身份，核对实际
+上线版本，并验证只读读取成功、越权写入拒绝、敏感字段不出站和分页检查点。没有这些现场
+证明时，继续显示“监测未接入”，不能把接口源码或健康页正常当成已监测用户反馈。
+
 独立记录应显示固定提交、产物摘要、环境、操作者、阶段、开始/结束时间、停止状态和各类验收证据。公开内容仅保留必要的脱敏状态。
 
 仅在固定候选通过实际验证、正常恢复访问且本轮没有回退后，标记本轮部署验证成功。失败、取消、未知和回退分别呈现，不能覆盖为绿色成功。具体执行细节与环境清单由部署所有者受限管理。
 
 ## v0.22.0 incremental data compatibility
+
+Work arrangement updates add owner-scoped before-images and calendar time
+exceptions. Before promoting a candidate that writes these fields, use an
+isolated database to create, update, read and undo an arrangement and export a
+changed occurrence with the accepted Native recovery reader as well. Validate
+actual occurrence times, versions and existing mutation receipts, not just table
+presence. Older code must not reset exceptions or discard new Work tables to
+make recovery appear compatible. If the recovery candidate cannot interpret
+the current calendar and proposal data honestly, qualify a suitable Native
+reader before release; a successful schema migration does not prove rollback.
 
 The capability candidate adds personal task/calendar and research-profile tables.
 Its local UI and regression checks do not grant production promotion. In addition
@@ -94,3 +123,11 @@ triggers, profile snapshot retention and preservation of new Work records when
 returning to compatible old code. Do not drop new tables to make rollback pass.
 The release uses the existing private Native-only controller; no new deployment
 or unrestricted shell execution is added by the application features.
+
+Optional bug progress adds receipt and stage tables plus feedback-deletion cleanup.
+Qualification must exercise an existing user's original feedback view, an uncertain
+write reconciled by its original receipt, manual pause/closure and account deletion.
+The compatible Native recovery reader must retain these additive tables and existing
+feedback history. The private consumer is disabled until its separate identity and
+the exact application revision are verified. CI alone does not enable it or prove
+user-visible delivery; progress cannot mark a fix or authorize deployment.

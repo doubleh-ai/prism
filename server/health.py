@@ -79,10 +79,10 @@ def _check_native_core() -> dict[str, Any]:
 def _check_tool_catalog() -> dict[str, Any]:
     """Inspect the same in-process definitions exposed to the Native runtime."""
     try:
-        from .agent.tools import PLATFORM_TOOLS, native_catalog
+        from .agent.tools import _CUSTOM, PLATFORM_TOOLS, native_catalog
 
         rows = native_catalog()
-        required = {*PLATFORM_TOOLS, "knowledge_search", "knowledge_get", "source_read"}
+        required = {*PLATFORM_TOOLS, *_CUSTOM}
         identifiers = [row["id"] for row in rows]
         valid = (
             set(identifiers) == required
@@ -95,30 +95,17 @@ def _check_tool_catalog() -> dict[str, Any]:
 
 
 def _model_checks() -> list[dict[str, Any]]:
-    try:
-        from .agent.provider import _ENDPOINTS
-    except ImportError:
-        _ENDPOINTS = {}
+    from .agent.provider import configuration_status
+
     models = []
     for model_id, cfg in config.MODELS.items():
-        base, key, model = (cfg.get(field) for field in ("base_url", "api_key", "model"))
         # Match the local provider's input contract. This checks configuration,
         # never authentication, connectivity, model quality or provider uptime.
-        endpoint_supported = isinstance(base, str) and base.rstrip("/") in _ENDPOINTS
-        credential_configured = (
-            type(key) is str and 0 < len(key) <= 8192 and all(33 <= ord(c) <= 126 for c in key)
-        )
-        model_configured = (
-            type(model) is str and 0 < len(model) <= 128 and all(32 <= ord(c) < 127 for c in model)
-        )
         models.append(
             {
                 "id": model_id,
                 "name": cfg.get("name", model_id),
-                "configured": endpoint_supported and credential_configured and model_configured,
-                "credential_configured": credential_configured,
-                "endpoint_supported": endpoint_supported,
-                "model_configured": model_configured,
+                **configuration_status(cfg),
             }
         )
     return models

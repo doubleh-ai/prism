@@ -236,6 +236,10 @@ class WorkHandle:
     def done(self):
         return self._completed and self._task.done()
 
+    def failed(self):
+        """The owner exited with an error. Its work can still block a drain."""
+        return self._task.done() and (self._task.cancelled() or self._task.exception() is not None)
+
     def add_done_callback(self, callback):
         if not callable(callback):
             fail("completion_callback_rejected")

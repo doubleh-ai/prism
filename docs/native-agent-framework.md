@@ -1,8 +1,22 @@
 # Prism Native Agent v1
 
+重要结论和产业关系使用封闭字段协议登记，模型能看到引用ID、逐字引句、主体、指标、
+期间、单位及口径的定义。数字差异和产业路径的期间检查见[数字与产业路径检查](quantitative-evidence.md)；
+这些是有界的一致性检查，不能替代原文语义或实际数据集成验收。
+
+在原有调用、时间、输出及每日配额内，可增加一次独立上下文的节选复核。复核不开放
+工具或搜索，不改变人工知识状态，预算不足优先收尾；详见[节选与结论复核](research-quality.md)。
+脚本模型通过只证明执行机制，真实模型语义质量另行验收。
+
+研究对话会逐条保存可回放的进度。如果执行已经退出，但研报或最终状态写入失败，当前页面和重新打开的会话都会提示“最终结果保存异常”。用户可以查看已有内容或提交反馈。页面保留最后一个已保存的事件编号，后台继续阻止排空，直到故障得到处理。刷新只回读原研究。
+
 本方案将研究对话的执行权交还 Prism。工作流、模型协议、执行预算、工具授权、研究证据、历史检索、状态保存与网页展示均由仓库代码实现。基础模型通过 HTTP API 提供推理；这里的自研指 Agent 框架，不是训练基础模型。
 
 本文描述仓库中的原生研究对话，不记录特定实例的部署状态。**整个 Prism 应用只允许 Prism Native 与直接模型 HTTP，禁止依赖或回退到 Claude Code CLI**；不读取外部 Skill，不通过 MCP 桥或本机回环 HTTP 执行原生工具，也不依赖其他 Agent SDK。辅助模型直接使用 HTTP。旧个股自动分析的模型编排、缓存与辅助提取实现已移除，兼容启动入口固定返回 503；Vibe 新研究与追问也保持 503。账号内已保存历史仍可读取。
+
+本人持仓风险通过显式许可的 `portfolio_risk` 汇总工具读取：按本轮固定版本和偏好，
+复用平台行情对价，保留假设与未评估项；一轮只采集一次，不把逐项持仓交给模型。
+用户在原“持仓与风险检查”中设置许可，无新导航或操作页，见[持仓检查](portfolio-risk.md)。
 
 ## 为什么重构
 
@@ -30,11 +44,11 @@ flowchart TD
 
 | 模块 | 职责 |
 |---|---|
-| `server/agent/provider.py` | 直接实现 Anthropic 兼容 Messages 流协议，支持现有 DeepSeek / MiniMax 地址；解析文本、工具和用量；思考签名仅在内存中用于续接，不进入网页或数据库。 |
+| `server/agent/provider.py`、`provider_openai.py` | 显式分派直接 Messages 与 Responses HTTP；固定提供方端点、有限流协议、工具终态及用量；私有推理续接仅在本轮内存，不进入网页或数据库。 |
 | `server/agent/runtime.py` | 有上限的模型—工具循环，真正后台任务归属、停止、历史上下文、版本和结果保存。 |
 | `server/agent/store.py` | SQLite 任务、顺序事件、事务认领、提交去重、取消意图和中断记录。 |
 | `server/agent/tools.py` | 由真实任务授权的平台工具与来源/知识工具；不提供任意 Shell、文件系统或代码执行。 |
-| `server/agent/sources.py` | HTTPS 公共资料抓取、来源白名单、DNS 和连接地址校验、大小/时间上限、页面节选。 |
+| `server/agent/sources.py`、`discovery.py` | 固定公开来源索引、实际链接与节选；公网 DNS、固定地址 TLS、安全响应和日期范围检查。 |
 | `server/agent/knowledge.py` | 账号内历史研究与报告的只读检索，保留原研究时间和待核验状态。 |
 | `server/agent/prompts.py` | 内置综合研究、产业链、公司研究三种方法和证据规则。方法是版本化代码，不是外部 Skill 文件。 |
 | `server/agent/api.py` | 开始、停止、任务查询和有序事件回放；回放请求不会触发模型。 |
@@ -87,7 +101,14 @@ flowchart TD
 | `GET /api/agent/runs/{id}/events?after_seq=N` | 分页读取持久化事件 |
 | `GET /api/agent/runs/{id}/stream?after_seq=N` | 仅回放与观察 SSE 事件 |
 
-继续使用已有 DeepSeek / MiniMax 模型环境配置。Anthropic 兼容 Messages 仅是 HTTP 协议，不是 Claude Code 依赖；凭证只在提供方认证请求头内使用，不写入记录。模型适配器拒绝未支持的地址、重定向和环境代理，不自动改用别的提供方。增加提供方必须实现相同有限协议并完成离线协议测试。
+DeepSeek / MiniMax 使用已有 Messages 配置；OpenAI 显式使用 Responses，必须配置独立 Key 和具体模型 ID。两种都是直接 HTTP 协议，不是 Claude Code 依赖；凭证只在对应提供方认证请求头内使用，不写入记录。模型适配器拒绝未支持的地址、重定向和环境代理，不自动重试或改用别的提供方。增加提供方必须实现相同有限协议并完成离线协议测试、真实有限模型及用户流程验收。
+
+Responses 按[函数调用](https://developers.openai.com/api/docs/guides/function-calling)、
+[流事件](https://developers.openai.com/api/reference/resources/responses/streaming-events)与
+[无状态推理续接](https://developers.openai.com/api/docs/guides/reasoning)合同适配。工具
+参数在完整终态前不能执行；`store: false` 的续接使用当轮已完成的输出项，私有项不
+进入持久化历史。搜索返回的真实 URL 和引用投影为平台来源，仍只表示检索取得，
+不表示原文或事实已经独立核验。配置与模拟协议通过也不代表账户已获模型或工具权限。
 
 `PRISM_RESEARCH_SOURCE_HOSTS` 可额外配置以逗号分隔的公司官网主机名，不含 URL、路径、凭证或通配符。默认允许的公共来源以 `sources.py` 为准。生产特定配置放私有运维仓库，凭证和运行数据不入任何 Git 仓库。
 

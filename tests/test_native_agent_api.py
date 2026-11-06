@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import httpx
@@ -11,7 +12,7 @@ from fastapi import HTTPException
 from server import config, conversations
 from server.agent import api, runtime, store
 from server.database import get_db
-from server.work_lifecycle import Manager
+from server.work_lifecycle import LifecycleError, Manager
 
 
 @pytest.fixture
@@ -79,6 +80,55 @@ async def wait_empty(manager):
             return
         await asyncio.sleep(0.005)
     pytest.fail(str(manager.observe()))
+
+
+@pytest.mark.parametrize("write", ["report", "terminal"])
+async def test_failed_write_stops_live_and_replay_readers_without_releasing_work(native, monkeypatch, write):
+    manager, user, Request = native
+    entered, resume = asyncio.Event(), asyncio.Event()
+    model_calls = []
+
+    async def model(*args, **kwargs):
+        model_calls.append(1)
+        entered.set()
+        await resume.wait()
+        yield {"type": "text_delta", "text": "合成研究进度。"}
+        yield {
+            "type": "done",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "合成研究进度。"}],
+        }
+
+    monkeypatch.setattr(runtime, "model_stream", model)
+    response = await api.chat_stream(Request(body()))
+    await asyncio.wait_for(entered.wait(), 3)
+    run_id = store.list_runs(user)[0]["run_id"]
+    handle = runtime.get_service(manager).active[run_id].handle
+    manager.begin_drain(manager.ticket())
+    target = (
+        "BEFORE INSERT ON saved_reports"
+        if write == "report"
+        else "BEFORE UPDATE ON native_agent_runs WHEN NEW.finished_at IS NOT NULL"
+    )
+    with get_db() as db:
+        db.execute(f"CREATE TRIGGER reject_write {target} BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
+    resume.set()
+    with pytest.raises((LifecycleError, sqlite3.IntegrityError)):
+        await asyncio.wait_for(handle.wait_result(), 3)
+    frames = await asyncio.wait_for(drain(response), 2)
+    saved = store.get_run(user, run_id)
+    notice = {"stream_error": "result_unconfirmed", "run_id": run_id, "after_seq": saved["last_seq"]}
+    assert frames[-1] == notice
+    assert [f["agent"]["seq"] for f in frames[:-1]] == list(range(1, saved["last_seq"] + 1))
+    assert saved["status"] not in store.TERMINAL and manager.observe()["blocked"] > 0
+    assert not await manager.wait_drained(0.02)
+    with pytest.raises(LifecycleError, match="quiescence_unproven"):
+        manager.seal(manager.ticket())
+    replay = await api.stream(run_id, Request(), after_seq=saved["last_seq"])
+    assert await asyncio.wait_for(drain(replay), 2) == [notice]
+    with pytest.raises(HTTPException) as denied:
+        await api.stream(run_id, Request(username="other"), after_seq=0)
+    assert denied.value.status_code == 404 and model_calls == [1]
 
 
 async def test_two_step_tools_persist_and_duplicate_http_replays_without_new_model(native, monkeypatch):

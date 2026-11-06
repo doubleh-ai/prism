@@ -97,7 +97,7 @@ async def test_flag_off_rejects_all_routes_without_parsing_private_payload(work_
     assert counts() == dict.fromkeys(counts(), 0)
 
 
-async def test_overview_get_is_read_only_and_declares_unimplemented_capabilities(work_client, work_db):
+async def test_overview_get_is_read_only_and_declares_available_capabilities(work_client, work_db):
     before = counts()
     for _ in range(2):
         response = await work_client.get("/api/work/overview", cookies=work_db["alice"])
@@ -106,7 +106,7 @@ async def test_overview_get_is_read_only_and_declares_unimplemented_capabilities
             "workspace": None,
             "tasks": [],
             "next_cursor": None,
-            "capabilities": {"tasks": True, "calendar": True, "reminders": False, "agent_actions": False},
+            "capabilities": {"tasks": True, "calendar": True, "reminders": True, "agent_actions": True},
         }
     assert counts() == before
 

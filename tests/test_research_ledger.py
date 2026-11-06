@@ -20,6 +20,12 @@ from server.research_context import EvidenceTracker, build_research_context
 
 
 def run(run_id="round-one", user="alice", conv=""):
+    from server.database import get_db
+
+    with get_db() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO users(username,password_hash) VALUES(?,?)", [user, "synthetic-ledger-user"]
+        )
     context = build_research_context(run_id=run_id, now=datetime(2026, 10, 20, 18, tzinfo=UTC))
     create_research_run(user, conv, "研究合成公司的 2025 年产能", context)
     return context
@@ -183,7 +189,9 @@ def test_scope_cannot_be_added_after_research_material_or_finalization(existing)
     with pytest.raises(HTTPException) as denied:
         set_research_scope("alice", "round-one", "2025-12-31")
     assert denied.value.status_code == 409
-    assert read_research_run("alice", "round-one") == before
+    after = read_research_run("alice", "round-one")
+    assert after["history_checks"].pop("evaluated_at") >= before["history_checks"].pop("evaluated_at")
+    assert after == before
 
 
 @pytest.mark.parametrize(

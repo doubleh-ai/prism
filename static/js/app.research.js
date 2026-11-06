@@ -7,7 +7,7 @@
   function list(value) { return Array.isArray(value) ? value : []; }
   function publication(doc) { if (!doc.published_at || doc.publication_precision === 'unknown') return '未知'; if (doc.publication_precision === 'day' || /^\d{4}-\d{2}-\d{2}$/.test(String(doc.published_at))) return String(doc.published_at).slice(0,10)+'（日精度）'; return ChatRender.formatTime(doc.published_at); }
   function empty(message) { return '<div class="research-empty">'+text(message)+'</div>'; }
-  function note(items) { var labels={published_after_cutoff:'发布日期晚于信息截止',historical_availability_unknown:'尚不能确认截止前已公开可用',publication_precision_insufficient:'发布时间精度不足，无法确认截止前可用',semantic_review_pending:'尚未完成语义核验，需要核对原文是否支持判断',no_claims:'尚未形成可追溯的候选判断',no_sources:'尚未取得来源资料',structured_claims_missing:'未登记逐项结论',citation_checks_incomplete:'引用校验未完成',search_snippet_only:'仅取得搜索摘要',publication_unknown:'发布日期未知',original_not_verified:'原始全文尚未核验',published_after_as_of:'资料晚于观察时点',future_publication:'资料晚于观察时点',value_not_in_excerpt:'数值未在摘录中定位',unit_not_in_excerpt:'单位未在摘录中定位',period_not_in_excerpt:'期间未在摘录中定位',invalidation_missing:'缺失失效条件',support_missing:'缺少支持材料',interrupted:'研究已中断',excerpt_truncated:'仅保留部分摘录',interrupted_by_restart:'服务重启，研究保留为部分完成，未自动重跑'}; return list(items).length ? '<ul class="research-gaps">'+items.map(function(item){return '<li>'+text(labels[item] || item)+'</li>';}).join('')+'</ul>' : ''; }
+  function note(items) { var labels={published_after_cutoff:'发布日期晚于信息截止',historical_availability_unknown:'尚不能确认截止前已公开可用',publication_precision_insufficient:'发布时间精度不足，无法确认截止前可用',semantic_review_pending:'尚未完成语义核验，需要核对原文是否支持判断',model_review_incomplete:'自动节选复核未完成，保留候选判断',model_review_partial_scope:'仅部分结论完成自动节选复核',model_review_disagreement:'自动节选复核发现待核查项，需回查原文',no_claims:'尚未形成可追溯的候选判断',no_sources:'尚未取得来源资料',structured_claims_missing:'未登记逐项结论',citation_checks_incomplete:'引用校验未完成',search_snippet_only:'仅取得搜索摘要',publication_unknown:'发布日期未知',original_not_verified:'原始全文尚未核验',published_after_as_of:'资料晚于观察时点',future_publication:'资料晚于观察时点',numeric_evidence_conflict:'同主体、指标及口径的数字存在差异，需核对原文',duplicate_calculation_input:'计算重复使用同一输入结论',calculation_out_of_range:'计算超出可核对范围',calculation_mismatch:'计算值与已登记输入不符',value_not_in_excerpt:'数值未在摘录中定位',unit_not_in_excerpt:'单位未在摘录中定位',period_not_in_excerpt:'期间未在摘录中定位',invalidation_missing:'缺失失效条件',support_missing:'缺少支持材料',interrupted:'研究已中断',excerpt_truncated:'仅保留部分摘录',interrupted_by_restart:'服务重启，研究保留为部分完成，未自动重跑'}; return list(items).length ? '<ul class="research-gaps">'+items.map(function(item){return '<li>'+text(labels[item] || item)+'</li>';}).join('')+'</ul>' : ''; }
   Object.assign(App, {
     _researchTab:'overview',
     _researchOnlyUnverified:false,
@@ -44,6 +44,9 @@
       var header = '<div class="research-boundary"><span>'+text(states[run.status] || run.status || '状态未知')+'</span><span>研究截至 '+text(ChatRender.formatTime(run.as_of))+'</span><span>数据截至：以各来源为准，缺失则未知</span></div>';
       if (run.information_cutoff) header += '<p class="research-note">信息截止：'+text(run.cutoff_precision === 'day' ? String(run.information_cutoff).slice(0,10)+'（日精度）' : ChatRender.formatTime(run.information_cutoff))+'；观察时间保持本轮实际时间。'+(run.requested_period?' 研究期间：'+text(run.requested_period):'')+'</p>';
       header += '<p class="research-notice">这里保留研究过程、原始线索与候选判断。引用结构匹配不等于语义核验；事实候选仍需核对原文。</p>';
+      if(data.history_checks&&data.history_checks.coverage_incomplete)header+='<p class="research-note">历史数值比较尚不完整，不能据此判断历史结论一致。</p>';
+      var changes=list(data.knowledge_changes).filter(function(change){return change && typeof change.source_claim_id==='string' && change.source_claim_id;});
+      if(changes.length)header += '<details class="research-notice"><summary>引用的历史结论有更新，查看复核</summary>'+changes.map(function(change){return '<p><a href="/knowledge?id='+escAttr(encodeURIComponent(change.source_claim_id))+'">查看复核</a></p>';}).join('')+'</details>';
       var body = '';
       if (tab === 'overview') {
         body = '<section class="research-section"><h3>核心判断与边界</h3>'+this._researchClaimsHTML(list(data.claims))+'</section>';
@@ -66,7 +69,7 @@
       } else if (tab === 'evidence') {
         body = '<div class="research-version-bar"><h3>资料与原文定位</h3><label><input id="researchUnverified" type="checkbox"'+(this._researchOnlyUnverified?' checked':'')+'> 仅看缺少原文定位</label></div>';
         var documents = list(data.documents).filter(function(doc){return !self._researchOnlyUnverified || doc.original_obtained !== true || !list(data.passages).some(function(p){return p.document_id === doc.document_id && p.locator && ['original_page','original_section','original_table'].indexOf(p.locator.kind)>=0;});});
-        body += documents.length ? documents.map(function(doc){var url=safeUrl(doc.url);return '<article class="research-source"><div><span class="research-tag">'+text(doc.content_scope==='search_snippet'?'搜索线索 · 非原文':doc.content_scope==='tool_returned_text'?'工具返回内容 · 非全文保证':'资料范围未知')+'</span><h3>'+text(doc.title || '未命名资料')+'</h3></div><p>发布 '+text(publication(doc))+' · 获取 '+text(ChatRender.formatTime(doc.retrieved_at))+'</p><p>来源类别：'+text(doc.source_kind || '未知')+' · 日期依据：'+text(doc.publication_basis || '未提供')+'</p><footer><button data-research-document="'+escAttr(doc.document_id)+'">查看摘录与定位</button>'+(url?'<a href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">打开原链接 ↗</a>':'')+'</footer></article>';}).join('') : empty('没有符合条件的资料；没有资料不等于事实不存在。');
+        body += documents.length ? documents.map(function(doc){var url=safeUrl(doc.url);return '<article class="research-source"><div><span class="research-tag">'+text(doc.content_scope==='search_snippet'?'搜索线索 · 非原文':doc.content_scope==='tool_returned_text'?'工具返回内容 · 非全文保证':'资料范围未知')+'</span><h3>'+text(doc.title || '未命名资料')+'</h3></div><p>'+ChatRender.publicationLabel(doc)+' '+text(publication(doc))+' · 获取 '+text(ChatRender.formatTime(doc.retrieved_at))+'</p><p>来源类别：'+text(doc.source_kind || '未知')+' · 日期依据：'+text(ChatRender.publicationBasis(doc))+'</p><footer><button data-research-document="'+escAttr(doc.document_id)+'">查看摘录与定位</button>'+(url?'<a href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">打开原链接 ↗</a>':'')+'</footer></article>';}).join('') : empty('没有符合条件的资料；没有资料不等于事实不存在。');
       } else body = this._researchRelationsHTML(data);
       document.getElementById('researchBody').innerHTML = header + body;
     },
@@ -78,8 +81,11 @@
     },
     _researchClaimsHTML:function(claims) {
       if (!claims.length) return empty('尚未记录候选判断。原始回复不会被自动追认为已核验事实。');
-      var self=this;
-      return '<div class="research-claims">'+claims.map(function(claim){return '<article class="research-claim"><div><span class="research-tag">'+text(kinds[claim.kind] || '判断类型未标注')+'</span><span class="research-note">语义待核验</span></div><p>'+text(claim.statement)+'</p>'+(claim.period?'<p class="research-note">所属期间：'+text(claim.period)+'</p>':'')+(claim.value!=null?'<p>数值 '+text(claim.value)+' '+text(claim.unit || '单位未提供')+' '+text(claim.currency || '')+'</p>':'')+(claim.formula?'<p class="research-note">计算式：'+self._researchFormulaText(claim.formula)+'</p>':'')+'<button data-research-claim="'+escAttr(claim.claim_id)+'">查看支持、反方与限制 ↗</button></article>';}).join('')+'</div>';
+      var self=this,bundle=this._researchBundle||{},conflicts=list(bundle.numerical_checks&&bundle.numerical_checks.conflicts),history=list(bundle.history_checks&&bundle.history_checks.conflicts);
+      function hasConflict(id){return conflicts.some(function(group){return group && list(group.claim_ids).indexOf(id)>=0;});}
+      function hasHistoricalConflict(id){return history.some(function(group){return group&&list(group.current_claim_ids).indexOf(id)>=0;});}
+      function hasReviewIssue(id){return list((bundle.model_review||{}).assessments).some(function(a){return a&&a.claim_id===id&&['not_supported','partly_supported','insufficient_evidence'].indexOf(a.effective_verdict)>=0;});}
+      return '<div class="research-claims">'+claims.map(function(claim){return '<article class="research-claim"><div><span class="research-tag">'+text(kinds[claim.kind] || '判断类型未标注')+'</span><span class="research-note">语义待核验</span></div><p>'+text(claim.statement)+'</p>'+(claim.period?'<p class="research-note">所属期间：'+text(claim.period)+'</p>':'')+(claim.value!=null?'<p>数值 '+text(claim.value)+' '+text(claim.unit || '单位未提供')+' '+text(claim.currency || '')+(hasConflict(claim.claim_id)?' <strong class="research-note">同口径数值有差异，需核对原文</strong>':hasHistoricalConflict(claim.claim_id)?' <strong class="research-note">与历史同口径数值有差异，需核对原文</strong>':'')+'</p>':'')+(claim.formula?'<p class="research-note">计算式：'+self._researchFormulaText(claim.formula)+'</p>':'')+(hasReviewIssue(claim.claim_id)?'<p class="research-note">原文与表述有待核查项</p>':'')+'<button data-research-claim="'+escAttr(claim.claim_id)+'">查看支持、反方与限制 ↗</button></article>';}).join('')+'</div>';
     },
     _researchRelationsHTML:function(data) {
       var dimensions = [['supply','上游供给'],['certification','认证周期'],['substitution','替代路线'],['cost','成本传导'],['demand','下游需求']];
@@ -97,10 +103,21 @@
       if(kind==='claim'){
         var claim=list(data.claims).find(function(c){return c.claim_id===id;});if(!claim)return;
         title=kinds[claim.kind] || '候选判断';body='<p>'+text(claim.statement)+'</p><p class="research-notice">引用检查：'+text(claim.citation_status === 'valid' ? '引用结构有效' : claim.citation_status || '未记录')+'；语义仍待核验。</p>'+passages(claim.supports,'支持材料')+passages(claim.opposes,'反方材料')+passages(claim.background,'背景材料')+'<h4>限制与缺口</h4>'+text(claim.limitations || '未记录')+note(claim.gaps);
+        var review=data.model_review||{},assessment=list(review.assessments).find(function(a){return a&&a.claim_id===id;});
+        if(assessment){var verdicts={supported:'节选支持该表述',partly_supported:'仅有部分支持',not_supported:'节选不支持该表述',insufficient_evidence:'节选证据不足'};body+='<h4>原文与结论</h4><p>'+text(verdicts[assessment.effective_verdict]||'尚待核查')+'（自动复核意见）</p><p>'+text(assessment.reason)+'</p><p class="research-note">依据已取得的节选，不代表独立事实认证；完整原文和人工复核仍需核对。</p>';
+          var historyIds=list(assessment.history_claim_ids), links=[], seen=new Set();
+          list(review.history_bindings).forEach(function(binding){
+            if(links.length>=2 || !binding || binding.current_claim_id!==id) return;
+            var historicalId=binding.historical_claim_id;
+            if(typeof historicalId!=='string' || !historicalId.trim() || historyIds.indexOf(historicalId)<0 || seen.has(historicalId)) return;
+            try { var encoded=encodeURIComponent(historicalId); seen.add(historicalId); links.push('<a href="/knowledge?id='+escAttr(encoded)+'">查看历史判断 '+(links.length+1)+'</a>'); } catch(error) { /* Invalid Unicode cannot form a link. */ }
+          });
+          if(links.length)body+='<p class="research-note">'+links.join(' · ')+'</p>';
+        }
       } else if(kind==='document'){
         var doc=list(data.documents).find(function(d){return d.document_id===id;});if(!doc)return;
         title=doc.title || '来源资料';var url=safeUrl(doc.url);
-        body='<p class="research-notice">'+text(doc.content_scope==='search_snippet'?'这里只取得搜索摘要，不能视为原始全文。':'只展示工具实际返回的内容范围，引用是否支持判断仍需核验。')+'</p><p>发布：'+text(publication(doc))+'<br>采集：'+text(ChatRender.formatTime(doc.retrieved_at))+'</p>'+(url?'<a href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">原始链接 ↗</a>':'')+list(data.passages).filter(function(p){return p.document_id===id;}).map(function(p){return '<div class="research-passage"><p>'+text(p.locator || '定位未提供')+'</p><blockquote>'+text(p.excerpt)+'</blockquote></div>';}).join('');
+        body='<p class="research-notice">'+text(doc.content_scope==='search_snippet'?'这里只取得搜索摘要，不能视为原始全文。':'只展示工具实际返回的内容范围，引用是否支持判断仍需核验。')+'</p><p>'+ChatRender.publicationLabel(doc)+'：'+text(publication(doc))+'<br>采集：'+text(ChatRender.formatTime(doc.retrieved_at))+'</p>'+(url?'<a href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">原始链接 ↗</a>':'')+list(data.passages).filter(function(p){return p.document_id===id;}).map(function(p){return '<div class="research-passage"><p>'+text(p.locator || '定位未提供')+'</p><blockquote>'+text(p.excerpt)+'</blockquote></div>';}).join('');
       } else {
         var relation=list(data.relations).find(function(r){return r.relation_id===id;});if(!relation)return;
         title=ChatRender.stringify(relation.from_entity)+' → '+ChatRender.stringify(relation.to_entity);

@@ -252,7 +252,7 @@
     elements.doneCount.textContent = all.filter(function (task) { return task.status === 'done'; }).length || '';
     elements.list.replaceChildren();
     var visible = visibleTasks();
-    var heading = state.filter === 'today' ? '今天，专注重要的事。' : state.filter === 'done' ? '每一步，都有记录。' : '把事情，逐一理清。';
+    var heading = state.filter === 'today' ? '今日任务' : state.filter === 'done' ? '已完成' : '全部任务';
     elements.viewTitle.textContent = heading;
     elements.listTitle.textContent = state.filter === 'today' ? '今日与待安排' : state.filter === 'done' ? '已完成的任务' : '全部任务';
     elements.listSummary.textContent = state.filter === 'today' ? today + ' 项今日／逾期 · ' + unscheduled + ' 项待安排' : '已加载 ' + all.length + ' 项';

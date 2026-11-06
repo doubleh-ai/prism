@@ -8,8 +8,8 @@ name: CI
 on:
   push:
     branches: [master, main]
-  pull_request:
-    branches: [master, main, codex/prism-production-v0.19.7, codex/prism-agent-workbench, codex/prism-release-control, codex/prism-evolution-v0.20.0, codex/prism-ui-report-readability]
+  # Also check fixes stacked on an unmerged release candidate.
+  pull_request: {}
 
 permissions:
   contents: read
@@ -30,6 +30,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify tested source identity
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
 
       - name: Set up Node for real browser-script regression tests
         uses: actions/setup-node@v7
@@ -72,6 +80,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify tested source identity
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@v5

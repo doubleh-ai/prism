@@ -77,7 +77,7 @@ async function initialReadIsPrivateAndReadOnly() {
   assert.equal(env.requests[0].options.method, 'GET'); assert.equal(env.requests[0].options.cache, 'no-store');
   assert.equal(env.requests[0].options.credentials, 'same-origin');
   assert.equal(env.e('workWelcome').hidden, false); assert.equal(env.e('workContent').hidden, true);
-  assert.match(template, /个人工作区/); assert.match(template, /消息推送、团队协作与 Agent 写操作尚未接入/);
+  assert.match(template, /会保存在你的账号下/);
   assert(!/https?:\/\//.test(template), 'no external assets');
 }
 async function explicitEnableAndUnknownReplay() {

@@ -16,6 +16,13 @@ from .industry_context import build_industry_context
 router = APIRouter(prefix="/api/industry")
 
 
+@router.get("/research")
+async def research_evidence(request: Request, q: str = "", before: int | None = None, limit: int = 20):
+    from .industry_research import evidence_graph
+
+    return evidence_graph(require_auth(request), query=q, before=before, limit=limit)
+
+
 def _slug(name: str) -> str:
     """Normalise a name into a stable node ID."""
     return re.sub(r"[^a-z0-9-]", "-", name.strip().lower())[:80]

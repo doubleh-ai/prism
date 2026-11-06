@@ -20,6 +20,8 @@ aiofiles>=23.2          # async file I/O for jsonl reads (chat.py)
 lru-dict>=1.2           # O(1) LRU for in-memory caches (proxy.py, main.py)
 # Native model streaming (same pinned version as the inherited market runtime).
 httpx==0.25.2
+beautifulsoup4==4.15.0  # exchange warehouse report tables
+pypdf==6.21.4          # bounded public-announcement text extraction
 numpy==2.2.*           # indicator evaluation (server/indicators/dsl.py)
 pandas==2.3.*          # indicator data frames and market normalization
 

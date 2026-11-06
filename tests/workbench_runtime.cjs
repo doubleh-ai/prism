@@ -10,12 +10,12 @@ process.env.TZ = 'UTC';
 
 function element() {
   const classes = new Set();
-  return {
+  return Object.assign(new EventTarget(), {
     innerHTML:'',textContent:'',value:'',style:{},dataset:{},open:false,disabled:false,title:'',
     classList:{add(...names){names.forEach(n=>classes.add(n));},remove(...names){names.forEach(n=>classes.delete(n));},contains(n){return classes.has(n);},toggle(n,on){const next=on===undefined?!classes.has(n):on;if(next)classes.add(n);else classes.delete(n);return next;}},
-    addEventListener(){},setAttribute(){},removeAttribute(){},querySelectorAll(){return [];},querySelector(){return null;},appendChild(){},focus(){},scrollTo(){},scrollIntoView(){},
+    setAttribute(){},removeAttribute(){},querySelectorAll(){return [];},querySelector(){return null;},appendChild(){},focus(){},scrollTo(){},scrollIntoView(){},
     showModal(){this.open=true;},close(){this.open=false;},
-  };
+  });
 }
 function environment() {
   const elements = new Map();
@@ -29,10 +29,72 @@ function environment() {
   for(const name of ['app.util.js','app.chat-render.js','app.core.js','app.chat.js','app.vibe.js']) vm.runInContext(fs.readFileSync('static/js/'+name,'utf8'),context,{filename:name});
   const app=context.App;
   const shippedRenderOne=app.renderOne;
+  const shippedRenderAll=app.renderAll;
   Object.assign(app,{renderAll(){},renderOne(){},loadConvs:async()=>{},_refreshReportsButton(){},_closeMobileSidebar(){},_buildTOC(){},_scrollToBottom(){},_startTypewriter(){},_stopTypewriter(){},_toast(){},selectAC(){return false;},_reportFilesForMessage(){return [];}});
-  return {context,app,elements,doc,shippedRenderOne,listeners};
+  return {context,app,elements,doc,shippedRenderOne,shippedRenderAll,listeners};
 }
 const settled=()=>new Promise(setImmediate);
+
+function imeEnterCommitsWithoutSending() {
+  const {app, doc} = environment();
+  const input = doc.getElementById('input');
+  const sent = [];
+  let autocompleteChecks = 0;
+  app.selectAC = () => { autocompleteChecks++; return false; };
+  app.send = () => { sent.push(input.value); input.value = ''; };
+  const keydown = (key, details = {}) =>
+    input.dispatchEvent(Object.assign(new Event('keydown', {cancelable:true}), {key}, details));
+
+  input.value = 'a';
+  input.dispatchEvent(new Event('compositionstart'));
+  assert.ok(keydown('Enter', {isComposing:true, keyCode:13}), 'let the IME commit the letter');
+  assert.ok(keydown('ArrowDown'), 'the candidate list owns its navigation');
+  assert.ok(keydown('Enter', {keyCode:13}), 'an active composition owns Enter even without a flag');
+  input.dispatchEvent(new Event('compositionend'));
+  assert.ok(keydown('Enter', {isComposing:false, keyCode:229}), 'WebKit may end composition before keydown');
+  assert.equal(keydown('Enter', {isComposing:false, keyCode:13}), false,
+    'a late unflagged Enter from the same IME confirmation must not send');
+  assert.deepEqual(sent, [], 'confirming an IME letter keeps it in the draft');
+  assert.equal(keydown('Enter', {repeat:true}), false);
+  assert.equal(autocompleteChecks, 0);
+  assert.deepEqual(sent, []);
+  assert.equal(input.value, 'a');
+
+  input.dispatchEvent(Object.assign(new Event('keyup'), {key:'Enter', keyCode:13}));
+  assert.equal(keydown('Enter', {keyCode:13}), false);
+  assert.deepEqual(sent, ['a'], 'the next deliberate Enter sends immediately');
+  assert.ok(keydown('Enter', {shiftKey:true}), 'Shift+Enter keeps the native newline');
+  app.selectAC = () => true;
+  assert.equal(keydown('Enter'), false);
+  assert.deepEqual(sent, ['a'], 'a selected Prism shortcut still takes precedence');
+  input.dispatchEvent(new Event('compositionstart'));
+  input.dispatchEvent(new Event('blur'));
+  app.selectAC = () => false;
+  input.value = 'new draft';
+  assert.equal(keydown('Enter'), false);
+  assert.deepEqual(sent, ['a', 'new draft']);
+
+  // Some IMEs finish composition before their unflagged confirming keydown.
+  const next = environment(), nextInput = next.doc.getElementById('input');
+  let now = 1000, sends = 0;
+  next.context.Date = class extends Date { static now() { return now; } };
+  next.app.send = () => { sends++; };
+  const nextKey = (type, key='Enter') => nextInput.dispatchEvent(
+    Object.assign(new Event(type, {cancelable:true}), {key, keyCode:key==='Enter'?13:65}));
+  nextInput.dispatchEvent(new Event('compositionstart'));
+  nextInput.dispatchEvent(new Event('compositionend'));
+  assert.equal(nextKey('keydown'), false);
+  assert.equal(sends, 0, 'composition-end-first confirmation retains the draft');
+  nextKey('keyup');
+  assert.equal(nextKey('keydown'), false);
+  assert.equal(sends, 1, 'the next physical Enter works without a waiting period');
+  nextKey('keyup');
+  nextInput.dispatchEvent(new Event('compositionstart'));
+  nextInput.dispatchEvent(new Event('compositionend'));
+  now += 200;
+  nextKey('keydown');
+  assert.equal(sends, 2, 'a later intentional Enter is not consumed after mouse/programmatic commit');
+}
 
 async function conversationOrder() {
   const {app}=environment(),pending={};
@@ -222,7 +284,7 @@ async function managementDoesNotRequestCapabilityHistory() {
   app.api=url=>{requests.push(url);return new Promise(resolve=>{finishOld=resolve;});};
   const pending=app._loadWorkbenchHistory();
   app.switchMode('admin');await settled();
-  assert.equal(doc.getElementById('workbenchContext').style.display,'none');
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);
   assert.equal(requests.length,1);assert(!requests.some(url=>url.includes('view=admin')));
   assert.equal(app._workbenchHistoryLoading,false);assert.equal(doc.getElementById('workbenchCallCount').textContent,'0');
   finishOld({ok:false,status:503});await pending;assert.equal(app._workbenchHistoryError,'','late capability failure must not raise a management alert');
@@ -231,14 +293,99 @@ async function managementDoesNotRequestCapabilityHistory() {
   app._openWorkbenchPanel('history');assert.equal(app._workbenchPanel,'capabilities');assert.equal(doc.getElementById('workbenchHistoryTab').hidden,true);
   app.api=async url=>{requests.push(url);return {ok:true,json:async()=>({calls:[]})};};
   app.switchMode('market');await settled();
-  assert.equal(doc.getElementById('workbenchContext').style.display,'');assert.equal(doc.getElementById('workbenchHistoryTab').hidden,false);
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);assert.equal(doc.getElementById('workbenchHistoryTab').hidden,false);
   assert.equal(requests.at(-1),'/api/capability-calls?view=market&limit=30');
   app.convId='original-chat';app.switchMode('chat');await settled();assert.equal(requests.at(-1),'/api/convs/original-chat/capability-calls');
-  const before=requests.length;app.switchMode('unsupported-view');await settled();assert.equal(requests.length,before);assert.equal(doc.getElementById('workbenchContext').style.display,'none');
+  const before=requests.length;app.switchMode('unsupported-view');await settled();assert.equal(requests.length,before);assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);
+}
+
+async function historyAndErrorsAppearOnlyWhenRelevant() {
+  const {context,app,doc}=environment();
+  vm.runInContext(fs.readFileSync('static/js/app.workbench.js','utf8'),context);
+  app._mode='chat';app.convId='own-conversation';app.msgs=[];
+  app.showWelcome();
+  let html=doc.getElementById('msgList').innerHTML;
+  assert(!html.includes('data-capability-view=')&&!html.includes('项平台能力'));
+  app._updateWorkbenchCount();assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,true);
+  app._receivePlatformCall({call_id:'own-call',conv_id:app.convId,status:'completed',target:{view:'market'}});
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,false);
+  assert.equal(doc.getElementById('workbenchCallCount').textContent,'1');
+  app.api=async()=>({ok:false,status:503});
+  await app._loadWorkbenchHistory();
+  assert.equal(doc.getElementById('workbenchHistoryEntry').hidden,false,'failed reads remain discoverable');
+  app._capabilityError='能力清单暂时无法读取，请重试。';app.showWelcome();
+  html=doc.getElementById('msgList').innerHTML;
+  assert(html.includes('role="status"')&&html.includes('data-workbench-retry="capabilities"'));
+}
+
+function compactResearchProgress() {
+  const {app}=environment();
+  const chunks=[
+    {t:'status',c:'Prism 正在准备研究'},
+    {t:'status',c:'Prism 正在研究'},
+    {t:'status',c:'整理问题与已有研究'},
+    {t:'tool',c:'indicator_list',d:'合成工具参数'},
+    {t:'status',c:'核对资料与组织分析'},
+    {t:'tool',c:'research_read',d:'空合成账本'},
+    {t:'think',c:'合成分析过程'},
+    {t:'text',c:'合成正文'},
+  ];
+  const before=JSON.stringify(chunks);
+  let html=app._renderMsg(chunks,'合成正文',true,{agent:{status:'running'}});
+  assert.equal((html.match(/class="research-progress"/g)||[]).length,1);
+  assert(html.includes('核对资料与组织分析'));
+  for(const old of ['Prism 正在准备研究','Prism 正在研究','整理问题与已有研究'])assert(!html.includes(old));
+  assert(!html.includes('research-status-notice')&&!html.includes('step-now'));
+  assert(html.includes('<details class="step-fold"><summary>工具调用 · 2 项</summary>'));
+  assert(html.includes('indicator_list')&&html.includes('research_read'));
+  assert(html.includes('<details class="think-box"><summary>分析过程</summary>'));
+  assert.equal(JSON.stringify(chunks),before,'display consolidation must not rewrite recorded events');
+  for(const streaming of [true,false]){
+    html=app._renderMsg(chunks.concat({t:'status',c:'研究已保存'}),'合成正文',streaming,{native_agent:{status:'completed'}});
+    assert(html.includes('合成正文')&&!html.includes('research-progress')&&!html.includes('research-status-notice'));
+  }
+}
+
+function researchExceptionsRemainVisible() {
+  const {app}=environment();
+  for(const state of ['partial','failed','cancelled','awaiting_user']){
+    const label=app._nativeStatusLabel(state);
+    let html=app._renderMsg([{t:'status',c:'核对资料与组织分析'},{t:'status',c:label,state}],'已有内容',true,{agent:{status:state}});
+    assert.equal((html.match(/class="research-status-notice"/g)||[]).length,1);
+    assert(html.includes(label)&&!html.includes('research-progress'));
+    html=app._renderMsg([],'已有内容',false,{native_agent:{status:state}});
+    assert(html.includes(label),'saved terminal metadata must restore the warning without live status events');
+  }
+  const cancelled=app._renderMsg([{t:'status',c:'本轮研究已停止，进度已保存'}],'',false,{native_agent:{status:'cancelled'}});
+  assert.equal((cancelled.match(/class="research-status-notice"/g)||[]).length,1);
+  const warning='连接中断 <img src=x onerror=alert(1)>';
+  const html=app._renderMsg([{t:'status',c:warning},{t:'status',c:warning}],'已有内容',false,{agent:{status:'running'}});
+  assert.equal((html.match(/class="research-status-notice"/g)||[]).length,1);
+  assert(!html.includes('<img')&&html.includes('&lt;img')&&!html.includes('research-progress'));
+}
+
+function persistedAndOfflineResearchStatus() {
+  const {app,context,doc,shippedRenderAll,shippedRenderOne}=environment();
+  app.renderQuoteTags=app._glossifyTerms=app._linkifyReports=html=>html;app.fillQuoteChips=()=>{};
+  app.convId='A';
+  app.msgs=[{role:'assistant',content:JSON.stringify({text:'保存的内容',chunks:[{t:'text',c:'保存的内容'}],native_agent:{engine:'prism-native',status:'partial'}})}];
+  shippedRenderAll.call(app);
+  let html=doc.getElementById('msgList').innerHTML;
+  assert(html.includes('研究尚未完整完成'),'history reads terminal metadata instead of losing partial status');
+  const message={role:'assistant',content:'已有内容',agent:{status:'running'},_chunks:[{t:'status',c:'核对资料与组织分析'},{t:'status',c:'连接暂时中断，仍可请求停止'},{t:'text',c:'已有内容'}]};
+  app.msgs=[message];context.Streams.A={active:true,offline:true,msgIdx:0,msgs:app.msgs};
+  shippedRenderAll.call(app);html=doc.getElementById('msgList').innerHTML;
+  assert(html.includes('连接暂时中断')&&!html.includes('research-progress'));
+  assert(context.Streams.A.active,'displaying disconnection must not clear run ownership or stop controls');
+  const bubble=element();doc.getElementById('msgList').querySelectorAll=()=>[bubble];
+  message._lastSig=null;shippedRenderOne.call(app,0);
+  assert(bubble.innerHTML.includes('连接暂时中断')&&!bubble.innerHTML.includes('research-progress'));
 }
 
 (async()=>{
+  imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
-  await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();
-  console.log('workbench runtime ok: 15 scenarios');
+  await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();await historyAndErrorsAppearOnlyWhenRelevant();
+  compactResearchProgress();researchExceptionsRemainVisible();persistedAndOfflineResearchStatus();
+  console.log('workbench runtime ok: 20 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

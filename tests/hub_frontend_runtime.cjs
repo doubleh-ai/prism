@@ -2,17 +2,19 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const tick=()=>new Promise(setImmediate);
 const script=fs.readFileSync('static/js/app.hub.js','utf8');
-function el(){return {value:'',checked:false,disabled:false,hidden:false,textContent:'',style:{},listeners:{},
-  addEventListener(k,f){this.listeners[k]=f;},replaceChildren(){},setAttribute(){}};}
-function setup(){
+function el(){return {value:'',checked:false,disabled:false,hidden:false,textContent:'',style:{},listeners:{},children:[],
+  append(...items){this.children.push(...items);},addEventListener(k,f){this.listeners[k]=f;},replaceChildren(...items){this.children=items;},setAttribute(){}};}
+function setup(page='preferences'){
  const fields=Object.fromEntries(['style','horizon','max_position_pct','max_drawdown_pct','allow_leverage'].map(k=>[k,el()]));
  Object.assign(fields.style,{value:'conservative'});fields.horizon.value='long';fields.max_position_pct.value='20';fields.max_drawdown_pct.value='10';
  const submit=el(),form=el();form.elements={namedItem:k=>fields[k]};form.querySelector=()=>submit;
  const els={main:el(),notice:el(),profileForm:form,profileReload:el(),profileVersion:el()},requests=[],listeners={};
- const context={console,URL,Intl,Date,JSON,Number,String,Promise,AbortController,Object,Error,
-  setTimeout,clearTimeout,location:{pathname:'/preferences',replace(){}},confirm:()=>true,
+ Object.assign(els,{portfolioForm:el(),addPosition:el(),useObservedPriceTime:el(),portfolioReload:el(),portfolioDetails:el()});
+ Object.assign(els,{futuresForm:form,futureSymbol:el(),futuresResult:el()});
+ const context={console,URL,URLSearchParams,Intl,Date,JSON,Number,String,Promise,AbortController,Object,Error,
+  setTimeout,clearTimeout,location:{pathname:'/'+page,search:'',replace(){}},confirm:()=>true,
   addEventListener(k,f){listeners[k]=f;},
-  document:{body:{dataset:{page:'preferences'}},getElementById:k=>els[k],createElement:el,
+  document:{body:{dataset:{page}},getElementById:k=>els[k],createElement:el,
    querySelectorAll:s=>s==='form'?[form]:[],addEventListener(){}},
   fetch(path,options){return new Promise((resolve,reject)=>requests.push({path,options,resolve,reject}));}};
  Object.defineProperty(context,'localStorage',{get(){throw Error('private persistent cache forbidden');}});
@@ -40,4 +42,56 @@ async function failedHandoffPreservesExistingDraft(){
  vm.createContext(context);vm.runInContext(fs.readFileSync('static/js/app.handoff.js','utf8'),context);
  await button.listeners.click();assert.equal(draft.value,'existing private draft');assert(!button.disabled);
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();console.log('hub journeys ok: 3 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showOfficialWarrants(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();
+ e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}}),url='https://www.shfe.com.cn/source';
+ assert.equal(e.requests[1].path,'/api/futures/CU/snapshot');
+ respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},
+  warehouse_receipt:{status:'collected',data_as_of:'2026-10-30',table:'铜',row:'总计',quantity:17,change:-2,unit:'吨',source_url:url}});
+ await run;
+ const rendered=JSON.stringify(e.els.futuresResult);
+ assert.match(rendered,/2026-10-30 · 总计 17 吨，较上一期变化 -2 吨/);assert.ok(rendered.includes(url));
+}
+async function showExchangeFuturesData(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},
+  exchange_daily:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/daily',active_contract:'cu2612',contracts:[{contract:'cu2612',delivery_month:'2026-12',close:70000,settlement:69900,volume:100,open_interest:80}],curve:{status:'collected',near_contract:'cu2612',far_contract:'cu2701',near_settlement:69900,far_settlement:70100,far_minus_near:200,shape:'contango'}},
+  member_positioning:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/members',contract:'cu2612',sides:{long:{ranked_members:20,quantity_sum:123,change_sum:-3,members:[{rank:1,member:'会员甲',quantity:12,change:-1}]}},notice:'多空排名差不代表净资金流。'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['远月升水','远月减近月：200','会员甲','多空排名差不代表净资金流','https://example.com/daily','https://example.com/members','空头持仓：未提供'])assert.ok(rendered.includes(text),text);
+}
+async function showMissingFuturesData(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'unavailable'},member_positioning:{status:'not_reported'}});await run;
+ const rendered=JSON.stringify(e.els.futuresResult);assert.match(rendered,/未取得交易所合约数据/);assert.match(rendered,/交易所未披露该合约的会员持仓/);
+}
+async function showRetainedOfficialDataWithoutContinuousPrices(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'CU',name:'铜',series_status:'unavailable',data_as_of:null,collected_at:'2026-11-03T12:00:00+08:00',latest:{close:null},technical:null,positioning:null,fundamentals:[],gaps:['现货数据尚未取得'],source:{},warehouse_receipt:{status:'collected',data_as_of:'2026-11-02',table:'铜',row:'总计',quantity:7,change:-1,unit:'吨',source_url:'https://www.shfe.com.cn/source'},exchange_daily:{status:'unavailable'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ assert.match(e.els.notice.textContent,/连续日线暂未取得/);assert.match(rendered,/总计 7 吨/);
+ assert(!rendered.includes('最近收盘')&&!rendered.includes('20日均值')&&!rendered.includes('null')&&!rendered.includes('undefined'));
+ assert(!e.submit.disabled);
+}
+async function showDifferentSourceDatesInOneNotice(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'CU',name:'铜',series_status:'collected',data_as_of:'2026-11-02',collected_at:'2026-11-03T12:00:00+08:00',latest:{close:70000},technical:{},positioning:{},fundamentals:[],gaps:[],source:{name:'合成公开行情',url:'https://finance.sina.com.cn/fixture'},date_alignment:'mixed',warehouse_receipt:{status:'collected',data_as_of:'2026-10-30',table:'铜',row:'总计',quantity:7,change:-1,unit:'吨',source_url:'https://www.shfe.com.cn/source'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ assert.match(e.els.notice.textContent,/资料日期不同/);assert(rendered.includes('2026-11-02')&&rendered.includes('2026-10-30')&&rendered.includes('70000'));
+}
+async function showDatedParametersWithinExistingDetails(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='RB';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'RB',name:'螺纹钢',series_status:'unavailable',collected_at:'2026-11-03T14:00:00+08:00',latest:{},source:{},fundamentals:[],gaps:[],
+  contract_dates:{status:'collected',data_as_of:'2026-11-02',reference_url:'https://www.shfe.com.cn/reports/businessdata/prmsummary/',notice:'未含法定节假日调整',contracts:[{contract:'rb2701',listed_on:'2026-01-16',listed_expiry_date:'2027-01-15',delivery_start:'2027-01-18',delivery_end:'2027-01-19'}]},
+  exchange_parameters:{status:'collected',data_as_of:'2026-11-03',reference_url:'javascript:alert(1)',notice:'非经纪商保证金',contracts:[{contract:'rb2701',spec_long_margin_pct:7,spec_short_margin_pct:null,hedge_long_margin_pct:6,hedge_short_margin_pct:6.5,upper_limit_pct:5,lower_limit_pct:4,additional_limit_notice_required:true}]}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const s of ['合约日期与交易所参数','2026-11-02','2026-11-03','2027-01-15','一般买保证金（%）','套保卖保证金（%）','未提供','须查原公告','未含法定节假日调整','非经纪商保证金'])assert(rendered.includes(s),s);
+ assert(!rendered.includes('javascript:')&&!rendered.includes('设置参数')&&!rendered.includes('undefined'));
+ assert.equal(e.requests.length,2);assert(!e.submit.disabled);
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();console.log('hub journeys ok: 9 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

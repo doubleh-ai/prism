@@ -7,7 +7,7 @@ from pathlib import Path
 def test_runtime_shell_login_and_diagnostics_share_asset_generation():
     root = Path(__file__).resolve().parent.parent
     shell = (root / "templates/app.html").read_text()
-    versions = re.findall(r'(?:src|href)="/static/[^"?]+\?v=([^"]+)"', shell)
+    versions = re.findall(r'(?:src|href)="/static/[^"?]+\?v=([^"#]+)(?:#[^"]*)?"', shell)
     assert versions and len(set(versions)) == 1, "Mixed UI generations can revive retired entry points"
     version = versions[0]
     core = (root / "static/js/app.core.js").read_text()
@@ -17,3 +17,5 @@ def test_runtime_shell_login_and_diagnostics_share_asset_generation():
     assert re.search(r"prism-workbench-v([^']+)'", sw).group(1) == version
     assert f"path + '?v={version}'" in sw
     assert f"app.css?v={version}" in login
+    recovery = (root / "templates/recover.html").read_text()
+    assert set(re.findall(r'/static/[^"?]+\?v=([^"#]+)', recovery)) == {version}

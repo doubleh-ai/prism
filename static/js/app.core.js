@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '93',
+  _clientAssetVersion: '111',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -539,12 +539,47 @@ document.addEventListener('click', function(e) {
   var sd = document.getElementById('skillDrawer');
   if (sd && sd.style.display==='block' && !e.target.closest('#skillDrawer') && !e.target.closest('#cmpTools')) sd.style.display='none';
 });
-document.getElementById('input').addEventListener('keydown', function(e) {
-  var key = e.key||e.code||'';
-  if (key==='Enter'&&!e.shiftKey) { e.preventDefault(); if (App.selectAC()) return; App.send(); return; }
-  if (key==='Tab'||e.keyCode===9) { e.preventDefault(); var dd=document.getElementById('acDropdown'); if (dd.style.display!=='none') { if (App.acIdx<0) { App.moveAC(1); } else { App.selectAC(); } return; } App.showAC(); return; }
-  if (key==='ArrowDown'||e.keyCode===40) { e.preventDefault(); App.moveAC(1); return; }
-  if (key==='ArrowUp'||e.keyCode===38) { e.preventDefault(); App.moveAC(-1); return; }
-  if (key==='Escape'||e.keyCode===27) { App.hideAC(); return; }
-});
+(function bindComposerKeys(input) {
+  var composing = false;
+  var imeEnterDown = false;
+  var compositionEndedAt = 0;
+  input.addEventListener('compositionstart', function() {
+    composing = true; imeEnterDown = false; compositionEndedAt = 0;
+  });
+  input.addEventListener('compositionend', function() {
+    composing = false; compositionEndedAt = Date.now();
+  });
+  input.addEventListener('blur', function() {
+    composing = false; imeEnterDown = false; compositionEndedAt = 0;
+  });
+  input.addEventListener('keyup', function() {
+    imeEnterDown = false; compositionEndedAt = 0;
+  });
+  input.addEventListener('keydown', function(e) {
+    var enter = e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.keyCode === 13;
+    if (composing || e.isComposing || e.keyCode === 229) {
+      if (enter) imeEnterDown = true;
+      return;
+    }
+    // The same confirmation may emit an unflagged Enter after compositionend.
+    // Hold it until keyup; a short grace also covers composition-end-first order.
+    var sinceCompositionEnd = Date.now() - compositionEndedAt;
+    if (enter && !e.shiftKey && (imeEnterDown ||
+        (compositionEndedAt && sinceCompositionEnd >= 0 && sinceCompositionEnd < 80))) {
+      e.preventDefault(); imeEnterDown = true; return;
+    }
+    if (!enter) { imeEnterDown = false; compositionEndedAt = 0; }
+
+    var key = e.key || e.code || '';
+    if (key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!e.repeat && !App.selectAC()) App.send();
+      return;
+    }
+    if (key==='Tab'||e.keyCode===9) { e.preventDefault(); var dd=document.getElementById('acDropdown'); if (dd.style.display!=='none') { if (App.acIdx<0) { App.moveAC(1); } else { App.selectAC(); } return; } App.showAC(); return; }
+    if (key==='ArrowDown'||e.keyCode===40) { e.preventDefault(); App.moveAC(1); return; }
+    if (key==='ArrowUp'||e.keyCode===38) { e.preventDefault(); App.moveAC(-1); return; }
+    if (key==='Escape'||e.keyCode===27) { App.hideAC(); return; }
+  });
+})(document.getElementById('input'));
 document.getElementById('input').addEventListener('input', function() { App.showAC(); this.style.height='auto'; this.style.height=Math.min(140,Math.max(24,this.scrollHeight))+'px'; });

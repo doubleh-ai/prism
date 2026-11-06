@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation, localcontext
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import HTTPException
@@ -27,6 +27,7 @@ from ..research_context import (
     source_timestamp,
 )
 from ..source_urls import redact_source_text, source_display_payload
+from .quantities import audit_claims
 
 TERMINAL = {"completed", "partial", "failed", "cancelled"}
 STAGES = {"queued", "discovering", "collecting", "extracting", "checking", "synthesizing"}
@@ -336,9 +337,32 @@ def ingest_tool_result(username: str, run_id: str, call: dict, block: dict, refs
                     "retrieved_at": source_timestamp(ref.get("retrieved_at")),
                     "published_at": published_at,
                     "publication_precision": precision,
-                    "publication_basis": "tool_metadata" if published_at else "unknown",
+                    "publication_basis": (
+                        ref.get("published_at_basis")
+                        if ref.get("published_at_basis") in {"page_metadata", "source_index_metadata"}
+                        else "tool_metadata"
+                    )
+                    if published_at
+                    else "unknown",
+                    "source_index": {
+                        "url": _safe_url(ref.get("index_source_url")),
+                        "body_sha256": ref["index_body_sha256"],
+                    }
+                    if _safe_url(ref.get("index_source_url"))
+                    and isinstance(ref.get("index_body_sha256"), str)
+                    and re.fullmatch(r"[a-f0-9]{64}", ref["index_body_sha256"])
+                    else None,
                     "data_period": None,
                     "content_sha256": content_hash,
+                    "retrieved_body_sha256": ref.get("body_sha256")
+                    if isinstance(ref.get("body_sha256"), str)
+                    and re.fullmatch(r"[a-f0-9]{64}", ref["body_sha256"])
+                    else None,
+                    "pdf_page_range": ref.get("page_range")
+                    if isinstance(ref.get("page_range"), list)
+                    and len(ref["page_range"]) <= 20
+                    and all(type(p) is int and 1 <= p <= 2000 for p in ref["page_range"])
+                    else None,
                     "receipt_sha256": _hash(text),
                     "hash_basis": "normalized_tool_return"
                     if tool == "WebFetch"
@@ -414,17 +438,27 @@ def _records(db, table, run_id):
 
 def read_research_run(username: str, run_id: str) -> dict:
     init_research_db()
+    from .history_checks import cross_run_checks
+    from .knowledge import change_notices, init_knowledge_db
+    from .model_review import present as present_model_review
+
+    init_knowledge_db()
     with get_db() as db:
         run = _owned(db, username, run_id)
+        claims = _records(db, "research_claims", run_id)
         return source_display_payload(
             {
                 "run": run,
                 "documents": _records(db, "research_documents", run_id),
                 "passages": _records(db, "research_passages", run_id),
-                "claims": _records(db, "research_claims", run_id),
+                "claims": claims,
+                "numerical_checks": audit_claims(claims),
+                "history_checks": cross_run_checks(db, username, run_id),
+                "model_review": present_model_review(run, claims),
                 "report_revisions": _records(db, "research_revisions", run_id),
                 "relations": _records(db, "research_relations", run_id),
                 "gaps": run["gaps"],
+                "knowledge_changes": change_notices(db, username, run_id),
             }
         )
 
@@ -448,8 +482,15 @@ def _short(value, limit=500):
 
 def _decimal(value):
     try:
-        result = Decimal(str(value).replace(",", ""))
-        return result if result.is_finite() and abs(result) < Decimal("1e100") else None
+        raw = str(value)
+        if len(raw) > 100 or not re.fullmatch(
+            r"[+-]?(?:\d{1,3}(?:,\d{3}){1,25}|\d{1,80})(?:\.\d{1,24})?(?:[eE][+-]?\d{1,3})?",
+            raw,
+            flags=re.ASCII,
+        ):
+            return None
+        result = Decimal(raw.replace(",", ""))
+        return result if result.is_finite() and result.copy_abs() < Decimal("1e100") else None
     except (InvalidOperation, ValueError):
         return None
 
@@ -480,9 +521,9 @@ def _claim(candidate, passages, documents, existing):
     all_ids = set(links["supports"] + links["opposes"] + links["background"])
     quotes = candidate.get("quotes", {})
     if not isinstance(quotes, dict) or any(
-        pid not in all_ids or not isinstance(quote, str) for pid, quote in quotes.items()
+        pid not in all_ids or not isinstance(quote, str) or len(quote) > 600 for pid, quote in quotes.items()
     ):
-        raise HTTPException(422, "引文必须绑定本轮引用")
+        raise HTTPException(422, "引文必须绑定本轮引用，且每条不超过600字")
     if any(not quote.strip() or quote not in passages[pid]["excerpt"] for pid, quote in quotes.items()):
         gaps.append("quote_not_in_passage")
     kind = candidate["kind"]
@@ -506,14 +547,18 @@ def _claim(candidate, passages, documents, existing):
     period = _short(candidate.get("period"), 120)
     unit = _short(candidate.get("unit"), 80)
     currency = _short(candidate.get("currency"), 30)
-    value = _short(str(candidate["value"]), 100) if candidate.get("value") is not None else None
+    value = str(candidate["value"]) if candidate.get("value") is not None else None
+    if value is not None and len(value) > 100:
+        raise HTTPException(422, "数字过长，不能截断为另一个数值")
     formula = None
     if value is not None and (not period or not unit):
         gaps.append("numeric_basis_missing")
     if kind == "fact" and value is not None:
         numeric = _decimal(value)
         numbers = [
-            _decimal(n) for p in supports for n in re.findall(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?", p["excerpt"])
+            _decimal(n)
+            for p in supports
+            for n in re.findall(r"(?<![A-Za-z0-9_.])-?\d[\d,]*(?:\.\d+)?", p["excerpt"], flags=re.ASCII)
         ]
         if numeric is None or numeric not in numbers:
             gaps.append("value_not_in_excerpt")
@@ -534,7 +579,9 @@ def _claim(candidate, passages, documents, existing):
             a, b = [existing[i] for i in inputs]
             values = [_decimal(c.get("value")) for c in (a, b)]
             formula = {"operator": raw["operator"], "input_claim_ids": inputs, "computed_value": None}
-            if None in values or any(c["citation_status"] != "valid" for c in (a, b)):
+            if inputs[0] == inputs[1]:
+                gaps.append("duplicate_calculation_input")
+            elif None in values or any(c["citation_status"] != "valid" for c in (a, b)):
                 gaps.append("calculation_input_unchecked")
             else:
                 x, y = values
@@ -547,10 +594,21 @@ def _claim(candidate, passages, documents, existing):
                         "multiply": lambda: x * y,
                         "divide": lambda: x / y,
                     }
-                    computed = operations[raw["operator"]]()
-                    formula["computed_value"] = str(computed)
-                    if _decimal(value) != computed:
-                        gaps.append("calculation_mismatch")
+                    try:
+                        with localcontext() as context:
+                            context.prec = 220
+                            context.Emax, context.Emin = 10000, -10000
+                            computed = operations[raw["operator"]]()
+                            if computed.copy_abs() >= Decimal("1e100") or (
+                                computed != 0 and computed.adjusted() < -999
+                            ):
+                                gaps.append("calculation_out_of_range")
+                            else:
+                                formula["computed_value"] = str(computed)
+                                if _decimal(value) != computed:
+                                    gaps.append("calculation_mismatch")
+                    except DecimalException:
+                        gaps.append("calculation_out_of_range")
             if a.get("period") != b.get("period") or period != a.get("period"):
                 gaps.append("period_mismatch")
             if a.get("currency") != b.get("currency") or currency != a.get("currency"):
@@ -581,6 +639,7 @@ def _claim(candidate, passages, documents, existing):
         "unit": unit,
         "currency": currency,
         "accounting_basis": _short(candidate.get("accounting_basis"), 300),
+        "metric": _short(candidate.get("metric"), 80),
         "entities": [_short(v, 120) for v in candidate.get("entities", [])[:20] if isinstance(v, str)]
         if isinstance(candidate.get("entities", []), list)
         else [],
@@ -596,9 +655,15 @@ def _claim(candidate, passages, documents, existing):
 def record_claims(username: str, run_id: str, claims: list[dict]) -> dict:
     if not isinstance(claims, list) or not 1 <= len(claims) <= 20:
         raise HTTPException(422, "每次登记 1–20 条候选结论")
+    from ..productivity.store import _active
+    from .history_checks import cross_run_checks
+    from .knowledge import init_knowledge_db
+
+    init_knowledge_db()
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
+            _active(db, username)
             run = _owned(db, username, run_id, writable=True)
             passages = {p["passage_id"]: p for p in _records(db, "research_passages", run_id)}
             documents = {d["document_id"]: d for d in _records(db, "research_documents", run_id)}
@@ -620,11 +685,19 @@ def record_claims(username: str, run_id: str, claims: list[dict]) -> dict:
         except BaseException:
             db.execute("ROLLBACK")
             raise
-    return {"claims": result, "semantic_status": "unreviewed"}
+    with get_db() as db:
+        return {
+            "claims": result,
+            "semantic_status": "unreviewed",
+            "numerical_checks": audit_claims(list(existing.values())),
+            "history_checks": cross_run_checks(db, username, run_id),
+        }
 
 
 def finalize_research_run(username: str, run_id: str, text: str, *, error=False, cancelled=False) -> dict:
     """Freeze one report per run. Retrying returns the identical saved revision."""
+    from .model_review import present as present_model_review
+
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -635,7 +708,27 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
                 return json.loads(old[0])
             claims = _records(db, "research_claims", run_id)
             relations = _records(db, "research_relations", run_id)
+            numerical_checks = audit_claims(claims)
+            if (run.get("model_review") or {}).get("status") == "running":
+                run["model_review"] = {
+                    **run["model_review"],
+                    "status": "failed",
+                    "reason": "interrupted",
+                    "usage_complete": False,
+                    "interrupted_usage_unknown": True,
+                }
+            model_review = present_model_review(run, claims)
             gaps = list(run["gaps"])
+            if model_review:
+                if model_review["status"] != "completed":
+                    gaps.append("model_review_incomplete")
+                else:
+                    if model_review["unreviewed_claims_count"]:
+                        gaps.append("model_review_partial_scope")
+                    if any(a["effective_verdict"] != "supported" for a in model_review["assessments"]):
+                        gaps.append("model_review_disagreement")
+            if numerical_checks["conflicts"]:
+                gaps.append("numeric_evidence_conflict")
             if not claims:
                 gaps.append("structured_claims_missing")
             if any(c["citation_status"] != "valid" for c in claims):
@@ -713,6 +806,8 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
                 "narrative_status": "model_output_unreviewed",
                 "acceptance_status": status,
                 "semantic_status": "unreviewed",
+                "numerical_checks": numerical_checks,
+                "model_review": model_review,
                 "gaps": list(dict.fromkeys(gaps)),
             }
             db.execute(

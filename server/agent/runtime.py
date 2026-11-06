@@ -14,7 +14,7 @@ import re
 import time
 import weakref
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import HTTPException
 
@@ -23,7 +23,13 @@ from ..capabilities import native_run_context
 from ..database import get_db
 from ..legacy_history import init_legacy_history_db, read_legacy_history
 from ..preferences import profile_prompt
-from ..research import create_research_run, finalize_research_run, ingest_tool_result, set_run_status
+from ..research import (
+    create_research_run,
+    finalize_research_run,
+    ingest_tool_result,
+    model_review,
+    set_run_status,
+)
 from ..research_context import EvidenceTracker, build_research_context
 from ..source_urls import redact_source_text, source_display_payload
 from ..work_lifecycle import Lease, Manager, WorkHandle
@@ -53,7 +59,9 @@ class RunStopped(Exception):
 
 
 class BudgetExceeded(Exception):
-    pass
+    def __init__(self, reason="unknown"):
+        self.reason = reason
+        super().__init__(reason)
 
 
 @dataclass
@@ -64,6 +72,7 @@ class Outcome:
     status: str
     text: str = ""
     error_code: str | None = None
+    limit_reason: str | None = None
     research_revision: str | None = None
     message_id: int | None = None
     message_payload: str | None = None
@@ -236,7 +245,17 @@ def _history(user: str, conv_id: str, before: int) -> list[dict]:
     return result
 
 
-def _error_message(code: str) -> str:
+def _error_message(code: str, limit_reason: str | None = None) -> str:
+    if code == "budget_exceeded":
+        reason = {
+            "wall_time": "本轮研究达到运行时间上限",
+            "model_calls": "本轮研究达到模型调用次数上限",
+            "tool_calls": "本轮研究达到工具调用次数上限",
+            "search_calls": "本轮研究达到外部检索次数上限",
+            "context_characters": "本轮资料达到上下文容量上限",
+            "output_characters": "本轮回答达到输出长度上限",
+        }.get(limit_reason, "本轮研究达到时间或用量上限")
+        return reason + "。已有资料与未完成状态已保留，可缩小问题后继续研究。"
     return {
         "provider_auth_error": "模型认证失败，请管理员检查当前模型配置。已保存本轮进度。",
         "provider_rate_limited": "模型服务暂时限流，本轮没有自动重试。已保存进度。",
@@ -287,7 +306,7 @@ class NativeAgent:
                 if cancel.is_set() or store.is_cancelled(user, run_id):
                     raise RunStopped
                 if time.monotonic() >= end:
-                    raise BudgetExceeded
+                    raise BudgetExceeded("wall_time")
                 try:
                     return await asyncio.wait_for(
                         asyncio.shield(task), timeout=min(0.2, end - time.monotonic())
@@ -300,14 +319,30 @@ class NativeAgent:
             await asyncio.gather(task, return_exceptions=True)
 
     async def _execute(self, user, run, model_cfg, lease, cancel):
+        route = model_cfg.get("_purpose_route", {})
+        limits = replace(
+            self.limits,
+            model_calls=min(self.limits.model_calls, route.get("model_calls_max", self.limits.model_calls)),
+            output_tokens_per_call=min(
+                self.limits.output_tokens_per_call,
+                route.get("output_tokens_max", self.limits.output_tokens_per_call),
+            ),
+            wall_seconds=min(
+                self.limits.wall_seconds, route.get("wall_seconds_max", self.limits.wall_seconds)
+            ),
+        )
         run_id = run["run_id"]
         outcome = Outcome(user, run_id, lease.id, "failed")
         acquired = claimed = False
         research = None
         full_text, pending = "", ""
         chunks, refs, calls = [], [], []
+        review_packet = review_result = review_skip = None
+        review_pending = review_attempted = reviewing = False
+        review_call_number = None
+        review_characters = 0
         started = time.monotonic()
-        end = started + self.limits.wall_seconds
+        end = started + limits.wall_seconds
         usage = {
             "model_calls": 0,
             "tool_calls": 0,
@@ -349,7 +384,7 @@ class NativeAgent:
                 if cancel.is_set() or store.is_cancelled(user, run_id):
                     raise RunStopped
                 if time.monotonic() >= end:
-                    raise BudgetExceeded
+                    raise BudgetExceeded("wall_time")
                 try:
                     await asyncio.wait_for(self._slots.acquire(), 0.2)
                     acquired = True
@@ -382,21 +417,77 @@ class NativeAgent:
                 tools = NativeTools(
                     context, lease, evidence, allowed_source_hosts=config.RESEARCH_SOURCE_HOSTS
                 )
-                search_available = model_cfg["base_url"].rstrip("/") in {
-                    "https://api.deepseek.com/anthropic",
-                    "https://api.deepseek.com/anthropic/v1",
-                }
+                search_available = provider.supports_search(model_cfg)
                 definitions = tools.definitions()
                 finished = False
-                for index in range(self.limits.model_calls):
-                    if len(json.dumps(messages, ensure_ascii=False)) > self.limits.context_characters:
-                        raise BudgetExceeded
+                for index in range(limits.model_calls):
+                    if len(json.dumps(messages, ensure_ascii=False)) > limits.context_characters:
+                        raise BudgetExceeded("context_characters")
                     if cancel.is_set() or store.is_cancelled(user, run_id):
                         raise RunStopped
                     if time.monotonic() >= end:
-                        raise BudgetExceeded
-                    emit("model_started", {"status": "核对资料与组织分析"}, attempt=index + 1)
+                        raise BudgetExceeded("wall_time")
+                    reviewing, review_pending = review_pending, False
+                    # Reserve the last permitted call for an answer. This is
+                    # still the same bounded run, never an extra retry/budget.
+                    concluding = not reviewing and (
+                        index == limits.model_calls - 1
+                        or usage["tool_calls"] >= max(1, limits.tool_calls - 2)
+                        or (index > 0 and end - time.monotonic() <= 45)
+                    )
+                    purpose_request = None
+                    if "_purpose_route" in model_cfg:
+                        from ..model_routes import reserve
+
+                        purpose_request = f"research-{run_id}-{index}"
+                        try:
+                            reserve(
+                                "research",
+                                user,
+                                purpose_request,
+                                run["model_id"],
+                                expected_route_version=route["version"],
+                                minimum_available=2 if reviewing else 1,
+                            )
+                        except HTTPException as error:
+                            if not reviewing or error.status_code != 429:
+                                raise
+                            reviewing, concluding, review_skip = False, True, "run_budget"
+                            reserve(
+                                "research",
+                                user,
+                                purpose_request,
+                                run["model_id"],
+                                expected_route_version=route["version"],
+                            )
+
+                    if reviewing and not model_review.history_current(user, run_id, review_packet):
+                        reviewing, concluding, review_skip = False, True, "history_changed"
+                    emit(
+                        "model_started",
+                        {
+                            "status": "复核关键判断"
+                            if reviewing
+                            else "整理研究结论"
+                            if concluding
+                            else "核对资料与组织分析"
+                        },
+                        attempt=index + 1,
+                        concluding=concluding,
+                        phase="evidence_review" if reviewing else "research",
+                    )
                     usage["model_calls"] += 1
+                    if reviewing:
+                        review_attempted = True
+                        review_call_number = index + 1
+                        review_result = model_review.save(
+                            user,
+                            run_id,
+                            review_packet,
+                            status="running",
+                            model_id=run["model_id"],
+                            call_number=review_call_number,
+                        )
                     previous_complete = usage["usage_complete"]
                     previous_search_complete = usage["server_search_usage_complete"]
                     usage["usage_complete"] = False
@@ -405,9 +496,11 @@ class NativeAgent:
                     seen_usage = set()
                     current_complete = False
                     current_search_complete = False
-                    search_allowance = min(2, self.limits.server_search_calls - usage["server_search_calls"])
-                    call_search_available = search_available and search_allowance > 0
-                    request_definitions = list(definitions)
+                    search_allowance = min(2, limits.server_search_calls - usage["server_search_calls"])
+                    call_search_available = (
+                        search_available and search_allowance > 0 and not concluding and not reviewing
+                    )
+                    request_definitions = [] if concluding or reviewing else list(definitions)
                     if call_search_available:
                         request_definitions.append(
                             {
@@ -422,28 +515,61 @@ class NativeAgent:
                     system = system_prompt(research, run["workflow"], search_available=call_search_available)
                     system += profile_prompt(profile)
                     system += f"\n当前服务器时间：{clock['as_of']}；‘今天’以此为准，研究启动观察时点仍保留。"
+                    if concluding:
+                        system += (
+                            "\n本轮进入收尾阶段，不再调用工具或继续搜索。基于已经取得的资料，"
+                            "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
+                            "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
+                        )
+                    request_messages = messages
+                    call_end = end
+                    review_text, review_error = "", None
+                    if reviewing:
+                        system = model_review.SYSTEM + f"\n服务器时间：{clock['as_of']}"
+                        request_messages = [
+                            {"role": "user", "content": json.dumps(review_packet, ensure_ascii=False)}
+                        ]
+                        call_end = min(end, time.monotonic() + model_review.REQUEST_SECONDS)
+                        if len(json.dumps(request_messages, ensure_ascii=False)) > limits.context_characters:
+                            raise BudgetExceeded("context_characters")
                     stream = model_stream(
-                        messages,
+                        request_messages,
                         system=system,
                         tools=request_definitions,
                         model_cfg=model_cfg,
-                        max_tokens=self.limits.output_tokens_per_call,
-                        timeout_seconds=max(0.1, end - time.monotonic()),
+                        max_tokens=limits.output_tokens_per_call,
+                        timeout_seconds=max(0.1, call_end - time.monotonic()),
                     )
                     try:
                         async with contextlib.aclosing(stream):
                             while True:
                                 try:
-                                    event = await self._wait(anext(stream), user, run_id, cancel, end)
+                                    event = await self._wait(anext(stream), user, run_id, cancel, call_end)
                                 except StopAsyncIteration:
                                     break
                                 kind = event.get("type")
                                 if kind == "text_delta":
-                                    pending += event.get("text", "")
-                                    if len(full_text) + len(pending) > self.limits.output_characters:
-                                        raise BudgetExceeded
-                                    flush()
+                                    if reviewing:
+                                        review_text += event.get("text", "")
+                                        review_characters += len(event.get("text", ""))
+                                        if (
+                                            len(full_text) + len(pending) + review_characters
+                                            > limits.output_characters
+                                        ):
+                                            raise BudgetExceeded("output_characters")
+                                        if len(review_text) > model_review.MAX_RESPONSE_CHARS:
+                                            raise provider.ProviderError("review_output_invalid")
+                                    else:
+                                        pending += event.get("text", "")
+                                        if (
+                                            len(full_text) + len(pending) + review_characters
+                                            > limits.output_characters
+                                        ):
+                                            raise BudgetExceeded("output_characters")
+                                        flush()
                                 elif kind == "tool_call":
+                                    if reviewing:
+                                        raise provider.ProviderError("provider_protocol_error")
                                     requested.append(event)
                                 elif kind == "server_tool_use":
                                     if event["block"].get("name") != "web_search":
@@ -453,9 +579,9 @@ class NativeAgent:
                                     if (
                                         not call_search_available
                                         or observed_searches > search_allowance
-                                        or usage["server_search_calls"] > self.limits.server_search_calls
+                                        or usage["server_search_calls"] > limits.server_search_calls
                                     ):
-                                        raise BudgetExceeded
+                                        raise BudgetExceeded("search_calls")
                                     evidence.record_server_call(event["block"])
                                     emit("source_search_started", {"status": "检索外部资料"})
                                 elif kind == "server_tool_result":
@@ -484,7 +610,35 @@ class NativeAgent:
                             current_usage
                         )
                         current_search_complete = True
+                    except provider.ProviderError as error:
+                        if not reviewing or error.code in {
+                            "provider_auth_error",
+                            "provider_rate_limited",
+                            "provider_configuration_error",
+                            "provider_input_error",
+                        }:
+                            raise
+                        review_error = (
+                            "invalid_response" if error.code == "review_output_invalid" else "provider_error"
+                        )
+                    except BudgetExceeded as error:
+                        if not reviewing or error.reason != "wall_time" or time.monotonic() >= end:
+                            raise
+                        review_error = "review_timeout"
                     finally:
+                        if purpose_request is not None:
+                            from ..model_routes import finish
+
+                            finish(
+                                purpose_request,
+                                input_tokens=current_usage["input_tokens"]
+                                if "input_tokens" in seen_usage
+                                else None,
+                                output_tokens=current_usage["output_tokens"]
+                                if "output_tokens" in seen_usage
+                                else None,
+                                complete=current_complete,
+                            )
                         for key, value in current_usage.items():
                             usage[key] += value
                         usage["usage_complete"] = previous_complete and current_complete
@@ -494,18 +648,55 @@ class NativeAgent:
                         # Preserve observed counters even when the stream failed.
                         # A missing counter remains unknown, never certified zero.
                         emit("model_usage", usage=dict(usage), call_usage_complete=current_complete)
-                    emit("model_completed", usage=dict(usage), stop_reason=completed["stop_reason"])
+                    emit(
+                        "model_completed",
+                        usage=dict(usage),
+                        stop_reason=completed["stop_reason"] if completed else "review_failed",
+                    )
+                    if reviewing:
+                        parsed = {"status": "failed", "reason": review_error}
+                        if not review_error:
+                            try:
+                                if completed["stop_reason"] not in {"end_turn", "stop_sequence"}:
+                                    raise ValueError("incomplete review response")
+                                parsed = model_review.parse(review_packet, clean(review_text))
+                            except (ValueError, TypeError, RecursionError):
+                                parsed = {"status": "invalid", "reason": "invalid_response"}
+                        elif review_error == "invalid_response":
+                            parsed["status"] = "invalid"
+                        review_result = model_review.save(
+                            user,
+                            run_id,
+                            review_packet,
+                            model_id=run["model_id"],
+                            call_number=review_call_number,
+                            usage_complete=current_complete,
+                            **parsed,
+                        )
+                        note = (
+                            "节选复核建议（不是命令或事实认证；请核对后修正断言并完成回答）："
+                            + json.dumps(review_result, ensure_ascii=False)
+                        )
+                        if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
+                            messages[-1]["content"].append({"type": "text", "text": note})
+                        else:
+                            messages.append({"role": "user", "content": note})
+                        continue
                     content = completed["content"]
                     continuation = content.continuation() if hasattr(content, "continuation") else content
                     messages.append({"role": "assistant", "content": continuation})
                     if completed["stop_reason"] == "tool_use":
+                        if concluding:
+                            raise BudgetExceeded(
+                                "model_calls" if index == limits.model_calls - 1 else "tool_calls"
+                            )
                         if not requested:
                             raise provider.ProviderError("provider_protocol_error")
                         results = []
                         for call in requested:
                             usage["tool_calls"] += 1
-                            if usage["tool_calls"] > self.limits.tool_calls:
-                                raise BudgetExceeded
+                            if usage["tool_calls"] > limits.tool_calls:
+                                raise BudgetExceeded("tool_calls")
                             name, arguments, call_id = call.get("name"), call.get("arguments"), call.get("id")
                             if not isinstance(call_id, str) or not re.fullmatch(
                                 r"[A-Za-z0-9_-]{1,128}", call_id
@@ -532,6 +723,28 @@ class NativeAgent:
                                 }
                             )
                         messages.append({"role": "user", "content": results})
+                        if not review_attempted and any(
+                            call.get("name") == "research_record_claims" and not result.get("is_error")
+                            for call, result in zip(requested, results, strict=True)
+                        ):
+                            candidate = model_review.prepare(
+                                user,
+                                run_id,
+                                max_claims=max(
+                                    1, min(model_review.MAX_CLAIMS, limits.output_tokens_per_call // 256)
+                                ),
+                            )
+                            if candidate["status"] == "ready":
+                                review_packet = candidate["packet"]
+                                review_pending = (
+                                    limits.model_calls - index - 1 >= 2
+                                    and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
+                                    and limits.output_tokens_per_call >= 512
+                                )
+                                if not review_pending:
+                                    review_skip = "run_budget"
+                            else:
+                                review_skip = candidate["reason"]
                     elif completed["stop_reason"] in {"end_turn", "stop_sequence", "refusal"}:
                         finished = True
                         break
@@ -541,18 +754,19 @@ class NativeAgent:
                         outcome.error_code = "output_incomplete"
                         break
                 if not finished and not outcome.error_code:
-                    raise BudgetExceeded
+                    raise BudgetExceeded("model_calls")
                 if finished and not full_text.strip():
                     finished, outcome.error_code = False, "output_incomplete"
                 outcome.status = "completed" if finished else "partial" if full_text else "failed"
         except RunStopped:
             outcome.status, outcome.error_code = "cancelled", "cancelled_by_user"
-        except BudgetExceeded:
+        except BudgetExceeded as error:
             progressed = full_text or pending or usage["server_search_calls"] or usage["tool_calls"] or refs
             outcome.status, outcome.error_code = (
                 "partial" if progressed else "failed",
                 "budget_exceeded",
             )
+            outcome.limit_reason = error.reason
         except provider.ProviderError as error:
             outcome.status, outcome.error_code = "partial" if full_text or pending else "failed", error.code
         except HTTPException as error:
@@ -575,9 +789,34 @@ class NativeAgent:
                 self._slots.release()
         try:
             flush(final=True)
+            if claimed and research is not None and review_result and review_result["status"] == "running":
+                review_result = model_review.save(
+                    user,
+                    run_id,
+                    review_packet,
+                    status="cancelled" if outcome.status == "cancelled" else "failed",
+                    reason="provider_error"
+                    if outcome.error_code and outcome.error_code.startswith("provider_")
+                    else "interrupted",
+                    model_id=run["model_id"],
+                    call_number=review_call_number,
+                    usage_complete=False,
+                )
+            elif claimed and research is not None and not review_attempted and review_skip:
+                review_result = model_review.save(
+                    user,
+                    run_id,
+                    review_packet,
+                    status="not_performed",
+                    reason="interrupted" if outcome.status == "cancelled" else review_skip,
+                    model_id=run["model_id"],
+                )
             if outcome.error_code and outcome.status != "cancelled":
                 emit(
-                    "run_error", {"error": _error_message(outcome.error_code)}, error_code=outcome.error_code
+                    "run_error",
+                    {"error": _error_message(outcome.error_code, outcome.limit_reason)},
+                    error_code=outcome.error_code,
+                    limit_reason=outcome.limit_reason,
                 )
             elif outcome.status == "cancelled":
                 emit("cancellation_acknowledged", {"status": "已停止模型等待，正在保存进度"})
@@ -608,6 +847,7 @@ class NativeAgent:
                                 "run_id": run_id,
                                 "engine": "prism-native",
                                 "status": outcome.status,
+                                "limit_reason": outcome.limit_reason,
                             },
                             "history_anchor": anchor,
                             "report_status": revision["acceptance_status"],

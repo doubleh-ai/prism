@@ -24,11 +24,14 @@ const settled=()=>new Promise(setImmediate);
 function rendersBoundariesAndSafeLinks() {
   const {app}=environment();app._operationsData=snapshot();
   let html=app._renderOperationsContent();
-  for(const text of ['CI 检查','候选构建','生产发布记录','尚未取得可信的生产执行记录','本实例版本，非生产核验','停止剩余步骤不等于回滚','3 分钟','北京时间','打开流程 / 在 GitHub 取消','草稿'])assert(html.includes(text),text);
+  for(const text of ['CI 检查','候选构建','生产发布记录','执行记录未接入','本实例版本，非生产核验','停止剩余步骤不等于回滚','3 分钟','北京时间','打开流程 / 在 GitHub 取消','草稿'])assert(html.includes(text),text);
   assert.equal((html.match(/class="operations-run"/g)||[]).length,2);
-  assert(html.includes('当前开放 PR'));assert(!html.includes('草稿与合并状态单独显示'));
+  assert(html.includes('待处理变更'));assert(!html.includes('草稿与合并状态单独显示'));
   assert(html.includes('href="https://github.com/doubleh-ai/prism/actions/runs/2"'));
-  assert(html.includes('<button disabled>部署不可用</button>'));
+  assert(!html.includes('<button disabled>部署不可用</button>'));
+  assert.equal((html.match(/issues\/9/g)||[]).length,1,'one visible independent stop entry');
+  assert(html.includes('<details class="operations-help">'));
+  assert(!html.includes('每次变更都有独立记录'));
   assert(!html.includes('onclick='),'the observation page must not contain mutation actions');
   app._operationsData.github.runs[0].conclusion='startup_failure';
   html=app._renderOperationsContent();assert(html.includes('class="operations-state attention">启动失败</span>'),'workflow startup failure must be an explicit failure, not neutral completion');
@@ -57,6 +60,22 @@ function validationStagesHaveChineseLabelsWithoutProductionClaims() {
     assert(!html.includes('该发布已完成独立验收。') && !html.includes('生产（已验收该版本）'));
     assert(html.includes('通过不代表已经发布。') && html.includes('构建成功不代表生产已更新。'));
   }
+}
+function managementNavigationKeepsActionsInTheirOwnPage() {
+  const {app,document}=environment();
+  app._renderAdminUsers('fixture-admin');
+  const nav=document.getElementById('adminNavigation').innerHTML;
+  let main=document.getElementById('adminPanelInner').innerHTML;
+  assert.equal((nav.match(/_adminSetTab\('operations'\)/g)||[]).length,1);
+  assert(!main.includes('_adminSetTab('),'the page does not duplicate its side navigation');
+  assert(!main.includes('id="adminNewPass"'),'account creation is not shown on the release page');
+  let closed=0;app._closeMobileSidebar=()=>closed++;
+  app._adminSetTab('accounts');
+  main=document.getElementById('adminPanelInner').innerHTML;
+  assert.equal((main.match(/id="adminNewUser"/g)||[]).length,1);
+  assert.equal((main.match(/id="adminNewPass"/g)||[]).length,1);
+  assert(main.includes('autocomplete="new-password"')&&main.includes('role="status"'));
+  assert.equal(closed,1,'mobile navigation reveals the selected page');
 }
 async function adminPermissionClearsSnapshots() {
   const {app,document,timers}=environment();let calls=0;
@@ -125,6 +144,6 @@ async function stalledRequestHasABoundedDeadline() {
   assert.equal(timers.size,1);assert.equal([...timers.values()][0].delay,30000);
 }
 (async()=>{
-  rendersBoundariesAndSafeLinks();validationStagesHaveChineseLabelsWithoutProductionClaims();await adminPermissionClearsSnapshots();await pollsOnlyWhileVisibleWithoutOverlap();await ignoresLateResponsesAfterLeaving();await failuresAndStaleDataStayExplicit();await operationsTabUsesItsOwnReadOnlyEndpoint();nativeHealthShowsConfigurationWithoutAnExternalExecutor();await stalledRequestHasABoundedDeadline();
-  console.log('operations runtime ok: 9 scenarios');
+  rendersBoundariesAndSafeLinks();validationStagesHaveChineseLabelsWithoutProductionClaims();managementNavigationKeepsActionsInTheirOwnPage();await adminPermissionClearsSnapshots();await pollsOnlyWhileVisibleWithoutOverlap();await ignoresLateResponsesAfterLeaving();await failuresAndStaleDataStayExplicit();await operationsTabUsesItsOwnReadOnlyEndpoint();nativeHealthShowsConfigurationWithoutAnExternalExecutor();await stalledRequestHasABoundedDeadline();
+  console.log('operations runtime ok: 10 scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

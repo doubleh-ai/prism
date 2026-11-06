@@ -57,6 +57,83 @@ async def execute(engine):
     return outcome
 
 
+async def test_native_reads_sources_records_typed_numeric_claims_and_saves_conflict(engine, monkeypatch):
+    from server.research import ledger
+    from server.research_context import EvidenceTracker
+
+    run_id = engine.run["run_id"]
+    ledger.create_research_run(
+        engine.user,
+        engine.conv,
+        engine.run["question"],
+        runtime.build_research_context(run_id=run_id, engine="prism-native"),
+    )
+    texts = ["2025年甲公司设计产能120万吨。", "2025年甲公司设计产能130万吨。"]
+    for index, text in enumerate(texts):
+        tracker = EvidenceTracker(run_id)
+        call = {
+            "id": "numeric-source-" + str(index),
+            "name": "WebFetch",
+            "input": {"url": "https://www.sse.com.cn/synthetic-" + str(index)},
+        }
+        tracker.record_call(call)
+        block = {"tool_use_id": call["id"], "content": text}
+        refs = tracker.record_result(block)
+        ledger.ingest_tool_result(engine.user, run_id, call, block, refs)
+    count = []
+
+    async def script(messages, **kwargs):
+        count.append(True)
+        if len(count) == 1:
+            spec = next(t for t in kwargs["tools"] if t["name"] == "research_record_claims")
+            assert spec["input_schema"]["$defs"]["ResearchClaim"]["additionalProperties"] is False
+            name, arguments = "research_read", {}
+        elif len(count) == 2:
+            result = json.loads(messages[-1]["content"][0]["content"])
+            data = result["data"]
+            claims = []
+            for passage in data["passages"]:
+                text = passage["excerpt"]
+                claims.append(
+                    {
+                        "kind": "fact",
+                        "statement": text,
+                        "supports": [passage["passage_id"]],
+                        "quotes": {passage["passage_id"]: text},
+                        "entities": ["甲公司"],
+                        "metric": "设计年产能",
+                        "accounting_basis": "设计产能",
+                        "period": "2025",
+                        "unit": "万吨",
+                        "value": "120" if "120" in text else "130",
+                    }
+                )
+            name, arguments = "research_record_claims", {"claims": claims}
+        else:
+            result = json.loads(messages[-1]["content"][0]["content"])
+            assert result["data"]["numerical_checks"]["conflicts"]
+            yield {
+                "type": "text_delta",
+                "text": "合成资料对同一时期的设计产能给出了不同数字，需要核对原文、统计范围及更正记录，当前不能据此确定供给瓶颈。",
+            }
+            yield done()
+            return
+        call_id = "numeric-native-" + str(len(count))
+        yield {"type": "tool_call", "id": call_id, "name": name, "arguments": arguments}
+        yield done(
+            "tool_use", content=[{"type": "tool_use", "id": call_id, "name": name, "input": arguments}]
+        )
+
+    monkeypatch.setattr(runtime, "model_stream", script)
+    outcome = await execute(engine)
+    assert outcome.status in {"completed", "partial"} and len(count) == 3
+    saved = ledger.read_research_run(engine.user, run_id)
+    assert len(saved["claims"]) == 2
+    assert saved["numerical_checks"]["conflicts"]
+    assert saved["report_revisions"][0]["numerical_checks"]["conflicts"]
+    assert {c["semantic_status"] for c in saved["claims"]} == {"unreviewed"}
+
+
 def events(engine):
     return store.list_events(engine.user, engine.run["run_id"], limit=200)
 
@@ -342,8 +419,42 @@ async def test_unexpected_search_overrun_preserves_observed_attempt(engine, monk
     monkeypatch.setattr(runtime, "model_stream", script)
     outcome = await execute(engine)
     assert outcome.status == "partial" and outcome.error_code == "budget_exceeded"
+    assert outcome.limit_reason == "search_calls"
     assert last_usage(engine)["server_search_calls"] == 2
     assert last_usage(engine)["server_search_usage_complete"] is False
+
+
+async def test_final_allowed_call_produces_answer_without_new_tools(engine, monkeypatch):
+    calls = []
+
+    async def script(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) < engine.service.limits.model_calls:
+            yield done("pause_turn")
+        else:
+            assert kwargs["tools"] == []
+            assert "本轮进入收尾阶段" in kwargs["system"]
+            yield {"type": "text_delta", "text": "基于已有资料的阶段性判断，尚缺最新公告。"}
+            yield done()
+
+    monkeypatch.setattr(runtime, "model_stream", script)
+    outcome = await execute(engine)
+    assert outcome.status == "completed"
+    assert len(calls) == engine.service.limits.model_calls
+    assert last_usage(engine)["model_calls"] == len(calls)
+    assert "阶段性判断" in outcome.text
+    assert any(e["type"] == "model_started" and e["concluding"] for e in events(engine))
+
+
+async def test_context_budget_is_specific_and_persisted_without_model_call(engine):
+    engine.service.limits = runtime.Limits(context_characters=1)
+    outcome = await execute(engine)
+    assert outcome.status == "failed" and outcome.limit_reason == "context_characters"
+    error = next(e for e in events(engine) if e["type"] == "run_error")
+    assert error["limit_reason"] == "context_characters"
+    assert "上下文容量上限" in error["ui"]["error"]
+    assert not any(e["type"] == "model_started" for e in events(engine))
+    assert json.loads(outcome.message_payload)["native_agent"]["limit_reason"] == "context_characters"
 
 
 def claimed_outcome(engine):
