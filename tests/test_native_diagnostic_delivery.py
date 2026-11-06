@@ -231,3 +231,41 @@ async def test_scheduler_stops_and_health_failure_is_unknown(owner, monkeypatch)
     manager.begin_drain(manager.ticket())
     await manager.wait_drained(timeout=1)
     manager.close_development()
+
+
+async def test_failed_sql_batch_releases_only_after_actual_rollback(owner):
+    admitted(owner)
+    manager = Manager()
+    worker = delivery.DiagnosticDelivery(manager)
+    with get_db() as db:
+        db.execute("""CREATE TRIGGER fail_delivery_tick BEFORE INSERT ON diagnostic_events
+                      BEGIN SELECT RAISE(ABORT,'synthetic projection failure'); END""")
+    assert worker.tick() == 0
+    assert worker.health()["status"] == "unavailable" and delivery.pending_count() == 1
+    assert manager.observe()["blocked"] == 0 and not any(manager.observe()["leases"].values())
+    with get_db() as db:
+        assert not db.in_transaction
+        db.execute("DROP TRIGGER fail_delivery_tick")
+    assert worker.tick() == 1 and rows()[0]["occurrences"] == 1
+    manager.begin_drain(manager.ticket())
+    await manager.wait_drained(timeout=1)
+    manager.close_development()
+
+
+def test_unconfirmed_sql_transaction_keeps_the_drain_blocked(owner, monkeypatch):
+    manager = Manager()
+    worker = delivery.DiagnosticDelivery(manager)
+
+    def uncertain():
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+        raise RuntimeError("synthetic unknown rollback")
+
+    monkeypatch.setattr(delivery, "deliver_pending", uncertain)
+    try:
+        assert worker.tick() == 0 and manager.observe()["blocked"] == 1
+    finally:
+        # Test cleanup is not a production reconciliation or drain receipt.
+        with get_db() as db:
+            db.execute("ROLLBACK")
+        manager._pool.shutdown(wait=True)

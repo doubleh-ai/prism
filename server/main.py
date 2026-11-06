@@ -192,6 +192,11 @@ async def lifespan(application):
         diagnostic_delivery.start()
         yield
     finally:
+        # Stop every idle producer before the first await can schedule another
+        # one. Closing one scheduler must not start another shutdown-time batch.
+        for scheduler in (diagnostic_delivery, reminders):
+            if scheduler.task is not None:
+                scheduler.task.cancel()
         await diagnostic_delivery.close()
         await reminders.close()
         await runtime.aclose()

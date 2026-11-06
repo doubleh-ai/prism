@@ -161,6 +161,22 @@ async def test_application_lifespan_binds_one_manager_and_closes_before_replacin
     assert second.observe()["state"] == "closed"
 
 
+async def test_application_shutdown_cancels_all_idle_schedulers_before_yielding(monkeypatch):
+    from server.agent.diagnostic_delivery import DiagnosticDelivery
+    from server.main import lifespan
+    from server.productivity.notifications import ReminderScheduler
+
+    monkeypatch.delenv("PRISM_WORK_CONTROL", raising=False)
+    calls = []
+    monkeypatch.setattr(DiagnosticDelivery, "tick", lambda _: calls.append("diagnostic"))
+    monkeypatch.setattr(ReminderScheduler, "tick", lambda _: calls.append("reminder"))
+    application = SimpleNamespace(state=SimpleNamespace())
+    async with lifespan(application):
+        pass
+    assert calls == []
+    assert application.state.work_runtime.manager.observe()["state"] == "closed"
+
+
 @pytest.mark.asyncio
 async def test_observed_history_cannot_grant_business_parent_or_hide_pending_response():
     _app, manager = application_manager()

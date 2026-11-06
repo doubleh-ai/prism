@@ -95,8 +95,20 @@ class DiagnosticDelivery:
 
     def tick(self):
         try:
-            with self.manager.admit("diagnostic", persist_required=False):
-                count = deliver_pending()
+            with self.manager.admit("diagnostic", persist_required=False) as lease:
+                try:
+                    count = deliver_pending()
+                except Exception:
+                    # A returned synchronous SQL failure has no external worker.
+                    # Only a confirmed closed transaction may release ownership;
+                    # an uncertain rollback still blocks the maintenance drain.
+                    with get_db() as db:
+                        if db.in_transaction:
+                            lease.block("persistence_failed")
+                    self.last_failure = int(time.time())
+                    self.status = "unavailable"
+                    log.warning("native_diagnostic_delivery_unavailable")
+                    return 0
             self.last_success = int(time.time())
             self.last_failure = None
             self.status = "ready"
