@@ -6,6 +6,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
 - 期货资料增加豆粕公开合约和仓单协议读取，区分查询日期、原始报告日期及访问受限；资料缺失时保留其他来源，避免将未取得的会员排名写成已取得。官方数据可用性与实际来源验收仍单独记录。
 
 ### Fixed
