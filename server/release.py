@@ -56,13 +56,16 @@ def parse_changelog(limit: int = 8) -> list[dict[str, Any]]:
                 releases.append(current)
                 if len(releases) >= limit:
                     break
+            current = None
+            section_title = ""
+            section_lines = []
+            if heading.group("version").strip().casefold() == "unreleased":
+                continue
             current = {
                 "version": heading.group("version"),
                 "date": heading.group("date") or "",
                 "sections": [],
             }
-            section_title = ""
-            section_lines = []
             continue
 
         if not current:

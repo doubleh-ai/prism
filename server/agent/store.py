@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from ..database import get_db
 from ..preferences import init_preferences_db, run_profile, snapshot_run
+from ..release import APP_VERSION
 from ..source_urls import redact_source_text, source_display_payload
 
 TERMINAL = frozenset({"completed", "partial", "failed", "cancelled"})
@@ -200,6 +201,17 @@ def init_agent_db():
                 user_message_id INTEGER NOT NULL, assistant_message_id INTEGER,
                 history_anchor_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS native_agent_diagnostic_delivery (
+                run_id TEXT PRIMARY KEY, version TEXT NOT NULL,
+                delivered_at REAL, event_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_native_diagnostic_pending
+                ON native_agent_diagnostic_delivery(delivered_at, run_id);
+            CREATE TRIGGER IF NOT EXISTS native_agent_diagnostic_delete
+            AFTER DELETE ON native_agent_runs
+            BEGIN
+                DELETE FROM native_agent_diagnostic_delivery WHERE run_id=OLD.run_id;
+            END;
             CREATE TRIGGER IF NOT EXISTS native_agent_conversation_delete
             AFTER DELETE ON conversations
             BEGIN
@@ -319,6 +331,12 @@ def create_run(user, conv_id, question, model_id, workflow, request_id=None, *, 
             "(run_id,username,conv_id,question,model_id,workflow,request_id,input_sha256,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
             [run_id, user, conv_id, safe_question, model_id, workflow, request_id, fingerprint, now, now],
+        )
+        # Capture the originating release with admission. Historical runs with
+        # no such provenance are not backfilled as incidents of a new release.
+        db.execute(
+            "INSERT INTO native_agent_diagnostic_delivery(run_id,version) VALUES(?,?)",
+            [run_id, APP_VERSION],
         )
         snapshot_run(db, user, run_id)
         row = _owned(db, user, run_id)

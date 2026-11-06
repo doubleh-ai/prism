@@ -4,6 +4,12 @@ All notable changes to Prism are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Native 研究终态诊断可在上报失败或进程重启后补送；交付回执和异常计数原子保存，避免重复报警。后台补送遵守任务排空，不调用模型，主动取消不报警；升级前缺少来源版本的历史任务不冒充新版本故障。
+- 更新日志中的 `Unreleased` 条目不会被版本接口当作已经发布的版本或混入已发布说明。
+
 ## [v0.23.0] - 2026-11-07
 
 ### DoubleH 与 Work
