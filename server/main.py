@@ -330,6 +330,7 @@ def render_template(name: str) -> str:
         for marker, fragment in (
             ("__RESEARCH_KNOWLEDGE__", "partials/research-knowledge.html"),
             ("__WORK_NOTIFICATIONS__", "partials/work-notifications.html"),
+            ("__FUTURES_WORKSPACE__", "partials/futures-workspace.html"),
         ):
             if marker in markup:
                 markup = markup.replace(marker, (TEMPLATE_DIR / fragment).read_text(encoding="utf-8"))
@@ -437,7 +438,10 @@ async def notifications_page(request: Request):
 async def futures_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
-    return HTMLResponse(render_template("futures.html"), headers={"Cache-Control": "no-store"})
+    query = [("mode", "futures")]
+    if request.query_params.get("symbol") in {"RB", "CU", "AU", "M", "SC"}:
+        query.append(("symbol", request.query_params["symbol"]))
+    return RedirectResponse("/prism?" + urlencode(query), headers={"Cache-Control": "no-store"})
 
 
 # ── Auth ──

@@ -2,8 +2,12 @@
 (function () {
   'use strict';
   var user, epoch = 0, profileVersion = 0, calendarRows = [], editing = null, pending = null, dirty = false, profileReady = false;
-  var $ = function (id) { return document.getElementById(id); };
-  var page = document.body.dataset.page;
+  var futuresRoot = document.getElementById('futuresWorkspace');
+  var bodyPage = document.body && document.body.dataset && document.body.dataset.page;
+  var embeddedFutures = !!futuresRoot && !bodyPage;
+  var futuresActive = false, futuresReady = false, futuresInitializing = null;
+  var $ = function (id) { return embeddedFutures && id === 'main' ? futuresRoot : document.getElementById(embeddedFutures && id === 'notice' ? 'futuresNotice' : id); };
+  var page = embeddedFutures ? 'futures' : bodyPage;
   var zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
   function node(tag, text, cls) { var el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
   function notice(text) { var target=$('notice'); if(target){target.textContent = text || ''; target.hidden = !text;} }
@@ -218,7 +222,7 @@
   }
   function metric(label,value){var box=node('div',undefined,'metric');box.append(node('span',label),node('strong',value===null||value===undefined?'待核查':String(value)));return box;}
   async function loadFutures(event){
-    if(event)event.preventDefault();var ticket=++epoch,form=$('futuresForm'),button=form.querySelector('button');button.disabled=true;
+    if(event)event.preventDefault();var ticket=++epoch,form=$('futuresForm'),button=form.querySelector('[type=submit]');button.disabled=true;
     $('futuresResult').replaceChildren();notice('正在读取研究资料…');
     try {
       var value=await api('/api/futures/'+$('futureSymbol').value+'/snapshot');if(ticket!==epoch)return;
@@ -277,12 +281,12 @@
       }else if(receipt){
         fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
       }
-      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/prism?futures='+value.symbol;fund.append(action);root.append(fund);
+      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});root.append(fund);
       if(hasSeries){var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);}
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }
   async function init(){
-    document.querySelectorAll('form').forEach(function(form){
+    (embeddedFutures ? futuresRoot : document).querySelectorAll('form').forEach(function(form){
       form.onsubmit=function(event){event.preventDefault();notice('页面尚未准备好，请刷新后再试。');};
       if(page!=='futures')form.addEventListener('input',function(){dirty=true;});
     });
@@ -304,15 +308,24 @@
         ['start','end'].forEach(function(name){field($('eventForm'),name).onchange=function(){try{resolveTime($('eventForm'),name,true);notice('');}catch(error){notice(error.message);}};});
         await loadCalendar();
       }
-      if(page==='futures'){var symbol=new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;}
+      if(page==='futures'){var symbol=embeddedFutures ? null : new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;futuresReady=true;}
     }catch(error){notice(error.message);}
   }
   window.addEventListener('beforeunload',function(event){if(dirty||pending||portfolioDirty||portfolioUnknown){event.preventDefault();event.returnValue='';}});
   window.addEventListener('pageshow',function(event){if(event.persisted)location.reload();});
   document.addEventListener('visibilitychange',async function(){
+    if(embeddedFutures&&!futuresActive)return;
     if(document.hidden){$('main').style.visibility='hidden';return;}
     try{await identify();$('main').style.visibility='';}catch(error){notice(error.message);$('main').style.visibility='';}
   });
-  window.PrismHub={api:api,resolveTime:resolveTime,loadCalendar:loadCalendar,loadFutures:loadFutures};
-  init();
+  window.PrismHub={api:api,resolveTime:resolveTime,loadCalendar:loadCalendar,loadFutures:loadFutures,
+    activateFutures:async function(){
+      futuresActive=true;
+      if(!futuresReady){if(!futuresInitializing)futuresInitializing=init().finally(function(){futuresInitializing=null;});await futuresInitializing;}
+      else try{await identify();}catch(error){notice(error.message);}
+      futuresRoot.style.visibility='';
+    },
+    suspendFutures:function(){futuresActive=false;}
+  };
+  if(!embeddedFutures)init();
 }());

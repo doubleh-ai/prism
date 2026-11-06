@@ -291,6 +291,10 @@ async def test_new_pages_require_auth_and_are_not_cacheable(client, feature_db):
     for path in ["/work", "/calendar", "/preferences", "/futures"]:
         assert (await client.get(path)).status_code == 307
         response = await client.get(path, cookies=feature_db[0])
+        if path == "/futures":
+            assert response.status_code == 307
+            assert response.headers["location"] == "/prism?mode=futures"
+            response = await client.get(response.headers["location"], cookies=feature_db[0])
         assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
 
 

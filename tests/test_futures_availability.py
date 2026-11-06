@@ -102,7 +102,7 @@ async def test_series_failure_still_reads_and_returns_actual_exchange_contracts(
     )
     assert result["latest"]["close"] is None and result["status"] == "partial"
     assert result["exchange_daily"]["contracts"][0]["settlement"] == 3490
-    assert target["href"] == "/futures?symbol=RB"
+    assert target["href"] == "/prism?mode=futures&symbol=RB"
     assert "部分" in summary and "连续日线" not in summary
     assert len(calls) == 6
 

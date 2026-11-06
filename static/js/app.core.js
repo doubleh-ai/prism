@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '114',
+  _clientAssetVersion: '117',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -151,7 +151,10 @@ var App = {
     var saved;
     try { saved = sessionStorage.getItem('prism_analysis'); } catch(e) {}
     var libraryParams = new URLSearchParams(location.search);
-    if (libraryParams.get('mode') === 'reports') {
+    if (libraryParams.get('mode') === 'futures' || ['RB','CU','AU','M','SC'].includes(libraryParams.get('futures'))) {
+      this._selectFuturesSymbol(libraryParams.get('symbol') || libraryParams.get('futures'));
+      this.switchMode('futures');
+    } else if (libraryParams.get('mode') === 'reports') {
       this._researchLibraryTab = libraryParams.get('library') === 'knowledge' ? 'knowledge' : 'reports';
       this.switchMode('reports');
       if (this._researchLibraryTab === 'knowledge' && libraryParams.get('claim')) this._openKnowledgeClaim(libraryParams.get('claim'));
@@ -178,6 +181,7 @@ var App = {
     }, opts.headers || {});
     var method = (opts.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      if (this.user && !opts.headers['X-Prism-Account']) opts.headers['X-Prism-Account'] = this.user;
       var csrf = this._getCookie('csrf_token');
       if (csrf) opts.headers['X-CSRF-Token'] = csrf;
     }

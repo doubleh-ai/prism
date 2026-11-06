@@ -138,6 +138,9 @@ Object.assign(App, {
       this._stopWatchlistRefresh();
       if (shell && !compact) shell.classList.remove('collapsed');
       this._initReports();
+    } else if (mode === 'futures') {
+      this._stopWatchlistRefresh();
+      this._initFutures();
     } else if (mode === 'vibe') {
       this._stopWatchlistRefresh();
       if (shell && !compact) shell.classList.remove('collapsed');

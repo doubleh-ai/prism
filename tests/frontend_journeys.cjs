@@ -128,6 +128,16 @@ async function configuredModelSelection() {
   app.api=async()=>response([{id:'unconfigured',name:'未配置模型',configured:false,default:false}]);await app.loadModels();assert.equal(app.model,'');assert.equal(doc.getElementById('modelConfigurationNotice').hidden,false);
   let requests=0;ctx.fetch=()=>{requests++;throw Error('must not start');};doc.getElementById('input').value='question';await app.send();assert.equal(requests,0);
 }
+async function restoredConversationShowsItsResearchMethod() {
+  const {app,doc}=env();app.skills=[{id:'prism-research',name:'综合研究'},{id:'futures-research',name:'期货研究'}];
+  app._refreshReportsButton=()=>{};app.loadConvs=()=>{};app._loadConversationCalls=()=>{};app._restoreNativeStream=()=>{};
+  app.api=async()=>response({id:'saved-futures',skill:'futures-research',messages:[{role:'user',content:'研究铜'}]});
+  app.renderSkillsBar();assert.match(doc.getElementById('composerChips').innerHTML,/综合研究/);
+  await app.openConv('saved-futures');
+  assert.equal(app.skill,'futures-research');assert.match(doc.getElementById('composerChips').innerHTML,/期货研究/);assert(!doc.getElementById('composerChips').innerHTML.includes('综合研究'));
+  app.api=async()=>response({id:'saved-general',skill:'prism-research',messages:[{role:'user',content:'普通问题'}]});
+  await app.openConv('saved-general');assert.equal(app.skill,'prism-research');assert.match(doc.getElementById('composerChips').innerHTML,/综合研究/);
+}
 async function analysisUsesNativeOnce() {
   const {app,doc}=env();let resolve,starts=0,sends=0;
   app._analysisTicker='600519';app._analysisName='合成名称';
@@ -211,4 +221,4 @@ async function industryAdvisoryStaysInExistingDetails() {
   assert(!doc.getElementById('industryResearch').innerHTML.includes('自动节选复核：'));
 }
 
-(async()=>{const cases=[industryAdvisoryStaysInExistingDetails,analysisUsesNativeOnce,adminDiagnosticFailuresAreUnknown,adminHealthDoesNotCertifyBusiness,normalApiDeadlineAndCallerCancellation,vibeSaveVersionAndSelection,actualChartOrder,klineIdentityAndReverseResponses,lateIndicatorDoesNotApply,savedReportSelection,vibeSelectionAndAction,stoppedVibeRequestCannotReturn,scanSelectionAndReconnect,capabilitySnapshotDoesNotReexecute,accountWatchlistAndFailure,confirmedWatchlistActivityIsPrivate,analysisShowsOnlyObservedStages,researchLedgerAndUntrustedData,researchReverseResponse,configuredModelSelection,analysisStartCannotReplaceHistory,industryGraphSelection];for(const test of cases)await test();console.log('frontend journeys ok: '+cases.length+' scenarios');})().catch(error=>{console.error(error);process.exitCode=1;});
+(async()=>{const cases=[restoredConversationShowsItsResearchMethod,industryAdvisoryStaysInExistingDetails,analysisUsesNativeOnce,adminDiagnosticFailuresAreUnknown,adminHealthDoesNotCertifyBusiness,normalApiDeadlineAndCallerCancellation,vibeSaveVersionAndSelection,actualChartOrder,klineIdentityAndReverseResponses,lateIndicatorDoesNotApply,savedReportSelection,vibeSelectionAndAction,stoppedVibeRequestCannotReturn,scanSelectionAndReconnect,capabilitySnapshotDoesNotReexecute,accountWatchlistAndFailure,confirmedWatchlistActivityIsPrivate,analysisShowsOnlyObservedStages,researchLedgerAndUntrustedData,researchReverseResponse,configuredModelSelection,analysisStartCannotReplaceHistory,industryGraphSelection];for(const test of cases)await test();console.log('frontend journeys ok: '+cases.length+' scenarios');})().catch(error=>{console.error(error);process.exitCode=1;});

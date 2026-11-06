@@ -114,6 +114,7 @@ Research chat uses Prism's owned direct HTTP runtime. The entire application pro
 
 - `GET /api/agent/workflows` and `GET /api/agent/tools`: authenticated native method/tool catalogs.
 - `POST /api/agent/chat/stream`: authenticated, CSRF-protected research start. Provide `question` and an existing owned `conv_id`; a stable `request_id` deduplicates the same input. Optional `model` and one `workflow` select the configured model and method. Reusing an identifier with different input returns 409.
+- Conversation creation and Native research start also accept `X-Prism-Account` as an optional browser context fence. A value that differs from the authenticated account returns 409 before creation or model admission. It is not a login credential; clients without the header still require the same authentication and record ownership.
 - `GET /api/agent/runs/{run_id}` and `/events?after_seq=N`: owned status and ordered persisted events.
 - `GET /api/agent/runs/{run_id}/stream?after_seq=N`: observe/replay only; this does not start or repeat model work.
 - `POST /api/agent/chat/cancel`: provide owned `conv_id` and optional `run_id`. `cancel_requested` is intent; `stopped` is true only after a terminal state.

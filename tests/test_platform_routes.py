@@ -4,7 +4,7 @@ import pytest
 
 
 async def test_portal_and_prism_are_distinct_authenticated_pages(client, auth_cookies):
-    for path in ("/", "/prism", "/projects", "/notifications", "/knowledge"):
+    for path in ("/", "/prism", "/projects", "/notifications", "/knowledge", "/futures"):
         response = await client.get(path)
         assert response.status_code == 307 and response.headers["location"] == "/login"
     portal = await client.get("/", cookies=auth_cookies)
@@ -63,3 +63,23 @@ async def test_capability_bookmarks_return_to_the_owning_workspace(client, auth_
     assert reminders.status_code == 307
     assert reminders.headers["location"] == "/work?panel=notifications"
     assert response.headers["cache-control"] == reminders.headers["cache-control"] == "no-store"
+
+
+async def test_futures_bookmark_selects_the_same_prism_workspace_without_starting_research(
+    client, auth_cookies
+):
+    from server.agent.runtime import init_runtime_db
+
+    init_runtime_db()
+    response = await client.get("/futures?symbol=CU&next=https://invalid.example", cookies=auth_cookies)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/prism?mode=futures&symbol=CU"
+    page = await client.get(response.headers["location"], cookies=auth_cookies)
+    assert page.status_code == 200
+    assert 'id="appShell"' in page.text and page.text.count('id="futuresWorkspace"') == 1
+    assert 'id="futuresStartResearch"' in page.text and "__FUTURES_WORKSPACE__" not in page.text
+    assert 'href="/futures"' not in page.text
+    from server.database import get_db
+
+    with get_db() as db:
+        assert db.execute("SELECT count(*) FROM native_agent_runs").fetchone()[0] == 0

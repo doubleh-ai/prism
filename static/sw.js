@@ -1,7 +1,7 @@
 /* Prism Service Worker - offline cache for static assets.
    Network-first for app-shell navigations so deploys cannot get stuck behind
    an old cached / page; cache-first with background update for /static/*. */
-const CACHE_NAME = 'prism-workbench-v114';
+const CACHE_NAME = 'prism-workbench-v117';
 const STATIC_PREFIX = '/static/';
 
 const PRE_CACHE = [
@@ -10,6 +10,7 @@ const PRE_CACHE = [
   '/static/css/desk.css',
   '/static/css/work.css',
   '/static/css/research-library.css',
+  '/static/css/futures-workspace.css',
   '/static/css/work-notifications.css',
   '/static/js/knowledge.js',
   '/static/js/notifications.js',
@@ -43,7 +44,7 @@ const PRE_CACHE = [
 self.addEventListener('install', function(ev) {
   ev.waitUntil(
     caches.open(CACHE_NAME).then(function(cache) {
-      return cache.addAll(PRE_CACHE.map(function(path) { return path + '?v=114'; })).catch(function() {});
+      return cache.addAll(PRE_CACHE.map(function(path) { return path + '?v=117'; })).catch(function() {});
     })
   );
   self.skipWaiting();

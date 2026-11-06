@@ -20,7 +20,7 @@ def test_frontend_journeys_actual_asset_order():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "frontend journeys ok: 22 scenarios" in result.stdout
+    assert "frontend journeys ok: 23 scenarios" in result.stdout
 
 
 def test_research_history_links_runtime():

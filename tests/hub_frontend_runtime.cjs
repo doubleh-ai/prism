@@ -4,21 +4,22 @@ const tick=()=>new Promise(setImmediate);
 const script=fs.readFileSync('static/js/app.hub.js','utf8');
 function el(){return {value:'',checked:false,disabled:false,hidden:false,textContent:'',style:{},listeners:{},children:[],
   append(...items){this.children.push(...items);},addEventListener(k,f){this.listeners[k]=f;},replaceChildren(...items){this.children=items;},setAttribute(){}};}
-function setup(page='preferences'){
+function setup(page='preferences',embedded=false){
  const fields=Object.fromEntries(['style','horizon','max_position_pct','max_drawdown_pct','allow_leverage'].map(k=>[k,el()]));
  Object.assign(fields.style,{value:'conservative'});fields.horizon.value='long';fields.max_position_pct.value='20';fields.max_drawdown_pct.value='10';
  const submit=el(),form=el();form.elements={namedItem:k=>fields[k]};form.querySelector=()=>submit;
  const els={main:el(),notice:el(),profileForm:form,profileReload:el(),profileVersion:el()},requests=[],listeners={};
  Object.assign(els,{portfolioForm:el(),addPosition:el(),useObservedPriceTime:el(),portfolioReload:el(),portfolioDetails:el()});
  Object.assign(els,{futuresForm:form,futureSymbol:el(),futuresResult:el()});
+ if(embedded){els.futuresWorkspace=el();els.futuresWorkspace.querySelectorAll=()=>[form];}
  const context={console,URL,URLSearchParams,Intl,Date,JSON,Number,String,Promise,AbortController,Object,Error,
   setTimeout,clearTimeout,location:{pathname:'/'+page,search:'',replace(){}},confirm:()=>true,
   addEventListener(k,f){listeners[k]=f;},
-  document:{body:{dataset:{page}},getElementById:k=>els[k],createElement:el,
+  document:{body:{dataset:embedded?{}:{page}},getElementById:k=>els[k],createElement:el,
    querySelectorAll:s=>s==='form'?[form]:[],addEventListener(){}},
   fetch(path,options){return new Promise((resolve,reject)=>requests.push({path,options,resolve,reject}));}};
  Object.defineProperty(context,'localStorage',{get(){throw Error('private persistent cache forbidden');}});
- context.window=context;vm.createContext(context);vm.runInContext(script,context);return {els,requests,submit,form,fields,listeners};
+ context.window=context;vm.createContext(context);vm.runInContext(script,context);return {els,requests,submit,form,fields,listeners,context};
 }
 const respond=(req,value,ok=true)=>req.resolve({ok,json:async()=>value});
 async function initialFailureBlocksNativeSubmit(){
@@ -36,11 +37,17 @@ async function accountSwitchBlocksWrite(){
  assert(e.requests.every(r=>r.options.cache==='no-store'));
 }
 async function failedHandoffPreservesExistingDraft(){
- const draft={value:'existing private draft'},button=el();button.remove=()=>assert.fail('must keep retry');
- const context={URLSearchParams,window:{location:{search:'?futures=RB'}},document:{createElement:()=>button,
-  querySelector:()=>({appendChild(){}}),getElementById:()=>draft},App:{convId:'old',setSkill(){},newConv:async()=>false}};
+ const draft={value:'existing private draft'},button=el(),notice=el(),symbol={value:'RB'};
+ const app={user:'synthetic-A',model:'synthetic',_modelsLoaded:true,skill:'prism-research',skills:[{id:'futures-research'}],
+  api:async()=>({ok:true,json:async()=>({user:'synthetic-A'})}),setSkill(value){this.skill=value;},newConv:async()=>false,_toast(){},send(){assert.fail('failed creation cannot start a model');}};
+ const context={App:app,document:{getElementById:id=>({input:draft,futuresStartResearch:button,futuresNotice:notice,futureSymbol:symbol})[id]},confirm:()=>true};context.window=context;
  vm.createContext(context);vm.runInContext(fs.readFileSync('static/js/app.handoff.js','utf8'),context);
- await button.listeners.click();assert.equal(draft.value,'existing private draft');assert(!button.disabled);
+ assert.equal(await app._startFuturesResearch(),false);assert.equal(draft.value,'existing private draft');assert(!button.disabled);assert.equal(app.skill,'prism-research');
+}
+async function embeddedFuturesStayLazyAndDoNotRebindOtherForms(){
+ const e=setup('futures',true);assert.equal(e.requests.length,0);assert.equal(e.form.onsubmit,undefined);
+ const active=e.context.PrismHub.activateFutures();assert.equal(e.requests.length,1);respond(e.requests[0],{user:'synthetic-A'});await active;
+ assert.equal(e.form.onsubmit,e.context.PrismHub.loadFutures);assert.equal(e.els.futuresWorkspace.style.visibility,'');
 }
 async function showOfficialWarrants(){
  const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();
@@ -94,4 +101,4 @@ async function showDatedParametersWithinExistingDetails(){
  assert(!rendered.includes('javascript:')&&!rendered.includes('设置参数')&&!rendered.includes('undefined'));
  assert.equal(e.requests.length,2);assert(!e.submit.disabled);
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();console.log('hub journeys ok: 9 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();console.log('hub journeys ok: 10 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -4,16 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 研究工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=114">
-  <link rel="stylesheet" href="/static/css/research-library.css?v=114">
+  <link rel="stylesheet" href="/static/css/app.css?v=117">
+  <link rel="stylesheet" href="/static/css/futures-workspace.css?v=117">
+  <link rel="stylesheet" href="/static/css/research-library.css?v=117">
   <style>#modelRoutes{margin-top:18px}#modelRoutes summary{cursor:pointer;font-weight:600}#modelRoutesBody>p{margin:12px 0;color:var(--text-muted,inherit)}#modelRoutesBody section{padding:16px 0;border-bottom:1px solid var(--border,#dfe4eb)}#modelRoutesBody form{display:grid;gap:12px;max-width:620px}#modelRoutesBody label{display:flex;align-items:center;gap:9px;flex-wrap:wrap}#modelRoutesBody select,#modelRoutesBody input[type=number]{padding:7px;border:1px solid var(--border,#dfe4eb);border-radius:6px;background:var(--bg2,#fff);color:var(--text,#202a38)}#modelRoutesBody details label{margin-top:10px}</style>
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=114">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=117">
 </head>
 <body>
 <div class="app-shell" id="appShell">
   <nav class="icon-rail" id="iconRail" aria-label="工作区导航">
     <div class="icon-rail-brand" title="Prism 研究工作台">
-      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=114#mark"/></svg>
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=117#mark"/></svg>
       <span class="rail-brand-word">Prism<small>研究工作台</small></span>
     </div>
     <span class="rail-section-label">研究空间</span>
@@ -25,7 +26,7 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 19V5m0 14h16M8 16l3-4 3 2 4-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="rail-label">行情工作区</span>
     </button>
-    <a class="icon-rail-btn" href="/futures"><span aria-hidden="true">↗</span><span class="rail-label">期货研究</span></a>
+    <button class="icon-rail-btn" data-mode="futures" title="期货研究" onclick="App.switchMode('futures')"><span aria-hidden="true">↗</span><span class="rail-label">期货研究</span></button>
     <button class="icon-rail-btn" data-mode="vibe" title="Vibe Trading" onclick="App.switchMode('vibe')">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 15c3.5-7 7.5 7 11-1.5 1.1-2.7 2.6-4.2 5-4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M18.2 5.5L20 9l-3.7 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="17" r="1.8" fill="currentColor"/><circle cx="14" cy="13" r="1.8" fill="currentColor"/></svg>
           <span class="rail-label">深度研究</span>
@@ -240,6 +241,7 @@
     </div>
     <div class="market-panel" id="vibePanel" style="display:none"><div class="market-panel-inner" id="vibePanelInner"><div class="market-empty-state">输入一句交易直觉，生成可验证的 Vibe Trading 计划</div></div></div>
     <div class="market-panel" id="analysisPanel" style="display:none"><div class="market-panel-inner" id="analysisPanelInner"><div class="market-empty-state">从左侧选择股票，在研究对话中分析并保存结果</div></div></div>
+    <div class="market-panel" id="futuresPanel" style="display:none"><div class="market-panel-inner">__FUTURES_WORKSPACE__</div></div>
     <div class="market-panel" id="reportsPanel" style="display:none"><div class="market-panel-inner">
       <nav class="research-library-tabs" aria-label="研究库内容"><button type="button" id="researchReportsTab" aria-pressed="true" onclick="App._setResearchLibraryTab('reports')">研究记录</button><button type="button" id="researchKnowledgeTab" aria-pressed="false" onclick="App._setResearchLibraryTab('knowledge')">结论与证据</button></nav>
       <div id="reportsPanelInner"><div class="market-empty-state">加载研究记录中...</div></div>
@@ -325,30 +327,31 @@
     <div id="feedbackContent" hidden></div>
   </div>
 </dialog>
-<script src="/static/lib/marked.min.js?v=114"></script>
-<script src="/static/lib/echarts.min.js?v=114"></script>
-<script src="/static/js/app.util.js?v=114"></script>
-<script src="/static/js/app.chat-render.js?v=114"></script>
-<script src="/static/js/app.core.js?v=114"></script>
-<script src="/static/js/app.diagnostics.js?v=114"></script>
-<script src="/static/js/app.feedback.js?v=114"></script>
-<script src="/static/js/app.chat.js?v=114"></script>
-<script src="/static/js/app.market.js?v=114"></script>
-<script src="/static/js/app.vibe.js?v=114"></script>
-<script src="/static/js/app.analysis.js?v=114"></script>
-<script src="/static/js/knowledge.js?v=114"></script>
-<script src="/static/js/app.reports.js?v=114"></script>
-<script src="/static/js/app.industry.js?v=114"></script>
-<script src="/static/js/app.indicators.js?v=114"></script>
-<script src="/static/js/app.screener.js?v=114"></script>
-<script src="/static/js/app.indicator-chart.js?v=114"></script>
-<script src="/static/js/app.admin.js?v=114"></script>
-<script src="/static/js/app.model-routes.js?v=114"></script>
-<script src="/static/js/app.release.js?v=114"></script>
-<script src="/static/js/app.tour.js?v=114"></script>
-<script src="/static/js/app.workbench.js?v=114"></script>
-<script src="/static/js/app.research.js?v=114"></script>
-<script src="/static/js/app.operations.js?v=114"></script>
-<script src="/static/js/app.handoff.js?v=114"></script>
+<script src="/static/lib/marked.min.js?v=117"></script>
+<script src="/static/lib/echarts.min.js?v=117"></script>
+<script src="/static/js/app.util.js?v=117"></script>
+<script src="/static/js/app.chat-render.js?v=117"></script>
+<script src="/static/js/app.core.js?v=117"></script>
+<script src="/static/js/app.diagnostics.js?v=117"></script>
+<script src="/static/js/app.feedback.js?v=117"></script>
+<script src="/static/js/app.chat.js?v=117"></script>
+<script src="/static/js/app.market.js?v=117"></script>
+<script src="/static/js/app.vibe.js?v=117"></script>
+<script src="/static/js/app.analysis.js?v=117"></script>
+<script src="/static/js/knowledge.js?v=117"></script>
+<script src="/static/js/app.reports.js?v=117"></script>
+<script src="/static/js/app.industry.js?v=117"></script>
+<script src="/static/js/app.indicators.js?v=117"></script>
+<script src="/static/js/app.screener.js?v=117"></script>
+<script src="/static/js/app.indicator-chart.js?v=117"></script>
+<script src="/static/js/app.admin.js?v=117"></script>
+<script src="/static/js/app.model-routes.js?v=117"></script>
+<script src="/static/js/app.release.js?v=117"></script>
+<script src="/static/js/app.tour.js?v=117"></script>
+<script src="/static/js/app.workbench.js?v=117"></script>
+<script src="/static/js/app.research.js?v=117"></script>
+<script src="/static/js/app.operations.js?v=117"></script>
+<script src="/static/js/app.hub.js?v=117"></script>
+<script src="/static/js/app.handoff.js?v=117"></script>
 </body>
 </html>
