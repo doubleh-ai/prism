@@ -172,12 +172,16 @@ ensure_configured_admin_user()
 # ── FastAPI app ──
 @asynccontextmanager
 async def lifespan(application):
+    from .agent.diagnostic_delivery import DiagnosticDelivery
+
     runtime = await open_runtime(producers={kind: kind != "vibe" for kind in KINDS})
     reminders = ReminderScheduler(runtime.manager)
+    diagnostic_delivery = DiagnosticDelivery(runtime.manager)
     try:
         bind_manager(application, runtime.manager)
         application.state.work_runtime = runtime
         application.state.work_reminders = reminders
+        application.state.native_diagnostic_delivery = diagnostic_delivery
         if runtime.controlled and os.environ.get("PRISM_SINGLE_WORKER") == "1":
             from .agent.store import recover_interrupted_runs as recover_native_runs
 
@@ -185,8 +189,15 @@ async def lifespan(application):
             # classifying old runs; ordinary reads never replay/recover execution.
             recover_native_runs(exclusive_startup=True)
         reminders.start()
+        diagnostic_delivery.start()
         yield
     finally:
+        # Stop every idle producer before the first await can schedule another
+        # one. Closing one scheduler must not start another shutdown-time batch.
+        for scheduler in (diagnostic_delivery, reminders):
+            if scheduler.task is not None:
+                scheduler.task.cancel()
+        await diagnostic_delivery.close()
         await reminders.close()
         await runtime.aclose()
 
@@ -315,7 +326,16 @@ def render_template(name: str) -> str:
     """Read and return a template file."""
     path = TEMPLATE_DIR / name
     if path.exists():
-        return path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
+        markup = path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
+        for marker, fragment in (
+            ("__RESEARCH_KNOWLEDGE__", "partials/research-knowledge.html"),
+            ("__RESEARCH_PREFERENCES__", "partials/research-preferences.html"),
+            ("__WORK_NOTIFICATIONS__", "partials/work-notifications.html"),
+            ("__FUTURES_WORKSPACE__", "partials/futures-workspace.html"),
+        ):
+            if marker in markup:
+                markup = markup.replace(marker, (TEMPLATE_DIR / fragment).read_text(encoding="utf-8"))
+        return markup
     return ""
 
 
@@ -378,14 +398,17 @@ async def work_page(request: Request):
 async def preferences_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
-    return HTMLResponse(render_template("preferences.html"), headers={"Cache-Control": "no-store"})
+    return RedirectResponse("/prism?mode=preferences", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/knowledge", response_class=HTMLResponse)
 async def knowledge_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
-    return HTMLResponse(render_template("knowledge.html"), headers={"Cache-Control": "no-store"})
+    query = [("mode", "reports"), ("library", "knowledge")]
+    if request.query_params.get("id"):
+        query.append(("claim", request.query_params["id"]))
+    return RedirectResponse("/prism?" + urlencode(query), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/calendar", response_class=HTMLResponse)
@@ -409,14 +432,17 @@ async def notifications_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
     require_work_enabled()
-    return HTMLResponse(render_template("notifications.html"), headers={"Cache-Control": "no-store"})
+    return RedirectResponse("/work?panel=notifications", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/futures", response_class=HTMLResponse)
 async def futures_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
-    return HTMLResponse(render_template("futures.html"), headers={"Cache-Control": "no-store"})
+    query = [("mode", "futures")]
+    if request.query_params.get("symbol") in {"RB", "CU", "AU", "M", "SC"}:
+        query.append(("symbol", request.query_params["symbol"]))
+    return RedirectResponse("/prism?" + urlencode(query), headers={"Cache-Control": "no-store"})
 
 
 # ── Auth ──
@@ -508,6 +534,10 @@ async def api_admin_health(request: Request):
     require_admin(request)
     result = admin_health_payload()
     result["background"] = {"work_reminders": await reminder_health(request)}
+    delivery = getattr(request.app.state, "native_diagnostic_delivery", None)
+    result["background"]["native_diagnostics"] = (
+        delivery.health() if delivery is not None else {"status": "not_started"}
+    )
     return result
 
 

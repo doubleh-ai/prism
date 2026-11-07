@@ -27,8 +27,13 @@ Full field names, meanings and limits are in [the portfolio guide](portfolio-ris
 ## DoubleH and personal Work
 
 `/` is the shared authenticated product entrance; `/prism` opens research. Work,
-projects, calendar and reminders use `/work`, `/projects`, `/calendar` and
-`/notifications`. `GET /api/platform` returns product availability only, with no
+projects and calendar use `/work`, `/projects` and `/calendar`. Reminders open
+inside the current Work page; `/notifications` redirects to `/work?panel=notifications`.
+Research records and claim review share the Prism research library;
+`/knowledge?id=...` redirects to `/prism?mode=reports&library=knowledge&claim=...`.
+Research preferences and portfolio checks remain within Prism;
+`/preferences` redirects to `/prism?mode=preferences` without changing stored settings.
+These capabilities are not additional products. `GET /api/platform` returns product availability only, with no
 research or personal Work payload. Existing accounts remain valid.
 
 - `GET/POST /api/work/projects`: list owned and accepted shared projects, or create an owned project. Creation requires
@@ -111,6 +116,7 @@ Research chat uses Prism's owned direct HTTP runtime. The entire application pro
 
 - `GET /api/agent/workflows` and `GET /api/agent/tools`: authenticated native method/tool catalogs.
 - `POST /api/agent/chat/stream`: authenticated, CSRF-protected research start. Provide `question` and an existing owned `conv_id`; a stable `request_id` deduplicates the same input. Optional `model` and one `workflow` select the configured model and method. Reusing an identifier with different input returns 409.
+- Conversation creation and Native research start also accept `X-Prism-Account` as an optional browser context fence. A value that differs from the authenticated account returns 409 before creation or model admission. It is not a login credential; clients without the header still require the same authentication and record ownership.
 - `GET /api/agent/runs/{run_id}` and `/events?after_seq=N`: owned status and ordered persisted events.
 - `GET /api/agent/runs/{run_id}/stream?after_seq=N`: observe/replay only; this does not start or repeat model work.
 - `POST /api/agent/chat/cancel`: provide owned `conv_id` and optional `run_id`. `cancel_requested` is intent; `stopped` is true only after a terminal state.
@@ -807,11 +813,23 @@ of a missing or stale secondary price feed. Only an actual dated HTTP 404 permit
 a query for the preceding date, at most three distinct calendar dates per
 source within the shared 15-second budget. Network, TLS, access, rate-limit and
 schema errors do not trigger earlier-date queries. This bounded window is not
-a trading calendar or a guarantee of the latest published report. Each parser
-checks the report's actual date; collected reports are retained while another
-source checks an older date. `source_attempts`, `observation_dates`,
+a trading calendar or a guarantee of the latest published report. SHFE/INE
+parsers check the report's actual date; collected reports are retained while
+another source checks an older date. `source_attempts`, `observation_dates`,
 `report_date_basis: bounded_calendar_window` and `date_alignment` preserve this
 distinction. A mixed-date snapshot must not be treated as a same-day comparison.
+
+For M, the DCE public protocol uses fixed HTTP POST endpoints with no credentials,
+cookies, redirects, access-challenge handling or automatic retries. Its metadata
+retains `transport_authenticated: false` and `original_verified: false`. Echoed
+dates must match; when none is provided, `date_provenance: request_parameter`
+identifies a query date rather than a confirmed report date. Those components
+appear in `observation_date_gaps`, are excluded from `observation_dates`, and
+cannot establish `date_alignment: same_day`. HTTP 412 is
+`automated_access_restricted`, not a missing report or permission to query an
+older date. Warehouse totals retain the reported lot unit; member rankings are
+not covered by this protocol. This adapter does not expand portfolio repricing
+coverage or certify live DCE data availability.
 
 For RB/CU/AU/SC, `contract_dates` and `exchange_parameters` independently read
 SHFE's combined dated business reports. The first returns per-contract

@@ -308,14 +308,25 @@ class TestReleaseMetadata:
         r = await client.get("/api/releases")
         assert r.status_code == 401
 
-    async def test_releases_returns_current_version(self, client, auth_cookies):
+    async def test_releases_separates_running_version_from_published_notes(
+        self, client, auth_cookies, tmp_path, monkeypatch
+    ):
+        from server import release
+
+        notes = tmp_path / "CHANGELOG.md"
+        notes.write_text(
+            "## [Unreleased]\n\n### Added\n- Pending change\n\n"
+            "## [v0.1.0] - 2026-01-01\n\n### Fixed\n- Published fix\n"
+        )
+        monkeypatch.setattr(release, "CHANGELOG_PATH", notes)
         r = await client.get("/api/releases", cookies=auth_cookies)
         assert r.status_code == 200
         data = r.json()
         assert data["version"] == APP_VERSION
-        assert data["latest"]["version"] == APP_VERSION
-        assert data["releases"]
-        assert data["releases"][0]["sections"]
+        assert data["latest"]["version"] == "v0.1.0"
+        assert data["latest"]["sections"] == [{"title": "Fixed", "items": ["Published fix"]}]
+        assert [value["version"] for value in data["releases"]] == ["v0.1.0"]
+        assert "Pending change" not in r.text
 
     async def test_app_shell_is_not_cached(self, client, auth_cookies):
         r = await client.get("/", cookies=auth_cookies)

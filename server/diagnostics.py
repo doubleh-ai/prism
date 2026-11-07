@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -68,8 +69,10 @@ def record_diagnostic(
     stack: str = "",
     version: str = "",
     context: dict | None = None,
+    _connection=None,
+    _occurred_at: float | None = None,
 ) -> int:
-    now = int(time.time())
+    now = int(time.time() if _occurred_at is None else _occurred_at)
     if kind.startswith("server_") and not version:
         version = APP_VERSION
     clean_message = _redact(message, 2000) or "Unknown anomaly"
@@ -86,9 +89,9 @@ def record_diagnostic(
         ]
     )
     fingerprint = hashlib.sha256(signature.encode("utf-8", errors="replace")).hexdigest()[:24]
-    with get_db() as db:
+    with get_db() if _connection is None else nullcontext(_connection) as db:
         row = db.execute(
-            """SELECT id, occurrences FROM diagnostic_events
+            """SELECT id, occurrences, first_seen, last_seen, severity, context_json FROM diagnostic_events
                WHERE fingerprint=? AND version=? AND username=? AND resolved_at IS NULL
                ORDER BY last_seen DESC LIMIT 1""",
             [fingerprint, version, username],
@@ -96,13 +99,16 @@ def record_diagnostic(
         if row:
             db.execute(
                 """UPDATE diagnostic_events
-                   SET occurrences=?, last_seen=?, severity=?, context_json=?
+                   SET occurrences=?, first_seen=?, last_seen=?, severity=?, context_json=?
                    WHERE id=?""",
                 [
                     int(row["occurrences"] or 0) + 1,
-                    now,
-                    severity,
-                    json.dumps(clean_context, ensure_ascii=False),
+                    min(int(row["first_seen"]), now),
+                    max(int(row["last_seen"]), now),
+                    severity if now >= row["last_seen"] else row["severity"],
+                    json.dumps(clean_context, ensure_ascii=False)
+                    if now >= row["last_seen"]
+                    else row["context_json"],
                     row["id"],
                 ],
             )
@@ -147,25 +153,37 @@ _NATIVE_ERROR_CODES = frozenset(
 )
 
 
-def record_native_outcome(username: str, status: str, error_code: str | None) -> None:
+def native_outcome_fields(status: str, error_code: str | None) -> dict | None:
+    if error_code == "interrupted_execution_unknown":
+        error_code = "execution_interrupted_unknown"
+    interrupted = status == "cancelled" and error_code == "execution_interrupted_unknown"
+    if status not in {"failed", "partial"} and not interrupted:
+        return None
+    code = error_code if error_code in _NATIVE_ERROR_CODES else "research_unavailable"
+    incomplete = status != "failed" or code == "budget_exceeded"
+    return {
+        "kind": "server_native_run_incomplete" if incomplete else "server_native_run_failed",
+        "severity": "warning" if incomplete else "error",
+        "component": "prism-native",
+        "message": "Native outcome: " + code,
+        "context": {"mode": status, "source": "prism-native"},
+    }
+
+
+def record_native_outcome(username: str, status: str, error_code: str | None, *, run_id=None) -> None:
     """Record terminal execution failure, even when the delivery HTTP succeeded.
 
     Never ingest questions, answers, tool payloads or raw provider error text.
     User cancellation and a completed run are not incidents.
     """
-    interrupted = status == "cancelled" and error_code == "execution_interrupted_unknown"
-    if status not in {"failed", "partial"} and not interrupted:
+    if run_id is not None:
+        from .agent.diagnostic_delivery import deliver_pending
+
+        deliver_pending(run_id=run_id, username=username, limit=1)
         return
-    code = error_code if error_code in _NATIVE_ERROR_CODES else "research_unavailable"
-    incomplete = status != "failed" or code == "budget_exceeded"
-    record_diagnostic(
-        username=username,
-        kind="server_native_run_incomplete" if incomplete else "server_native_run_failed",
-        severity="warning" if incomplete else "error",
-        component="prism-native",
-        message="Native outcome: " + code,
-        context={"mode": status, "source": "prism-native"},
-    )
+    fields = native_outcome_fields(status, error_code)
+    if fields is not None:
+        record_diagnostic(username=username, **fields)
 
 
 def _diagnostic_rows(status: str = "open", limit: int = 100) -> list[dict[str, Any]]:

@@ -62,4 +62,4 @@ async def test_unsupported_exchange_sends_no_request():
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: pytest.fail("unexpected fetch"))
     ) as client:
-        assert await receipts.read_report(client, "M", DAY, 0) == {"status": "not_covered"}
+        assert await receipts.read_report(client, "UNSUPPORTED", DAY, 0) == {"status": "not_covered"}

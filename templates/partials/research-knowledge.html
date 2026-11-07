@@ -1,0 +1,25 @@
+<section id="researchKnowledge" class="research-knowledge" hidden aria-label="研究结论">
+  <p id="knowledgeNotice" class="knowledge-notice" role="status" aria-live="polite" hidden></p>
+  <form id="knowledgeSearchForm" class="knowledge-search">
+    <label for="knowledgeQuery">搜索研究结论<input id="knowledgeQuery" type="search" maxlength="200" autocomplete="off"></label>
+    <button type="submit" class="admin-secondary">搜索</button>
+  </form>
+  <div id="knowledgeResults" aria-live="polite"></div>
+  <p id="knowledgeEmpty" class="knowledge-muted" hidden>没有找到研究结论。</p>
+  <button type="button" class="admin-secondary" id="knowledgeMore" hidden>加载更多</button>
+  <section id="knowledgeDetail" class="knowledge-detail" hidden aria-labelledby="knowledgeDetailTitle">
+    <div class="knowledge-actions"><h3 id="knowledgeDetailTitle">结论与证据</h3><button type="button" class="admin-secondary" id="knowledgeClose">关闭</button></div>
+    <p id="knowledgeStatement"></p><p id="knowledgeMetadata" class="knowledge-muted"></p><p id="knowledgeLimitations" class="knowledge-muted"></p>
+    <h4>原始证据</h4><div id="knowledgeSources"></div>
+    <p><a id="knowledgeReport" hidden>查看原研究</a></p>
+    <details><summary>复核记录</summary><div id="knowledgeHistory"></div></details>
+    <details class="knowledge-review"><summary>复核此结论</summary><form id="knowledgeReviewForm">
+      <label>复核结果<select id="knowledgeState"><option value="reviewed">已复核</option><option value="disputed">有争议</option><option value="retracted">撤回</option></select></label>
+      <label>理由模板<select id="knowledgeReasonTemplate"><option value="">自行填写</option><option value="已核对原始证据与结论。">已核对原始证据</option><option value="证据不足或存在不同解释。">证据不足或存在不同解释</option><option value="原结论已不再适用。">原结论已不再适用</option></select></label>
+      <label>复核说明<textarea id="knowledgeNote" maxlength="4000" rows="3"></textarea></label>
+      <details><summary>高级选项</summary><label id="knowledgeUntilLabel">有效期至（本地时间）<input id="knowledgeUntil" type="datetime-local"></label><label id="knowledgeReplacementLabel" hidden>替代结论 ID（可选）<input id="knowledgeReplacement" maxlength="200"></label></details>
+      <p id="knowledgeReviewNotice" class="knowledge-notice" role="status" aria-live="polite"></p>
+      <div class="knowledge-actions"><button type="submit" class="admin-primary">保存复核</button><button type="button" class="admin-secondary" id="knowledgeReload">重新读取</button></div>
+    </form></details>
+  </section>
+</section>

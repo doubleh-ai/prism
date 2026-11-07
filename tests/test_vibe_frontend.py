@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -14,7 +15,8 @@ def test_official_vibe_workbench_static_contract():
     assert 'id="vibeDepth"' not in template
     assert 'id="vibeHistoryList"' in template
     assert "开始正式研究" not in template
-    assert "app.vibe.js?v=111" in template
+    version = re.search(r"app\.css\?v=(\d+)", template).group(1)
+    assert f"app.vibe.js?v={version}" in template
     assert '#appShell[data-mode="vibe"]' in css
     assert "/api/vibe/plan" in js
     assert "/api/vibe/engine" not in js

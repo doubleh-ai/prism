@@ -46,7 +46,7 @@
       header += '<p class="research-notice">这里保留研究过程、原始线索与候选判断。引用结构匹配不等于语义核验；事实候选仍需核对原文。</p>';
       if(data.history_checks&&data.history_checks.coverage_incomplete)header+='<p class="research-note">历史数值比较尚不完整，不能据此判断历史结论一致。</p>';
       var changes=list(data.knowledge_changes).filter(function(change){return change && typeof change.source_claim_id==='string' && change.source_claim_id;});
-      if(changes.length)header += '<details class="research-notice"><summary>引用的历史结论有更新，查看复核</summary>'+changes.map(function(change){return '<p><a href="/knowledge?id='+escAttr(encodeURIComponent(change.source_claim_id))+'">查看复核</a></p>';}).join('')+'</details>';
+      if(changes.length)header += '<details class="research-notice"><summary>引用的历史结论有更新，查看复核</summary>'+changes.map(function(change){return '<p><a data-knowledge-claim="'+escAttr(change.source_claim_id)+'" href="/prism?mode=reports&amp;library=knowledge&amp;claim='+escAttr(encodeURIComponent(change.source_claim_id))+'">查看复核</a></p>';}).join('')+'</details>';
       var body = '';
       if (tab === 'overview') {
         body = '<section class="research-section"><h3>核心判断与边界</h3>'+this._researchClaimsHTML(list(data.claims))+'</section>';
@@ -110,7 +110,7 @@
             if(links.length>=2 || !binding || binding.current_claim_id!==id) return;
             var historicalId=binding.historical_claim_id;
             if(typeof historicalId!=='string' || !historicalId.trim() || historyIds.indexOf(historicalId)<0 || seen.has(historicalId)) return;
-            try { var encoded=encodeURIComponent(historicalId); seen.add(historicalId); links.push('<a href="/knowledge?id='+escAttr(encoded)+'">查看历史判断 '+(links.length+1)+'</a>'); } catch(error) { /* Invalid Unicode cannot form a link. */ }
+            try { var encoded=encodeURIComponent(historicalId); seen.add(historicalId); links.push('<a data-knowledge-claim="'+escAttr(historicalId)+'" href="/prism?mode=reports&amp;library=knowledge&amp;claim='+escAttr(encoded)+'">查看历史判断 '+(links.length+1)+'</a>'); } catch(error) { /* Invalid Unicode cannot form a link. */ }
           });
           if(links.length)body+='<p class="research-note">'+links.join(' · ')+'</p>';
         }
@@ -141,6 +141,13 @@
       document.getElementById('researchDialog').close();App.switchMode('chat');
       App.openConv(conv).then(function(){if(d.researchQuestion && App.convId===conv){var input=document.getElementById('input');input.value=d.researchQuestion;input.focus();App._toast('已拟定局部深挖问题，发送后才会开始新研究');}});
     }
+  });
+  document.addEventListener('click',function(event){
+    var link=event.target.closest('a[data-knowledge-claim]');
+    if(!link || event.defaultPrevented || event.button>0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)return;
+    event.preventDefault();
+    var dialog=document.getElementById('researchDialog');if(dialog && dialog.open)dialog.close();
+    App._openKnowledgeClaim(link.dataset.knowledgeClaim);
   });
   document.addEventListener('change',function(event){
     if(event.target.id==='researchRevisionSelect'){App._researchSelectedRevision=event.target.value;App._renderResearch();}

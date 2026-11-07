@@ -1,0 +1,11 @@
+#appShell[data-mode=futures] .sidebar,#appShell[data-mode=futures] .msgs-wrap,#appShell[data-mode=futures] .input-zone{display:none!important}
+#appShell[data-mode=futures] #futuresPanel{display:flex!important}
+.futures-workspace{max-width:100%;min-width:0;overflow-wrap:anywhere;color:var(--text);font-size:14px;line-height:1.7}
+.futures-form{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.futures-form>label{flex:1;max-width:420px}.futures-form select{display:block;width:100%;margin-top:8px;padding:11px;border:1px solid var(--border2);border-radius:var(--r);background:var(--bg);color:var(--text);font:inherit}
+.futures-help,.futures-workspace .muted{color:var(--text2);font-size:13px}.futures-help{margin:20px 0 28px}
+.futures-workspace .card{padding:24px;margin:20px 0;border:1px solid var(--border);border-radius:var(--r);background:var(--bg2);min-width:0}
+.futures-workspace h2{font-size:20px;margin:0 0 14px}.futures-workspace h3{font-size:16px;margin:18px 0 8px}.futures-workspace p{margin:10px 0}.futures-workspace details{margin:14px 0}.futures-workspace summary{cursor:pointer}
+.futures-workspace .metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.futures-workspace .metric{background:var(--bg3);padding:16px;border-radius:var(--r)}.futures-workspace .metric span{font-size:12px;color:var(--text2)}.futures-workspace .metric strong{display:block;font-size:24px;margin-top:6px}
+.futures-workspace .table-scroll{max-width:100%;overflow:auto}.futures-workspace table{border-collapse:collapse;min-width:100%;width:max-content;font-variant-numeric:tabular-nums}.futures-workspace th,.futures-workspace td{padding:10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;font-size:13px}.futures-workspace a{color:var(--accent)}
+.futures-workspace .notice{margin:0 0 20px;padding:14px;border:1px solid var(--border2);border-radius:var(--r);background:var(--bg2);color:var(--text2)}.futures-workspace [hidden]{display:none!important}
+@media(max-width:650px){.futures-form>label{flex-basis:100%;max-width:none}.futures-form button{min-height:44px}.futures-form select{font-size:16px}.futures-workspace .metrics{grid-template-columns:1fr}.futures-workspace .card{padding:18px}}

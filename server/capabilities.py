@@ -32,7 +32,7 @@ from .work_lifecycle import Lease, LifecycleError, current_lease, get_manager
 router = APIRouter(prefix="/api")
 Ticker = Annotated[str, Field(pattern=r"^[A-Za-z0-9.\-]{1,16}$")]
 RecordId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_\-]{1,128}$")]
-View = Literal["market", "industry", "indicators", "screener", "reports", "analysis", "vibe"]
+View = Literal["market", "futures", "industry", "indicators", "screener", "reports", "analysis", "vibe"]
 
 
 class Arguments(BaseModel):
@@ -267,7 +267,7 @@ _TOOLS = (
         "读取连续日线、技术指标、成交持仓、已覆盖品种的同日交易所仓单、具体合约结算曲线和分别披露的会员排名。保留来源、日期和缺口。",
         FuturesArgs,
         "platform_market",
-        "market",
+        "futures",
     ),
     Capability(
         "market_quote",
@@ -931,7 +931,8 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         from .futures import snapshot
 
         value = await snapshot(data["symbol"])
-        target["href"] = "/futures?symbol=" + data["symbol"]
+        target["href"] = "/prism?mode=futures&symbol=" + data["symbol"]
+        target["symbol"] = data["symbol"]
         summary = (
             "已取得部分期货资料，缺失项见结果" if value.get("status") == "partial" else "已取得期货研究资料"
         )

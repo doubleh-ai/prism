@@ -4,21 +4,29 @@ const tick=()=>new Promise(setImmediate);
 const script=fs.readFileSync('static/js/app.hub.js','utf8');
 function el(){return {value:'',checked:false,disabled:false,hidden:false,textContent:'',style:{},listeners:{},children:[],
   append(...items){this.children.push(...items);},addEventListener(k,f){this.listeners[k]=f;},replaceChildren(...items){this.children=items;},setAttribute(){}};}
-function setup(page='preferences'){
+function setup(page='preferences',embedded=false){
  const fields=Object.fromEntries(['style','horizon','max_position_pct','max_drawdown_pct','allow_leverage'].map(k=>[k,el()]));
  Object.assign(fields.style,{value:'conservative'});fields.horizon.value='long';fields.max_position_pct.value='20';fields.max_drawdown_pct.value='10';
  const submit=el(),form=el();form.elements={namedItem:k=>fields[k]};form.querySelector=()=>submit;
  const els={main:el(),notice:el(),profileForm:form,profileReload:el(),profileVersion:el()},requests=[],listeners={};
  Object.assign(els,{portfolioForm:el(),addPosition:el(),useObservedPriceTime:el(),portfolioReload:el(),portfolioDetails:el()});
  Object.assign(els,{futuresForm:form,futureSymbol:el(),futuresResult:el()});
+ if(embedded){
+  els.futuresWorkspace=el();els.futuresNotice=el();els.futuresWorkspace.querySelectorAll=()=>[els.futuresForm];
+  if(page==='preferences'){
+   els.preferencesWorkspace=el();els.preferencesNotice=el();
+   els.preferencesWorkspace.querySelectorAll=()=>[form,els.portfolioForm];
+   els.futuresForm=el();
+  }
+ }
  const context={console,URL,URLSearchParams,Intl,Date,JSON,Number,String,Promise,AbortController,Object,Error,
   setTimeout,clearTimeout,location:{pathname:'/'+page,search:'',replace(){}},confirm:()=>true,
   addEventListener(k,f){listeners[k]=f;},
-  document:{body:{dataset:{page}},getElementById:k=>els[k],createElement:el,
+  document:{body:{dataset:embedded?{}:{page}},getElementById:k=>els[k],createElement:el,
    querySelectorAll:s=>s==='form'?[form]:[],addEventListener(){}},
   fetch(path,options){return new Promise((resolve,reject)=>requests.push({path,options,resolve,reject}));}};
  Object.defineProperty(context,'localStorage',{get(){throw Error('private persistent cache forbidden');}});
- context.window=context;vm.createContext(context);vm.runInContext(script,context);return {els,requests,submit,form,fields,listeners};
+ context.window=context;vm.createContext(context);vm.runInContext(script,context);return {els,requests,submit,form,fields,listeners,context};
 }
 const respond=(req,value,ok=true)=>req.resolve({ok,json:async()=>value});
 async function initialFailureBlocksNativeSubmit(){
@@ -36,11 +44,42 @@ async function accountSwitchBlocksWrite(){
  assert(e.requests.every(r=>r.options.cache==='no-store'));
 }
 async function failedHandoffPreservesExistingDraft(){
- const draft={value:'existing private draft'},button=el();button.remove=()=>assert.fail('must keep retry');
- const context={URLSearchParams,window:{location:{search:'?futures=RB'}},document:{createElement:()=>button,
-  querySelector:()=>({appendChild(){}}),getElementById:()=>draft},App:{convId:'old',setSkill(){},newConv:async()=>false}};
+ const draft={value:'existing private draft'},button=el(),notice=el(),symbol={value:'RB'};
+ const app={user:'synthetic-A',model:'synthetic',_modelsLoaded:true,skill:'prism-research',skills:[{id:'futures-research'}],
+  api:async()=>({ok:true,json:async()=>({user:'synthetic-A'})}),setSkill(value){this.skill=value;},newConv:async()=>false,_toast(){},send(){assert.fail('failed creation cannot start a model');}};
+ const context={App:app,document:{getElementById:id=>({input:draft,futuresStartResearch:button,futuresNotice:notice,futureSymbol:symbol})[id]},confirm:()=>true};context.window=context;
  vm.createContext(context);vm.runInContext(fs.readFileSync('static/js/app.handoff.js','utf8'),context);
- await button.listeners.click();assert.equal(draft.value,'existing private draft');assert(!button.disabled);
+ assert.equal(await app._startFuturesResearch(),false);assert.equal(draft.value,'existing private draft');assert(!button.disabled);assert.equal(app.skill,'prism-research');
+}
+async function embeddedFuturesStayLazyAndDoNotRebindOtherForms(){
+ const e=setup('futures',true);assert.equal(e.requests.length,0);assert.equal(e.form.onsubmit,undefined);
+ const active=e.context.PrismHub.activateFutures();assert.equal(e.requests.length,1);respond(e.requests[0],{user:'synthetic-A'});await active;
+ assert.equal(e.form.onsubmit,e.context.PrismHub.loadFutures);assert.equal(e.els.futuresWorkspace.style.visibility,'');
+}
+async function preferencesKeepDraftWhileUsingFutures(){
+ const e=setup('preferences',true),prefs=e.context.PrismPreferences;
+ assert.equal(e.requests.length,0,'opening Prism must not read holdings or preferences');
+ assert.equal(e.form.onsubmit,undefined);
+ const opening=prefs.activate();respond(e.requests[0],{user:'synthetic-A'});await tick();
+ respond(e.requests[1],{profile:{configured:true,version:9,style:'balanced',horizon:'long',max_position_pct:20,max_drawdown_pct:10}});await opening;
+ const save=e.form.onsubmit;e.fields.style.value='aggressive';e.form.listeners.input();
+ prefs.suspend();const futures=e.context.PrismHub.activateFutures();respond(e.requests[2],{user:'synthetic-A'});await futures;
+ assert.equal(e.form.onsubmit,save,'futures must not rebind the preferences form');
+ assert.equal(e.els.futuresForm.onsubmit,e.context.PrismHub.loadFutures);
+ e.context.PrismHub.suspendFutures();const returning=prefs.activate();respond(e.requests[3],{user:'synthetic-A'});await returning;
+ assert.equal(e.fields.style.value,'aggressive');assert.match(e.els.profileVersion.textContent,/版本 9/);
+ assert.equal(e.requests.filter(r=>r.path==='/api/preferences/research').length,1,'returning must not overwrite the draft');
+ assert(!e.requests.some(r=>r.path.includes('/portfolio')||r.options.method==='PUT'));
+ let warned=false;e.listeners.beforeunload({preventDefault(){warned=true;}});assert(warned);
+}
+async function preferencesRejectChangedAccountOnReturn(){
+ const e=setup('preferences',true),prefs=e.context.PrismPreferences;
+ let opening=prefs.activate();respond(e.requests[0],{user:'synthetic-A'});await tick();respond(e.requests[1],{profile:{configured:false,version:0}});await opening;
+ e.fields.style.value='aggressive';prefs.suspend();opening=prefs.activate();respond(e.requests[2],{user:'synthetic-B'});await opening;
+ assert.equal(e.els.preferencesWorkspace.children.length,1,'remove the old account form from the workspace');
+ assert.match(JSON.stringify(e.els.preferencesWorkspace.children),/账号已经切换/);
+ const saving=e.form.onsubmit({preventDefault(){},currentTarget:e.form});respond(e.requests[3],{user:'synthetic-B'});await saving;
+ assert(!e.requests.some(r=>r.options.method==='PUT'),'a detached old form cannot save to the new account');
 }
 async function showOfficialWarrants(){
  const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();
@@ -94,4 +133,20 @@ async function showDatedParametersWithinExistingDetails(){
  assert(!rendered.includes('javascript:')&&!rendered.includes('设置参数')&&!rendered.includes('undefined'));
  assert.equal(e.requests.length,2);assert(!e.submit.disabled);
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();console.log('hub journeys ok: 9 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showDceAccessRestrictionWithoutDiscardingAvailablePrices(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='M';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'M',name:'豆粕',series_status:'collected',data_as_of:'2026-11-06',collected_at:'2026-11-07T10:00:00+08:00',latest:{close:3000},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'unavailable',error_code:'automated_access_restricted',member_positioning:{status:'not_covered'}},warehouse_receipt:{status:'unavailable',error_code:'automated_access_restricted'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['最近收盘','3000','交易所限制自动读取，合约资料暂未取得','交易所限制自动读取，仓单资料暂未取得'])assert(rendered.includes(text),text);
+ assert.equal(e.requests.length,2);assert(!e.submit.disabled);
+}
+async function showDceQueryDateAndKeepUnverifiedSourceExplicit(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='M';
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'M',name:'豆粕',series_status:'unavailable',latest:{},fundamentals:[],gaps:[],source:{},exchange_daily:{status:'collected',data_as_of:'2026-11-06',date_provenance:'request_parameter',transport_authenticated:false,active_contract:'m2701',contracts:[],curve:{status:'insufficient'},notice:'日期来自查询参数，原始内容尚未独立核验。',source_url:'http://www.dce.com.cn/dcereport/publicweb/dailystat/dayQuotes',member_positioning:{status:'not_covered'}},warehouse_receipt:{status:'collected',data_as_of:'2026-11-06',date_provenance:'request_parameter',table:'豆粕',row:'小计',quantity:30,change:2,unit:'手',source_url:'javascript:alert(1)',notice:'仓单仅为手数，未换算吨数。'}});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['查询日期 2026-11-06','公开来源未独立核验','日期来自查询参数','仓单仅为手数'])assert(rendered.includes(text),text);
+ assert(!rendered.includes('javascript:')&&!rendered.includes('交易所日期 2026-11-06'));
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await preferencesKeepDraftWhileUsingFutures();await preferencesRejectChangedAccountOnReturn();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();console.log('hub journeys ok: 14 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

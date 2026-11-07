@@ -144,10 +144,9 @@ async def test_unavailable_rankings_keep_curve_and_no_redirect_or_arbitrary_host
     async with httpx.AsyncClient(transport=httpx.MockTransport(serve), follow_redirects=False) as client:
         result = await ex.read_daily(client, "RB", DAY, asyncio.get_running_loop().time() + 2)
         assert result["status"] == "collected" and result["member_positioning"]["status"] == "unavailable"
-        assert await ex.read_daily(client, "M", DAY, 0) == {
-            "status": "not_covered",
-            "member_positioning": {"status": "not_covered"},
-        }
+        expired = await ex.read_daily(client, "M", DAY, 0)
+        assert expired["status"] == "unavailable" and expired["error_code"] == "source_timeout"
+        assert expired["member_positioning"]["status"] == "not_covered"
     assert len(seen) == 2
 
 

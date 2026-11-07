@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import config
-from ..auth import require_auth
+from ..auth import require_account_context, require_auth
 from ..database import check_rate_limit
 from ..models import validation_error_message
 from ..source_urls import source_display_payload
@@ -131,6 +131,7 @@ async def tools(request: Request):
 @router.post("/chat/stream")
 async def chat_stream(request: Request):
     user = require_auth(request)
+    require_account_context(request, user)
     try:
         req = ChatRequest(**(await request.json() or {}))
         workflow = workflow_id(req.workflow or req.skill)

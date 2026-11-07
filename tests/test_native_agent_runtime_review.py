@@ -596,6 +596,30 @@ def test_diagnostic_failure_does_not_undo_saved_research(engine, monkeypatch):
     assert store.get_run(engine.user, engine.run["run_id"])["status"] == "failed"
 
 
+def test_saved_terminal_can_recover_a_failed_diagnostic_without_reexecution(engine, monkeypatch):
+    from server import diagnostics
+
+    original = diagnostics.record_native_outcome
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("synthetic diagnostic sink unavailable")
+
+    monkeypatch.setattr(diagnostics, "record_native_outcome", unavailable)
+    outcome = runtime.Outcome(
+        engine.user, engine.run["run_id"], "test", "failed", error_code="provider_timeout"
+    )
+    engine.service._persist(outcome)
+    saved = store.get_run(engine.user, engine.run["run_id"])
+    monkeypatch.setattr(diagnostics, "record_native_outcome", original)
+    engine.service._persist(outcome)
+    engine.service._persist(outcome)
+    with get_db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM diagnostic_events")]
+    assert len(rows) == 1 and rows[0]["occurrences"] == 1
+    assert rows[0]["message"] == "Native outcome: provider_timeout"
+    assert store.get_run(engine.user, engine.run["run_id"]) == saved
+
+
 async def test_model_receives_frozen_profile_not_latest_settings(engine, monkeypatch):
     from server.preferences import init_preferences_db
 

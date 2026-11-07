@@ -103,6 +103,18 @@ def require_auth(request: Request, optional: bool = False) -> str | None:
     return user
 
 
+def require_account_context(request: Request, authenticated_user: str) -> None:
+    """Fence a browser write to the account that prepared it, when supplied.
+
+    The caller must authenticate first. Resource ownership remains mandatory. Older clients may
+    omit this optional context; it is never an alternative login credential.
+    """
+    if not authenticated_user:
+        raise HTTPException(401)
+    if request.headers.get("X-Prism-Account", authenticated_user) != authenticated_user:
+        raise HTTPException(409, "账号已经切换，请刷新后再提交")
+
+
 def verify_csrf(request: Request) -> None:
     """Verify the request carries the CSRF defense header.
 

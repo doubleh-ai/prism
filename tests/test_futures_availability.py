@@ -102,7 +102,7 @@ async def test_series_failure_still_reads_and_returns_actual_exchange_contracts(
     )
     assert result["latest"]["close"] is None and result["status"] == "partial"
     assert result["exchange_daily"]["contracts"][0]["settlement"] == 3490
-    assert target["href"] == "/futures?symbol=RB"
+    assert target["href"] == "/prism?mode=futures&symbol=RB"
     assert "部分" in summary and "连续日线" not in summary
     assert len(calls) == 6
 
@@ -323,3 +323,25 @@ async def test_parameter_files_keep_separate_observation_dates_and_404_scope(mon
     assert value["date_alignment"] == "mixed" and value["observation_dates"] == ["2026-11-02", "2026-11-03"]
     requests = value["source_attempts"]
     assert [r["source"] for r in requests if r["requested_date"] == "2026-11-02"] == ["contract_dates"]
+
+
+async def test_dce_query_parameters_do_not_certify_matching_observation_dates(monkeypatch):
+    from tests.test_dce_futures import daily, warehouse
+
+    def handler(request):
+        if request.url.host == "stock2.finance.sina.com.cn":
+            return httpx.Response(200, json=bars())
+        assert request.url.host == "www.dce.com.cn" and request.method == "POST"
+        return httpx.Response(200, json=warehouse() if "wbill" in request.url.path else daily())
+
+    install(monkeypatch, handler)
+    value = await futures.snapshot("M")
+    assert value["exchange_daily"]["status"] == value["warehouse_receipt"]["status"] == "collected"
+    assert value["exchange_daily"]["date_provenance"] == "request_parameter"
+    assert value["date_alignment"] == "unverified"
+    assert value["observation_dates"] == ["2026-11-02"]
+    assert set(value["observation_date_gaps"]) == {"exchange_daily", "warehouse_receipt"}
+    assert value["positioning"]["member_rankings"]["status"] == "not_covered"
+    assert "会员排名尚未取得" in " ".join(value["gaps"])
+    assert "会员排名已取得" not in " ".join(value["gaps"])
+    assert value["status"] == "partial" and value["portfolio_risk_status"] == "not_evaluated"
