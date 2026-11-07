@@ -188,6 +188,16 @@ async def _payload(request: Request, model):
         raise HTTPException(422, "反馈格式无效，请检查类型、长度和必填项")
 
 
+def _acceptance_id(request: Request) -> int | None:
+    """Narrow a machine read to one dedicated test-account record, never a user."""
+    values = request.query_params.getlist("acceptance_id")
+    if not values:
+        return None
+    if len(values) != 1 or not re.fullmatch(r"[1-9][0-9]{0,15}", values[0]) or int(values[0]) > 2**53 - 1:
+        raise HTTPException(422, "验收记录编号无效", headers={"Cache-Control": "no-store"})
+    return int(values[0])
+
+
 def _text(value: str) -> str:
     if _PRIVATE_KEY.search(value):
         raise HTTPException(422, "请移除私钥、凭证和环境配置后再提交反馈")

@@ -69,7 +69,7 @@ def _auth(request: Request) -> None:
 
 
 def _query(request: Request, *, queue: bool) -> tuple[int, int, int, str]:
-    allowed = {"since", "after_id", "limit"} | ({"category"} if queue else set())
+    allowed = {"since", "after_id", "limit"} | ({"category", "acceptance_id"} if queue else set())
     pairs = list(request.query_params.multi_items())
     if any(k not in allowed for k, _ in pairs) or len(pairs) != len(dict(pairs)):
         _deny(422)
@@ -130,15 +130,26 @@ async def queue_signals(request: Request):
     _auth(request)
     started_at = int(time.time())
     since, after_id, limit, category = _query(request, queue=True)
+    acceptance_id = feedback._acceptance_id(request)
+    selection = ""
+    selected = []
+    if acceptance_id is not None:
+        selection = (
+            " AND id=? AND username=? AND EXISTS"
+            " (SELECT 1 FROM users u WHERE u.username=feedback_items.username"
+            " AND u.disabled_at IS NULL)"
+        )
+        selected = [acceptance_id, "prism-acceptance"]
     # Deliberately avoid selecting titles, descriptions, identity, page paths,
     # triage JSON, reply/verification text or update history.
     with get_db() as db:
         rows = db.execute(
             """SELECT id, category, feature, status, version, revision,
                       revision_number, created_at, updated_at
-               FROM feedback_items WHERE category=? AND updated_at>=? AND id>?
-               ORDER BY id LIMIT ?""",
-            [category, since, after_id, limit + 1],
+               FROM feedback_items WHERE category=? AND updated_at>=? AND id>?"""
+            + selection
+            + " ORDER BY id LIMIT ?",
+            [category, since, after_id, *selected, limit + 1],
         ).fetchall()
     items = [
         {

@@ -93,8 +93,13 @@ async def queue(
 ):
     revision = _auth(request)
     pairs = list(request.query_params.multi_items())
-    if len(pairs) != len(dict(pairs)) or any(k not in {"batch_date", "after_id", "limit"} for k, _ in pairs):
+    if len(pairs) != len(dict(pairs)) or any(
+        k not in {"batch_date", "after_id", "limit", "acceptance_id"} for k, _ in pairs
+    ):
         _deny(422, "建议评审参数无效")
+    acceptance_id = feedback._acceptance_id(request)
+    selection = " AND f.id=? AND f.username=?" if acceptance_id is not None else ""
+    selected = [acceptance_id, "prism-acceptance"] if acceptance_id is not None else []
     now = _day()
     if batch_date != now.date().isoformat():
         _deny(409, "建议评审批次日期已变化")
@@ -105,8 +110,8 @@ async def queue(
                 "SELECT f.id,f.title,f.description,f.feature,f.revision_number,f.review_batch_date "
                 "FROM feedback_items f JOIN users u ON u.username=f.username "
                 "WHERE u.disabled_at IS NULL AND f.category='suggestion' AND f.status='pending_review' "
-                "AND f.review_batch_date<=? AND f.id>? ORDER BY f.id LIMIT ?",
-                [batch_date, after_id, limit + 1],
+                "AND f.review_batch_date<=? AND f.id>?" + selection + " ORDER BY f.id LIMIT ?",
+                [batch_date, after_id, *selected, limit + 1],
             ).fetchall()
             if due
             else []
