@@ -1,13 +1,11 @@
 /* Account-bound forms. Private values remain in memory, never localStorage. */
 (function () {
   'use strict';
+  function createHub(page, workspaceRoot) {
   var user, epoch = 0, profileVersion = 0, calendarRows = [], editing = null, pending = null, dirty = false, profileReady = false;
-  var futuresRoot = document.getElementById('futuresWorkspace');
-  var bodyPage = document.body && document.body.dataset && document.body.dataset.page;
-  var embeddedFutures = !!futuresRoot && !bodyPage;
-  var futuresActive = false, futuresReady = false, futuresInitializing = null;
-  var $ = function (id) { return embeddedFutures && id === 'main' ? futuresRoot : document.getElementById(embeddedFutures && id === 'notice' ? 'futuresNotice' : id); };
-  var page = embeddedFutures ? 'futures' : bodyPage;
+  var embedded = !!workspaceRoot, embeddedFutures = embedded && page === 'futures';
+  var workspaceActive = false, workspaceReady = false, workspaceInitializing = null;
+  var $ = function (id) { return embedded && id === 'main' ? workspaceRoot : document.getElementById(embedded && id === 'notice' ? (page === 'futures' ? 'futuresNotice' : 'preferencesNotice') : id); };
   var zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
   function node(tag, text, cls) { var el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
   function notice(text) { var target=$('notice'); if(target){target.textContent = text || ''; target.hidden = !text;} }
@@ -287,7 +285,7 @@
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }
   async function init(){
-    (embeddedFutures ? futuresRoot : document).querySelectorAll('form').forEach(function(form){
+    (embedded ? workspaceRoot : document).querySelectorAll('form').forEach(function(form){
       form.onsubmit=function(event){event.preventDefault();notice('页面尚未准备好，请刷新后再试。');};
       if(page!=='futures')form.addEventListener('input',function(){dirty=true;});
     });
@@ -309,24 +307,35 @@
         ['start','end'].forEach(function(name){field($('eventForm'),name).onchange=function(){try{resolveTime($('eventForm'),name,true);notice('');}catch(error){notice(error.message);}};});
         await loadCalendar();
       }
-      if(page==='futures'){var symbol=embeddedFutures ? null : new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;futuresReady=true;}
+      if(page==='futures'){var symbol=embeddedFutures ? null : new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;}
     }catch(error){notice(error.message);}
   }
   window.addEventListener('beforeunload',function(event){if(dirty||pending||portfolioDirty||portfolioUnknown){event.preventDefault();event.returnValue='';}});
   window.addEventListener('pageshow',function(event){if(event.persisted)location.reload();});
   document.addEventListener('visibilitychange',async function(){
-    if(embeddedFutures&&!futuresActive)return;
+    if(embedded&&!workspaceActive)return;
     if(document.hidden){$('main').style.visibility='hidden';return;}
     try{await identify();$('main').style.visibility='';}catch(error){notice(error.message);$('main').style.visibility='';}
   });
-  window.PrismHub={api:api,resolveTime:resolveTime,loadCalendar:loadCalendar,loadFutures:loadFutures,
-    activateFutures:async function(){
-      futuresActive=true;
-      if(!futuresReady){if(!futuresInitializing)futuresInitializing=init().finally(function(){futuresInitializing=null;});await futuresInitializing;}
+  var hub={api:api,resolveTime:resolveTime,loadCalendar:loadCalendar,loadFutures:loadFutures,
+    activate:async function(){
+      workspaceActive=true;
+      if(!workspaceReady){if(!workspaceInitializing)workspaceInitializing=init().then(function(){workspaceReady=true;}).finally(function(){workspaceInitializing=null;});await workspaceInitializing;}
       else try{await identify();}catch(error){notice(error.message);}
-      futuresRoot.style.visibility='';
+      workspaceRoot.style.visibility='';
     },
-    suspendFutures:function(){futuresActive=false;}
+    suspend:function(){workspaceActive=false;}
   };
-  if(!embeddedFutures)init();
+  hub.activateFutures=hub.activate;hub.suspendFutures=hub.suspend;
+  if(!embedded)init();
+  return hub;
+  }
+  var bodyPage=document.body&&document.body.dataset&&document.body.dataset.page;
+  if(bodyPage)window.PrismHub=createHub(bodyPage,null);
+  else {
+    var futuresRoot=document.getElementById('futuresWorkspace');
+    if(futuresRoot)window.PrismHub=createHub('futures',futuresRoot);
+    var preferencesRoot=document.getElementById('preferencesWorkspace');
+    if(preferencesRoot)window.PrismPreferences=createHub('preferences',preferencesRoot);
+  }
 }());

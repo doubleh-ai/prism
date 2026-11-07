@@ -4,7 +4,7 @@ import pytest
 
 
 async def test_portal_and_prism_are_distinct_authenticated_pages(client, auth_cookies):
-    for path in ("/", "/prism", "/projects", "/notifications", "/knowledge", "/futures"):
+    for path in ("/", "/prism", "/projects", "/notifications", "/knowledge", "/futures", "/preferences"):
         response = await client.get(path)
         assert response.status_code == 307 and response.headers["location"] == "/login"
     portal = await client.get("/", cookies=auth_cookies)
@@ -63,6 +63,20 @@ async def test_capability_bookmarks_return_to_the_owning_workspace(client, auth_
     assert reminders.status_code == 307
     assert reminders.headers["location"] == "/work?panel=notifications"
     assert response.headers["cache-control"] == reminders.headers["cache-control"] == "no-store"
+
+
+async def test_preferences_bookmark_keeps_the_prism_shell(client, auth_cookies):
+    response = await client.get("/preferences?next=https://invalid.example", cookies=auth_cookies)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/prism?mode=preferences"
+    assert response.headers["cache-control"] == "no-store"
+    page = await client.get(response.headers["location"], cookies=auth_cookies)
+    assert page.status_code == 200 and 'id="appShell"' in page.text
+    assert page.text.count('id="preferencesWorkspace"') == 1
+    assert page.text.count('id="profileForm"') == page.text.count('id="portfolioForm"') == 1
+    assert 'data-mode="preferences"' in page.text
+    assert 'href="/preferences"' not in page.text
+    assert "__RESEARCH_PREFERENCES__" not in page.text
 
 
 async def test_futures_bookmark_selects_the_same_prism_workspace_without_starting_research(

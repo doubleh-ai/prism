@@ -11,7 +11,14 @@ function setup(page='preferences',embedded=false){
  const els={main:el(),notice:el(),profileForm:form,profileReload:el(),profileVersion:el()},requests=[],listeners={};
  Object.assign(els,{portfolioForm:el(),addPosition:el(),useObservedPriceTime:el(),portfolioReload:el(),portfolioDetails:el()});
  Object.assign(els,{futuresForm:form,futureSymbol:el(),futuresResult:el()});
- if(embedded){els.futuresWorkspace=el();els.futuresWorkspace.querySelectorAll=()=>[form];}
+ if(embedded){
+  els.futuresWorkspace=el();els.futuresNotice=el();els.futuresWorkspace.querySelectorAll=()=>[els.futuresForm];
+  if(page==='preferences'){
+   els.preferencesWorkspace=el();els.preferencesNotice=el();
+   els.preferencesWorkspace.querySelectorAll=()=>[form,els.portfolioForm];
+   els.futuresForm=el();
+  }
+ }
  const context={console,URL,URLSearchParams,Intl,Date,JSON,Number,String,Promise,AbortController,Object,Error,
   setTimeout,clearTimeout,location:{pathname:'/'+page,search:'',replace(){}},confirm:()=>true,
   addEventListener(k,f){listeners[k]=f;},
@@ -48,6 +55,31 @@ async function embeddedFuturesStayLazyAndDoNotRebindOtherForms(){
  const e=setup('futures',true);assert.equal(e.requests.length,0);assert.equal(e.form.onsubmit,undefined);
  const active=e.context.PrismHub.activateFutures();assert.equal(e.requests.length,1);respond(e.requests[0],{user:'synthetic-A'});await active;
  assert.equal(e.form.onsubmit,e.context.PrismHub.loadFutures);assert.equal(e.els.futuresWorkspace.style.visibility,'');
+}
+async function preferencesKeepDraftWhileUsingFutures(){
+ const e=setup('preferences',true),prefs=e.context.PrismPreferences;
+ assert.equal(e.requests.length,0,'opening Prism must not read holdings or preferences');
+ assert.equal(e.form.onsubmit,undefined);
+ const opening=prefs.activate();respond(e.requests[0],{user:'synthetic-A'});await tick();
+ respond(e.requests[1],{profile:{configured:true,version:9,style:'balanced',horizon:'long',max_position_pct:20,max_drawdown_pct:10}});await opening;
+ const save=e.form.onsubmit;e.fields.style.value='aggressive';e.form.listeners.input();
+ prefs.suspend();const futures=e.context.PrismHub.activateFutures();respond(e.requests[2],{user:'synthetic-A'});await futures;
+ assert.equal(e.form.onsubmit,save,'futures must not rebind the preferences form');
+ assert.equal(e.els.futuresForm.onsubmit,e.context.PrismHub.loadFutures);
+ e.context.PrismHub.suspendFutures();const returning=prefs.activate();respond(e.requests[3],{user:'synthetic-A'});await returning;
+ assert.equal(e.fields.style.value,'aggressive');assert.match(e.els.profileVersion.textContent,/版本 9/);
+ assert.equal(e.requests.filter(r=>r.path==='/api/preferences/research').length,1,'returning must not overwrite the draft');
+ assert(!e.requests.some(r=>r.path.includes('/portfolio')||r.options.method==='PUT'));
+ let warned=false;e.listeners.beforeunload({preventDefault(){warned=true;}});assert(warned);
+}
+async function preferencesRejectChangedAccountOnReturn(){
+ const e=setup('preferences',true),prefs=e.context.PrismPreferences;
+ let opening=prefs.activate();respond(e.requests[0],{user:'synthetic-A'});await tick();respond(e.requests[1],{profile:{configured:false,version:0}});await opening;
+ e.fields.style.value='aggressive';prefs.suspend();opening=prefs.activate();respond(e.requests[2],{user:'synthetic-B'});await opening;
+ assert.equal(e.els.preferencesWorkspace.children.length,1,'remove the old account form from the workspace');
+ assert.match(JSON.stringify(e.els.preferencesWorkspace.children),/账号已经切换/);
+ const saving=e.form.onsubmit({preventDefault(){},currentTarget:e.form});respond(e.requests[3],{user:'synthetic-B'});await saving;
+ assert(!e.requests.some(r=>r.options.method==='PUT'),'a detached old form cannot save to the new account');
 }
 async function showOfficialWarrants(){
  const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();
@@ -117,4 +149,4 @@ async function showDceQueryDateAndKeepUnverifiedSourceExplicit(){
  for(const text of ['查询日期 2026-11-06','公开来源未独立核验','日期来自查询参数','仓单仅为手数'])assert(rendered.includes(text),text);
  assert(!rendered.includes('javascript:')&&!rendered.includes('交易所日期 2026-11-06'));
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();console.log('hub journeys ok: 12 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await preferencesKeepDraftWhileUsingFutures();await preferencesRejectChangedAccountOnReturn();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();console.log('hub journeys ok: 14 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

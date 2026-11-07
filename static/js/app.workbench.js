@@ -1,7 +1,7 @@
 /* Prism research workspace. Navigation never starts a second research job. */
 (function() {
   'use strict';
-  var viewLabels = {chat:'研究对话',market:'行情工作区',futures:'期货研究',vibe:'深度研究',analysis:'个股分析',reports:'研究库',industry:'产业关系',indicators:'指标实验室',screener:'全市场选股',admin:'工作台管理'};
+  var viewLabels = {chat:'研究对话',market:'行情工作区',futures:'期货研究',preferences:'研究偏好',vibe:'深度研究',analysis:'个股分析',reports:'研究库',industry:'产业关系',indicators:'指标实验室',screener:'全市场选股',admin:'工作台管理'};
   var capabilityViews = ['market','futures','vibe','analysis','reports','industry','indicators','screener'];
   var originalSwitchMode = App.switchMode;
   var originalMarketWorkspace = App._showMarketWorkspace;
@@ -230,6 +230,7 @@
   });
   App.switchMode = function(mode) {
     if (window.PrismHub && this._mode === 'futures' && mode !== 'futures') PrismHub.suspendFutures();
+    if (window.PrismPreferences && this._mode === 'preferences' && mode !== 'preferences') PrismPreferences.suspend();
     if (window.PrismKnowledge && mode !== 'reports') PrismKnowledge.setActive(false);
     if (mode !== this._mode) {
       this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;

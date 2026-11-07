@@ -141,6 +141,9 @@ Object.assign(App, {
     } else if (mode === 'futures') {
       this._stopWatchlistRefresh();
       this._initFutures();
+    } else if (mode === 'preferences') {
+      this._stopWatchlistRefresh();
+      if (window.PrismPreferences) PrismPreferences.activate();
     } else if (mode === 'vibe') {
       this._stopWatchlistRefresh();
       if (shell && !compact) shell.classList.remove('collapsed');

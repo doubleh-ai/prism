@@ -329,6 +329,7 @@ def render_template(name: str) -> str:
         markup = path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
         for marker, fragment in (
             ("__RESEARCH_KNOWLEDGE__", "partials/research-knowledge.html"),
+            ("__RESEARCH_PREFERENCES__", "partials/research-preferences.html"),
             ("__WORK_NOTIFICATIONS__", "partials/work-notifications.html"),
             ("__FUTURES_WORKSPACE__", "partials/futures-workspace.html"),
         ):
@@ -397,7 +398,7 @@ async def work_page(request: Request):
 async def preferences_page(request: Request):
     if not require_auth(request, optional=True):
         return RedirectResponse("/login")
-    return HTMLResponse(render_template("preferences.html"), headers={"Cache-Control": "no-store"})
+    return RedirectResponse("/prism?mode=preferences", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/knowledge", response_class=HTMLResponse)

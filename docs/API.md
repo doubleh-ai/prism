@@ -31,6 +31,8 @@ projects and calendar use `/work`, `/projects` and `/calendar`. Reminders open
 inside the current Work page; `/notifications` redirects to `/work?panel=notifications`.
 Research records and claim review share the Prism research library;
 `/knowledge?id=...` redirects to `/prism?mode=reports&library=knowledge&claim=...`.
+Research preferences and portfolio checks remain within Prism;
+`/preferences` redirects to `/prism?mode=preferences` without changing stored settings.
 These capabilities are not additional products. `GET /api/platform` returns product availability only, with no
 research or personal Work payload. Existing accounts remain valid.
 

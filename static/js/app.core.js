@@ -154,6 +154,8 @@ var App = {
     if (libraryParams.get('mode') === 'futures' || ['RB','CU','AU','M','SC'].includes(libraryParams.get('futures'))) {
       this._selectFuturesSymbol(libraryParams.get('symbol') || libraryParams.get('futures'));
       this.switchMode('futures');
+    } else if (libraryParams.get('mode') === 'preferences') {
+      this.switchMode('preferences');
     } else if (libraryParams.get('mode') === 'reports') {
       this._researchLibraryTab = libraryParams.get('library') === 'knowledge' ? 'knowledge' : 'reports';
       this.switchMode('reports');

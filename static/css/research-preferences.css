@@ -1,0 +1,23 @@
+#appShell[data-mode=preferences] .sidebar,
+#appShell[data-mode=preferences] .msgs-wrap,
+#appShell[data-mode=preferences] .input-zone{display:none!important}
+#appShell[data-mode=preferences] #preferencesPanel{display:flex!important}
+.preferences-workspace{width:100%;max-width:1100px;min-width:0;margin:0 auto;color:var(--text);font-size:14px;line-height:1.7;overflow-wrap:anywhere}
+.preferences-workspace .card{margin:0 0 24px;padding:24px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg2);min-width:0}
+.preferences-workspace h2{margin:0 0 16px;font-size:19px}.preferences-workspace p{margin:12px 0}
+.preferences-workspace .form-grid,.preferences-workspace .position-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.preferences-workspace .form-grid>*{min-width:0}.preferences-workspace .wide,.preferences-workspace .check{grid-column:1/-1}
+.preferences-workspace label{display:block}.preferences-workspace label>input:not([type=checkbox]),.preferences-workspace label>select{display:block;width:100%;margin-top:6px}
+.preferences-workspace input:not([type=checkbox]),.preferences-workspace select,.preferences-workspace textarea{box-sizing:border-box;max-width:100%;padding:10px 12px;border:1px solid var(--border2);border-radius:var(--r);background:var(--bg);color:var(--text);font:inherit}
+.preferences-workspace input[type=checkbox]{width:auto;margin-right:7px;accent-color:var(--accent)}
+.preferences-workspace button{padding:9px 16px;border:1px solid var(--border2);border-radius:var(--r);background:var(--accent);color:var(--bg);font:inherit;cursor:pointer}
+.preferences-workspace button.secondary{background:var(--bg);color:var(--text)}.preferences-workspace button:disabled{opacity:.55;cursor:default}
+.preferences-workspace .actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px}.preferences-workspace .muted,.preferences-workspace #profileVersion,.preferences-workspace #portfolioVersion{color:var(--text2);font-size:13px}
+.preferences-workspace .notice{padding:14px;border:1px solid var(--border2);border-radius:var(--r);background:var(--bg3);color:var(--text)}
+.preferences-workspace summary{cursor:pointer}.preferences-workspace details.card>summary{font-weight:600;font-size:18px}.preferences-workspace details.card[open]>summary{margin-bottom:20px}
+.preferences-workspace .position-row{padding:16px;margin:14px 0;border:1px solid var(--border);border-radius:var(--r)}.preferences-workspace .position-fields{margin-top:16px}
+.preferences-workspace .risk-rule{padding:12px 0;border-bottom:1px solid var(--border)}
+.preferences-workspace #importDetails{margin:18px 0}.preferences-workspace #importDetails>label{margin:12px 0}.preferences-workspace #importText{width:100%}
+.preferences-workspace #importResult{max-width:100%;max-height:320px;overflow:auto}.preferences-workspace table{width:max-content;min-width:100%;border-collapse:collapse}.preferences-workspace th,.preferences-workspace td{padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--border);min-width:100px}
+.preferences-workspace a{color:var(--accent)}.preferences-workspace [hidden]{display:none!important}.preferences-workspace #portfolioNotice:empty{display:none}
+@media(max-width:650px){.preferences-workspace .form-grid,.preferences-workspace .position-fields{grid-template-columns:1fr}.preferences-workspace .card{padding:18px}.preferences-workspace input,.preferences-workspace select,.preferences-workspace textarea{font-size:16px}.preferences-workspace button{min-height:44px}}
