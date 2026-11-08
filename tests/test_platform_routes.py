@@ -41,6 +41,43 @@ async def test_work_pages_share_account_without_research_payload(client, auth_co
     assert response.text.count("data-work-notifications") == 1
     assert 'href="/notifications"' not in response.text
     assert "__WORK_NOTIFICATIONS__" not in response.text
+    assert response.text.count('id="feedbackDialog"') == 1
+    assert response.text.count("data-work-feedback") == 1
+    assert "/prism?feedback=" not in response.text
+    assert "__FEEDBACK_DIALOG__" not in response.text
+    assert response.text.index("/static/js/work.feedback.js") < response.text.index(
+        "/static/js/app.feedback.js"
+    )
+    assert "/static/js/app.core.js" not in response.text
+
+
+@pytest.mark.parametrize(
+    "path,feature", [("/work", "work"), ("/projects", "work"), ("/calendar", "calendar")]
+)
+async def test_contextual_work_feedback_can_be_submitted_and_read_back(client, auth_cookies, path, feature):
+    from server.feedback import init_feedback_db
+
+    init_feedback_db()
+    response = await client.post(
+        "/api/feedback",
+        cookies=auth_cookies,
+        headers={"X-Prism-Account": "testuser"},
+        json={
+            "category": "bug",
+            "title": "合成工作区反馈",
+            "description": "仅用于隔离测试的页面反馈。",
+            "page": path,
+            "feature": feature,
+            "request_id": "00000000-0000-4000-8000-000000000024",
+        },
+    )
+    assert response.status_code == 200
+    item = response.json()["feedback"]
+    readback = await client.get(f"/api/feedback/{item['id']}", cookies=auth_cookies)
+    assert readback.status_code == 200
+    saved = readback.json()["feedback"]
+    assert saved["page"] == path and saved["feature"] == feature
+    assert saved["status"] == "triaging"
 
 
 async def test_capability_bookmarks_return_to_the_owning_workspace(client, auth_cookies):
@@ -59,6 +96,8 @@ async def test_capability_bookmarks_return_to_the_owning_workspace(client, auth_
     assert prism.text.count('id="researchKnowledge"') == 1
     assert 'href="/knowledge"' not in prism.text and "__RESEARCH_KNOWLEDGE__" not in prism.text
     assert claim not in prism.text
+    assert prism.text.count('id="feedbackDialog"') == 1
+    assert "__FEEDBACK_DIALOG__" not in prism.text
     reminders = await client.get("/notifications?next=https://invalid.example", cookies=auth_cookies)
     assert reminders.status_code == 307
     assert reminders.headers["location"] == "/work?panel=notifications"

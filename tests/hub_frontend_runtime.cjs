@@ -9,6 +9,8 @@ function setup(page='preferences',embedded=false){
  Object.assign(fields.style,{value:'conservative'});fields.horizon.value='long';fields.max_position_pct.value='20';fields.max_drawdown_pct.value='10';
  const submit=el(),form=el();form.elements={namedItem:k=>fields[k]};form.querySelector=()=>submit;
  const els={main:el(),notice:el(),profileForm:form,profileReload:el(),profileVersion:el()},requests=[],listeners={};
+ const foreignForm=el(),foreignSubmit=function(){};foreignForm.onsubmit=foreignSubmit;
+ els.main.querySelectorAll=()=>[form];
  Object.assign(els,{portfolioForm:el(),addPosition:el(),useObservedPriceTime:el(),portfolioReload:el(),portfolioDetails:el()});
  Object.assign(els,{futuresForm:form,futureSymbol:el(),futuresResult:el()});
  if(embedded){
@@ -23,10 +25,12 @@ function setup(page='preferences',embedded=false){
   setTimeout,clearTimeout,location:{pathname:'/'+page,search:'',replace(){}},confirm:()=>true,
   addEventListener(k,f){listeners[k]=f;},
   document:{body:{dataset:embedded?{}:{page}},getElementById:k=>els[k],createElement:el,
-   querySelectorAll:s=>s==='form'?[form]:[],addEventListener(){}},
+   querySelectorAll:s=>s==='form'?[form,foreignForm]:[],addEventListener(){}},
   fetch(path,options){return new Promise((resolve,reject)=>requests.push({path,options,resolve,reject}));}};
  Object.defineProperty(context,'localStorage',{get(){throw Error('private persistent cache forbidden');}});
- context.window=context;vm.createContext(context);vm.runInContext(script,context);return {els,requests,submit,form,fields,listeners,context};
+ context.window=context;vm.createContext(context);vm.runInContext(script,context);
+ assert.equal(foreignForm.onsubmit,foreignSubmit,'workspace setup must not replace shared feedback submission');
+ return {els,requests,submit,form,fields,listeners,context};
 }
 const respond=(req,value,ok=true)=>req.resolve({ok,json:async()=>value});
 async function initialFailureBlocksNativeSubmit(){

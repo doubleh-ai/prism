@@ -4,12 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 研究工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=119">
+  <link rel="stylesheet" href="/static/css/app.css?v=120">
   <link rel="stylesheet" href="/static/css/futures-workspace.css?v=119">
   <link rel="stylesheet" href="/static/css/research-library.css?v=119">
   <link rel="stylesheet" href="/static/css/research-preferences.css?v=119">
   <style>#modelRoutes{margin-top:18px}#modelRoutes summary{cursor:pointer;font-weight:600}#modelRoutesBody>p{margin:12px 0;color:var(--text-muted,inherit)}#modelRoutesBody section{padding:16px 0;border-bottom:1px solid var(--border,#dfe4eb)}#modelRoutesBody form{display:grid;gap:12px;max-width:620px}#modelRoutesBody label{display:flex;align-items:center;gap:9px;flex-wrap:wrap}#modelRoutesBody select,#modelRoutesBody input[type=number]{padding:7px;border:1px solid var(--border,#dfe4eb);border-radius:6px;background:var(--bg2,#fff);color:var(--text,#202a38)}#modelRoutesBody details label{margin-top:10px}</style>
   <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=119">
+  <link rel="stylesheet" href="/static/css/feedback.css?v=120">
 </head>
 <body>
 <div class="app-shell" id="appShell">
@@ -314,28 +315,14 @@
   <nav id="researchTabs" class="workbench-dialog-tabs" role="tablist" aria-label="研究视图"><button role="tab" data-research-tab="overview">研究概览</button><button role="tab" data-research-tab="report">网页研报</button><button role="tab" data-research-tab="evidence">来源证据</button><button role="tab" data-research-tab="industry">产业关系</button></nav>
   <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
 </dialog>
-<dialog id="feedbackDialog" class="workbench-dialog feedback-dialog" aria-labelledby="feedbackTitle">
-  <header><div><h2 id="feedbackTitle">反馈与建议</h2></div><button type="button" onclick="document.getElementById('feedbackDialog').close()" aria-label="关闭反馈">×</button></header>
-  <nav class="workbench-dialog-tabs" aria-label="反馈视图"><button type="button" onclick="App._feedbackView('new')">提交反馈</button><button type="button" onclick="App._feedbackView('mine')">我的反馈与进度</button><button type="button" id="feedbackReviewEntry" hidden onclick="App._feedbackView('admin')">反馈评审</button></nav>
-  <div class="workbench-dialog-body">
-    <form id="feedbackForm" class="feedback-form" onsubmit="App._submitFeedback(event)">
-      <label for="feedbackCategory">反馈类型</label><select id="feedbackCategory"><option value="bug">功能异常 · 优先排查</option><option value="suggestion">改进建议 · 每日评审</option></select>
-      <label for="feedbackSummary">用一句话描述</label><input id="feedbackSummary" required maxlength="120" placeholder="例如：报告表格在手机上被截断">
-      <label for="feedbackDescription">发生了什么？你希望怎样？</label><textarea id="feedbackDescription" required maxlength="6000" rows="5" placeholder="异常请写操作步骤、实际结果和预期结果；建议请写使用场景和想改进的地方。"></textarea>
-      <p class="feedback-privacy">反馈用于排查和评审，可由自动流程辅助处理。仅附带当前页面和版本，不自动上传对话、研报或截图。请勿填写密码、密钥及其他敏感信息。</p>
-      <div class="feedback-form-actions"><span id="feedbackPage"></span><button type="submit" id="feedbackSubmit">提交并跟踪进度</button></div>
-    </form>
-    <p id="feedbackMessage" class="feedback-message" role="status" aria-live="polite"></p>
-    <div id="feedbackContent" hidden></div>
-  </div>
-</dialog>
+__FEEDBACK_DIALOG__
 <script src="/static/lib/marked.min.js?v=119"></script>
 <script src="/static/lib/echarts.min.js?v=119"></script>
 <script src="/static/js/app.util.js?v=119"></script>
 <script src="/static/js/app.chat-render.js?v=119"></script>
 <script src="/static/js/app.core.js?v=119"></script>
 <script src="/static/js/app.diagnostics.js?v=119"></script>
-<script src="/static/js/app.feedback.js?v=119"></script>
+<script src="/static/js/app.feedback.js?v=120"></script>
 <script src="/static/js/app.chat.js?v=119"></script>
 <script src="/static/js/app.market.js?v=119"></script>
 <script src="/static/js/app.vibe.js?v=119"></script>
@@ -353,7 +340,7 @@
 <script src="/static/js/app.workbench.js?v=119"></script>
 <script src="/static/js/app.research.js?v=119"></script>
 <script src="/static/js/app.operations.js?v=119"></script>
-<script src="/static/js/app.hub.js?v=119"></script>
+<script src="/static/js/app.hub.js?v=120"></script>
 <script src="/static/js/app.handoff.js?v=119"></script>
 </body>
 </html>

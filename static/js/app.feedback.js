@@ -17,8 +17,10 @@ Object.assign(App, {
     document.getElementById('feedbackReviewEntry').hidden = !this.isAdmin;
     if (category === 'bug' || category === 'suggestion') document.getElementById('feedbackCategory').value = category;
     var context = this._feedbackOrigin || this._mode || 'chat';
-    var names = {work:'我的任务',calendar:'日历安排',futures:'期货研究',preferences:'研究偏好'};
-    document.getElementById('feedbackPage').textContent = '当前页面：' + (names[context] || context);
+    var names = {work:'我的任务',projects:'项目',calendar:'日历安排',futures:'期货研究',preferences:'研究偏好',
+      chat:'研究对话',market:'行情工作区',vibe:'深度研究',analysis:'个股分析',reports:'研究库',
+      industry:'产业关系',admin:'平台管理',screener:'全市场选股',indicators:'指标实验室'};
+    document.getElementById('feedbackPage').textContent = '当前页面：' + (this._feedbackPageLabel || names[context] || '当前工作区');
     if (!dialog.open) dialog.showModal();
     this._feedbackView('new');
     document.getElementById('feedbackSummary').focus();
@@ -102,7 +104,8 @@ Object.assign(App, {
         document.getElementById('feedbackContent').hidden = false;
         this._renderFeedbackDetail(data.feedback);
       }
-      document.getElementById('feedbackErrorHint').hidden = true;
+      var errorHint = document.getElementById('feedbackErrorHint');
+      if (errorHint) errorHint.hidden = true;
     } catch (error) {
       // Keep the same request id: a lost response must not create another ticket.
       this._feedbackNotice(seq, '提交结果尚未确认，请先查看“我的反馈与进度”。原内容已保留，重试同一内容会核对原提交。');

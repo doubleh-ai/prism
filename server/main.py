@@ -331,6 +331,7 @@ def render_template(name: str) -> str:
             ("__RESEARCH_KNOWLEDGE__", "partials/research-knowledge.html"),
             ("__RESEARCH_PREFERENCES__", "partials/research-preferences.html"),
             ("__WORK_NOTIFICATIONS__", "partials/work-notifications.html"),
+            ("__FEEDBACK_DIALOG__", "partials/feedback-dialog.html"),
             ("__FUTURES_WORKSPACE__", "partials/futures-workspace.html"),
         ):
             if marker in markup:

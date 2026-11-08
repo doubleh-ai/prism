@@ -302,7 +302,7 @@
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }
   async function init(){
-    (embedded ? workspaceRoot : document).querySelectorAll('form').forEach(function(form){
+    (embedded ? workspaceRoot : $('main')).querySelectorAll('form').forEach(function(form){
       form.onsubmit=function(event){event.preventDefault();notice('页面尚未准备好，请刷新后再试。');};
       if(page!=='futures')form.addEventListener('input',function(){dirty=true;});
     });
