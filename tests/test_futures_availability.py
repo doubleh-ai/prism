@@ -29,7 +29,12 @@ def isolated_market(monkeypatch):
         # These cases own only their existing daily-market/exchange HTTP scope.
         # The new public monthly source and its shared snapshot are exercised
         # independently in test_futures_fundamentals.py.
-        return {"status": "unavailable", "topic": "合成月度资料未采集", "index_url": "https://www.stats.gov.cn/sj/zxfb/", "observations": []}
+        return {
+            "status": "unavailable",
+            "topic": "合成月度资料未采集",
+            "index_url": "https://www.stats.gov.cn/sj/zxfb/",
+            "observations": [],
+        }
 
     monkeypatch.setattr(futures.futures_fundamentals, "read_supply", unrelated_monthly_source)
 

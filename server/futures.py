@@ -354,7 +354,10 @@ async def snapshot(symbol):
                 value.update(reports)
                 value["fundamental_supply"] = supply
                 if symbol == "RB":
-                    value["fundamentals"][0] = {**supply, "official_url": supply.get("source_url", supply["index_url"])}
+                    value["fundamentals"][0] = {
+                        **supply,
+                        "official_url": supply.get("source_url", supply["index_url"]),
+                    }
                 value["source_attempts"] = attempts
                 value["report_date_basis"] = "bounded_calendar_window"
                 if value["exchange_daily"]["status"] == "collected":
@@ -400,7 +403,9 @@ async def snapshot(symbol):
                     if item["status"] == "collected" and item.get("date_provenance") == "request_parameter"
                 ]
                 value["observation_dates"] = sorted(set(dates))
-                value["date_alignment_scope"] = "daily_observations_only; monthly supply retains its own periods"
+                value["date_alignment_scope"] = (
+                    "daily_observations_only; monthly supply retains its own periods"
+                )
                 value["date_alignment"] = (
                     "mixed"
                     if len(set(dates)) > 1
