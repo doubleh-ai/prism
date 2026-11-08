@@ -808,6 +808,20 @@ use a 300-second cache. This status does not certify fundamental research or
 portfolio suitability. No source collected returns 503 with
 `X-Prism-Data-Status: unavailable` and `Retry-After: 30`, without caching a result.
 
+For RB and SC, `fundamental_supply` reads at most three fixed NBS release-index
+pages and two distinct monthly industrial releases, within six seconds and a
+1 MiB limit per body, without authentication, redirects or automatic retries.
+RB selects national pig iron, crude steel and steel products; SC selects crude
+oil production and refinery throughput. `observations` retains each release's
+period, publication date, body digest, monthly/combined-period amounts,
+year-to-date amounts where reported and official year-on-year percentages.
+Identical desktop/mobile tables count once; conflicting tables, units, dates
+or missing metrics reject that release. The series describes national
+enterprises above designated size, not deliverable output, inventory, operating
+rates or global supply; throughput is not refined-product output. Missing CU,
+AU and M coverage is not filled from aggregates or other products. Monthly
+periods remain separate from the daily `date_alignment` comparison.
+
 Official reports start from the server's Shanghai calendar date, independently
 of a missing or stale secondary price feed. Only an actual dated HTTP 404 permits
 a query for the preceding date, at most three distinct calendar dates per

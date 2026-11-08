@@ -1,4 +1,4 @@
-"""Dated NBS steel production: national supply context, never rebar output or inventory.
+"""Dated NBS production: national context, never deliverable output or inventory.
 
 Only fixed public HTTPS index/release paths are read. Each URL is requested at
 most once, with a shared deadline and finite discovery/body limits. Published
@@ -27,19 +27,30 @@ BODY_LIMIT = 1024 * 1024
 INDEX_PAGES = 3
 RELEASES = 2
 SECONDS = 6
-LABELS = {"生铁(万吨)": "pig_iron", "粗钢(万吨)": "crude_steel", "钢材(万吨)": "steel_products"}
+LABELS = {
+    "RB": {"生铁(万吨)": "pig_iron", "粗钢(万吨)": "crude_steel", "钢材(万吨)": "steel_products"},
+    "SC": {"原油(万吨)": "crude_oil_production", "原油加工量(万吨)": "refinery_throughput"},
+}
+TOPICS = {"RB": "全国钢铁生产供给背景", "SC": "全国原油生产与炼厂加工背景"}
 RELEASE_PATH = re.compile(r"/sj/zxfb/(\d{6})/t(\d{8})_(\d{5,12})\.html\Z")
 TITLE = re.compile(r"(20\d{2})年(?:(1)[—－–-](2)|(\d{1,2}))月份?规模以上工业增加值")
-NOTICE = (
-    "全国规模以上工业企业的生铁、粗钢及钢材产量，仅作螺纹钢供给背景；不是螺纹钢专属产量、"
-    "钢厂开工率、社会库存或现货基差。单位为万吨，同比采用原文。企业统计范围及历史数可能修订，"
-    "不以累计差分替代当月产量或重算官方同比。"
-)
+NOTICE = {
+    "RB": (
+        "全国规模以上工业企业的生铁、粗钢及钢材产量，仅作螺纹钢供给背景；不是螺纹钢专属产量、"
+        "钢厂开工率、社会库存或现货基差。单位为万吨，同比采用原文。企业统计范围及历史数可能修订，"
+        "不以累计差分替代当月产量或重算官方同比。"
+    ),
+    "SC": (
+        "全国规模以上工业企业的原油产量与原油加工量，仅作国内生产与炼厂需求背景；不是全球供需、"
+        "进口量、炼厂开工率、库存或可交割油种产量。单位为万吨，同比采用原文。企业统计范围及历史数"
+        "可能修订，不以累计差分替代当月数、不重算官方同比，也不以加工量代替成品油产量。"
+    ),
+}
 
 
 def _need(value):
     if not value:
-        raise ValueError("invalid NBS steel release")
+        raise ValueError("invalid NBS production release")
 
 
 def _text(value):
@@ -168,7 +179,10 @@ def _number(value, *, nonnegative=False):
     return int(result) if result == int(result) else float(result)
 
 
-def parse_release(raw, url, today, *, expected_period=None):
+def parse_release(raw, url, today, *, expected_period=None, symbol="RB"):
+    _need(symbol in LABELS)
+    labels = LABELS[symbol]
+    stems = tuple(label.split("(", 1)[0] for label in labels)
     published = _release(url)
     _need(published <= today)
     parser = _html(raw)
@@ -186,7 +200,7 @@ def parse_release(raw, url, today, *, expected_period=None):
     cumulative_header = f"1—{last}月"
     matching = []
     for table in parser.tables:
-        if any(row and any(label in row[0] for label in ("生铁", "粗钢", "钢材")) for row in table):
+        if any(row and any(stem in row[0] for stem in stems) for row in table):
             _need(
                 table[:2]
                 == (
@@ -202,10 +216,10 @@ def parse_release(raw, url, today, *, expected_period=None):
     _need(1 <= len(matching) <= 2 and all(table == matching[0] for table in matching))
     products = {}
     for row in matching[0]:
-        if row and any(label in row[0] for label in ("生铁", "粗钢", "钢材")):
-            _need(row[0] in LABELS and len(row) == (3 if combined else 5) and row[0] not in products)
+        if row and any(stem in row[0] for stem in stems):
+            _need(row[0] in labels and len(row) == (3 if combined else 5) and row[0] not in products)
             products[row[0]] = {
-                "product": LABELS[row[0]],
+                "product": labels[row[0]],
                 "label": row[0][:-4],
                 "unit": "万吨",
                 "period_amount": _number(row[1], nonnegative=True),
@@ -219,7 +233,7 @@ def parse_release(raw, url, today, *, expected_period=None):
                     }
                 ),
             }
-    _need(set(products) == set(LABELS))
+    _need(set(products) == set(labels))
     return {
         "source_url": url,
         "body_sha256": hashlib.sha256(raw).hexdigest(),
@@ -231,7 +245,7 @@ def parse_release(raw, url, today, *, expected_period=None):
         "period_kind": "combined_january_february" if combined else "calendar_month",
         "year_to_date_start": date(year, 1, 1).isoformat(),
         "scope": "national_industrial_enterprises_above_designated_size",
-        "products": [products[label] for label in LABELS],
+        "products": [products[label] for label in labels],
         "duplicate_tables": len(matching),
     }
 
@@ -271,18 +285,28 @@ async def _fetch(client, url, deadline, seen):
 
 async def read_supply(client, symbol, today, deadline):
     base = {
-        "topic": "全国钢铁生产供给背景",
+        "topic": TOPICS.get(symbol, "公开生产基本面"),
         "source_kind": "official_public_release",
         "index_url": INDEX,
         "observations": [],
-        "notice": NOTICE,
-        "rebar_specific_output": False,
+        "notice": NOTICE.get(symbol, "尚未接入该品种的官方生产基本面，不能用其他品种数据替代。"),
+        **(
+            {"rebar_specific_output": False}
+            if symbol == "RB"
+            else {
+                "deliverable_grade_verified": False,
+                "imports_collected": False,
+                "global_supply_collected": False,
+            }
+            if symbol == "SC"
+            else {}
+        ),
         "social_inventory_collected": False,
         "spot_basis_collected": False,
         "operating_rate_collected": False,
     }
-    if symbol != "RB":
-        return {**base, "status": "not_covered", "reason": "national_steel_series_is_rb_context_only"}
+    if symbol not in LABELS:
+        return {**base, "status": "not_covered", "reason": "nbs_product_series_not_covered"}
     end = min(deadline, asyncio.get_running_loop().time() + SECONDS)
     candidates, gaps, seen = {}, [], set()
     errors = (httpx.HTTPError, ValueError, TypeError, OverflowError, TimeoutError, RecursionError)
@@ -309,7 +333,7 @@ async def read_supply(client, symbol, today, deadline):
             break
         try:
             raw = await _fetch(client, item["url"], end, seen)
-            observations.append(parse_release(raw, item["url"], today, expected_period=period))
+            observations.append(parse_release(raw, item["url"], today, expected_period=period, symbol=symbol))
         except errors as error:
             gaps.append({"source_url": item["url"], **source_failure(error)})
     return {

@@ -353,7 +353,7 @@ async def snapshot(symbol):
                 supply = monthly.result()
                 value.update(reports)
                 value["fundamental_supply"] = supply
-                if symbol == "RB":
+                if symbol in {"RB", "SC"}:
                     value["fundamentals"][0] = {
                         **supply,
                         "official_url": supply.get("source_url", supply["index_url"]),
