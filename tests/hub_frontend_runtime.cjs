@@ -149,4 +149,17 @@ async function showDceQueryDateAndKeepUnverifiedSourceExplicit(){
  for(const text of ['查询日期 2026-11-06','公开来源未独立核验','日期来自查询参数','仓单仅为手数'])assert(rendered.includes(text),text);
  assert(!rendered.includes('javascript:')&&!rendered.includes('交易所日期 2026-11-06'));
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await preferencesKeepDraftWhileUsingFutures();await preferencesRejectChangedAccountOnReturn();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();console.log('hub journeys ok: 14 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showCollectedMonthlySupplyAlongsideUncollectedFundamentalDrivers(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();
+ const run=e.form.onsubmit({preventDefault(){}});
+ respond(e.requests[1],{symbol:'RB',name:'螺纹钢',series_status:'unavailable',latest:{},source:{},gaps:['社会库存和现货基差仍缺少原始数据'],fundamentals:[
+  {topic:'全国钢铁生产供给背景',status:'collected',history_window_complete:false,notice:'不是螺纹钢专属产量、开工率或社会库存',observations:[
+   {period_label:'2026年9月',published_date:'2026-10-19',source_url:'https://www.stats.gov.cn/sj/zxfb/202610/t20261019_1965617.html',products:[{label:'粗钢',unit:'万吨',period_amount:7359,period_yoy_pct:0.1,year_to_date_amount:72477,year_to_date_yoy_pct:-2.9}]}
+  ]},
+  {topic:'社会与钢厂库存',status:'not_collected',official_url:'https://www.shfe.cn/'}
+ ]});await run;
+ const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['全国钢铁生产供给背景','2026年9月','发布 2026-10-19','7359 万吨','官方同比 0.1%','年初至该期 72477 万吨','社会与钢厂库存：尚未采集','不是螺纹钢专属产量','本次历史窗口未收集完整','社会库存和现货基差仍缺少原始数据'])assert(rendered.includes(text),text);
+ assert(!rendered.includes('全国钢铁生产供给背景：尚未采集'));assert.equal(e.requests.length,2);
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await preferencesKeepDraftWhileUsingFutures();await preferencesRejectChangedAccountOnReturn();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();await showCollectedMonthlySupplyAlongsideUncollectedFundamentalDrivers();console.log('hub journeys ok: 15 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

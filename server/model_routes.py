@@ -2,6 +2,8 @@
 
 Reservations are durable before network I/O. Failed and unknown calls consume
 their reservation; configuration changes do not reset the daily usage ledger.
+Only routes consumed by this application are configurable. Historical unused
+settings and reservations stay intact; private operations own their own routes.
 """
 
 from __future__ import annotations
@@ -24,13 +26,10 @@ from .productivity.models import ClosedModel
 from .productivity.routes import _body
 
 router = APIRouter(prefix="/api/admin/model-routes", tags=["admin"])
-Purpose = Literal["research", "work_planning", "feedback_triage", "suggestion_review", "validation"]
+Purpose = Literal["research", "work_planning"]
 PURPOSES = {
     "research": "投资研究",
     "work_planning": "工作安排",
-    "feedback_triage": "异常归类",
-    "suggestion_review": "建议评审",
-    "validation": "模型验收",
 }
 
 
@@ -81,9 +80,13 @@ def _choices():
     ]
 
 
-def resolve(purpose, *, explicit_model=None, private_work=False):
-    if purpose not in PURPOSES:
+def _require_purpose(purpose):
+    if not isinstance(purpose, str) or purpose not in PURPOSES:
         raise HTTPException(422, "模型用途无效")
+
+
+def resolve(purpose, *, explicit_model=None, private_work=False):
+    _require_purpose(purpose)
     init_model_routes_db()
     with get_db() as db:
         route = _route(db, purpose)
@@ -99,6 +102,7 @@ def resolve(purpose, *, explicit_model=None, private_work=False):
 
 
 def reserve(purpose, actor, request_id, model_id, *, expected_route_version, minimum_available=1):
+    _require_purpose(purpose)
     if type(minimum_available) is not int or minimum_available not in {1, 2}:
         raise HTTPException(422, "模型预留范围无效")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", request_id):
@@ -177,6 +181,7 @@ async def list_routes(request: Request):
 async def save_route(purpose: Purpose, request: Request):
     admin = require_admin(request)
     verify_csrf(request)
+    _require_purpose(purpose)
     body = await _body(request, RouteUpdate)
     if require_admin(request) != admin:
         raise HTTPException(401, "请重新登录")

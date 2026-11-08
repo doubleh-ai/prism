@@ -280,7 +280,24 @@
       }else if(receipt){
         fund.append(node('p',receipt.error_code==='automated_access_restricted'?'交易所限制自动读取，仓单资料暂未取得；已取得的其他资料仍保留。':receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
       }
-      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});root.append(fund);
+      fund.append(node('h3','基本面资料与待补证问题'));
+      value.fundamentals.forEach(function(item){
+        if(item.status==='collected'&&Array.isArray(item.observations)&&item.observations.length){
+          fund.append(node('h3',item.topic));
+          item.observations.slice(0,2).forEach(function(observation){
+            fund.append(node('p',display(observation.period_label)+' · 发布 '+display(observation.published_date),'muted'));
+            (Array.isArray(observation.products)?observation.products:[]).slice(0,3).forEach(function(product){
+              var text=product.label+'：'+display(product.period_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.period_yoy_pct)+'%';
+              if(product.year_to_date_amount!==undefined)text+='；年初至该期 '+display(product.year_to_date_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.year_to_date_yoy_pct)+'%';
+              fund.append(node('p',text));
+            });
+            var original=sourceLink(observation.source_url,'查看本期原文 ↗');if(original)fund.append(original);
+          });
+          if(item.notice)fund.append(node('p',item.notice,'muted'));
+          if(item.history_window_complete===false)fund.append(node('p','本次历史窗口未收集完整，已取得的月份分别保留。','muted'));
+        }else{var p=node('p',item.topic+'：尚未采集 · '),a=sourceLink(item.official_url,'查看官方来源 ↗');if(a)p.append(a);fund.append(p);}
+      });
+      value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});root.append(fund);
       if(hasSeries){var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);}
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }

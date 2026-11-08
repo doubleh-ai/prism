@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from . import exchange_futures, futures_parameters, warehouse_receipts
+from . import exchange_futures, futures_fundamentals, futures_parameters, warehouse_receipts
 from .auth import require_auth
 from .data_availability import source_failure
 from .database import check_rate_limit
@@ -342,8 +342,19 @@ async def snapshot(symbol):
                     value["gaps"].insert(
                         0, "未取得连续日线，技术指标与连续持仓变化未计算；其他来源按各自日期显示"
                     )
-                reports, attempts = await _reports(client, symbol, now.date(), deadline - 0.25)
+                # Keep both asynchronous readers owned until normal exit,
+                # cancellation or an unexpected failure has closed siblings.
+                async with asyncio.TaskGroup() as sources:
+                    dated = sources.create_task(_reports(client, symbol, now.date(), deadline - 0.25))
+                    monthly = sources.create_task(
+                        futures_fundamentals.read_supply(client, symbol, now.date(), deadline - 0.25)
+                    )
+                reports, attempts = dated.result()
+                supply = monthly.result()
                 value.update(reports)
+                value["fundamental_supply"] = supply
+                if symbol == "RB":
+                    value["fundamentals"][0] = {**supply, "official_url": supply.get("source_url", supply["index_url"])}
                 value["source_attempts"] = attempts
                 value["report_date_basis"] = "bounded_calendar_window"
                 if value["exchange_daily"]["status"] == "collected":
@@ -363,6 +374,7 @@ async def snapshot(symbol):
                 coverage["member_positioning"] = (
                     value["exchange_daily"].get("member_positioning", {}).get("status", "unavailable")
                 )
+                coverage["fundamental_supply"] = supply["status"]
                 value["coverage"] = coverage
                 if not any(status == "collected" for status in coverage.values()):
                     raise HTTPException(
@@ -388,6 +400,7 @@ async def snapshot(symbol):
                     if item["status"] == "collected" and item.get("date_provenance") == "request_parameter"
                 ]
                 value["observation_dates"] = sorted(set(dates))
+                value["date_alignment_scope"] = "daily_observations_only; monthly supply retains its own periods"
                 value["date_alignment"] = (
                     "mixed"
                     if len(set(dates)) > 1

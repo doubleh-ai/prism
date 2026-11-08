@@ -931,8 +931,17 @@ the existing CSRF protection and reject account switches.
 | `GET /api/knowledge/items?query=...&before=...&limit=30` | Search all accessible persisted structured claims with bounded cursor pagination |
 | `GET /api/knowledge/items/{id}` | Claim, source passages, review history and affected owned research |
 | `PUT /api/knowledge/items/{id}/review` | `expected_version`, state, note, optional correction link; reviewed claims require a future validity time, incomplete citations cannot be promoted |
-| `GET/PUT /api/admin/model-routes[/{purpose}]` | Administrator-only purpose selection and bounded request/token/time quotas; only registered model IDs, no key material |
+| `GET/PUT /api/admin/model-routes[/{purpose}]` | Administrator-only `research` and `work_planning` selection and bounded request/token/time quotas; only registered model IDs, no key material |
 | `GET /api/industry/research?q=...&before=...&limit=20` | Owned structured relationship candidates, original source excerpts, supporting/opposing claim review state, finite transmission hypotheses and cursor pagination; background seed edges excluded |
+
+Application model settings cover only investment research and Work planning,
+whose consumers resolve and reserve those routes. Old `feedback_triage`,
+`suggestion_review` and `validation` settings and usage records remain intact as
+history, but are not listed as effective application routes and cannot be saved,
+resolved or newly reserved. Cloud triage, suggestion review and engineering use
+the independent private operations console and its own durable model budget;
+application settings do not authorize or reconfigure those workers. Native
+release model acceptance remains bound to its separately reviewed finite permit.
 
 Calendar create/update accepts optional `recurrence`: `frequency` daily, weekly
 or monthly; `interval` 1–12; weekly `weekdays` 0 (Monday) through 6; exactly one of
