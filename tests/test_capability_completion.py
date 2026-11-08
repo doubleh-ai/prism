@@ -241,6 +241,21 @@ def test_futures_rejects_malformed_observations(change):
 
 async def test_real_futures_http_parser_and_cache_without_external_calls(monkeypatch):
     requests = []
+    monthly_calls = []
+
+    async def unrelated_monthly_source(_client, symbol, _today, _deadline):
+        # This case owns Sina parsing and the dated exchange/cache boundary.
+        # The monthly reader's real HTTP parsing and shared snapshot are tested
+        # independently in test_futures_fundamentals.py.
+        monthly_calls.append(symbol)
+        return {
+            "status": "unavailable",
+            "topic": "合成月度资料未采集",
+            "index_url": "https://www.stats.gov.cn/sj/zxfb/",
+            "observations": [],
+        }
+
+    monkeypatch.setattr(futures.futures_fundamentals, "read_supply", unrelated_monthly_source)
 
     def handler(request):
         requests.append(request)
@@ -261,6 +276,7 @@ async def test_real_futures_http_parser_and_cache_without_external_calls(monkeyp
     first["latest"]["close"] = 0
     again = await futures.snapshot("RB")
     assert len(requests) == 13 and again["cached"] and again["latest"]["close"] == 170
+    assert monthly_calls == ["RB"], "a cached snapshot must not reacquire the unrelated monthly source"
     assert len({str(request.url) for request in requests}) == 13
     assert len({item["requested_date"] for item in again["source_attempts"]}) == 3
     assert again["warehouse_receipt"]["status"] == "unavailable"
