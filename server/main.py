@@ -484,6 +484,8 @@ async def api_releases(request: Request):
 _UI_ACTIVITY_RULES = {
     "chat": {"open"},
     "market": {"open", "watchlist_add", "watchlist_remove", "screener_start"},
+    "futures": {"open"},
+    "preferences": {"open"},
     "analysis": {"open"},
     "vibe": {"open"},
     "report": {"open"},
