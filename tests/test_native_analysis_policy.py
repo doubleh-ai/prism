@@ -4,7 +4,6 @@ import ast
 import asyncio
 import builtins
 import json
-import runpy
 from pathlib import Path
 
 import pytest
@@ -209,15 +208,6 @@ async def test_owned_history_remains_readable_without_execution(
     assert (await client.get("/api/analysis/unknown/report", cookies=auth_cookies)).status_code == 404
 
 
-def test_public_operational_entry_point_is_only_a_retirement_notice():
+def test_public_application_does_not_ship_operational_stop_entry_point():
     path = Path(__file__).resolve().parents[1] / "scripts/new_runtime_stop.py"
-    source = path.read_bytes()
-    assert len(source) <= 1024
-    tree = ast.parse(source)
-    assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) for node in ast.walk(tree))
-    assert {node.name for node in tree.body if isinstance(node, ast.FunctionDef)} == {"main"}
-    calls = [node.func for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    assert all(isinstance(node, ast.Name) and node.id in {"main", "SystemExit"} for node in calls)
-    namespace = runpy.run_path(str(path))
-    with pytest.raises(SystemExit, match="reviewed private operations workflow"):
-        namespace["main"]()
+    assert not path.exists()
