@@ -77,6 +77,8 @@ def _row(db, owner, claim_id):
 
 
 def _present(row, *, now=None):
+    from .model_review import current_advice
+
     now = now or datetime.now(UTC)
     claim, run = json.loads(row["payload"]), json.loads(row["run_payload"])
     state = row["state"] or "candidate"
@@ -86,7 +88,7 @@ def _present(row, *, now=None):
         effective = "expired"
     else:
         effective = state
-    model_review = run.get("model_review")
+    model_review = current_advice(run.get("model_review"))
     advisory = None
     if model_review:
         assessment = next(
@@ -96,6 +98,7 @@ def _present(row, *, now=None):
             "status": model_review.get("status"),
             "observed_at": model_review.get("observed_at"),
             "assessment": assessment,
+            "method_current": model_review.get("method_current", False),
             "semantic_verification": False,
             "independent_sources_verified": False,
         }

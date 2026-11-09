@@ -38,12 +38,17 @@ SYSTEM = (
     '"evidence_ids":["输入的段落ID"],"reason":"具体指出支持范围、矛盾或缺失，最多400字"}]}。'
     "逐项返回且不得新增或省略结论ID。supported仅表示所给节选支持该表述，"
     "不能当作事实认证；推断和假设仍须解释成立条件。"
+    "supported或partly_supported必须引用本轮role为supports的段落，不能只引用opposes。"
+    "已提供的反方节选也应逐项引用并解释；未引用的反证意味着支持范围尚未核全。"
     "若结论带有historical_context，同时比较其中历史表述与双方原始节选，在同一reason中解释变化、矛盾或缺口。"
     "历史结论不是事实依据；shared_body为true表示复用同一正文，不能称为独立佐证。"
     "此时还须返回history_verdict（consistent|changed_context|potential_conflict|insufficient_evidence）和"
     "history_claim_ids（全部所给历史结论ID）。期间或口径不同使用changed_context或证据不足，不判为同口径冲突。"
-    "一致或潜在冲突须引用本轮及每条历史的段落ID；没有历史材料时省略这两个字段。"
+    "一致或潜在冲突须引用本轮及每条历史role为supports的段落ID，不能只用历史反证代替原判断依据；"
+    "没有历史材料时省略这两个字段。"
 )
+METHOD_VERSION = "prism.excerpt-review.citation-roles.v2"
+METHOD_SHA256 = hashlib.sha256((METHOD_VERSION + "\n" + SYSTEM).encode()).hexdigest()
 
 
 class Assessment(ClosedModel):
@@ -231,6 +236,7 @@ def parse(packet, text):
     for assessment in value.assessments:
         claim = claims[assessment.claim_id]
         current_ids = {s["passage_id"] for s in claim["sources"]}
+        supporting_ids = {s["passage_id"] for s in claim["sources"] if s["role"] == "supports"}
         historical = claim.get("historical_context", [])
         old_ids = {p["claim_id"] for p in historical}
         allowed = current_ids | {s["passage_id"] for p in historical for s in p["sources"]}
@@ -238,7 +244,7 @@ def parse(packet, text):
             len(assessment.evidence_ids) != len(set(assessment.evidence_ids))
             or not set(assessment.evidence_ids) <= allowed
             or assessment.verdict in {"supported", "partly_supported"}
-            and not set(assessment.evidence_ids) & current_ids
+            and not set(assessment.evidence_ids) & supporting_ids
         ):
             raise ValueError("invalid evidence binding")
         if (
@@ -249,9 +255,11 @@ def parse(packet, text):
             raise ValueError("invalid history binding")
         if assessment.history_verdict in {"consistent", "potential_conflict"} and (
             not all(p["context_matches"] for p in historical)
-            or not set(assessment.evidence_ids) & current_ids
+            or not set(assessment.evidence_ids) & supporting_ids
             or any(
-                not set(assessment.evidence_ids) & {s["passage_id"] for s in p["sources"]} for p in historical
+                not set(assessment.evidence_ids)
+                & {s["passage_id"] for s in p["sources"] if s["role"] == "supports"}
+                for p in historical
             )
         ):
             raise ValueError("unbound history comparison")
@@ -260,6 +268,16 @@ def parse(packet, text):
             "potential_conflict",
             "insufficient_evidence",
         }
+        # Citation roles are supplied by the owned ledger, not granted by the
+        # reviewer. Unreferenced opposition cannot silently disappear from an
+        # otherwise complete-looking support verdict, including old context.
+        opposition_ids = {
+            s["passage_id"]
+            for entry in (claim, *historical)
+            for s in entry["sources"]
+            if s["role"] == "opposes"
+        }
+        incomplete = incomplete or bool(opposition_ids - set(assessment.evidence_ids))
         incomplete = (
             incomplete
             or bool(historical)
@@ -353,7 +371,7 @@ def save(
         "schema": "prism.model-review.v1",
         "status": status,
         "reason": reason,
-        "method_sha256": hashlib.sha256(SYSTEM.encode()).hexdigest(),
+        "method_sha256": METHOD_SHA256,
         "packet_id": packet_id,
         "model_id": model_id,
         "call_number": call_number,
@@ -430,11 +448,35 @@ def save(
     return record
 
 
-def present(run, claims):
-    review = run.get("model_review")
+def current_advice(review):
+    """Project old advice without rewriting its stored opinion or report."""
     if not review:
         return None
-    ids = {a["claim_id"] for a in review.get("assessments", [])}
+    current = review.get("method_sha256") == METHOD_SHA256
+    value = {**review, "method_current": current}
+    if review.get("status") == "completed" and not current:
+        value.update(
+            status="invalid",
+            reason="review_policy_changed",
+            assessments=[
+                {
+                    **assessment,
+                    "effective_verdict": "insufficient_evidence",
+                    "scope_incomplete": True,
+                    "reason": "历史自动意见使用旧复核规则，需重新复核。原意见："
+                    + assessment.get("reason", ""),
+                }
+                for assessment in review.get("assessments", [])
+            ],
+        )
+    return value
+
+
+def present(run, claims):
+    review = current_advice(run.get("model_review"))
+    if not review:
+        return None
+    ids = {a["claim_id"] for a in review.get("assessments", [])} if review["status"] == "completed" else set()
     return {
         **review,
         "unreviewed_claims_count": sum(c["claim_id"] not in ids for c in claims),
