@@ -296,11 +296,18 @@
                 fund.append(annual);
               }
             }
-            (Array.isArray(observation.products)?observation.products:[]).slice(0,3).forEach(function(product){
-              var text=product.label+'：'+display(product.period_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.period_yoy_pct)+'%';
+            var products=Array.isArray(observation.products)?observation.products:[],gold=observation.series_kind==='gold_year_to_date_production_consumption';
+            products.slice(0,gold?2:3).forEach(function(product){
+              var text=product.label+'：'+(gold?'年初至该期累计 ':'')+display(product.period_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.period_yoy_pct)+'%';
               if(product.year_to_date_amount!==undefined)text+='；年初至该期 '+display(product.year_to_date_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.year_to_date_yoy_pct)+'%';
               fund.append(node('p',text));
             });
+            if(gold){
+              var categories=node('details');categories.append(node('summary','原料与消费分类'));
+              categories.append(node('p',display(observation.period_start)+' 至 '+display(observation.period_end)+'；累计统计，不是单季数据。','muted'));
+              categories.append(makeTable(['统计项目','累计数量（吨）','官方同比（%）'],products.slice(0,7).map(function(product){return [product.label,display(product.period_amount),display(product.period_yoy_pct)];})));
+              fund.append(categories);
+            }
             var original=sourceLink(observation.source_url,'查看本期原文 ↗');if(original)fund.append(original);
           });
           if(item.notice)fund.append(node('p',item.notice,'muted'));

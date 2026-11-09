@@ -17,7 +17,14 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from . import exchange_futures, futures_fundamentals, futures_parameters, futures_soybean, warehouse_receipts
+from . import (
+    exchange_futures,
+    futures_fundamentals,
+    futures_gold,
+    futures_parameters,
+    futures_soybean,
+    warehouse_receipts,
+)
 from .auth import require_auth
 from .data_availability import source_failure
 from .database import check_rate_limit
@@ -42,7 +49,7 @@ PRODUCTS = {
         "黄金",
         "SHFE",
         "https://www.shfe.cn/",
-        ["实际利率与美元", "央行及实物需求", "库存与交割", "地缘与流动性变化"],
+        ["国内黄金产量与消费背景", "实际利率与美元", "央行需求", "库存、交割与流动性变化"],
     ),
     "M": (
         "豆粕",
@@ -347,15 +354,19 @@ async def snapshot(symbol):
                 async with asyncio.TaskGroup() as sources:
                     dated = sources.create_task(_reports(client, symbol, now.date(), deadline - 0.25))
                     monthly = sources.create_task(
-                        (futures_soybean if symbol == "M" else futures_fundamentals).read_supply(
-                            client, symbol, now.date(), deadline - 0.25
-                        )
+                        (
+                            futures_soybean
+                            if symbol == "M"
+                            else futures_gold
+                            if symbol == "AU"
+                            else futures_fundamentals
+                        ).read_supply(client, symbol, now.date(), deadline - 0.25)
                     )
                 reports, attempts = dated.result()
                 supply = monthly.result()
                 value.update(reports)
                 value["fundamental_supply"] = supply
-                if symbol in {"RB", "SC", "M"}:
+                if symbol in {"RB", "SC", "M", "AU"}:
                     value["fundamentals"][0] = {
                         **supply,
                         "official_url": supply.get("source_url", supply["index_url"]),

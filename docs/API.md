@@ -818,9 +818,24 @@ year-to-date amounts where reported and official year-on-year percentages.
 Identical desktop/mobile tables count once; conflicting tables, units, dates
 or missing metrics reject that release. The series describes national
 enterprises above designated size, not deliverable output, inventory, operating
-rates or global supply; throughput is not refined-product output. Missing CU,
-AU and M coverage is not filled from aggregates or other products. Monthly
+rates or global supply; throughput is not refined-product output. Missing
+coverage is not filled from aggregates or other products. Monthly
 periods remain separate from the daily `date_alignment` comparison.
+
+For AU, the same `fundamental_supply` component discovers up to two distinct
+cumulative periods from at most three fixed China Gold Association statistics
+index pages. Requests share a six-second deadline, 1 MiB bodies and the same
+no-authentication, no-redirect and no-retry boundaries. The parser verifies the
+article's source credit, publication date, period and headline/body agreement.
+`series_kind: gold_year_to_date_production_consumption` retains national domestic
+and imported raw-material production, their reported total, consumption and its
+three reported categories in tonnes, with original signed year-on-year changes.
+`period_kind: year_to_date` always starts on January 1; figures are neither
+differenced into quarters nor forced to balance after rounding. Imported
+raw-material production is not customs bullion imports; these statistics do not
+establish global supply, deliverable gold, inventory, basis or capital flows.
+Each article's digest and original URL remain available. Cumulative periods do
+not enter the daily date-alignment comparison. CU fundamentals remain uncovered.
 
 Official reports start from the server's Shanghai calendar date, independently
 of a missing or stale secondary price feed. Only an actual dated HTTP 404 permits
