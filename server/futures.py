@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from . import exchange_futures, futures_fundamentals, futures_parameters, warehouse_receipts
+from . import exchange_futures, futures_fundamentals, futures_parameters, futures_soybean, warehouse_receipts
 from .auth import require_auth
 from .data_availability import source_failure
 from .database import check_rate_limit
@@ -48,7 +48,7 @@ PRODUCTS = {
         "豆粕",
         "DCE",
         "https://www.dce.com.cn/",
-        ["大豆进口与到港", "油厂压榨与库存", "饲料需求", "现货基差"],
+        ["大豆年度供需与压榨背景", "油厂库存与开工", "饲料需求", "现货基差"],
     ),
     "SC": (
         "原油",
@@ -347,13 +347,15 @@ async def snapshot(symbol):
                 async with asyncio.TaskGroup() as sources:
                     dated = sources.create_task(_reports(client, symbol, now.date(), deadline - 0.25))
                     monthly = sources.create_task(
-                        futures_fundamentals.read_supply(client, symbol, now.date(), deadline - 0.25)
+                        (futures_soybean if symbol == "M" else futures_fundamentals).read_supply(
+                            client, symbol, now.date(), deadline - 0.25
+                        )
                     )
                 reports, attempts = dated.result()
                 supply = monthly.result()
                 value.update(reports)
                 value["fundamental_supply"] = supply
-                if symbol in {"RB", "SC"}:
+                if symbol in {"RB", "SC", "M"}:
                     value["fundamentals"][0] = {
                         **supply,
                         "official_url": supply.get("source_url", supply["index_url"]),

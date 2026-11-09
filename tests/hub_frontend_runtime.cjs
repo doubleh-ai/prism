@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const tick=()=>new Promise(setImmediate);
 const script=fs.readFileSync('static/js/app.hub.js','utf8');
-function el(){return {value:'',checked:false,disabled:false,hidden:false,textContent:'',style:{},listeners:{},children:[],
+function el(tag){return {tagName:typeof tag==='string'?tag.toUpperCase():undefined,value:'',checked:false,disabled:false,hidden:false,textContent:'',style:{},listeners:{},children:[],
   append(...items){this.children.push(...items);},addEventListener(k,f){this.listeners[k]=f;},replaceChildren(...items){this.children=items;},setAttribute(){}};}
 function setup(page='preferences',embedded=false){
  const fields=Object.fromEntries(['style','horizon','max_position_pct','max_drawdown_pct','allow_leverage'].map(k=>[k,el()]));
@@ -172,4 +172,13 @@ async function showCollectedMonthlySupplyAlongsideUncollectedFundamentalDrivers(
  assert(!rendered.includes(sample.topic+'：尚未采集'));assert.equal(e.requests.length,2);
  }
 }
-(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await preferencesKeepDraftWhileUsingFutures();await preferencesRejectChangedAccountOnReturn();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();await showCollectedMonthlySupplyAlongsideUncollectedFundamentalDrivers();console.log('hub journeys ok: 15 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});
+async function showSoybeanForecastsInsideExistingFundamentals(){
+ const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='M';
+ const run=e.form.onsubmit({preventDefault(){}});
+ const estimates=[{label:'2025/26（10月估计）',values:{production:20,imports:21,crush_consumption:23,balance_change:-2}},{label:'2026/27（9月预测）',values:{production:30,imports:31,crush_consumption:33,balance_change:-3}},{label:'2026/27（10月预测）',period_start:'2026-10-01',period_end:'2027-09-30',values:{production:40,imports:41,crush_consumption:43,balance_change:-4}}];
+ respond(e.requests[1],{symbol:'M',name:'豆粕',series_status:'unavailable',latest:{},source:{},gaps:[],fundamentals:[{topic:'大豆年度供需与压榨背景',status:'collected',notice:'压榨消费是大豆投入量，不是豆粕产量；结余变化不是期末库存。',observations:[{series_kind:'soybean_annual_balance_estimates',period_label:'2026年10月报告',published_date:'2026-10-09',unit:'万吨',estimates,metrics:[{key:'production',label:'产量'},{key:'imports',label:'进口'},{key:'crush_consumption',label:'压榨消费'},{key:'balance_change',label:'结余变化'}],source_url:'https://scs.moa.gov.cn/jcyj/202610/t20261009_1234567.htm'}]}]});
+ await run;const rendered=JSON.stringify(e.els.futuresResult);
+ for(const text of ['大豆年度供需与压榨背景','2026/27（10月预测）','产量 40、进口 41、压榨消费 43 万吨','年度口径与各期估计','2026-10-01 至 2027-09-30','2025/26（10月估计）','2026/27（9月预测）','-4','不是豆粕产量','不是期末库存'])assert(rendered.includes(text),text);
+ const visit=n=>[n].concat((n.children||[]).flatMap(visit)),nodes=visit(e.els.futuresResult);const detail=nodes.find(n=>n.tagName==='DETAILS');assert(detail&&!detail.open);assert(nodes.some(n=>n.className==='table-scroll'));assert(!rendered.includes('官方同比'));assert.equal(e.requests.length,2);
+}
+(async()=>{await initialFailureBlocksNativeSubmit();await accountSwitchBlocksWrite();await failedHandoffPreservesExistingDraft();await embeddedFuturesStayLazyAndDoNotRebindOtherForms();await preferencesKeepDraftWhileUsingFutures();await preferencesRejectChangedAccountOnReturn();await showOfficialWarrants();await showExchangeFuturesData();await showMissingFuturesData();await showRetainedOfficialDataWithoutContinuousPrices();await showDifferentSourceDatesInOneNotice();await showDatedParametersWithinExistingDetails();await showDceAccessRestrictionWithoutDiscardingAvailablePrices();await showDceQueryDateAndKeepUnverifiedSourceExplicit();await showCollectedMonthlySupplyAlongsideUncollectedFundamentalDrivers();await showSoybeanForecastsInsideExistingFundamentals();console.log('hub journeys ok: 16 scenarios');})().catch(e=>{console.error(e);process.exitCode=1;});

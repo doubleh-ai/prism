@@ -286,6 +286,16 @@
           fund.append(node('h3',item.topic));
           item.observations.slice(0,2).forEach(function(observation){
             fund.append(node('p',display(observation.period_label)+' · 发布 '+display(observation.published_date),'muted'));
+            if(observation.series_kind==='soybean_annual_balance_estimates'){
+              var estimates=Array.isArray(observation.estimates)?observation.estimates:[],latest=estimates[estimates.length-1];
+              if(latest&&latest.values){
+                fund.append(node('p',display(latest.label)+' · 产量 '+display(latest.values.production)+'、进口 '+display(latest.values.imports)+'、压榨消费 '+display(latest.values.crush_consumption)+' '+display(observation.unit)));
+                var annual=node('details');annual.append(node('summary','年度口径与各期估计'));
+                annual.append(node('p','大豆市场年度 '+display(latest.period_start)+' 至 '+display(latest.period_end)+'；各列保留原报告的历史、估计或预测标注。','muted'));
+                annual.append(makeTable(['大豆 · '+display(observation.unit)].concat(estimates.map(function(column){return column.label;})),(Array.isArray(observation.metrics)?observation.metrics:[]).map(function(metric){return [metric.label].concat(estimates.map(function(column){return display((column.values||{})[metric.key]);}));})));
+                fund.append(annual);
+              }
+            }
             (Array.isArray(observation.products)?observation.products:[]).slice(0,3).forEach(function(product){
               var text=product.label+'：'+display(product.period_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.period_yoy_pct)+'%';
               if(product.year_to_date_amount!==undefined)text+='；年初至该期 '+display(product.year_to_date_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.year_to_date_yoy_pct)+'%';
@@ -294,7 +304,7 @@
             var original=sourceLink(observation.source_url,'查看本期原文 ↗');if(original)fund.append(original);
           });
           if(item.notice)fund.append(node('p',item.notice,'muted'));
-          if(item.history_window_complete===false)fund.append(node('p','本次历史窗口未收集完整，已取得的月份分别保留。','muted'));
+          if(item.history_window_complete===false)fund.append(node('p','本次历史窗口未收集完整，已取得的报告分别保留。','muted'));
         }else{var p=node('p',item.topic+'：尚未采集 · '),a=sourceLink(item.official_url,'查看官方来源 ↗');if(a)p.append(a);fund.append(p);}
       });
       value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});root.append(fund);

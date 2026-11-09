@@ -37,6 +37,7 @@ def isolated_market(monkeypatch):
         }
 
     monkeypatch.setattr(futures.futures_fundamentals, "read_supply", unrelated_monthly_source)
+    monkeypatch.setattr(futures.futures_soybean, "read_supply", unrelated_monthly_source)
 
 
 def install(monkeypatch, handler):
