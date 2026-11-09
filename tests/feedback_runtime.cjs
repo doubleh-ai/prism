@@ -40,7 +40,8 @@ async function submissionKeepsOneUuidAndNeverRetriesItself() {
   app.api=async(url,options)=>{requests.push({url,payload:JSON.parse(options.body)});throw Error('synthetic lost response');};
   await app._submitFeedback();assert.equal(requests.length,1);assert.equal(app._feedbackBusy,false);assert.equal(document.getElementById('feedbackSubmit').disabled,false);
   const first=requests[0].payload;
-  assert.deepEqual(Object.keys(first).sort(),['category','description','feature','page','request_id','title']);
+  assert.deepEqual(Object.keys(first).sort(),['category','description','feature','page','repair_scope','request_id','title']);
+  assert.equal(first.repair_scope,'industry-evidence');
   assert.equal(first.page,'/');assert.equal(first.feature,'industry');assert.match(first.request_id,/^[a-f0-9-]{36}$/i);
   assert(!JSON.stringify(first).includes('DO_NOT_UPLOAD'));assert.match(document.getElementById('feedbackMessage').textContent,/尚未确认/);
   assert(document.getElementById('feedbackDescription').value);
@@ -130,8 +131,26 @@ async function diagnosticsExplainHistoricalScopeAndArchiveBoundary() {
   const html=app._renderAdminDiagnosticsTab();assert.match(html,/当前版本/);assert.match(html,/历史版本，待复测/);assert.match(html,/版本未知，待核对/);assert.match(html,/归档不代表修复完成/);assert(!html.includes('影响功能使用'));
 }
 
+async function closedRepairScopesFreezeFeedbackAndSeparateDiagnosticContexts() {
+  const {app,ctx,document}=env(),sent=[];
+  app._mode='futures';document.getElementById('futureSymbol').value='AU';
+  app._openFeedback();app._mode='preferences';
+  const payload=app._feedbackPayload();assert.equal(payload.feature,'futures');assert.equal(payload.repair_scope,'futures-gold');
+  assert.equal(app._repairScopeForContext({route:'/api/futures/AU/snapshot'}),'futures-interface');
+  assert.equal(app._repairScopeForContext({route:'/api/unknown-private-route'}),'unknown');
+  assert.equal(app._repairScopeForContext({route:'/api/chat?token=DO_NOT_UPLOAD'}),'unknown');
+  app._mode='__proto__';assert.equal(app._repairScopeForContext(),'unknown');
+  app._mode='futures';ctx.fetch=async(path,options)=>{sent.push({path,body:JSON.parse(options.body)});return response({ok:true});};
+  app._captureDiagnostic('js_error','synthetic same message',{component:'panel'});
+  document.getElementById('futureSymbol').value='M';
+  app._captureDiagnostic('js_error','synthetic same message',{component:'panel'});
+  assert.equal(sent.length,2);assert.equal(sent[0].body.context.repair_scope,'futures-gold');
+  assert.equal(sent[1].body.context.repair_scope,'futures-soybean');
+  assert(!JSON.stringify(sent).includes('DO_NOT_UPLOAD'));
+}
+
 (async()=>{
-  const cases=[submissionKeepsOneUuidAndNeverRetriesItself,changedDraftAndRateLimitRemainExplicit,busySubmissionCannotCreateAnotherRequest,uuidFallbackIsStillARealVersionFourIdentifier,escapedFeedbackAndOwnedVersusAdminViews,ownerAndAdminUseDifferentListEndpoints,fixedValidationAndConflictDoNotResubmit,lateListCannotReplaceNewForm,lateSubmitCannotEraseNewDraft,lateUpdateCannotReplaceAnotherDetail,callerCancellationIsMarkedByObjectNotErrorName,diagnosticsExplainHistoricalScopeAndArchiveBoundary];
+  const cases=[submissionKeepsOneUuidAndNeverRetriesItself,changedDraftAndRateLimitRemainExplicit,busySubmissionCannotCreateAnotherRequest,uuidFallbackIsStillARealVersionFourIdentifier,escapedFeedbackAndOwnedVersusAdminViews,ownerAndAdminUseDifferentListEndpoints,fixedValidationAndConflictDoNotResubmit,lateListCannotReplaceNewForm,lateSubmitCannotEraseNewDraft,lateUpdateCannotReplaceAnotherDetail,callerCancellationIsMarkedByObjectNotErrorName,diagnosticsExplainHistoricalScopeAndArchiveBoundary,closedRepairScopesFreezeFeedbackAndSeparateDiagnosticContexts];
   for(const test of cases)await test();
   console.log('feedback frontend ok: '+cases.length+' scenarios');
 })().catch(error=>{console.error(error);process.exitCode=1;});

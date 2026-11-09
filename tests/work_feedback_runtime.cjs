@@ -58,7 +58,8 @@ async function submissionAndProgressUseTheSameTicket() {
   const pending=e.app._submitFeedback();identity(e,1);await tick();
   const request=e.queue[2];assert.equal(request.path,'/api/feedback');
   const payload=JSON.parse(request.options.body);
-  assert.deepEqual(Object.keys(payload).sort(),['category','description','feature','page','request_id','title']);
+  assert.deepEqual(Object.keys(payload).sort(),['category','description','feature','page','repair_scope','request_id','title']);
+  assert.equal(payload.repair_scope,'work-projects');
   assert.equal(payload.page,'/projects');assert.equal(payload.feature,'work');
   assert(!JSON.stringify(payload).includes('UNSAVED_WORK_REQUEST'));assert(!JSON.stringify(payload).includes('DO_NOT_UPLOAD'));
   assert.equal(request.options.credentials,'same-origin');assert.equal(request.options.redirect,'error');

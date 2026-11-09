@@ -139,7 +139,7 @@ fields and duplicate keys are rejected, with a 32 KiB request-body limit.
 
 | Endpoint | Access and behavior |
 |---|---|
-| `POST /api/feedback` | Signed-in user; `category` (`bug` / `suggestion`), `title` (1–120), `description` (1–6000), optional local `page`, closed-enum `feature` and UUID `request_id`. Returns `ok`, `reused`, `feedback`. |
+| `POST /api/feedback` | Signed-in user; `category` (`bug` / `suggestion`), `title` (1–120), `description` (1–6000), optional local `page`, closed-enum `feature`, `repair_scope` and UUID `request_id`. Scope defaults to `unknown`; known scopes must match the feature. Returns `ok`, `reused`, `feedback`. |
 | `GET /api/feedback` | Own records only; optional `category`, `status`, `feature`, `before_id`, `limit` (default 50, capped at 100). Returns `items`, `next_before_id`. |
 | `GET /api/feedback/{id}` | Own detail and user-visible update history, or 404. |
 | `GET /api/admin/feedback` | Administrator queue; same filters plus Shanghai `review_batch_date` (`YYYY-MM-DD`). |
@@ -273,6 +273,14 @@ access refusals, unmatched paths and explicit cancellation records are not in
 the diagnostic kind allowlist. Signals, including those with the current version
 label, still require reproduction; a version label does not certify an exact
 deployed revision. These endpoints never change feedback or resolve diagnostics.
+
+Both streams may include a `repair_scope` from the closed map in
+[`server/repair_scopes.py`](../server/repair_scopes.py). Unknown scopes are omitted;
+queue scopes must match `feature`. Diagnostics may additionally include a short
+origin `revision`; receiving-server metadata does not establish that origin.
+Legacy records and deferred outcomes without commit provenance are not backfilled.
+A matching client-reported revision remains an untrusted reproduction hint, not
+proof of loaded assets or permission to modify code.
 
 Both accept `since` (inclusive Unix seconds, default 0), `after_id` (default 0)
 and `limit` (1–100, default 50). Queue additionally accepts `category=bug` or

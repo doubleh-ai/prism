@@ -22,7 +22,7 @@ def test_feedback_and_diagnostics_actual_javascript_calls():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "feedback frontend ok: 12 scenarios" in result.stdout
+    assert "feedback frontend ok: 13 scenarios" in result.stdout
 
 
 def test_work_feedback_stays_in_context_and_rechecks_the_account():

@@ -14,7 +14,8 @@ from fastapi import APIRouter, HTTPException, Request
 from .auth import require_admin, require_auth
 from .database import check_rate_limit, get_db
 from .models import DiagnosticEventRequest, validation_error_message
-from .release import APP_VERSION, release_payload
+from .release import APP_VERSION, _read_deployed_revision, release_payload
+from .repair_scopes import normalize_scope, scope_from_api_route
 
 router = APIRouter()
 
@@ -55,6 +56,11 @@ def _safe_context(context: dict | None) -> dict[str, Any]:
             out[key] = _redact(value, 240)
         elif isinstance(value, (int, float, bool)) or value is None:
             out[key] = value
+    scope = scope_from_api_route(out.get("route"))
+    if scope == "unknown":
+        scope = normalize_scope((context or {}).get("repair_scope"))
+    if scope != "unknown":
+        out["repair_scope"] = scope
     return out
 
 
@@ -71,6 +77,7 @@ def record_diagnostic(
     context: dict | None = None,
     _connection=None,
     _occurred_at: float | None = None,
+    _origin: str = "server",
 ) -> int:
     now = int(time.time() if _occurred_at is None else _occurred_at)
     if kind.startswith("server_") and not version:
@@ -78,6 +85,21 @@ def record_diagnostic(
     clean_message = _redact(message, 2000) or "Unknown anomaly"
     clean_stack = _redact(stack, 8000)
     clean_context = _safe_context(context)
+    recorded_revision = _read_deployed_revision()
+    origin_revision = ""
+    if re.fullmatch(r"[0-9a-f]{40}", recorded_revision or ""):
+        clean_context["recorded_revision"] = recorded_revision
+        # A receiving server is not proof that an old browser or delayed run
+        # originated at this commit. Client identity remains an untrusted hint;
+        # it can select a bounded reproduction, never authorize a repair.
+        if version == APP_VERSION and (
+            (_origin == "server" and _occurred_at is None)
+            or (
+                _origin == "client"
+                and clean_context.get("server_revision") in (recorded_revision, recorded_revision[:12])
+            )
+        ):
+            origin_revision = recorded_revision
     signature = "\n".join(
         [
             kind,
@@ -88,6 +110,11 @@ def record_diagnostic(
             version,
         ]
     )
+    if clean_context.get("repair_scope"):
+        signature += "\n" + clean_context["repair_scope"]
+    if clean_context.get("recorded_revision"):
+        signature += "\n" + clean_context["recorded_revision"]
+        signature += "\n" + (origin_revision or "unattributed_origin")
     fingerprint = hashlib.sha256(signature.encode("utf-8", errors="replace")).hexdigest()[:24]
     with get_db() if _connection is None else nullcontext(_connection) as db:
         row = db.execute(
@@ -116,8 +143,9 @@ def record_diagnostic(
         cur = db.execute(
             """INSERT INTO diagnostic_events
                (username, kind, severity, component, page, message, stack,
-                fingerprint, version, context_json, first_seen, last_seen)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                fingerprint, version, context_json, first_seen, last_seen, repair_scope, recorded_revision,
+                origin_revision)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 username,
                 kind,
@@ -131,6 +159,9 @@ def record_diagnostic(
                 json.dumps(clean_context, ensure_ascii=False),
                 now,
                 now,
+                clean_context.get("repair_scope", "unknown"),
+                clean_context.get("recorded_revision", ""),
+                origin_revision,
             ],
         )
         return int(cur.lastrowid)
@@ -240,6 +271,16 @@ async def capture_client_diagnostic(request: Request):
         payload = DiagnosticEventRequest(**((await request.json()) or {}))
     except Exception as exc:
         raise HTTPException(422, validation_error_message(exc))
+    if payload.kind not in {
+        "js_error",
+        "promise_rejection",
+        "render_object_artifact",
+        "chart_blank",
+        "blank_panel",
+        "api_network_error",
+        "api_http_5xx",
+    }:
+        raise HTTPException(422, "client diagnostic kind invalid")
     event_id = record_diagnostic(
         username=username,
         kind=payload.kind,
@@ -250,6 +291,7 @@ async def capture_client_diagnostic(request: Request):
         stack=payload.stack or "",
         version=payload.version or "",
         context=payload.context,
+        _origin="client",
     )
     return {"ok": True, "id": event_id}
 

@@ -14,6 +14,7 @@ from . import feedback
 from .database import check_rate_limit, get_db
 from .internal_tokens import load_tokens
 from .release import APP_VERSION, _read_deployed_revision
+from .repair_scopes import signal_scope
 
 router = APIRouter()
 _HEADER = "X-Prism-Monitor-Token"
@@ -145,7 +146,7 @@ async def queue_signals(request: Request):
     with get_db() as db:
         rows = db.execute(
             """SELECT id, category, feature, status, version, revision,
-                      revision_number, created_at, updated_at
+                      revision_number, created_at, updated_at, repair_scope
                FROM feedback_items WHERE category=? AND updated_at>=? AND id>?"""
             + selection
             + " ORDER BY id LIMIT ?",
@@ -156,6 +157,7 @@ async def queue_signals(request: Request):
             "id": _integer(row["id"]),
             "category": category,
             "feature": row["feature"] if row["feature"] in feedback._FEATURES else "unknown",
+            **signal_scope(row["repair_scope"], feature=row["feature"]),
             "status": row["status"] if row["status"] in feedback._STATUSES[category] else "unknown",
             "version": _version(row["version"]),
             "revision": _revision(row["revision"]),
@@ -176,7 +178,8 @@ async def diagnostic_signals(request: Request):
     kinds = sorted(_KINDS)
     with get_db() as db:
         rows = db.execute(
-            """SELECT id,kind,severity,version,substr(message,1,512) AS message,occurrences,first_seen,last_seen
+            """SELECT id,kind,severity,version,substr(message,1,512) AS message,occurrences,first_seen,last_seen,
+                      repair_scope,origin_revision
                FROM diagnostic_events WHERE resolved_at IS NULL AND last_seen>=? AND id>?
                AND kind IN ("""
             + ",".join("?" for _ in kinds)
@@ -197,6 +200,12 @@ async def diagnostic_signals(request: Request):
             {
                 "id": _integer(row["id"]),
                 "kind": row["kind"],
+                **signal_scope(row["repair_scope"]),
+                **(
+                    {"revision": _revision(row["origin_revision"])}
+                    if _revision(row["origin_revision"])
+                    else {}
+                ),
                 "severity": row["severity"]
                 if row["severity"] in {"info", "warning", "error", "critical"}
                 else "unknown",
