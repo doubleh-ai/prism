@@ -101,9 +101,10 @@ async function showExchangeFuturesData(){
  const run=e.form.onsubmit({preventDefault(){}});
  respond(e.requests[1],{symbol:'CU',name:'铜',latest:{},technical:{},positioning:{},fundamentals:[],gaps:[],source:{},
   exchange_daily:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/daily',active_contract:'cu2612',contracts:[{contract:'cu2612',delivery_month:'2026-12',close:70000,settlement:69900,volume:100,open_interest:80}],curve:{status:'collected',near_contract:'cu2612',far_contract:'cu2701',near_settlement:69900,far_settlement:70100,far_minus_near:200,shape:'contango'}},
-  member_positioning:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/members',contract:'cu2612',sides:{long:{ranked_members:20,quantity_sum:123,change_sum:-3,members:[{rank:1,member:'会员甲',quantity:12,change:-1}]}},notice:'多空排名差不代表净资金流。'}});
+  member_positioning:{status:'collected',data_as_of:'2026-10-30',source_url:'https://example.com/members',contract:'cu2612',sides:{volume:{status:'not_reported',ranked_members:0,quantity_sum:null,change_sum:null,members:[]},long:{ranked_members:20,quantity_sum:123,change_sum:-3,members:[{rank:1,member:'会员甲',quantity:12,change:-1}]}},notice:'多空排名差不代表净资金流。'}});
  await run;const rendered=JSON.stringify(e.els.futuresResult);
- for(const text of ['远月升水','远月减近月：200','会员甲','多空排名差不代表净资金流','https://example.com/daily','https://example.com/members','空头持仓：未提供'])assert.ok(rendered.includes(text),text);
+ for(const text of ['远月升水','远月减近月：200','会员甲','多空排名差不代表净资金流','https://example.com/daily','https://example.com/members','空头持仓：未提供','成交量：该列未披露'])assert.ok(rendered.includes(text),text);
+ assert(!rendered.includes('前 0 名合计'));
 }
 async function showMissingFuturesData(){
  const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='CU';
@@ -130,10 +131,10 @@ async function showDatedParametersWithinExistingDetails(){
  const e=setup('futures');respond(e.requests[0],{user:'synthetic-A'});await tick();e.els.futureSymbol.value='RB';
  const run=e.form.onsubmit({preventDefault(){}});
  respond(e.requests[1],{symbol:'RB',name:'螺纹钢',series_status:'unavailable',collected_at:'2026-11-03T14:00:00+08:00',latest:{},source:{},fundamentals:[],gaps:[],
-  contract_dates:{status:'collected',data_as_of:'2026-11-02',reference_url:'https://www.shfe.com.cn/reports/businessdata/prmsummary/',notice:'未含法定节假日调整',contracts:[{contract:'rb2701',listed_on:'2026-01-16',listed_expiry_date:'2027-01-15',delivery_start:'2027-01-18',delivery_end:'2027-01-19'}]},
+  contract_dates:{status:'collected',data_as_of:'2026-11-02',source_updated_at:'2026-10-30T20:55:06+08:00',reference_url:'https://www.shfe.com.cn/reports/businessdata/prmsummary/',notice:'未含法定节假日调整',contracts:[{contract:'rb2701',listed_on:'2026-01-16',listed_expiry_date:'2027-01-15',delivery_start:'2027-01-18',delivery_end:'2027-01-19'}]},
   exchange_parameters:{status:'collected',data_as_of:'2026-11-03',reference_url:'javascript:alert(1)',notice:'非经纪商保证金',contracts:[{contract:'rb2701',spec_long_margin_pct:7,spec_short_margin_pct:null,hedge_long_margin_pct:6,hedge_short_margin_pct:6.5,upper_limit_pct:5,lower_limit_pct:4,additional_limit_notice_required:true}]}});
  await run;const rendered=JSON.stringify(e.els.futuresResult);
- for(const s of ['合约日期与交易所参数','2026-11-02','2026-11-03','2027-01-15','一般买保证金（%）','套保卖保证金（%）','未提供','须查原公告','未含法定节假日调整','非经纪商保证金'])assert(rendered.includes(s),s);
+ for(const s of ['合约日期与交易所参数','交易日 2026-11-02 · 发布 2026-10-30T20:55:06+08:00','2026-11-03','2027-01-15','一般买保证金（%）','套保卖保证金（%）','未提供','须查原公告','未含法定节假日调整','非经纪商保证金'])assert(rendered.includes(s),s);
  assert(!rendered.includes('javascript:')&&!rendered.includes('设置参数')&&!rendered.includes('undefined'));
  assert.equal(e.requests.length,2);assert(!e.submit.disabled);
 }

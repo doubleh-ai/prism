@@ -72,8 +72,11 @@ def _base(raw, kind, symbol, day, updated):
     if not isinstance(updated, str) or not re.fullmatch(r"\d{8} \d{2}:\d{2}:\d{2}", updated):
         raise ValueError("invalid exchange update date")
     stamp = datetime.strptime(updated, "%Y%m%d %H:%M:%S")
-    if stamp.date() != day:
-        raise ValueError("exchange update date mismatch")
+    # The night session's trading day is later than its publication date.
+    # Report and per-row TRADINGDAY already bind the requested trading day;
+    # preserve publication time separately rather than rejecting that session.
+    if stamp.date() > day:
+        raise ValueError("exchange update after trading day")
     return {
         "status": "collected",
         "symbol": symbol,

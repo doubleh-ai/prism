@@ -252,7 +252,7 @@
       if(members.status==='collected'){
         market.append(node('p','交易所日期 '+display(members.data_as_of)+' · 合约 '+display(members.contract),'muted'));
         var sides=members.sides||{},labels={volume:'成交量',long:'多头持仓',short:'空头持仓'};
-        ['volume','long','short'].forEach(function(key){var side=sides[key];if(!side){market.append(node('p',labels[key]+'：未提供','muted'));return;}market.append(node('p',labels[key]+'：前 '+display(side.ranked_members)+' 名合计 '+display(side.quantity_sum)+'，增减 '+display(side.change_sum)));});
+        ['volume','long','short'].forEach(function(key){var side=sides[key];if(!side){market.append(node('p',labels[key]+'：未提供','muted'));return;}if(side.status==='not_reported'){market.append(node('p',labels[key]+'：该列未披露','muted'));return;}market.append(node('p',labels[key]+'：前 '+display(side.ranked_members)+' 名合计 '+display(side.quantity_sum)+'，增减 '+display(side.change_sum)));});
         market.append(node('p',members.notice||'会员排名为交易所披露的分项数据，多空排名差不代表净资金流。','muted'));
         var memberDetails=node('details');memberDetails.append(node('summary','会员明细与原表'));
         ['volume','long','short'].forEach(function(key){var side=sides[key],rows=side&&Array.isArray(side.members)?side.members:[];memberDetails.append(node('h3',labels[key]));if(rows.length)memberDetails.append(makeTable(['排名','会员','数量','增减'],rows.map(function(m){return [m.rank,m.member,m.quantity,m.change];})));else memberDetails.append(node('p','未提供会员明细。','muted'));});
@@ -261,7 +261,7 @@
       var dates=value.contract_dates||{},params=value.exchange_parameters||{},terms=node('details');terms.append(node('summary','合约日期与交易所参数'));
       [[dates,'合约日期'],[params,'交易参数']].forEach(function(pair){var report=pair[0],label=pair[1];terms.append(node('h3',label));
         if(report.status!=='collected'){terms.append(node('p',report.status==='not_covered'?'该品种尚未覆盖。':'本次未取得。','muted'));return;}
-        terms.append(node('p','资料日期 '+display(report.data_as_of),'muted'));var rows=Array.isArray(report.contracts)?report.contracts:[];
+        terms.append(node('p','交易日 '+display(report.data_as_of)+(report.source_updated_at?' · 发布 '+display(report.source_updated_at):''),'muted'));var rows=Array.isArray(report.contracts)?report.contracts:[];
         if(label==='合约日期')terms.append(makeTable(['合约','上市日','列示到期日','交割开始','交割结束'],rows.map(function(c){return [c.contract,c.listed_on,c.listed_expiry_date,c.delivery_start,c.delivery_end];})));
         else terms.append(makeTable(['合约','一般买保证金（%）','一般卖保证金（%）','套保买保证金（%）','套保卖保证金（%）','涨停幅度（%）','跌停幅度（%）','另有特殊限制'],rows.map(function(c){return [c.contract,c.spec_long_margin_pct,c.spec_short_margin_pct,c.hedge_long_margin_pct,c.hedge_short_margin_pct,c.upper_limit_pct,c.lower_limit_pct,c.additional_limit_notice_required?'须查原公告':'未报告'];})));
         terms.append(node('p',report.notice,'muted'));var link=sourceLink(report.reference_url,'查看官方参数页面 ↗');if(link)terms.append(link);

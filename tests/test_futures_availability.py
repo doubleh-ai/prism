@@ -209,6 +209,48 @@ async def test_network_access_or_schema_failures_do_not_trigger_date_fallback(mo
     assert calls == [NOW.date(), NOW.date()] and futures._cache == {}
 
 
+async def test_previous_member_report_participates_in_date_alignment(monkeypatch):
+    def handler(request):
+        if request.url.host == "stock2.finance.sina.com.cn":
+            return httpx.Response(503)
+        if "/kx" in request.url.path:
+            return httpx.Response(200, json=quote(NOW.date()))
+        if request.url.path.endswith("pm20261103.dat"):
+            return httpx.Response(404)
+        if request.url.path.endswith("pm20261102.dat"):
+            return httpx.Response(
+                200,
+                json={
+                    "o_code": "0000",
+                    "report_date": "20261102",
+                    "o_cursor": [
+                        {
+                            "INSTRUMENTID": "rb2701",
+                            "RANK": 1,
+                            **{
+                                f"{key}{col}": val
+                                for col in (1, 2, 3)
+                                for key, val in (
+                                    ("PARTICIPANTID", "0001"),
+                                    ("PARTICIPANTABBR", "合成会员"),
+                                    ("CJ", 10),
+                                )
+                            },
+                            **{f"CJ{col}_CHG": 1 for col in (1, 2, 3)},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(403)
+
+    install(monkeypatch, handler)
+    value = await futures.snapshot("RB")
+    assert value["date_alignment"] == "mixed"
+    assert value["observation_dates"] == ["2026-11-02", "2026-11-03"]
+    assert value["positioning"]["member_rankings"]["data_as_of"] == "2026-11-02"
+    assert value["coverage"]["member_positioning"] == "collected"
+
+
 async def test_missing_reports_have_a_bounded_three_date_window_and_never_invent_a_trading_date(monkeypatch):
     requests = []
 

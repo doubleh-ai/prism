@@ -411,6 +411,9 @@ async def snapshot(symbol):
                     and item.get("data_as_of")
                     and item.get("date_provenance") != "request_parameter"
                 )
+                ranking = value["exchange_daily"].get("member_positioning", {})
+                if ranking.get("status") == "collected" and ranking.get("data_as_of"):
+                    dates.append(ranking["data_as_of"])
                 value["observation_date_gaps"] = [
                     key
                     for key, item in reports.items()

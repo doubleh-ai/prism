@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -159,11 +159,18 @@ def parse_rankings(raw: bytes, symbol: str, day: date, contract: str):
         raise ValueError("noncontiguous ranking")
     sides = {}
     for column, side in [(1, "volume"), (2, "long"), (3, "short")]:
-        members, ids = [], set()
+        members, ids, ended = [], set(), False
         for rank, row in sorted(ranked):
             name, ident = row.get(f"PARTICIPANTABBR{column}"), row.get(f"PARTICIPANTID{column}")
+            quantity, change = row.get(f"CJ{column}"), row.get(f"CJ{column}_CHG")
+            # Each column has its own disclosure length. The official report
+            # pads shorter lists with four empty strings, not zero positions.
+            if (ident, name, quantity, change) == ("", "", "", ""):
+                ended = True
+                continue
             if (
-                not isinstance(name, str)
+                ended
+                or not isinstance(name, str)
                 or not 1 <= len(name.strip()) <= 120
                 or not isinstance(ident, str)
                 or not ident
@@ -175,19 +182,20 @@ def parse_rankings(raw: bytes, symbol: str, day: date, contract: str):
                 {
                     "rank": rank,
                     "member": name.strip(),
-                    "quantity": _number(row.get(f"CJ{column}"), integer=True),
-                    "change": _number(row.get(f"CJ{column}_CHG"), signed=True, integer=True),
+                    "quantity": _number(quantity, integer=True),
+                    "change": _number(change, signed=True, integer=True),
                 }
             )
         sides[side] = {
+            "status": "collected" if members else "not_reported",
             "ranked_members": len(members),
-            "quantity_sum": sum(row["quantity"] for row in members),
-            "change_sum": sum(row["change"] for row in members),
+            "quantity_sum": sum(row["quantity"] for row in members) if members else None,
+            "change_sum": sum(row["change"] for row in members) if members else None,
             "members": members,
         }
     return {
         **base,
-        "status": "collected",
+        "status": "collected" if any(side["ranked_members"] for side in sides.values()) else "not_reported",
         "body_sha256": hashlib.sha256(raw).hexdigest(),
         "sides": sides,
         "notice": "分别为成交、持买、持卖排名各列所披露会员的手数合计；三列会员集合不同，未披露会员不视为零。排名变化含样本进出，不等于同一会员持仓变化或资金净流向；不据此推断全市场方向。",
@@ -240,15 +248,31 @@ async def read_daily(client, symbol, day, deadline):
     if symbol == "M":
         return value
     errors = (httpx.HTTPError, ValueError, TypeError, KeyError, OverflowError, TimeoutError, RecursionError)
-    try:
-        ranks = await _fetch(client, report_url(symbol, day, rankings=True), day, deadline)
-        value["member_positioning"] = parse_rankings(ranks, symbol, day, value["active_contract"])
-    except errors as error:
-        value["member_positioning"] = {
-            "status": "unavailable",
-            "requested_date": day.isoformat(),
-            "source_url": report_url(symbol, day, rankings=True),
-            "contract": value["active_contract"],
-            **source_failure(error),
-        }
+    attempts = []
+    # A trading bulletin can exist during the night session before that day's
+    # rankings. Discover up to three distinct dated reports, only after a 404;
+    # never retry transport/schema failures or substitute another contract.
+    for offset in range(3):
+        requested = day - timedelta(days=offset)
+        if offset and deadline <= asyncio.get_running_loop().time():
+            break
+        try:
+            ranks = await _fetch(client, report_url(symbol, requested, rankings=True), requested, deadline)
+            result = parse_rankings(ranks, symbol, requested, value["active_contract"])
+            attempts.append({"requested_date": requested.isoformat(), "status": result["status"]})
+            value["member_positioning"] = {**result, "source_attempts": attempts}
+            break
+        except errors as error:
+            failure = source_failure(error)
+            attempts.append({"requested_date": requested.isoformat(), "status": "unavailable", **failure})
+            value["member_positioning"] = {
+                "status": "unavailable",
+                "requested_date": requested.isoformat(),
+                "source_url": report_url(symbol, requested, rankings=True),
+                "contract": value["active_contract"],
+                "source_attempts": attempts,
+                **failure,
+            }
+            if failure["error_code"] != "report_not_found":
+                break
     return value
