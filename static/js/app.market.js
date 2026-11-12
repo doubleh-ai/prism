@@ -163,7 +163,7 @@ Object.assign(App, {
 
   _showMarketEmpty: function() {
     var inner = document.getElementById('marketPanelInner');
-    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>搜索股票或选择已有自选，也可以从全市场指标选股开始。</span><div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button><button type="button" onclick="App._showMarketWorkspace(\'screener\')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace(\'library\')">配置指标库</button></div></div>';
+    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>搜索股票或选择已有自选。</span><div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button></div></div>';
   },
 
   _openMarketSearch: function() {

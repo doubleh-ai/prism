@@ -67,10 +67,6 @@
       <div class="market-sidebar-results" id="marketSidebarResults"></div>
       <div class="watchlist-head"><span>自选</span><span class="watchlist-count" id="watchlistCount"></span></div>
       <div class="watchlist" id="watchlist"></div>
-      <div class="market-side-actions">
-        <button type="button" onclick="App._showMarketWorkspace('screener')">全市场选股</button>
-        <button type="button" onclick="App._showMarketWorkspace('library')">指标库</button>
-      </div>
     </div>
 
     <div class="sidebar-vibe" id="sidebarVibe" style="display:none">
@@ -179,8 +175,8 @@
           <div class="market-panel-inner" id="marketPanelInner">
             <div class="market-empty-workbench">
               <strong>选择一只股票开始复盘</strong>
-              <span>从左侧搜索或点击自选，也可以先从全市场指标选股开始。</span>
-              <div><button type="button" onclick="App._showMarketWorkspace('screener')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace('library')">配置指标库</button></div>
+              <span>搜索股票或选择已有自选。</span>
+              <div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button></div>
             </div>
           </div>
         </section>
