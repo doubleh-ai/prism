@@ -3,6 +3,24 @@
 import pytest
 
 
+async def test_beta_environment_is_visible_without_claiming_a_published_release(
+    client, auth_cookies, monkeypatch
+):
+    from server import main, release
+
+    monkeypatch.setattr(main, "INSTANCE_CHANNEL", "beta")
+    login = await client.get("/login")
+    assert " · Beta</title>" in login.text
+    prism = await client.get("/prism", cookies=auth_cookies)
+    assert release.APP_VERSION + " Beta</span>" in prism.text
+    observed = await client.get("/api/releases", cookies=auth_cookies)
+    assert observed.json()["version"] == release.APP_VERSION
+    assert observed.json()["latest"]["version"] == "v0.23.0"
+    monkeypatch.setattr(main, "INSTANCE_CHANNEL", "unexpected-untrusted-label")
+    page = await client.get("/prism", cookies=auth_cookies)
+    assert "unexpected-untrusted-label" not in page.text and " Beta</span>" not in page.text
+
+
 async def test_portal_and_prism_are_distinct_authenticated_pages(client, auth_cookies):
     for path in ("/", "/prism", "/projects", "/notifications", "/knowledge", "/futures", "/preferences"):
         response = await client.get(path)
