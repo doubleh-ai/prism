@@ -23,6 +23,7 @@ from . import (
     futures_gold,
     futures_parameters,
     futures_soybean,
+    public_network,
     warehouse_receipts,
 )
 from .auth import require_auth
@@ -339,7 +340,7 @@ async def snapshot(symbol):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 15
         async with asyncio.timeout_at(deadline), _slots:
-            async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False) as client:
+            async with public_network.async_client(timeout=8) as client:
                 now = datetime.now(SHANGHAI)
                 value, error = await _continuous(client, symbol, now, min(deadline - 6.25, loop.time() + 6))
                 has_series = value is not None

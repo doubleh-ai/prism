@@ -15,10 +15,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import HTTPException
 
-from . import exchange_futures, portfolio
+from . import exchange_futures, portfolio, public_network
 from .database import check_rate_limit, get_db
 from .market.factory import get_chain
 from .preferences import profile_in_transaction, run_profile
@@ -113,7 +112,7 @@ async def _quote(code):
 async def _settlements(symbol, deadline):
     """One dated report per product; only a dated 404 permits an older date."""
     today = datetime.now(SHANGHAI).date()
-    async with httpx.AsyncClient(timeout=6, follow_redirects=False, trust_env=False) as client:
+    async with public_network.async_client(timeout=6) as client:
         for offset in range(3):
             day = today - timedelta(days=offset)
             value = await exchange_futures.read_settlements(client, symbol, day, deadline)

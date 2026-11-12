@@ -12,6 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from .. import public_network
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
 from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
@@ -24,6 +25,24 @@ _TENCENT_URL = "https://qt.gtimg.cn/q="
 _SINA_KLINE_URL = (
     "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 )
+MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _fetch_public(req, timeout):
+    """One owned HTTPS read, with no environment proxy, redirect or retry."""
+    with (
+        public_network.sync_client(timeout=timeout) as client,
+        client.stream("GET", req.full_url, headers=dict(req.header_items())) as response,
+    ):
+        if response.status_code != 200:
+            raise ProviderUnavailable("market public source HTTP failure")
+        parts, size = [], 0
+        for part in response.iter_bytes():
+            size += len(part)
+            if size > MAX_BODY_BYTES:
+                raise ProviderUnavailable("market public source response too large")
+            parts.append(part)
+        return b"".join(parts)
 
 
 def _sina_symbol(ticker: str) -> str:
@@ -64,8 +83,7 @@ def _fetch_tencent_quotes(codes: list[str], timeout: float = 8) -> dict:
     url = _TENCENT_URL + ",".join(prefixed)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = _decode_gbk(resp.read())
+        body = _decode_gbk(_fetch_public(req, timeout))
     except Exception as e:
         raise ProviderUnavailable(f"Tencent quote fetch failed: {e}") from e
 
@@ -184,5 +202,4 @@ class TencentProvider:
     @staticmethod
     def _fetch_kline_sync(req, timeout: int) -> str:
         """Sync helper for asyncio.to_thread — reads the response body."""
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+        return _fetch_public(req, timeout).decode("utf-8", errors="replace")

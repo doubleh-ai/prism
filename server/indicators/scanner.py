@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from .. import public_network
 from ..database import get_db
 from ..work_lifecycle import WorkHandle, get_manager
 from .dsl import DSLError, MissingData, evaluate, is_signal
@@ -473,7 +474,7 @@ async def _run_job(
             if fast_fetch and not needs_fund:
                 import httpx
 
-                fast_client = httpx.AsyncClient(
+                fast_client = public_network.async_client(
                     headers={"User-Agent": "Mozilla/5.0"},
                     timeout=httpx.Timeout(12),
                     limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),

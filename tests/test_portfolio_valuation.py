@@ -665,7 +665,7 @@ async def test_settlement_transport_is_fixed_anonymous_and_only_dated404_looks_b
         )
         return client(**kwargs, transport=httpx.MockTransport(handler))
 
-    monkeypatch.setattr(V.httpx, "AsyncClient", factory)
+    monkeypatch.setattr(V.public_network.httpx, "AsyncClient", factory)
     value = await market.real_settlements("RB", asyncio.get_running_loop().time() + 1)
     assert len(calls) == (2 if failure == "dated404" else 1)
     assert value["status"] == ("collected" if failure == "dated404" else "unavailable")
