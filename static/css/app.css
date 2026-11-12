@@ -2103,3 +2103,14 @@ body::after{display:none}
 @media(max-width:600px){.admin-account-create{grid-template-columns:1fr}.admin-account-create h3,.admin-account-create [role=status]{grid-column:1}.admin-account-create .admin-btn{min-height:40px}.workbench-history-btn{font-size:10px;padding:6px 8px}}
 
 .industry-research{padding:16px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);color:var(--text2);font-size:13px;overflow-wrap:anywhere}.industry-research h3,.industry-research h4{color:var(--text);margin:0 0 7px}.industry-research p{margin:6px 0}.industry-research-row{padding:12px 0;border-top:1px solid var(--border)}.industry-research details{margin:10px 0}.industry-research summary{cursor:pointer;color:var(--text)}.industry-research a{color:var(--accent)}.industry-research-evidence,.industry-research-source,.industry-research-paths>div{margin:10px 0;padding-left:12px;border-left:2px solid var(--border2)}.industry-research blockquote{margin:8px 0;white-space:pre-wrap}.industry-research button{font:inherit;color:var(--accent);background:transparent;border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer}
+
+/* Login secondary actions */
+.workbench-login .login-password{position:relative}
+.workbench-login .login-card .login-password input{padding-right:52px}
+.workbench-login .login-card .login-password-toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:40px;height:40px;min-height:0;margin:0;padding:9px;background:transparent;color:var(--text2);border-radius:5px}
+.workbench-login .login-password-toggle:hover{color:var(--accent);background:var(--accent-bg)}
+.login-password-toggle svg{width:20px;height:20px}
+.login-password-toggle[aria-pressed="true"] .login-eye-slash{display:none}
+.workbench-login .login-card .login-recovery{margin:20px 0 0;font-size:12px}
+.login-recovery a{color:var(--text2);text-decoration:none}
+.login-recovery a:hover{color:var(--accent);text-decoration:underline;text-underline-offset:3px}

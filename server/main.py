@@ -30,6 +30,7 @@ from .config import (
     CORS_ALLOW_CREDENTIALS,
     CORS_ORIGINS,
     DEFAULT_MODEL,
+    INSTANCE_CHANNEL,
     LOG_FILE,
     MODELS,
     RATE_EXPLAIN_PER_MIN,
@@ -326,7 +327,10 @@ def render_template(name: str) -> str:
     """Read and return a template file."""
     path = TEMPLATE_DIR / name
     if path.exists():
-        markup = path.read_text(encoding="utf-8").replace("__APP_VERSION__", APP_VERSION)
+        label = APP_VERSION + (" Beta" if INSTANCE_CHANNEL == "beta" else "")
+        markup = path.read_text(encoding="utf-8").replace("__APP_VERSION__", label)
+        if INSTANCE_CHANNEL == "beta":
+            markup = markup.replace("</title>", " · Beta</title>", 1)
         for marker, fragment in (
             ("__RESEARCH_KNOWLEDGE__", "partials/research-knowledge.html"),
             ("__RESEARCH_PREFERENCES__", "partials/research-preferences.html"),

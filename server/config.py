@@ -12,6 +12,8 @@ DATA_DIR = Path(os.environ.get("STOCK_DATA_DIR", PROJECT_ROOT / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TEMPLATE_DIR = PROJECT_ROOT / "templates"
 STATIC_DIR = PROJECT_ROOT / "static"
+# Presentation only. A Beta label does not establish deployment acceptance.
+INSTANCE_CHANNEL = "beta" if os.environ.get("PRISM_INSTANCE_CHANNEL") == "beta" else ""
 
 # ── 密钥（持久化到 data/，不会进 git） ──
 SECRET_KEY_FILE = DATA_DIR / "secret_key"

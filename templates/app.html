@@ -4,19 +4,19 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 研究工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=122">
-  <link rel="stylesheet" href="/static/css/futures-workspace.css?v=122">
-  <link rel="stylesheet" href="/static/css/research-library.css?v=122">
-  <link rel="stylesheet" href="/static/css/research-preferences.css?v=122">
+  <link rel="stylesheet" href="/static/css/app.css?v=123">
+  <link rel="stylesheet" href="/static/css/futures-workspace.css?v=123">
+  <link rel="stylesheet" href="/static/css/research-library.css?v=123">
+  <link rel="stylesheet" href="/static/css/research-preferences.css?v=123">
   <style>#modelRoutes{margin-top:18px}#modelRoutes summary{cursor:pointer;font-weight:600}#modelRoutesBody>p{margin:12px 0;color:var(--text-muted,inherit)}#modelRoutesBody section{padding:16px 0;border-bottom:1px solid var(--border,#dfe4eb)}#modelRoutesBody form{display:grid;gap:12px;max-width:620px}#modelRoutesBody label{display:flex;align-items:center;gap:9px;flex-wrap:wrap}#modelRoutesBody select,#modelRoutesBody input[type=number]{padding:7px;border:1px solid var(--border,#dfe4eb);border-radius:6px;background:var(--bg2,#fff);color:var(--text,#202a38)}#modelRoutesBody details label{margin-top:10px}</style>
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=122">
-  <link rel="stylesheet" href="/static/css/feedback.css?v=122">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=123">
+  <link rel="stylesheet" href="/static/css/feedback.css?v=123">
 </head>
 <body>
 <div class="app-shell" id="appShell">
   <nav class="icon-rail" id="iconRail" aria-label="工作区导航">
     <div class="icon-rail-brand" title="Prism 研究工作台">
-      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=122#mark"/></svg>
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=123#mark"/></svg>
       <span class="rail-brand-word">Prism<small>研究工作台</small></span>
     </div>
     <span class="rail-section-label">研究空间</span>
@@ -67,10 +67,6 @@
       <div class="market-sidebar-results" id="marketSidebarResults"></div>
       <div class="watchlist-head"><span>自选</span><span class="watchlist-count" id="watchlistCount"></span></div>
       <div class="watchlist" id="watchlist"></div>
-      <div class="market-side-actions">
-        <button type="button" onclick="App._showMarketWorkspace('screener')">全市场选股</button>
-        <button type="button" onclick="App._showMarketWorkspace('library')">指标库</button>
-      </div>
     </div>
 
     <div class="sidebar-vibe" id="sidebarVibe" style="display:none">
@@ -179,8 +175,8 @@
           <div class="market-panel-inner" id="marketPanelInner">
             <div class="market-empty-workbench">
               <strong>选择一只股票开始复盘</strong>
-              <span>从左侧搜索或点击自选，也可以先从全市场指标选股开始。</span>
-              <div><button type="button" onclick="App._showMarketWorkspace('screener')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace('library')">配置指标库</button></div>
+              <span>搜索股票或选择已有自选。</span>
+              <div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button></div>
             </div>
           </div>
         </section>
@@ -316,31 +312,31 @@
   <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
 </dialog>
 __FEEDBACK_DIALOG__
-<script src="/static/lib/marked.min.js?v=122"></script>
-<script src="/static/lib/echarts.min.js?v=122"></script>
-<script src="/static/js/app.util.js?v=122"></script>
-<script src="/static/js/app.chat-render.js?v=122"></script>
-<script src="/static/js/app.core.js?v=122"></script>
-<script src="/static/js/app.diagnostics.js?v=122"></script>
-<script src="/static/js/app.feedback.js?v=122"></script>
-<script src="/static/js/app.chat.js?v=122"></script>
-<script src="/static/js/app.market.js?v=122"></script>
-<script src="/static/js/app.vibe.js?v=122"></script>
-<script src="/static/js/app.analysis.js?v=122"></script>
-<script src="/static/js/knowledge.js?v=122"></script>
-<script src="/static/js/app.reports.js?v=122"></script>
-<script src="/static/js/app.industry.js?v=122"></script>
-<script src="/static/js/app.indicators.js?v=122"></script>
-<script src="/static/js/app.screener.js?v=122"></script>
-<script src="/static/js/app.indicator-chart.js?v=122"></script>
-<script src="/static/js/app.admin.js?v=122"></script>
-<script src="/static/js/app.model-routes.js?v=122"></script>
-<script src="/static/js/app.release.js?v=122"></script>
-<script src="/static/js/app.tour.js?v=122"></script>
-<script src="/static/js/app.workbench.js?v=122"></script>
-<script src="/static/js/app.research.js?v=122"></script>
-<script src="/static/js/app.operations.js?v=122"></script>
-<script src="/static/js/app.hub.js?v=122"></script>
-<script src="/static/js/app.handoff.js?v=122"></script>
+<script src="/static/lib/marked.min.js?v=123"></script>
+<script src="/static/lib/echarts.min.js?v=123"></script>
+<script src="/static/js/app.util.js?v=123"></script>
+<script src="/static/js/app.chat-render.js?v=123"></script>
+<script src="/static/js/app.core.js?v=123"></script>
+<script src="/static/js/app.diagnostics.js?v=123"></script>
+<script src="/static/js/app.feedback.js?v=123"></script>
+<script src="/static/js/app.chat.js?v=123"></script>
+<script src="/static/js/app.market.js?v=123"></script>
+<script src="/static/js/app.vibe.js?v=123"></script>
+<script src="/static/js/app.analysis.js?v=123"></script>
+<script src="/static/js/knowledge.js?v=123"></script>
+<script src="/static/js/app.reports.js?v=123"></script>
+<script src="/static/js/app.industry.js?v=123"></script>
+<script src="/static/js/app.indicators.js?v=123"></script>
+<script src="/static/js/app.screener.js?v=123"></script>
+<script src="/static/js/app.indicator-chart.js?v=123"></script>
+<script src="/static/js/app.admin.js?v=123"></script>
+<script src="/static/js/app.model-routes.js?v=123"></script>
+<script src="/static/js/app.release.js?v=123"></script>
+<script src="/static/js/app.tour.js?v=123"></script>
+<script src="/static/js/app.workbench.js?v=123"></script>
+<script src="/static/js/app.research.js?v=123"></script>
+<script src="/static/js/app.operations.js?v=123"></script>
+<script src="/static/js/app.hub.js?v=123"></script>
+<script src="/static/js/app.handoff.js?v=123"></script>
 </body>
 </html>
