@@ -173,7 +173,7 @@ ensure_configured_admin_user()
 async def lifespan(application):
     from .agent.diagnostic_delivery import DiagnosticDelivery
 
-    runtime = await open_runtime(producers={kind: kind != "vibe" for kind in KINDS})
+    runtime = await open_runtime(producers=dict.fromkeys(KINDS, True))
     reminders = ReminderScheduler(runtime.manager)
     diagnostic_delivery = DiagnosticDelivery(runtime.manager)
     try:

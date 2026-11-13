@@ -47,6 +47,9 @@ class ProviderChain:
         self._inflight: dict[str, WorkHandle] = {}
 
     def _cache_key(self, method: str, provider_name: str, *parts: str) -> str:
+        # Pre-normalization Tencent quotes used lots / 10k CNY, including stale cache.
+        if method == "quote" and provider_name == "tencent":
+            method = "quote-shares-cny"
         # Old AKShare bars may have silently dropped dates with missing amount.
         if method == "kline-v3" and provider_name == "akshare":
             method = "kline-v4"

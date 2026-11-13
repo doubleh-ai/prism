@@ -18,7 +18,7 @@ install: ## Install runtime dependencies.
 	$(PIP) install --require-hashes -r requirements.lock
 	$(PIP) check
 
-install-dev: install ## Install pinned test/lint tools without changing runtime versions.
+install-dev: install ## Install pinned test/lint/type-check tools without changing runtime versions.
 	$(PIP) install --no-deps -r requirements-test.txt
 	$(PIP) check
 

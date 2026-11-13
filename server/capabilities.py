@@ -1116,16 +1116,11 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         }.get(entry.get("status"), "未知")
         return entry, target, f"研究状态：{status_label}"
     if name.startswith("vibe_"):
-        from .models import VibePlanRequest
         from .vibe import (
-            _insert_vibe_plan,
-            _start_task,
-            build_vibe_plan,
             cancel_owned_plan,
             execution_status,
             get_owned_plan,
             list_owned_plans,
-            start_owned_followup,
         )
 
         if name == "vibe_list":
@@ -1150,18 +1145,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         if name == "vibe_cancel":
             result = await cancel_owned_plan(user, data["id"])
             return result, target, "研究已停止" if result["cancelled"] else "尚未确认引擎停止，请核对当前任务"
-        if name == "vibe_followup":
-            plan = start_owned_followup(user, data["id"], data["question"])
-            return {"plan": plan}, target, "追问已排队，原报告保留"
-
-        if name == "vibe_start":
-            plan = build_vibe_plan(VibePlanRequest(**data, agent=True))
-            plan["id"] = secrets.token_hex(10)
-            _insert_vibe_plan(user, plan)
-            _start_task(plan["id"], user)
-            target["id"] = plan["id"]
-        else:
-            plan = get_owned_plan(user, data["id"])
+        plan = get_owned_plan(user, data["id"])
         result = {
             k: plan.get(k)
             for k in (
@@ -1184,9 +1168,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         return (
             {"plan": result, "history_only": True, "execution": execution_status()},
             target,
-            "Vibe 研究已启动"
-            if name == "vibe_start"
-            else f"已保存 Vibe 记录状态：{plan.get('status', 'unknown')}；不是旧引擎实时状态，本版暂停执行",
+            f"已保存 Vibe 记录状态：{plan.get('status', 'unknown')}；不是旧引擎实时状态，本版暂停执行",
         )
     raise HTTPException(404)
 

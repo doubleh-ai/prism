@@ -226,3 +226,26 @@ async def test_kline_chain_normalizes_daily_only_provider_and_uses_adjustment_ca
     assert (bars[0].open, bars[0].close, bars[0].volume) == (10, 13, 300)
     cached, _ = cache.get("kline-v3:daily-only:600519:1w:2:none")
     assert cached is not None
+
+
+@pytest.mark.parametrize("ttl", [60, -1])
+async def test_legacy_tencent_quote_cache_cannot_reintroduce_old_units(ttl):
+    cache = MarketCache()
+    old = Quote(ticker="600519", price=1435.26, volume=41780, turnover=595483, timestamp=1, source="tencent")
+    cache.set("quote:tencent:600519", old.model_dump(), ttl=ttl)
+    provider = FakeProvider("tencent", fail=True)
+    chain = ProviderChain([provider], cache=cache)
+    with pytest.raises(NoProviderAvailable):
+        await chain.get_quote("600519")
+
+    provider._fail = False
+    provider._quote = old.model_copy(update={"volume": 4178000, "turnover": 5954830000})
+    quote, stale = await chain.get_quote("600519")
+    assert (quote.volume, quote.turnover, stale) == (4178000, 5954830000, False)
+    calls = provider.calls
+    assert await chain.get_quote("600519") == (quote, False)
+    assert provider.calls == calls
+    cache.set("quote-shares-cny:tencent:600519", quote.model_dump(), ttl=-1)
+    provider._fail = True
+    fallback, stale = await chain.get_quote("600519")
+    assert (fallback.volume, fallback.turnover, stale) == (4178000, 5954830000, True)

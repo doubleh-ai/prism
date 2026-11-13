@@ -168,8 +168,8 @@ class TestCSRFDefense:
         assert r.status_code == 403, f"Got {r.status_code}: {r.text}"
 
     @pytest.mark.asyncio
-    async def test_post_with_csrf_header_passes(self, client, auth_cookies):
-        """A POST with the correct CSRF header must succeed."""
+    async def test_post_with_requested_with_header_passes(self, client, auth_cookies):
+        """A POST with X-Requested-With: XMLHttpRequest must succeed."""
         r = await client.post(
             "/api/convs",
             json={"title": "csrf test"},
