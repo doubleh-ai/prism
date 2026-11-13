@@ -385,15 +385,14 @@ scope and requirements for a future production controller.
 
 Body: `{"username": "...", "password": "..."}`
 
-- 200: `{"user": "alice", "csrf_token": "..."}` + sets `token` and
-  `csrf_token` cookies.
+- 200: `{"user": "alice"}` + sets the `token` cookie.
 - 403: wrong credentials.
 - 422: malformed body.
 - 429: rate-limited.
 
 ### `POST /api/logout`
 
-- 200: `{"ok": true}`. Clears both `token` and `csrf_token` cookies.
+- 200: `{"ok": true}`. Clears the `token` cookie.
 
 ### `GET /api/me`
 
