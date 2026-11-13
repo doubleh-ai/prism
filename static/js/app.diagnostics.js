@@ -49,13 +49,11 @@ Object.assign(App, {
       viewport:window.innerWidth + 'x' + window.innerHeight
     }, options.context || {});
     context.repair_scope = scope;
-    var csrf = this._getCookie('csrf_token');
     fetch('/api/diagnostics/client', {
       method:'POST',
       headers:{
         'Content-Type':'application/json',
-        'X-Requested-With':'XMLHttpRequest',
-        'X-CSRF-Token':csrf || ''
+        'X-Requested-With':'XMLHttpRequest'
       },
       body:JSON.stringify({
         kind:kind,

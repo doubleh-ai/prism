@@ -20,7 +20,7 @@ function element() {
 function environment() {
   const elements = new Map();
   const listeners={};
-  const doc={cookie:'csrf_token=test-csrf',addEventListener(type,callback){(listeners[type]||(listeners[type]=[])).push(callback);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,documentElement:element(),getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
+  const doc={cookie:'',addEventListener(type,callback){(listeners[type]||(listeners[type]=[])).push(callback);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,documentElement:element(),getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
   const context={console,document:doc,marked:markedModule.marked,crypto,AbortController,TextDecoder,TextEncoder,URL,Intl,Set,Map,Date,JSON,Promise,
     location:{href:''},navigator:{},localStorage:{getItem(){return null;},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;},setItem(){},removeItem(){}},
     addEventListener(){},matchMedia(){return {matches:false};},requestAnimationFrame(){return 1;},cancelAnimationFrame(){},setInterval(){return 1;},clearInterval(){},setTimeout,clearTimeout,
@@ -399,12 +399,12 @@ function persistedAndOfflineResearchStatus() {
   assert(bubble.innerHTML.includes('连接暂时中断')&&!bubble.innerHTML.includes('research-progress'));
 }
 
-async function csrfEchoAndFactBasedScan() {
+async function headerDefenseAndFactBasedScan() {
   const {context,app,doc}=environment();
   let sent;
   context.fetch=async(url,opts)=>{sent=opts;return {ok:true,status:200};};
   await app.api('/api/convs',{method:'POST'});
-  assert.equal(sent.headers['X-CSRF-Token'],'test-csrf');
+  assert(!Object.hasOwn(sent.headers,'X-CSRF-Token'));
   assert.equal(sent.headers['X-Requested-With'],'XMLHttpRequest');
   vm.runInContext(fs.readFileSync('static/js/app.indicators.js','utf8'),context);
   app._renderScanResults('指标',{scanned:1,matches:[{ticker:'000001',triggered_at:1,price:10,days_ago:8,strength:99}]});
@@ -414,7 +414,7 @@ async function csrfEchoAndFactBasedScan() {
 }
 
 (async()=>{
-  await csrfEchoAndFactBasedScan();
+  await headerDefenseAndFactBasedScan();
   shippedRenderingContracts();
   imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();

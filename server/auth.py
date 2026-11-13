@@ -116,7 +116,7 @@ def require_account_context(request: Request, authenticated_user: str) -> None:
 
 
 def verify_csrf(request: Request) -> None:
-    """Verify the defense header and matching double-submit CSRF token.
+    """Verify the request carries the CSRF defense header.
 
     For state-changing methods we require ``X-Requested-With: XMLHttpRequest``.
     Browsers will not add custom headers to cross-site form submissions
@@ -136,15 +136,6 @@ def verify_csrf(request: Request) -> None:
             status_code=403,
             detail=f"Missing {CSRF_REQUIRED_HEADER}: {CSRF_HEADER_VALUE} header",
         )
-
-    cookie_token = request.cookies.get("csrf_token", "")
-    header_token = request.headers.get("X-CSRF-Token", "")
-    if (
-        not cookie_token
-        or not header_token
-        or not secrets.compare_digest(cookie_token.encode("utf-8"), header_token.encode("utf-8"))
-    ):
-        raise HTTPException(status_code=403, detail="Missing or mismatched CSRF token")
 
     # Optional Origin pinning (configure ALLOWED_ORIGINS in production).
     if ALLOWED_ORIGINS:
@@ -205,27 +196,13 @@ async def login(request: Request):
         status="success",
         request=request,
     )
-    # Generate a per-session CSRF token. The frontend mirrors this in the
-    # ``X-CSRF-Token`` header. This is the double-submit cookie pattern.
-    csrf_token = secrets.token_urlsafe(32)
-    resp = JSONResponse({"user": username, "csrf_token": csrf_token})
+    resp = JSONResponse({"user": username})
     resp.set_cookie(
         "token",
         token,
         max_age=30 * 86400,
         path="/",
         httponly=True,
-        samesite=COOKIE_SAMESITE,
-        secure=COOKIE_SECURE,
-    )
-    # CSRF token is NOT HttpOnly — JS must be able to read it. It's also
-    # bound to the session via the same samesite/secure attributes.
-    resp.set_cookie(
-        "csrf_token",
-        csrf_token,
-        max_age=30 * 86400,
-        path="/",
-        httponly=False,
         samesite=COOKIE_SAMESITE,
         secure=COOKIE_SECURE,
     )
@@ -250,5 +227,4 @@ def logout(request: Request):
         )
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("token", path="/")
-    resp.delete_cookie("csrf_token", path="/")
     return resp

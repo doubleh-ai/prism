@@ -32,11 +32,13 @@ actions; research must not treat those jumps alone as investment signals.
 See the [AkShare source](https://github.com/akfamily/akshare/blob/main/akshare/stock/stock_zh_a_sina.py)
 and [BaoStock adjustment explanation](https://www.baostock.com/helpdocs/pdf/BaoStock%E5%A4%8D%E6%9D%83%E5%9B%A0%E5%AD%90%E7%AE%80%E4%BB%8B.pdf).
 
-The existing RSI uses a rolling mean of gains/losses, not Wilder smoothing. KDJ
+RSI uses Wilder smoothing: seed average gain/loss with the first n changes, then
+update each average as `(previous * (n - 1) + current) / n`. The first n values
+remain NaN; zero loss with positive gain yields 100, and both zero yield 50. KDJ
 initializes its exponential smoothing from the first available RSV. These are
 calculation conventions, not demonstrated predictive accuracy. Changing them
-requires separate reference fixtures and compatibility review. Scanner freshness
-scores and raw indicator rankings are not win-rate or cross-stock confidence scores.
+requires separate reference fixtures and compatibility review. Signal scans sort
+by observed bar age (`days_ago`); no synthetic strength score is produced.
 
 ## Acceptance sequence
 

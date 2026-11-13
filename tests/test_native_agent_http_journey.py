@@ -205,7 +205,6 @@ def live_native(tmp_path, request):
                     "/api/login", json={"username": username, "password": "synthetic-local-test"}
                 )
                 assert result.status_code == 200
-                client.headers["X-CSRF-Token"] = client.cookies["csrf_token"]
                 clients.append(client)
             yield clients
         finally:

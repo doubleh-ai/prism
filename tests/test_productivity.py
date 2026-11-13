@@ -32,8 +32,7 @@ async def work_client(work_db):
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
-        headers={"X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": "synthetic-test-csrf"},
-        cookies={"csrf_token": "synthetic-test-csrf"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
     ) as client:
         yield client
 

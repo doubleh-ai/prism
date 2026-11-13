@@ -128,16 +128,6 @@ async def client():
             if method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
                 for k, v in CSRF_HEADERS.items():
                     headers.setdefault(k, v)
-                # Browser writes echo the cookie. Private worker requests deliberately
-                # carry no browser cookies and use their separate scoped identity.
-                if not str(url).startswith("/api/internal/"):
-                    cookies = dict(kw.get("cookies") or {})
-                    csrf = cookies.get("csrf_token") or c.cookies.get("csrf_token")
-                    if not csrf:
-                        csrf = "synthetic-test-csrf"
-                        cookies["csrf_token"] = csrf
-                        kw["cookies"] = cookies
-                    headers.setdefault("X-CSRF-Token", csrf)
             return await orig_request(method, url, headers=headers, **kw)
 
         c.request = patched_request

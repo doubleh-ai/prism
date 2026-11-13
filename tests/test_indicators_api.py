@@ -461,12 +461,10 @@ async def test_background_scan_returns_partial_signal_results():
     assert completed["matches"][0]["days_ago"] == 0
     assert "strength" not in completed["matches"][0]
 
-
-def test_scan_sort_uses_bar_age_even_beyond_old_score_floor():
-    from server.indicators.scanner import _sort_matches
+    # Recent-signal ordering uses actual bar age, including beyond the old score floor.
 
     rows = [{"days_ago": age, "turnover": 1000 - age, "triggered_at": age} for age in [15, 0, 8, 6, 1]]
-    _sort_matches(rows, {}, signal=True)
+    scanner._sort_matches(rows, {}, signal=True)
     assert [row["days_ago"] for row in rows] == [0, 1, 6, 8, 15]
-    _sort_matches(rows, {"sort": "recent_signal", "direction": "asc"}, signal=True)
+    scanner._sort_matches(rows, {"sort": "recent_signal", "direction": "asc"}, signal=True)
     assert [row["days_ago"] for row in rows] == [15, 8, 6, 1, 0]
