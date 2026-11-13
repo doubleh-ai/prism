@@ -67,7 +67,7 @@ def _b_vol(df, fund, _):
 def _b_amount(df, fund, _):
     if "amount" in df.columns:
         return df["amount"].astype(float)
-    return df["volume"].astype(float) * df["close"].astype(float)
+    return pd.Series(float("nan"), index=df.index)
 
 
 def _b_mavol(df, fund, n):
@@ -76,12 +76,21 @@ def _b_mavol(df, fund, n):
 
 def _b_rsi(df, fund, n):
     delta = df["close"].diff()
-    gain = delta.clip(lower=0).rolling(int(n)).mean()
-    loss = (-delta.clip(upper=0)).rolling(int(n)).mean()
+    n = int(n)
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    gain = pd.Series(float("nan"), index=df.index)
+    loss = pd.Series(float("nan"), index=df.index)
+    if len(delta) > n:
+        # The first n changes seed Wilder's recursive averages at index n.
+        gain.iloc[n] = gains.iloc[1 : n + 1].mean(skipna=False)
+        loss.iloc[n] = losses.iloc[1 : n + 1].mean(skipna=False)
+        for i in range(n + 1, len(delta)):
+            gain.iloc[i] = (gain.iloc[i - 1] * (n - 1) + gains.iloc[i]) / n
+            loss.iloc[i] = (loss.iloc[i - 1] * (n - 1) + losses.iloc[i]) / n
     rs = gain / loss.where(loss.ne(0))
     result = 100 - 100 / (1 + rs)
     result = result.mask(loss.eq(0) & gain.gt(0), 100)
-    # A flat, fully warmed window is neutral; an unobserved window is unknown.
     return result.mask(loss.eq(0) & gain.eq(0), 50)
 
 

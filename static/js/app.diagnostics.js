@@ -35,7 +35,8 @@ Object.assign(App, {
   _captureDiagnostic: function(kind, message, options) {
     options = options || {};
     if (!this.user || !kind || !message) return;
-    var key = [kind, options.component || '', String(message).slice(0, 180), this._diagnosticVersion()].join('|');
+    var scope = this._repairScopeForContext ? this._repairScopeForContext(options.context || {}) : 'unknown';
+    var key = [kind, options.component || '', scope, String(message).slice(0, 180), this._diagnosticVersion()].join('|');
     var now = Date.now();
     if (now - Number(this._diagnosticRecent[key] || 0) < 10 * 60 * 1000) return;
     this._diagnosticRecent[key] = now;
@@ -47,13 +48,12 @@ Object.assign(App, {
       server_revision:(this._releaseData && this._releaseData.deployed_revision) || '',
       viewport:window.innerWidth + 'x' + window.innerHeight
     }, options.context || {});
-    var csrf = this._getCookie('csrf_token');
+    context.repair_scope = scope;
     fetch('/api/diagnostics/client', {
       method:'POST',
       headers:{
         'Content-Type':'application/json',
-        'X-Requested-With':'XMLHttpRequest',
-        'X-CSRF-Token':csrf || ''
+        'X-Requested-With':'XMLHttpRequest'
       },
       body:JSON.stringify({
         kind:kind,

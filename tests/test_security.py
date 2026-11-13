@@ -168,8 +168,8 @@ class TestCSRFDefense:
         assert r.status_code == 403, f"Got {r.status_code}: {r.text}"
 
     @pytest.mark.asyncio
-    async def test_post_with_csrf_header_passes(self, client, auth_cookies):
-        """A POST with the correct CSRF header must succeed."""
+    async def test_post_with_requested_with_header_passes(self, client, auth_cookies):
+        """A POST with X-Requested-With: XMLHttpRequest must succeed."""
         r = await client.post(
             "/api/convs",
             json={"title": "csrf test"},
@@ -217,23 +217,6 @@ class TestCookieSecurity:
         cfg_src = Path(__file__).resolve().parent.parent / "server" / "config.py"
         text = cfg_src.read_text(encoding="utf-8")
         assert "COOKIE_SECURE" in text
-
-    def test_login_sets_csrf_cookie(self, client, test_user):
-        """Successful login must issue both 'token' and 'csrf_token' cookies."""
-        import asyncio
-
-        async def _check():
-            r = await client.post(
-                "/api/login",
-                json={"username": test_user["username"], "password": test_user["password"]},
-            )
-            assert r.status_code == 200
-            # httpx stores cookies on the client; verify both were set
-            jar = dict(client.cookies)
-            # At minimum the token cookie is present
-            assert "token" in jar
-
-        asyncio.get_event_loop().run_until_complete(_check())
 
 
 # ── Auth CSRF verification function ──

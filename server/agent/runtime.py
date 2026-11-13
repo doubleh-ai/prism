@@ -72,6 +72,7 @@ class Outcome:
     status: str
     text: str = ""
     error_code: str | None = None
+    provider_diagnostic: dict | None = None
     limit_reason: str | None = None
     research_revision: str | None = None
     message_id: int | None = None
@@ -769,6 +770,7 @@ class NativeAgent:
             outcome.limit_reason = error.reason
         except provider.ProviderError as error:
             outcome.status, outcome.error_code = "partial" if full_text or pending else "failed", error.code
+            outcome.provider_diagnostic = error.diagnostic or None
         except HTTPException as error:
             if error.status_code in {401, 404}:
                 outcome.abandoned = True
@@ -779,7 +781,8 @@ class NativeAgent:
             )
         except asyncio.CancelledError:
             outcome.status, outcome.error_code = "cancelled", "execution_interrupted_unknown"
-        except Exception:
+        except Exception as error:
+            log.error("native_execution_failed error_type=%s", type(error).__name__)
             outcome.status, outcome.error_code = (
                 "partial" if full_text or pending else "failed",
                 "research_unavailable",
@@ -817,6 +820,11 @@ class NativeAgent:
                     {"error": _error_message(outcome.error_code, outcome.limit_reason)},
                     error_code=outcome.error_code,
                     limit_reason=outcome.limit_reason,
+                    **(
+                        {"provider_diagnostic": outcome.provider_diagnostic}
+                        if outcome.provider_diagnostic
+                        else {}
+                    ),
                 )
             elif outcome.status == "cancelled":
                 emit("cancellation_acknowledged", {"status": "已停止模型等待，正在保存进度"})
@@ -895,6 +903,12 @@ class NativeAgent:
                 outcome.abandoned = True
                 return outcome
             raise
+        except Exception as error:
+            # Failed persistence is not a terminal success. Keep the manager's
+            # blocked lease and the reader's result_unconfirmed notice; record
+            # only the phase/class, never exception text containing user input.
+            log.error("native_finalization_unconfirmed error_type=%s", type(error).__name__)
+            raise
 
     def _persist(self, outcome: Outcome):
         if outcome.abandoned:
@@ -904,7 +918,7 @@ class NativeAgent:
             # This task failed the atomic claim and never invoked the model.
             return
         try:
-            previous = store.get_run(outcome.user, outcome.run_id)
+            store.get_run(outcome.user, outcome.run_id)
             if outcome.research_revision:
                 with get_db() as db:
                     row = db.execute(
@@ -926,20 +940,23 @@ class NativeAgent:
             )
             if terminal["status"] != outcome.status:
                 raise RuntimeError("native_terminal_persistence_unconfirmed")
-            if previous["status"] not in store.TERMINAL:
-                try:
-                    from ..diagnostics import record_native_outcome
+            try:
+                from ..diagnostics import record_native_outcome
 
-                    record_native_outcome(outcome.user, outcome.status, outcome.error_code)
-                except Exception:
-                    # Telemetry must not turn an already-saved result into a failed save.
-                    log.warning("native_outcome_diagnostic_unavailable")
+                record_native_outcome(outcome.user, outcome.status, outcome.error_code, run_id=outcome.run_id)
+            except Exception:
+                # The persisted release-bound delivery remains pending. A replay
+                # or the drain-aware scheduler can project it without reexecution.
+                log.warning("native_outcome_diagnostic_unavailable")
 
         except HTTPException as error:
             if error.status_code not in {401, 404}:
                 raise
             outcome.abandoned = True
             _retire_removed_owner(outcome)
+        except Exception as error:
+            log.error("native_terminal_persistence_unconfirmed error_type=%s", type(error).__name__)
+            raise
 
 
 def _retire_removed_owner(outcome: Outcome):

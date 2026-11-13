@@ -110,6 +110,56 @@ def test_members_remain_in_separate_lists_and_summary_is_never_double_counted():
     assert ex.parse_rankings(encode(rankings()), "RB", DAY, "rb2612")["status"] == "not_reported"
 
 
+def blank_column(row, column):
+    for key in ("PARTICIPANTID", "PARTICIPANTABBR", "CJ"):
+        row[f"{key}{column}"] = ""
+    row[f"CJ{column}_CHG"] = ""
+
+
+def test_independent_short_columns_preserve_other_disclosures_and_unknown_empty_totals():
+    value = rankings()
+    for row in value["o_cursor"][:2]:
+        blank_column(row, 1)
+    blank_column(value["o_cursor"][1], 3)
+    result = ex.parse_rankings(encode(value), "RB", DAY, "rb2701")
+    assert result["status"] == "collected"
+    assert result["sides"]["volume"] == {
+        "status": "not_reported",
+        "ranked_members": 0,
+        "quantity_sum": None,
+        "change_sum": None,
+        "members": [],
+    }
+    assert result["sides"]["long"]["quantity_sum"] == 403
+    assert result["sides"]["short"]["ranked_members"] == 1
+    assert result["sides"]["short"]["quantity_sum"] == 301
+
+
+@pytest.mark.parametrize("fault", ["missing_name", "zero_quantity", "missing_change", "rank_hole"])
+def test_incomplete_or_nonterminal_blanks_do_not_hide_corrupt_disclosures(fault):
+    value = rankings()
+    row = value["o_cursor"][0 if fault == "rank_hole" else 1]
+    blank_column(row, 2)
+    if fault == "missing_name":
+        row["PARTICIPANTID2"] = "2-2"
+    elif fault == "zero_quantity":
+        row["CJ2"] = 0
+    elif fault == "missing_change":
+        del row["CJ2_CHG"]
+    with pytest.raises(ValueError):
+        ex.parse_rankings(encode(value), "RB", DAY, "rb2701")
+
+
+def test_all_columns_unreported_never_produce_zero_position_totals():
+    value = rankings()
+    for row in value["o_cursor"][:2]:
+        for column in (1, 2, 3):
+            blank_column(row, column)
+    result = ex.parse_rankings(encode(value), "RB", DAY, "rb2701")
+    assert result["status"] == "not_reported"
+    assert all(side["quantity_sum"] is None for side in result["sides"].values())
+
+
 @pytest.mark.parametrize("change", ["date", "duplicate", "rank_gap", "member_duplicate", "negative", "bool"])
 def test_bad_rankings_are_unavailable_not_zero(change):
     value = rankings()
@@ -144,11 +194,87 @@ async def test_unavailable_rankings_keep_curve_and_no_redirect_or_arbitrary_host
     async with httpx.AsyncClient(transport=httpx.MockTransport(serve), follow_redirects=False) as client:
         result = await ex.read_daily(client, "RB", DAY, asyncio.get_running_loop().time() + 2)
         assert result["status"] == "collected" and result["member_positioning"]["status"] == "unavailable"
-        assert await ex.read_daily(client, "M", DAY, 0) == {
-            "status": "not_covered",
-            "member_positioning": {"status": "not_covered"},
-        }
+        expired = await ex.read_daily(client, "M", DAY, 0)
+        assert expired["status"] == "unavailable" and expired["error_code"] == "source_timeout"
+        assert expired["member_positioning"]["status"] == "not_covered"
     assert len(seen) == 2
+
+
+async def test_unpublished_night_session_rankings_keep_their_actual_previous_report_date():
+    calls = []
+
+    def serve(request):
+        calls.append(request.url.path)
+        if "/kx" in request.url.path:
+            return httpx.Response(200, json=quotes())
+        if request.url.path.endswith("pm20261102.dat"):
+            return httpx.Response(404)
+        assert request.url.path.endswith("pm20261101.dat")
+        value = rankings()
+        value["report_date"] = "20261101"
+        return httpx.Response(200, json=value)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        result = await ex.read_daily(client, "RB", DAY, asyncio.get_running_loop().time() + 2)
+    assert len(calls) == 3
+    assert result["data_as_of"] == "2026-11-02"
+    member = result["member_positioning"]
+    assert member["contract"] == result["active_contract"] == "rb2701"
+    assert member["status"] == "collected" and member["data_as_of"] == "2026-11-01"
+    assert member["source_url"].endswith("pm20261101.dat")
+    assert member["source_attempts"] == [
+        {
+            "requested_date": "2026-11-02",
+            "status": "unavailable",
+            "error_code": "report_not_found",
+            "http_status": 404,
+        },
+        {"requested_date": "2026-11-01", "status": "collected"},
+    ]
+
+
+@pytest.mark.parametrize("failure", ["404", "403", "429", "redirect", "schema", "network"])
+async def test_rankings_discovery_only_moves_to_distinct_dates_after_404(failure):
+    calls = []
+
+    def serve(request):
+        calls.append(request.url.path)
+        if "/kx" in request.url.path:
+            return httpx.Response(200, json=quotes())
+        if failure == "network":
+            raise httpx.ConnectError("synthetic private diagnostic", request=request)
+        if failure == "schema":
+            return httpx.Response(200, json={})
+        if failure == "redirect":
+            return httpx.Response(302, headers={"location": "https://untrusted.invalid/"})
+        return httpx.Response(int(failure))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve), follow_redirects=False) as client:
+        result = await ex.read_daily(client, "RB", DAY, asyncio.get_running_loop().time() + 2)
+    assert len(calls) == (4 if failure == "404" else 2)
+    assert len(calls) == len(set(calls))
+    assert result["member_positioning"]["status"] == "unavailable"
+    assert len(result["member_positioning"]["source_attempts"]) == len(calls) - 1
+    assert "synthetic private diagnostic" not in str(result)
+
+
+async def test_undisclosed_contract_does_not_borrow_another_contract_or_an_older_ranking():
+    calls = []
+
+    def serve(request):
+        calls.append(request.url.path)
+        if "/kx" in request.url.path:
+            return httpx.Response(200, json=quotes())
+        value = rankings()
+        for row in value["o_cursor"]:
+            row["INSTRUMENTID"] = "rb2611"
+        return httpx.Response(200, json=value)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        result = await ex.read_daily(client, "RB", DAY, asyncio.get_running_loop().time() + 2)
+    assert len(calls) == 2
+    assert result["member_positioning"]["status"] == "not_reported"
+    assert result["member_positioning"]["contract"] == "rb2701"
 
 
 async def test_expired_deadline_and_partial_or_oversize_json_fail_closed():

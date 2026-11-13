@@ -10,7 +10,7 @@ import pytest
 async def test_work_responses_plan_preview_confirm_undo_and_local_configuration(
     client, auth_cookies, test_user, monkeypatch
 ):
-    from server import config, health, main, model_routes
+    from server import config, health, model_routes
     from server.agent import provider_openai
     from server.database import get_db
     from server.productivity import calendar, notifications, projects, store
@@ -32,7 +32,6 @@ async def test_work_responses_plan_preview_confirm_undo_and_local_configuration(
     }
     models = {"openai": cfg, "unconfigured": {**cfg, "model": ""}}
     monkeypatch.setattr(config, "MODELS", models)
-    monkeypatch.setattr(main, "MODELS", models)
     monkeypatch.setattr(config, "DEFAULT_MODEL", "openai")
     model_routes.init_model_routes_db()
     space = store.create_space(
@@ -125,6 +124,7 @@ async def test_work_responses_plan_preview_confirm_undo_and_local_configuration(
     assert snapshot["models"][0]["endpoint_host"] == "openai"
     assert snapshot["models"][0]["protocol"] == "openai_responses"
     public_models = (await client.get("/api/models")).json()
+    assert [m["id"] for m in public_models if m["default"]] == ["openai"]
     assert {m["id"]: m["configured"] for m in public_models} == {"openai": True, "unconfigured": False}
     assert {m["id"]: m["configured"] for m in health._model_checks()} == {
         "openai": True,

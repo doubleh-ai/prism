@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+PriceAdjustment = Literal["none", "qfq", "hfq"]
+
 
 class Quote(BaseModel):
     """Real-time quote for a single ticker."""
@@ -18,8 +20,8 @@ class Quote(BaseModel):
     price: float = Field(..., ge=0)
     change: float = 0.0  # absolute change vs prev close
     change_pct: float = 0.0  # percentage change
-    volume: float = Field(default=0.0, ge=0)
-    turnover: float = Field(default=0.0, ge=0)
+    volume: float = Field(default=0.0, ge=0)  # shares
+    turnover: float = Field(default=0.0, ge=0)  # traded amount in CNY
     high: float | None = Field(default=None, ge=0)
     low: float | None = Field(default=None, ge=0)
     open: float | None = Field(default=None, ge=0)
@@ -50,8 +52,9 @@ class KLine(BaseModel):
     high: float
     low: float
     close: float
-    volume: float = Field(..., ge=0)
-    turnover: float | None = Field(default=None, ge=0)
+    volume: float = Field(..., ge=0)  # shares for A-share bars
+    turnover: float | None = Field(default=None, ge=0)  # traded CNY amount; None means unavailable
+    adjustment: Literal["none", "qfq", "hfq", "unknown"] = "unknown"
     provenance: KLineProvenance | None = None
 
 
@@ -81,6 +84,9 @@ def describe_kline(bars: list[KLine], *, stale: bool) -> dict:
         "timestamp_kind": "bar_date",
         "data_kind": "kline",
         "period_completeness": "unknown",
+        "adjustment": bars[0].adjustment
+        if bars and all(b.adjustment == bars[0].adjustment for b in bars)
+        else "unknown",
         "stale": stale,
     }
 

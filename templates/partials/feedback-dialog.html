@@ -1,0 +1,15 @@
+<dialog id="feedbackDialog" class="workbench-dialog feedback-dialog" aria-labelledby="feedbackTitle">
+  <header><div><h2 id="feedbackTitle">反馈与建议</h2></div><button type="button" onclick="document.getElementById('feedbackDialog').close()" aria-label="关闭反馈">×</button></header>
+  <nav class="workbench-dialog-tabs" aria-label="反馈视图"><button type="button" onclick="App._feedbackView('new')">提交反馈</button><button type="button" onclick="App._feedbackView('mine')">我的反馈与进度</button><button type="button" id="feedbackReviewEntry" hidden onclick="App._feedbackView('admin')">反馈评审</button></nav>
+  <div class="workbench-dialog-body">
+    <form id="feedbackForm" class="feedback-form" onsubmit="App._submitFeedback(event)">
+      <label for="feedbackCategory">反馈类型</label><select id="feedbackCategory"><option value="bug">功能异常 · 优先排查</option><option value="suggestion">改进建议 · 每日评审</option></select>
+      <label for="feedbackSummary">用一句话描述</label><input id="feedbackSummary" required maxlength="120" placeholder="例如：报告表格在手机上被截断">
+      <label for="feedbackDescription">发生了什么？你希望怎样？</label><textarea id="feedbackDescription" required maxlength="6000" rows="5" placeholder="异常请写操作步骤、实际结果和预期结果；建议请写使用场景和想改进的地方。"></textarea>
+      <p class="feedback-privacy">反馈用于排查和评审，可由自动流程辅助处理。仅附带当前页面和版本，不自动上传对话、研报或截图。请勿填写密码、密钥及其他敏感信息。</p>
+      <div class="feedback-form-actions"><span id="feedbackPage"></span><button type="submit" id="feedbackSubmit">提交并跟踪进度</button></div>
+    </form>
+    <p id="feedbackMessage" class="feedback-message" role="status" aria-live="polite"></p>
+    <div id="feedbackContent" hidden></div>
+  </div>
+</dialog>

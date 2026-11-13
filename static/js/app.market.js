@@ -138,6 +138,12 @@ Object.assign(App, {
       this._stopWatchlistRefresh();
       if (shell && !compact) shell.classList.remove('collapsed');
       this._initReports();
+    } else if (mode === 'futures') {
+      this._stopWatchlistRefresh();
+      this._initFutures();
+    } else if (mode === 'preferences') {
+      this._stopWatchlistRefresh();
+      if (window.PrismPreferences) PrismPreferences.activate();
     } else if (mode === 'vibe') {
       this._stopWatchlistRefresh();
       if (shell && !compact) shell.classList.remove('collapsed');
@@ -157,7 +163,7 @@ Object.assign(App, {
 
   _showMarketEmpty: function() {
     var inner = document.getElementById('marketPanelInner');
-    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>搜索股票或选择已有自选，也可以从全市场指标选股开始。</span><div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button><button type="button" onclick="App._showMarketWorkspace(\'screener\')">打开全市场选股</button><button type="button" onclick="App._showMarketWorkspace(\'library\')">配置指标库</button></div></div>';
+    if (inner) inner.innerHTML = '<div class="market-empty-workbench"><strong>选择一只股票开始复盘</strong><span>搜索股票或选择已有自选。</span><div><button type="button" onclick="App._openMarketSearch()">搜索或选择股票</button></div></div>';
   },
 
   _openMarketSearch: function() {
@@ -524,10 +530,13 @@ Object.assign(App, {
     }
     var channels = {tencent:'平台直连', akshare:'AkShare', baostock:'BaoStock'};
     var channel = Object.prototype.hasOwnProperty.call(channels, data.adapter) ? channels[data.adapter] : '';
+    var adjustments = {none:"不复权", qfq:"前复权", hfq:"后复权"};
+    var adjustment = Object.prototype.hasOwnProperty.call(adjustments, data.adjustment) ? adjustments[data.adjustment] : "未记录";
     var cache = data.stale === true ? '已过期，使用备用记录' : data.stale === false ? '有效期内' : '未记录';
     return '<div class="market-kline-provenance"><div class="market-kline-facts">' +
       '<p><span>数据来源</span>' + sourceHtml + '</p>' +
       (channel ? '<p><span>获取渠道</span>' + esc(channel) + '</p>' : '') +
+      '<p><span>价格口径</span>' + esc(adjustment) + '</p>' +
       '<p><span>最后数据日期</span>' + esc(dateLabel(lastDate, true)) + '</p>' +
       '<p><span>采集时间</span>' + esc(dateLabel(data.retrieved_at, false)) + '</p>' +
       '<p><span>缓存状态</span>' + esc(cache) + '</p></div>' +

@@ -398,7 +398,7 @@ async def test_futures_exchange_report_reaches_the_owned_agent(native, monkeypat
     )
     result = await native.tools.execute("futures_snapshot", {"symbol": "CU"}, "synthetic-copper")
     assert result["ok"] and result["data"]["warehouse_receipt"] == report
-    assert result["call"]["target"]["href"] == "/futures?symbol=CU"
+    assert result["call"]["target"]["href"] == "/prism?mode=futures&symbol=CU"
 
 
 async def test_platform_dispatch_is_durable_idempotent_and_not_external_evidence(native):

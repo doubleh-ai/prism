@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
@@ -13,13 +14,93 @@ from server.productivity.assistant import parse_routine
 
 
 @pytest.fixture(autouse=True)
-def work_schema():
+def work_schema(monkeypatch):
     from server.productivity import calendar, notifications, projects, store
 
     store.init_productivity_db()
     calendar.init_calendar_db()
     projects.init_projects_db()
     notifications.init_notifications_db()
+    monkeypatch.setattr(model_routes, "_deployment_routes", None)
+
+
+def deployment_setting(**changes):
+    return {
+        "model_id": model_routes.config.DEFAULT_MODEL,
+        "enabled": True,
+        "allow_private_work": False,
+        "output_tokens_max": 1024,
+        "model_calls_max": 1,
+        "wall_seconds_max": 60,
+        "daily_calls_max": 2,
+        **changes,
+    }
+
+
+def test_deployment_routes_do_not_write_admin_settings_or_erase_unknown_usage(monkeypatch):
+    policy = {"research": deployment_setting(daily_calls_max=1)}
+    with monkeypatch.context() as isolated:
+        isolated.setattr(model_routes, "get_db", lambda: pytest.fail("startup must not open a database"))
+        model_routes.install_defaults(policy)
+    policy["research"]["daily_calls_max"] = 1000
+    model_id, _, route = model_routes.resolve("research")
+    assert route["version"] == 0 and route["daily_calls_max"] == 1
+    model_routes.reserve("research", "synthetic", "unobserved", model_id, expected_route_version=0)
+    with pytest.raises(HTTPException) as denied:
+        model_routes.reserve("research", "synthetic", "next", model_id, expected_route_version=0)
+    assert denied.value.status_code == 429
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM model_routes").fetchone()[0] == 0
+        assert tuple(
+            db.execute("SELECT status,input_tokens,output_tokens FROM model_request_reservations").fetchone()
+        ) == ("unknown", None, None)
+    with pytest.raises(ValueError, match="already_installed"):
+        model_routes.install_defaults({})
+
+
+@pytest.mark.parametrize("purpose", ["research", "work_planning"])
+def test_explicit_empty_deployment_policy_closes_every_unlisted_purpose(purpose):
+    model_routes.install_defaults({})
+    with pytest.raises(HTTPException) as denied:
+        model_routes.resolve(purpose, explicit_model=model_routes.config.DEFAULT_MODEL)
+    assert denied.value.status_code == 503
+
+
+def test_existing_admin_setting_overrides_deployment_default():
+    model_routes.init_model_routes_db()
+    stored = {
+        **deployment_setting(enabled=False),
+        "purpose": "research",
+        "configured": True,
+        "version": 7,
+    }
+    with get_db() as db:
+        db.execute("INSERT INTO model_routes VALUES(?,?,?)", ["research", 7, json.dumps(stored)])
+    model_routes.install_defaults({"research": deployment_setting()})
+    with pytest.raises(HTTPException) as denied:
+        model_routes.resolve("research")
+    assert denied.value.status_code == 503
+    with get_db() as db:
+        assert json.loads(db.execute("SELECT payload FROM model_routes").fetchone()[0]) == stored
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"model_id": "not-registered"},
+        {"enabled": 1},
+        {"daily_calls_max": True},
+        {"model_calls_max": 0},
+        {"wall_seconds_max": 181},
+        {"output_tokens_max": 2049},
+        {"allow_private_work": True},
+        {"api_key": "synthetic-forbidden"},
+    ],
+)
+def test_invalid_deployment_policy_does_not_attach_partial_settings(change):
+    with pytest.raises(ValueError, match="defaults_invalid"):
+        model_routes.install_defaults({"research": deployment_setting(**change)})
+    assert not model_routes.defaults_installed()
 
 
 def test_routine_intents_preserve_wall_time_and_reject_ambiguous_writes():
@@ -30,6 +111,112 @@ def test_routine_intents_preserve_wall_time_and_reject_ambiguous_writes():
     assert parse_routine("不要创建任务买东西", "Asia/Shanghai", now=now) is None
     assert parse_routine("明天讨论一下", "Asia/Shanghai", now=now) is None
     assert parse_routine("今天上午7点提醒我开项目会", "Asia/Shanghai", now=now).clarification
+
+
+async def test_native_http_work_plan_keeps_purpose_quota_and_human_confirmation(
+    client, auth_cookies, monkeypatch
+):
+    """Exercise the actual Messages parser and Work consumer, with synthetic HTTP."""
+    import httpx
+    from test_model_network import frame
+
+    from server import model_network
+
+    monkeypatch.setattr(model_network, "_network", None)
+    monkeypatch.setattr(
+        model_routes.config,
+        "MODELS",
+        {
+            "synthetic-work": {
+                "name": "Synthetic planner",
+                "base_url": "https://api.deepseek.com/anthropic",
+                "model": "synthetic-work",
+                "api_key": "synthetic-work-key",
+            }
+        },
+    )
+    monkeypatch.setattr(model_routes.config, "DEFAULT_MODEL", "synthetic-work")
+    model_routes.init_model_routes_db()
+    model_routes.install_defaults(
+        {
+            "work_planning": deployment_setting(model_id="synthetic-work", allow_private_work=True),
+        }
+    )
+    descriptor, requests = [], []
+    plan = {"actions": [{"kind": "create_task", "fields": {"title": "合成模型安排"}}]}
+    raw = b"".join(
+        [
+            frame(
+                "message_start", message={"role": "assistant", "content": [], "usage": {"input_tokens": 2}}
+            ),
+            frame(
+                "content_block_start",
+                index=0,
+                content_block={
+                    "type": "tool_use",
+                    "id": "synthetic-tool",
+                    "name": "propose_work",
+                    "input": plan,
+                },
+            ),
+            frame("content_block_stop", index=0),
+            frame("message_delta", delta={"stop_reason": "tool_use"}, usage={"output_tokens": 3}),
+            frame("message_stop"),
+        ]
+    )
+
+    class WorkNetwork:
+        def async_transport(self, **selected):
+            descriptor.append(selected)
+
+            def send(request):
+                requests.append(json.loads(request.content))
+                return httpx.Response(200, content=raw, headers={"content-type": "text/event-stream"})
+
+            return httpx.MockTransport(send)
+
+    model_network.install(WorkNetwork())
+    body = {
+        "request_id": str(uuid4()),
+        "text": "请把这段合成想法整理成一个待办：先梳理评审重点。",
+        "timezone": "Asia/Shanghai",
+        "allow_model": True,
+    }
+    response = await client.post("/api/work/assistant/proposals", json=body, cookies=auth_cookies)
+    assert response.status_code == 200, response.text
+    proposal = response.json()["proposal"]
+    assert proposal["source"] == "model" and proposal["state"] == "ready"
+    assert descriptor == [
+        {
+            "purpose": "work_planning",
+            "endpoint": "https://api.deepseek.com/anthropic/v1/messages",
+            "model": "synthetic-work",
+        }
+    ]
+    assert requests[0]["tools"][0]["name"] == "propose_work"
+    assert "_model_purpose" not in requests[0]
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM work_tasks").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM model_routes").fetchone()[0] == 0
+        usage = dict(
+            db.execute(
+                "SELECT purpose,status,input_tokens,output_tokens FROM model_request_reservations"
+            ).fetchone()
+        )
+    assert usage == {"purpose": "work_planning", "status": "complete", "input_tokens": 2, "output_tokens": 3}
+    assert (
+        await client.post("/api/work/assistant/proposals", json=body, cookies=auth_cookies)
+    ).json() == response.json()
+    assert len(descriptor) == 1
+    path = f"/api/work/assistant/proposals/{proposal['id']}"
+    assert (
+        await client.post(path + "/confirm", json={"digest": proposal["digest"]}, cookies=auth_cookies)
+    ).status_code == 200
+    with get_db() as db:
+        assert db.execute("SELECT title FROM work_tasks").fetchone()[0] == "合成模型安排"
+    assert (
+        await client.post(path + "/undo", json={"digest": proposal["digest"]}, cookies=auth_cookies)
+    ).status_code == 200
 
 
 async def test_preview_changes_nothing_confirmation_replays_one_object(client, auth_cookies):
@@ -66,10 +253,11 @@ async def test_preview_changes_nothing_confirmation_replays_one_object(client, a
     assert (await client.get(f"/api/work/assistant/proposals/{proposal['id']}")).status_code == 401
 
 
-def test_purpose_quota_unknown_usage_not_reset_by_configuration(monkeypatch):
+@pytest.mark.parametrize("purpose", ["research", "work_planning"])
+def test_purpose_quota_unknown_usage_not_reset_by_configuration(purpose):
     model_routes.init_model_routes_db()
     route = {
-        "purpose": "work_planning",
+        "purpose": purpose,
         "version": 1,
         "configured": True,
         "enabled": True,
@@ -78,13 +266,13 @@ def test_purpose_quota_unknown_usage_not_reset_by_configuration(monkeypatch):
         "model_id": "synthetic-model",
     }
     with get_db() as db:
-        db.execute("INSERT INTO model_routes VALUES(?,?,?)", ["work_planning", 1, json.dumps(route)])
+        db.execute("INSERT INTO model_routes VALUES(?,?,?)", [purpose, 1, json.dumps(route)])
     model_routes.reserve(
-        "work_planning", "synthetic-owner", "request-one", "synthetic-model", expected_route_version=1
+        purpose, "synthetic-owner", "request-one", "synthetic-model", expected_route_version=1
     )
     with pytest.raises(HTTPException) as repeated:
         model_routes.reserve(
-            "work_planning", "synthetic-owner", "request-one", "synthetic-model", expected_route_version=1
+            purpose, "synthetic-owner", "request-one", "synthetic-model", expected_route_version=1
         )
     assert repeated.value.status_code == 409
     route["version"] = 2
@@ -92,7 +280,7 @@ def test_purpose_quota_unknown_usage_not_reset_by_configuration(monkeypatch):
         db.execute("UPDATE model_routes SET version=2,payload=?", [json.dumps(route)])
     with pytest.raises(HTTPException) as exhausted:
         model_routes.reserve(
-            "work_planning", "synthetic-owner", "request-two", "synthetic-model", expected_route_version=2
+            purpose, "synthetic-owner", "request-two", "synthetic-model", expected_route_version=2
         )
     assert exhausted.value.status_code == 429
     with get_db() as db:
@@ -101,6 +289,140 @@ def test_purpose_quota_unknown_usage_not_reset_by_configuration(monkeypatch):
         ).fetchone()
         assert tuple(row) == ("unknown", None, None)
     assert "api_key" not in json.dumps(model_routes.snapshot())
+
+
+@pytest.fixture
+def historical_unused_model_settings():
+    """Old enabled settings and both known/unknown usage remain private history."""
+    model_routes.init_model_routes_db()
+    day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    with get_db() as db:
+        for purpose in ("feedback_triage", "suggestion_review", "validation"):
+            route = {
+                "purpose": purpose,
+                "configured": True,
+                "version": 7,
+                "enabled": True,
+                "model_id": model_routes.config.DEFAULT_MODEL,
+                "daily_calls_max": 50,
+            }
+            db.execute("INSERT INTO model_routes VALUES(?,?,?)", [purpose, 7, json.dumps(route)])
+            for status in ("unknown", "complete"):
+                db.execute(
+                    "INSERT INTO model_request_reservations VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        f"historical-{purpose}-{status}",
+                        purpose,
+                        "synthetic-owner",
+                        7,
+                        route["model_id"],
+                        day,
+                        status,
+                        12 if status == "complete" else None,
+                        8 if status == "complete" else None,
+                        100,
+                    ],
+                )
+
+    def snapshot():
+        with get_db() as db:
+            return (
+                [tuple(row) for row in db.execute("SELECT * FROM model_routes ORDER BY purpose")],
+                [
+                    tuple(row)
+                    for row in db.execute("SELECT * FROM model_request_reservations ORDER BY request_id")
+                ],
+            )
+
+    return snapshot
+
+
+async def test_admin_lists_only_live_application_purposes_without_erasing_history(
+    client, auth_cookies, monkeypatch, historical_unused_model_settings
+):
+    from server import auth
+
+    monkeypatch.setattr(auth, "ADMIN_USERS", {"testuser"})
+    before = historical_unused_model_settings()
+    response = await client.get("/api/admin/model-routes", cookies=auth_cookies)
+    assert response.status_code == 200, response.text
+    value = response.json()
+    assert [route["purpose"] for route in value["routes"]] == ["research", "work_planning"]
+    assert all(route["configured"] is False for route in value["routes"])
+    assert "api_key" not in json.dumps(value)
+    assert historical_unused_model_settings() == before
+
+
+@pytest.mark.parametrize("purpose", ["feedback_triage", "suggestion_review", "validation"])
+async def test_nonconsumer_purposes_cannot_be_saved_resolved_or_reserved(
+    purpose, client, auth_cookies, monkeypatch, historical_unused_model_settings
+):
+    from server import auth
+
+    monkeypatch.setattr(auth, "ADMIN_USERS", {"testuser"})
+    before = historical_unused_model_settings()
+    response = await client.put(
+        "/api/admin/model-routes/" + purpose,
+        cookies=auth_cookies,
+        json={"expected_version": 7, "model_id": model_routes.config.DEFAULT_MODEL},
+    )
+    assert response.status_code == 422, response.text
+    with pytest.raises(HTTPException) as resolved:
+        model_routes.resolve(purpose)
+    assert resolved.value.status_code == 422
+    with pytest.raises(HTTPException) as reserved:
+        model_routes.reserve(
+            purpose,
+            "synthetic-owner",
+            "new-unsupported-request",
+            model_routes.config.DEFAULT_MODEL,
+            expected_route_version=7,
+        )
+    assert reserved.value.status_code == 422
+    # The direct handler also refuses before parsing a body or touching history.
+    with pytest.raises(HTTPException) as direct:
+        await model_routes.save_route(
+            purpose,
+            type(
+                "SyntheticRequest",
+                (),
+                {
+                    "method": "PUT",
+                    "cookies": auth_cookies,
+                    "headers": {"X-Requested-With": "XMLHttpRequest"},
+                },
+            )(),
+        )
+    assert direct.value.status_code == 422 and direct.value.detail == "模型用途无效"
+    assert historical_unused_model_settings() == before
+
+
+@pytest.mark.parametrize("purpose", ["research", "work_planning"])
+async def test_live_application_routes_still_save_and_drive_resolution(
+    purpose, client, auth_cookies, monkeypatch
+):
+    from server import auth
+
+    monkeypatch.setattr(auth, "ADMIN_USERS", {"testuser"})
+    response = await client.put(
+        "/api/admin/model-routes/" + purpose,
+        cookies=auth_cookies,
+        json={
+            "expected_version": 0,
+            "model_id": model_routes.config.DEFAULT_MODEL,
+            "allow_private_work": purpose == "work_planning",
+            "daily_calls_max": 1,
+        },
+    )
+    assert response.status_code == 200, response.text
+    model_id, _model, route = model_routes.resolve(purpose, private_work=purpose == "work_planning")
+    assert model_id == response.json()["route"]["model_id"] and route["version"] == 1
+    model_routes.reserve(purpose, "synthetic-owner", "one-live-request", model_id, expected_route_version=1)
+    with pytest.raises(HTTPException) as exhausted:
+        model_routes.reserve(
+            purpose, "synthetic-owner", "two-live-request", model_id, expected_route_version=1
+        )
+    assert exhausted.value.status_code == 429
 
 
 async def test_model_planner_only_proposes_then_requires_confirmation(client, auth_cookies, monkeypatch):

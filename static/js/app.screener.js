@@ -229,7 +229,7 @@ Object.assign(App, {
     var scope = (document.getElementById("marketScanScope") || {}).value || "market";
     var selected = this._findIndicator((document.getElementById("marketScanIndicator") || {}).value) || {};
     var preferredSort = (selected.plan || {}).score;
-    var validSort = ["strength", "recent_signal", "latest_value"].indexOf(preferredSort) >= 0;
+    var validSort = ["recent_signal", "latest_value"].indexOf(preferredSort) >= 0;
     var preferredDirection = (selected.plan || {}).direction;
     var names = {};
     var tickers = [];
@@ -253,7 +253,7 @@ Object.assign(App, {
       min_turnover: Number((document.getElementById("marketScanTurnover") || {}).value || 0) * 10000,
       max_results: Number((document.getElementById("marketScanMaxResults") || {}).value || 100),
       max_universe: 0,
-      sort: validSort ? preferredSort : (selected.kind === "plot" ? "latest_value" : "strength"),
+      sort: validSort ? preferredSort : (selected.kind === "plot" ? "latest_value" : "recent_signal"),
       direction: preferredDirection === "asc" ? "asc" : "desc"
     };
   },

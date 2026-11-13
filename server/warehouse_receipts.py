@@ -68,6 +68,10 @@ def parse_report(raw: bytes, symbol: str, day: date):
 
 
 async def read_report(client, symbol, day, deadline):
+    if symbol == "M":
+        from . import dce_futures
+
+        return await dce_futures.read_warehouse(client, day, deadline)
     if symbol not in TABLES:
         return {"status": "not_covered"}
     try:

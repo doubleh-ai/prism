@@ -27,8 +27,13 @@ Full field names, meanings and limits are in [the portfolio guide](portfolio-ris
 ## DoubleH and personal Work
 
 `/` is the shared authenticated product entrance; `/prism` opens research. Work,
-projects, calendar and reminders use `/work`, `/projects`, `/calendar` and
-`/notifications`. `GET /api/platform` returns product availability only, with no
+projects and calendar use `/work`, `/projects` and `/calendar`. Reminders open
+inside the current Work page; `/notifications` redirects to `/work?panel=notifications`.
+Research records and claim review share the Prism research library;
+`/knowledge?id=...` redirects to `/prism?mode=reports&library=knowledge&claim=...`.
+Research preferences and portfolio checks remain within Prism;
+`/preferences` redirects to `/prism?mode=preferences` without changing stored settings.
+These capabilities are not additional products. `GET /api/platform` returns product availability only, with no
 research or personal Work payload. Existing accounts remain valid.
 
 - `GET/POST /api/work/projects`: list owned and accepted shared projects, or create an owned project. Creation requires
@@ -111,13 +116,14 @@ Research chat uses Prism's owned direct HTTP runtime. The entire application pro
 
 - `GET /api/agent/workflows` and `GET /api/agent/tools`: authenticated native method/tool catalogs.
 - `POST /api/agent/chat/stream`: authenticated, CSRF-protected research start. Provide `question` and an existing owned `conv_id`; a stable `request_id` deduplicates the same input. Optional `model` and one `workflow` select the configured model and method. Reusing an identifier with different input returns 409.
+- Conversation creation and Native research start also accept `X-Prism-Account` as an optional browser context fence. A value that differs from the authenticated account returns 409 before creation or model admission. It is not a login credential; clients without the header still require the same authentication and record ownership.
 - `GET /api/agent/runs/{run_id}` and `/events?after_seq=N`: owned status and ordered persisted events.
 - `GET /api/agent/runs/{run_id}/stream?after_seq=N`: observe/replay only; this does not start or repeat model work.
 - `POST /api/agent/chat/cancel`: provide owned `conv_id` and optional `run_id`. `cancel_requested` is intent; `stopped` is true only after a terminal state.
 
 SSE frames carry `agent.run_id`, `agent.seq`, `agent.status` and `agent.event`. Readers deduplicate sequence numbers and reconnect with GET. Browser refresh checks owned history before attaching to the existing run. Execution `completed` is distinct from research `unreviewed`; collection and historical reuse do not certify facts. `/api/chat/stream` and `/api/chat/cancel` only alias Native behavior. No environment flag enables the old runner. `/api/chat/respond` returns 409 and asks the user to send a new message.
 
-Owned conversation history reads platform SQLite only. `history_migration.status` distinguishes `imported`, `pending_import` and `not_required`; pending import still exposes existing platform messages. The explicit offline importer is not an API or startup job and never restores a CLI runtime dependency. Vibe execution remains disabled with 503; owned saved history remains available.
+Owned conversation history reads platform SQLite only. `history_migration.status` distinguishes `imported`, `pending_import` and `not_required`; pending import still exposes existing platform messages. The explicit offline importer is not an API or startup job and never restores a CLI runtime dependency. Vibe plan creation (`POST /api/vibe/plan`) and follow-up (`POST /api/vibe/plans/{plan_id}/follow-up`) routes have been removed. Owned saved history remains available through `GET /api/vibe/plans` and `GET /api/vibe/plans/{plan_id}`.
 
 Endpoints are JSON over HTTP unless a stream or file is documented.
 Authentication is via a session
@@ -133,7 +139,7 @@ fields and duplicate keys are rejected, with a 32 KiB request-body limit.
 
 | Endpoint | Access and behavior |
 |---|---|
-| `POST /api/feedback` | Signed-in user; `category` (`bug` / `suggestion`), `title` (1–120), `description` (1–6000), optional local `page`, closed-enum `feature` and UUID `request_id`. Returns `ok`, `reused`, `feedback`. |
+| `POST /api/feedback` | Signed-in user; `category` (`bug` / `suggestion`), `title` (1–120), `description` (1–6000), optional local `page`, closed-enum `feature`, `repair_scope` and UUID `request_id`. Scope defaults to `unknown`; known scopes must match the feature. Returns `ok`, `reused`, `feedback`. |
 | `GET /api/feedback` | Own records only; optional `category`, `status`, `feature`, `before_id`, `limit` (default 50, capped at 100). Returns `items`, `next_before_id`. |
 | `GET /api/feedback/{id}` | Own detail and user-visible update history, or 404. |
 | `GET /api/admin/feedback` | Administrator queue; same filters plus Shanghai `review_batch_date` (`YYYY-MM-DD`). |
@@ -268,6 +274,14 @@ the diagnostic kind allowlist. Signals, including those with the current version
 label, still require reproduction; a version label does not certify an exact
 deployed revision. These endpoints never change feedback or resolve diagnostics.
 
+Both streams may include a `repair_scope` from the closed map in
+[`server/repair_scopes.py`](../server/repair_scopes.py). Unknown scopes are omitted;
+queue scopes must match `feature`. Diagnostics may additionally include a short
+origin `revision`; receiving-server metadata does not establish that origin.
+Legacy records and deferred outcomes without commit provenance are not backfilled.
+A matching client-reported revision remains an untrusted reproduction hint, not
+proof of loaded assets or permission to modify code.
+
 Both accept `since` (inclusive Unix seconds, default 0), `after_id` (default 0)
 and `limit` (1–100, default 50). Queue additionally accepts `category=bug` or
 `suggestion` (default bug). Unknown, duplicate, invalid or future-time parameters
@@ -371,15 +385,14 @@ scope and requirements for a future production controller.
 
 Body: `{"username": "...", "password": "..."}`
 
-- 200: `{"user": "alice", "csrf_token": "..."}` + sets `token` and
-  `csrf_token` cookies.
+- 200: `{"user": "alice"}` + sets the `token` cookie.
 - 403: wrong credentials.
 - 422: malformed body.
 - 429: rate-limited.
 
 ### `POST /api/logout`
 
-- 200: `{"ok": true}`. Clears both `token` and `csrf_token` cookies.
+- 200: `{"ok": true}`. Clears the `token` cookie.
 
 ### `GET /api/me`
 
@@ -511,8 +524,10 @@ fields are omitted when they do not apply. Views are `market`, `industry`,
 `indicators`, `screener`, `reports`, `analysis`, and `vibe`.
 
 Capability results link to existing records; **navigation does not execute
-the capability again**. `analysis_start`, `vibe_start`, and `scan_start`
-create tasks and advertise `read_only: false`. A completed *start call*
+the capability again**. `scan_start` creates a task and advertises
+`read_only: false`. `analysis_start`, `vibe_start`, and `vibe_followup`
+remain catalog entries with `available: false` and an `unavailable_reason`;
+they cannot create tasks. A completed *start call*
 means that a task was accepted, not that the underlying research finished;
 open the task or use its status capability to inspect progress. Platform
 call records are not original external evidence.
@@ -700,12 +715,17 @@ Real-time quote.
 ### `GET /api/quote/{ticker}/kline`
 
 K-line bars. Query params: `period` ∈ `1d|1w|1m|5m|15m|30m|60m`
-(default `1d`); `limit` 1..500 (default `120`).
+(default `1d`); `limit` 1..500 (default `120`);
+`adjustment` ∈ `none|qfq|hfq` (default `none`, unadjusted).
+Provider fallbacks and caches must match the requested adjustment. Unsupported
+adjusted sources fail explicitly rather than returning a different series.
 
-- 200: `{"ticker": "...", "period": "1d", "stale": false,
-  "kline": [{"ts": ..., "open": ..., "high": ..., "low": ...,
-  "close": ..., "volume": ...}, ...]}`
+- 200: `{"ticker": "...", "period": "1d", "stale": false, "adjustment": "none",
+  "kline": [{"timestamp": ..., "open": ..., "high": ..., "low": ...,
+  "close": ..., "volume": ..., "turnover": null, "adjustment": "none"}, ...]}`
+- Missing turnover remains `null`, distinct from zero; it is not estimated from volume and close.
 - 400: invalid period or limit.
+- 422: invalid adjustment.
 - 503: no provider available.
 
 ### `GET /api/fundamentals/{ticker}`
@@ -802,16 +822,57 @@ use a 300-second cache. This status does not certify fundamental research or
 portfolio suitability. No source collected returns 503 with
 `X-Prism-Data-Status: unavailable` and `Retry-After: 30`, without caching a result.
 
+For RB and SC, `fundamental_supply` reads at most three fixed NBS release-index
+pages and two distinct monthly industrial releases, within six seconds and a
+1 MiB limit per body, without authentication, redirects or automatic retries.
+RB selects national pig iron, crude steel and steel products; SC selects crude
+oil production and refinery throughput. `observations` retains each release's
+period, publication date, body digest, monthly/combined-period amounts,
+year-to-date amounts where reported and official year-on-year percentages.
+Identical desktop/mobile tables count once; conflicting tables, units, dates
+or missing metrics reject that release. The series describes national
+enterprises above designated size, not deliverable output, inventory, operating
+rates or global supply; throughput is not refined-product output. Missing
+coverage is not filled from aggregates or other products. Monthly
+periods remain separate from the daily `date_alignment` comparison.
+
+For AU, the same `fundamental_supply` component discovers up to two distinct
+cumulative periods from at most three fixed China Gold Association statistics
+index pages. Requests share a six-second deadline, 1 MiB bodies and the same
+no-authentication, no-redirect and no-retry boundaries. The parser verifies the
+article's source credit, publication date, period and headline/body agreement.
+`series_kind: gold_year_to_date_production_consumption` retains national domestic
+and imported raw-material production, their reported total, consumption and its
+three reported categories in tonnes, with original signed year-on-year changes.
+`period_kind: year_to_date` always starts on January 1; figures are neither
+differenced into quarters nor forced to balance after rounding. Imported
+raw-material production is not customs bullion imports; these statistics do not
+establish global supply, deliverable gold, inventory, basis or capital flows.
+Each article's digest and original URL remain available. Cumulative periods do
+not enter the daily date-alignment comparison. CU fundamentals remain uncovered.
+
 Official reports start from the server's Shanghai calendar date, independently
 of a missing or stale secondary price feed. Only an actual dated HTTP 404 permits
 a query for the preceding date, at most three distinct calendar dates per
 source within the shared 15-second budget. Network, TLS, access, rate-limit and
 schema errors do not trigger earlier-date queries. This bounded window is not
-a trading calendar or a guarantee of the latest published report. Each parser
-checks the report's actual date; collected reports are retained while another
-source checks an older date. `source_attempts`, `observation_dates`,
+a trading calendar or a guarantee of the latest published report. SHFE/INE
+parsers check the report's actual date; collected reports are retained while
+another source checks an older date. `source_attempts`, `observation_dates`,
 `report_date_basis: bounded_calendar_window` and `date_alignment` preserve this
 distinction. A mixed-date snapshot must not be treated as a same-day comparison.
+
+For M, the DCE public protocol uses fixed HTTP POST endpoints with no credentials,
+cookies, redirects, access-challenge handling or automatic retries. Its metadata
+retains `transport_authenticated: false` and `original_verified: false`. Echoed
+dates must match; when none is provided, `date_provenance: request_parameter`
+identifies a query date rather than a confirmed report date. Those components
+appear in `observation_date_gaps`, are excluded from `observation_dates`, and
+cannot establish `date_alignment: same_day`. HTTP 412 is
+`automated_access_restricted`, not a missing report or permission to query an
+older date. Warehouse totals retain the reported lot unit; member rankings are
+not covered by this protocol. This adapter does not expand portfolio repricing
+coverage or certify live DCE data availability.
 
 For RB/CU/AU/SC, `contract_dates` and `exchange_parameters` independently read
 SHFE's combined dated business reports. The first returns per-contract
@@ -913,8 +974,17 @@ the existing CSRF protection and reject account switches.
 | `GET /api/knowledge/items?query=...&before=...&limit=30` | Search all accessible persisted structured claims with bounded cursor pagination |
 | `GET /api/knowledge/items/{id}` | Claim, source passages, review history and affected owned research |
 | `PUT /api/knowledge/items/{id}/review` | `expected_version`, state, note, optional correction link; reviewed claims require a future validity time, incomplete citations cannot be promoted |
-| `GET/PUT /api/admin/model-routes[/{purpose}]` | Administrator-only purpose selection and bounded request/token/time quotas; only registered model IDs, no key material |
+| `GET/PUT /api/admin/model-routes[/{purpose}]` | Administrator-only `research` and `work_planning` selection and bounded request/token/time quotas; only registered model IDs, no key material |
 | `GET /api/industry/research?q=...&before=...&limit=20` | Owned structured relationship candidates, original source excerpts, supporting/opposing claim review state, finite transmission hypotheses and cursor pagination; background seed edges excluded |
+
+Application model settings cover only investment research and Work planning,
+whose consumers resolve and reserve those routes. Old `feedback_triage`,
+`suggestion_review` and `validation` settings and usage records remain intact as
+history, but are not listed as effective application routes and cannot be saved,
+resolved or newly reserved. Cloud triage, suggestion review and engineering use
+the independent private operations console and its own durable model budget;
+application settings do not authorize or reconfigure those workers. Native
+release model acceptance remains bound to its separately reviewed finite permit.
 
 Calendar create/update accepts optional `recurrence`: `frequency` daily, weekly
 or monthly; `interval` 1–12; weekly `weekdays` 0 (Monday) through 6; exactly one of

@@ -555,6 +555,23 @@ def test_native_failed_execution_reaches_diagnostics(engine, monkeypatch, code):
     assert "synthetic-isolated-test" not in json.dumps(row)
 
 
+def test_native_provider_failure_saves_only_safe_diagnostic_and_does_not_retry(engine, monkeypatch):
+    requests = []
+
+    async def failed(*args, **kwargs):
+        requests.append(True)
+        raise runtime.provider.ProviderError("provider_http_error", http_status=400, provider_status=2061)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(runtime, "model_stream", failed)
+    outcome = asyncio.run(execute(engine))
+    assert outcome.status == "failed" and outcome.error_code == "provider_http_error"
+    error = next(e for e in events(engine) if e["type"] == "run_error")
+    assert error["provider_diagnostic"] == {"http_status": 400, "provider_status": 2061}
+    assert len(requests) == 1
+    assert "synthetic-isolated-test" not in json.dumps(error)
+
+
 @pytest.mark.parametrize(
     "status,code,expected",
     [
@@ -594,6 +611,30 @@ def test_diagnostic_failure_does_not_undo_saved_research(engine, monkeypatch):
     )
     engine.service._persist(outcome)
     assert store.get_run(engine.user, engine.run["run_id"])["status"] == "failed"
+
+
+def test_saved_terminal_can_recover_a_failed_diagnostic_without_reexecution(engine, monkeypatch):
+    from server import diagnostics
+
+    original = diagnostics.record_native_outcome
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("synthetic diagnostic sink unavailable")
+
+    monkeypatch.setattr(diagnostics, "record_native_outcome", unavailable)
+    outcome = runtime.Outcome(
+        engine.user, engine.run["run_id"], "test", "failed", error_code="provider_timeout"
+    )
+    engine.service._persist(outcome)
+    saved = store.get_run(engine.user, engine.run["run_id"])
+    monkeypatch.setattr(diagnostics, "record_native_outcome", original)
+    engine.service._persist(outcome)
+    engine.service._persist(outcome)
+    with get_db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM diagnostic_events")]
+    assert len(rows) == 1 and rows[0]["occurrences"] == 1
+    assert rows[0]["message"] == "Native outcome: provider_timeout"
+    assert store.get_run(engine.user, engine.run["run_id"]) == saved
 
 
 async def test_model_receives_frozen_profile_not_latest_settings(engine, monkeypatch):

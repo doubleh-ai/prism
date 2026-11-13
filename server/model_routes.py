@@ -2,6 +2,8 @@
 
 Reservations are durable before network I/O. Failed and unknown calls consume
 their reservation; configuration changes do not reset the daily usage ledger.
+Only routes consumed by this application are configurable. Historical unused
+settings and reservations stay intact; private operations own their own routes.
 """
 
 from __future__ import annotations
@@ -24,13 +26,10 @@ from .productivity.models import ClosedModel
 from .productivity.routes import _body
 
 router = APIRouter(prefix="/api/admin/model-routes", tags=["admin"])
-Purpose = Literal["research", "work_planning", "feedback_triage", "suggestion_review", "validation"]
+Purpose = Literal["research", "work_planning"]
 PURPOSES = {
     "research": "投资研究",
     "work_planning": "工作安排",
-    "feedback_triage": "异常归类",
-    "suggestion_review": "建议评审",
-    "validation": "模型验收",
 }
 
 
@@ -43,6 +42,51 @@ class RouteUpdate(ClosedModel):
     model_calls_max: int = Field(default=1, ge=1, le=6)
     wall_seconds_max: int = Field(default=60, ge=5, le=180)
     daily_calls_max: int = Field(default=50, ge=1, le=1000)
+
+
+_deployment_routes: dict[str, dict] | None = None
+
+
+def validate_defaults(value):
+    """Validate startup policy without opening or modifying any database.
+
+    An explicit deployment policy closes unlisted purposes. Stored admin
+    settings remain authoritative; reservations always use the durable ledger.
+    """
+    fields = set(RouteUpdate.model_fields) - {"expected_version"}
+    if type(value) is not dict or set(value) - PURPOSES.keys():
+        raise ValueError("model_route_defaults_invalid")
+    result = {}
+    for purpose, item in value.items():
+        if not (
+            type(item) is dict
+            and set(item) == fields
+            and type(item["model_id"]) is str
+            and item["model_id"] in config.MODELS
+            and all(type(item[k]) is bool for k in ("enabled", "allow_private_work"))
+            and all(type(item[k]) is int for k in fields - {"model_id", "enabled", "allow_private_work"})
+            and (not item["allow_private_work"] or purpose == "work_planning")
+        ):
+            raise ValueError("model_route_defaults_invalid")
+        try:
+            result[purpose] = RouteUpdate.model_validate({"expected_version": 0, **item}).model_dump(
+                exclude={"expected_version"}
+            )
+        except ValueError:
+            raise ValueError("model_route_defaults_invalid") from None
+    return result
+
+
+def defaults_installed():
+    return _deployment_routes is not None
+
+
+def install_defaults(value):
+    """Attach one reviewed startup policy; never write an admin setting."""
+    global _deployment_routes
+    if defaults_installed():
+        raise ValueError("model_route_defaults_already_installed")
+    _deployment_routes = validate_defaults(value)
 
 
 def init_model_routes_db():
@@ -63,7 +107,17 @@ def init_model_routes_db():
 
 def _route(db, purpose):
     row = db.execute("SELECT payload FROM model_routes WHERE purpose=?", [purpose]).fetchone()
-    return json.loads(row[0]) if row else {"purpose": purpose, "version": 0, "configured": False}
+    if row:
+        return json.loads(row[0])
+    if _deployment_routes is not None:
+        return {
+            "purpose": purpose,
+            "version": 0,
+            "configured": True,
+            "enabled": False,
+            **_deployment_routes.get(purpose, {}),
+        }
+    return {"purpose": purpose, "version": 0, "configured": False}
 
 
 def _choices():
@@ -81,9 +135,13 @@ def _choices():
     ]
 
 
-def resolve(purpose, *, explicit_model=None, private_work=False):
-    if purpose not in PURPOSES:
+def _require_purpose(purpose):
+    if not isinstance(purpose, str) or purpose not in PURPOSES:
         raise HTTPException(422, "模型用途无效")
+
+
+def resolve(purpose, *, explicit_model=None, private_work=False):
+    _require_purpose(purpose)
     init_model_routes_db()
     with get_db() as db:
         route = _route(db, purpose)
@@ -95,10 +153,11 @@ def resolve(purpose, *, explicit_model=None, private_work=False):
     model = config.MODELS.get(model_id)
     if not configuration_status(model)["configured"]:
         raise HTTPException(503, "该用途尚未配置可用模型")
-    return model_id, dict(model), route
+    return model_id, {**model, "_model_purpose": purpose}, route
 
 
 def reserve(purpose, actor, request_id, model_id, *, expected_route_version, minimum_available=1):
+    _require_purpose(purpose)
     if type(minimum_available) is not int or minimum_available not in {1, 2}:
         raise HTTPException(422, "模型预留范围无效")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", request_id):
@@ -177,6 +236,7 @@ async def list_routes(request: Request):
 async def save_route(purpose: Purpose, request: Request):
     admin = require_admin(request)
     verify_csrf(request)
+    _require_purpose(purpose)
     body = await _body(request, RouteUpdate)
     if require_admin(request) != admin:
         raise HTTPException(401, "请重新登录")

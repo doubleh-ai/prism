@@ -29,11 +29,6 @@ def temp_data_dir(monkeypatch):
                 for key, value in server.config.MODELS.items()
             },
         )
-        # Modules may already hold the configuration dictionary from earlier tests.
-        for module_name in ("server.main",):
-            module = sys.modules.get(module_name)
-            if module is not None:
-                monkeypatch.setattr(module, "MODELS", server.config.MODELS)
         server.config.DATA_DIR = Path(td)
         server.config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         # Reset DB_PATH
@@ -45,6 +40,9 @@ def temp_data_dir(monkeypatch):
         # would be reused.
         server.database.reset_connection()
         server.database.init_db()
+        from server.agent.store import init_agent_db
+
+        init_agent_db()
         # Default network transports cannot spend model quota or send test data
         # outside loopback. Explicit MockTransport and ASGI tests stay real.
         import httpx

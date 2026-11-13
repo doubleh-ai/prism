@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '111',
+  _clientAssetVersion: '124',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -150,7 +150,17 @@ var App = {
     // If a previous analysis was running, auto-restore it (P5 persistence)
     var saved;
     try { saved = sessionStorage.getItem('prism_analysis'); } catch(e) {}
-    if (saved) {
+    var libraryParams = new URLSearchParams(location.search);
+    if (libraryParams.get('mode') === 'futures' || ['RB','CU','AU','M','SC'].includes(libraryParams.get('futures'))) {
+      this._selectFuturesSymbol(libraryParams.get('symbol') || libraryParams.get('futures'));
+      this.switchMode('futures');
+    } else if (libraryParams.get('mode') === 'preferences') {
+      this.switchMode('preferences');
+    } else if (libraryParams.get('mode') === 'reports') {
+      this._researchLibraryTab = libraryParams.get('library') === 'knowledge' ? 'knowledge' : 'reports';
+      this.switchMode('reports');
+      if (this._researchLibraryTab === 'knowledge' && libraryParams.get('claim')) this._openKnowledgeClaim(libraryParams.get('claim'));
+    } else if (saved) {
       var st;
       try { st = JSON.parse(saved); } catch(e) {}
       if (st && st.id) {
@@ -163,18 +173,13 @@ var App = {
 
   api: async function(url, opts) {
     opts = Object.assign({}, opts || {});
-    // Inject CSRF defense headers on every API call. The double-submit
-    // cookie pattern: the server sets csrf_token (non-HttpOnly), JS mirrors
-    // it in the X-CSRF-Token header. X-Requested-With additionally blocks
-    // browser cross-site requests (browsers won't add custom headers to
-    // cross-origin form submissions).
+    // Custom headers prevent cross-site form submissions without CORS preflight.
     opts.headers = Object.assign({
       'X-Requested-With': 'XMLHttpRequest',
     }, opts.headers || {});
     var method = (opts.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-      var csrf = this._getCookie('csrf_token');
-      if (csrf) opts.headers['X-CSRF-Token'] = csrf;
+      if (this.user && !opts.headers['X-Prism-Account']) opts.headers['X-Prism-Account'] = this.user;
     }
     var r, deadline, expired = false, upstream = opts.signal;
     var controller = new AbortController();
@@ -231,11 +236,6 @@ var App = {
         target_label: targetLabel || ''
       })
     }).catch(function() {});
-  },
-
-  _getCookie: function(name) {
-    var m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : '';
   },
 
   /* ═══ Theme ═══ */

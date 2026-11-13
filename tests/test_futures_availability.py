@@ -25,6 +25,20 @@ def isolated_market(monkeypatch):
     monkeypatch.setattr(futures, "_cache", {})
     monkeypatch.setattr(futures, "_slots", asyncio.Semaphore(2))
 
+    async def unrelated_monthly_source(*_args):
+        # These cases own only their existing daily-market/exchange HTTP scope.
+        # The new public monthly source and its shared snapshot are exercised
+        # independently in test_futures_fundamentals.py.
+        return {
+            "status": "unavailable",
+            "topic": "合成月度资料未采集",
+            "index_url": "https://www.stats.gov.cn/sj/zxfb/",
+            "observations": [],
+        }
+
+    monkeypatch.setattr(futures.futures_fundamentals, "read_supply", unrelated_monthly_source)
+    monkeypatch.setattr(futures.futures_soybean, "read_supply", unrelated_monthly_source)
+
 
 def install(monkeypatch, handler):
     original = httpx.AsyncClient
@@ -102,7 +116,7 @@ async def test_series_failure_still_reads_and_returns_actual_exchange_contracts(
     )
     assert result["latest"]["close"] is None and result["status"] == "partial"
     assert result["exchange_daily"]["contracts"][0]["settlement"] == 3490
-    assert target["href"] == "/futures?symbol=RB"
+    assert target["href"] == "/prism?mode=futures&symbol=RB"
     assert "部分" in summary and "连续日线" not in summary
     assert len(calls) == 6
 
@@ -193,6 +207,48 @@ async def test_network_access_or_schema_failures_do_not_trigger_date_fallback(mo
         await futures.snapshot("RB")
     assert result.value.status_code == 503 and result.value.headers["X-Prism-Data-Status"] == "unavailable"
     assert calls == [NOW.date(), NOW.date()] and futures._cache == {}
+
+
+async def test_previous_member_report_participates_in_date_alignment(monkeypatch):
+    def handler(request):
+        if request.url.host == "stock2.finance.sina.com.cn":
+            return httpx.Response(503)
+        if "/kx" in request.url.path:
+            return httpx.Response(200, json=quote(NOW.date()))
+        if request.url.path.endswith("pm20261103.dat"):
+            return httpx.Response(404)
+        if request.url.path.endswith("pm20261102.dat"):
+            return httpx.Response(
+                200,
+                json={
+                    "o_code": "0000",
+                    "report_date": "20261102",
+                    "o_cursor": [
+                        {
+                            "INSTRUMENTID": "rb2701",
+                            "RANK": 1,
+                            **{
+                                f"{key}{col}": val
+                                for col in (1, 2, 3)
+                                for key, val in (
+                                    ("PARTICIPANTID", "0001"),
+                                    ("PARTICIPANTABBR", "合成会员"),
+                                    ("CJ", 10),
+                                )
+                            },
+                            **{f"CJ{col}_CHG": 1 for col in (1, 2, 3)},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(403)
+
+    install(monkeypatch, handler)
+    value = await futures.snapshot("RB")
+    assert value["date_alignment"] == "mixed"
+    assert value["observation_dates"] == ["2026-11-02", "2026-11-03"]
+    assert value["positioning"]["member_rankings"]["data_as_of"] == "2026-11-02"
+    assert value["coverage"]["member_positioning"] == "collected"
 
 
 async def test_missing_reports_have_a_bounded_three_date_window_and_never_invent_a_trading_date(monkeypatch):
@@ -323,3 +379,25 @@ async def test_parameter_files_keep_separate_observation_dates_and_404_scope(mon
     assert value["date_alignment"] == "mixed" and value["observation_dates"] == ["2026-11-02", "2026-11-03"]
     requests = value["source_attempts"]
     assert [r["source"] for r in requests if r["requested_date"] == "2026-11-02"] == ["contract_dates"]
+
+
+async def test_dce_query_parameters_do_not_certify_matching_observation_dates(monkeypatch):
+    from tests.test_dce_futures import daily, warehouse
+
+    def handler(request):
+        if request.url.host == "stock2.finance.sina.com.cn":
+            return httpx.Response(200, json=bars())
+        assert request.url.host == "www.dce.com.cn" and request.method == "POST"
+        return httpx.Response(200, json=warehouse() if "wbill" in request.url.path else daily())
+
+    install(monkeypatch, handler)
+    value = await futures.snapshot("M")
+    assert value["exchange_daily"]["status"] == value["warehouse_receipt"]["status"] == "collected"
+    assert value["exchange_daily"]["date_provenance"] == "request_parameter"
+    assert value["date_alignment"] == "unverified"
+    assert value["observation_dates"] == ["2026-11-02"]
+    assert set(value["observation_date_gaps"]) == {"exchange_daily", "warehouse_receipt"}
+    assert value["positioning"]["member_rankings"]["status"] == "not_covered"
+    assert "会员排名尚未取得" in " ".join(value["gaps"])
+    assert "会员排名已取得" not in " ".join(value["gaps"])
+    assert value["status"] == "partial" and value["portfolio_risk_status"] == "not_evaluated"

@@ -101,6 +101,7 @@ Object.assign(App, {
       var notice = document.getElementById('modelConfigurationNotice');
       if (notice) { notice.hidden = false; notice.textContent = '模型配置暂时无法读取，请刷新后重试。'; }
     }
+    if (this._syncFuturesModel) this._syncFuturesModel();
   },
   setModel: function(m) {
     if (!(this._models || []).some(function(item){return item.id === m && item.configured === true;})) return;
@@ -422,6 +423,7 @@ Object.assign(App, {
   },
 
   renderAll: function() {
+    if (this.renderSkillsBar) this.renderSkillsBar();
     var el = document.getElementById('msgList');
     if (!this.msgs.length) { this.showWelcome(); return; }
     var self = this;
@@ -752,7 +754,6 @@ Object.assign(App, {
         headers: {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
-          'X-CSRF-Token': self._getCookie('csrf_token'),
         },
         body: JSON.stringify({term: term, context: ''})
       });
@@ -1259,6 +1260,7 @@ Object.assign(App, {
     var sid = this.convId;
     var requestMessages = this.msgs;
     var requestModel = this.model;
+    var requestOwner = this.user;
     var requestStream;
 
     // Keep ownership attached to the original message array across navigation.
@@ -1277,7 +1279,7 @@ Object.assign(App, {
         headers: {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
-          'X-CSRF-Token': self._getCookie('csrf_token'),
+          'X-Prism-Account': requestOwner || '',
         },
         body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: requestModel, request_id: requestId}),
         signal: stream.transportController.signal

@@ -74,6 +74,17 @@ def test_official_fraction_is_converted_to_percentage_without_long_short_or_hedg
     assert result["broker_terms_status"] == "not_evaluated" and not result["latest_effective_terms_verified"]
 
 
+@pytest.mark.parametrize("kind", ["contract_dates", "exchange_parameters"])
+def test_night_session_trading_day_is_separate_from_previous_evening_publication(kind):
+    doc = document(kind)
+    doc["update_date"] = "20261030 20:55:06"  # Friday publication for Monday's trading day.
+    parser = p.parse_contract_dates if kind == "contract_dates" else p.parse_exchange_parameters
+    result = parser(encode(doc), "RB", DAY)
+    assert result["data_as_of"] == "2026-11-02"
+    assert result["source_updated_at"] == "2026-10-30T20:55:06+08:00"
+    assert not result["latest_effective_terms_verified"]
+
+
 def test_missing_ratios_are_unknown_and_special_limits_require_the_notice():
     doc = document("exchange_parameters")
     doc["ContractDailyTradeArgument"][0].update(
@@ -115,7 +126,7 @@ def test_wrong_identity_dates_and_schema_never_become_current_contract_rules(kin
     elif fault == "invalid_month":
         rows[0]["INSTRUMENTID"] = "rb2713"
     elif fault == "wrong_update":
-        doc["update_date"] = "20261101 16:20:06"
+        doc["update_date"] = "20261103 16:20:06"
     elif fault == "invalid_time":
         doc["update_date"] = "20261102 27:20:06"
     elif fault == "empty":

@@ -12,6 +12,7 @@ import asyncio
 import copy
 import json
 import math
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -19,10 +20,13 @@ from dataclasses import dataclass
 
 import httpx
 
+from .. import model_network
+
 _ENDPOINTS = {
     "https://api.deepseek.com/anthropic": "https://api.deepseek.com/anthropic/v1/messages",
     "https://api.deepseek.com/anthropic/v1": "https://api.deepseek.com/anthropic/v1/messages",
     "https://api.minimax.io/anthropic/v1": "https://api.minimax.io/anthropic/v1/messages",
+    "https://api.minimaxi.com/anthropic/v1": "https://api.minimaxi.com/anthropic/v1/messages",
 }
 _OPENAI_ENDPOINTS = {"https://api.openai.com", "https://api.openai.com/v1"}
 
@@ -51,6 +55,8 @@ def configuration_status(model_cfg: dict) -> dict:
         if base in _OPENAI_ENDPOINTS
         else "minimax"
         if base == "https://api.minimax.io/anthropic/v1"
+        else "minimax-cn"
+        if base == "https://api.minimaxi.com/anthropic/v1"
         else "deepseek"
         if base in _ENDPOINTS
         else "unknown"
@@ -116,9 +122,111 @@ _SERVER_RESULTS = frozenset(
 class ProviderError(RuntimeError):
     """A closed error code, never an upstream body, URL, key or exception string."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, http_status=None, provider_status=None):
         self.code = code if code in _ERROR_CODES else "provider_protocol_error"
+        self.diagnostic = {}
+        if type(http_status) is int and 300 <= http_status <= 599:
+            self.diagnostic["http_status"] = http_status
+        if type(provider_status) is int and provider_status in _MINIMAX_STATUS_CODES:
+            self.diagnostic["provider_status"] = provider_status
         super().__init__(self.code)
+
+
+# Published numeric API errors only. Never retain a response message, trace,
+# header, request, URL or arbitrary upstream field in the owned event log.
+_MINIMAX_STATUS_CODES = frozenset(
+    {
+        1000,
+        1001,
+        1002,
+        1004,
+        1008,
+        1024,
+        1026,
+        1027,
+        1033,
+        1039,
+        1041,
+        1042,
+        1045,
+        1046,
+        2013,
+        2014,
+        2022,
+        2045,
+        2046,
+        2047,
+        2049,
+        2053,
+        2056,
+        2057,
+        2061,
+        2062,
+        2064,
+        2066,
+        2067,
+        2068,
+        2069,
+    }
+)
+
+
+async def _http_diagnostic(response, *, minimax, deadline):
+    """Read only a finite MiniMax error envelope, exporting known integers.
+
+    Other providers and redirects still close without reading the error body.
+    A diagnostic timeout or malformed response must preserve the original HTTP
+    failure and must never trigger another request.
+    """
+    result = {"http_status": response.status_code}
+    if not minimax or not 400 <= response.status_code <= 599:
+        return result
+    if response.headers.get("content-type", "").split(";", 1)[0].lower().strip() != "application/json":
+        return result
+    remaining = min(3, deadline - time.monotonic())
+    if remaining <= 0:
+        return result
+    try:
+        async with asyncio.timeout(remaining):
+            raw = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=2048):
+                if len(raw) + len(chunk) > 16384:
+                    return result
+                raw.extend(chunk)
+            value = _loads(raw)
+            if type(value) is not dict:
+                return result
+            candidates = []
+            for key in ("error", "base_resp"):
+                item = value.get(key)
+                if type(item) is not dict:
+                    continue
+                candidates.extend(item.get(field) for field in ("code", "status_code"))
+                # The Messages compatibility envelope may encode the numeric
+                # code at the end of its message. Export only an allowlisted int.
+                message = item.get("message")
+                if type(message) is str and len(message) <= 4096:
+                    match = re.search(r"\(([1-9][0-9]{3,4})\)\.?\s*$", message)
+                    if match:
+                        candidates.append(int(match.group(1)))
+            codes = {n for n in candidates if type(n) is int and n in _MINIMAX_STATUS_CODES}
+            if len(codes) == 1:
+                result["provider_status"] = codes.pop()
+    except (ProviderError, ValueError, TypeError, RecursionError, TimeoutError, httpx.HTTPError):
+        pass
+    return result
+
+
+def _transport(model_cfg, endpoint, supplied):
+    if not model_network.delegated():
+        return supplied
+    _need(supplied is None, "provider_configuration_error")
+    try:
+        return model_network.async_transport(
+            purpose=model_cfg.get("_model_purpose"), endpoint=endpoint, model=model_cfg["model"]
+        )
+    except model_network.ModelNetworkError:
+        raise ProviderError("provider_configuration_error") from None
 
 
 @dataclass(frozen=True)
@@ -497,7 +605,7 @@ class AnthropicMessagesProvider:
         body = _json_bytes(payload, "provider_input_error")
         _need(len(body) <= self.limits.max_request_bytes, "provider_input_error")
         client = httpx.AsyncClient(
-            transport=self.transport,
+            transport=_transport(model_cfg, endpoint, self.transport),
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_seconds),
@@ -525,7 +633,16 @@ class AnthropicMessagesProvider:
                     403: "provider_auth_error",
                     429: "provider_rate_limited",
                 }.get(response.status_code, "provider_http_error")
-                raise ProviderError(code)
+                diagnostic = await _http_diagnostic(
+                    response,
+                    minimax=endpoint
+                    in {
+                        "https://api.minimax.io/anthropic/v1/messages",
+                        "https://api.minimaxi.com/anthropic/v1/messages",
+                    },
+                    deadline=deadline,
+                )
+                raise ProviderError(code, **diagnostic)
             _need(
                 response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                 == "text/event-stream"

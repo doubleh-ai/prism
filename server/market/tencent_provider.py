@@ -12,9 +12,10 @@ import time
 import urllib.parse
 import urllib.request
 
+from .. import public_network
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
-from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
+from .models import Fundamentals, KLine, KLineProvenance, PriceAdjustment, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
 
@@ -24,6 +25,24 @@ _TENCENT_URL = "https://qt.gtimg.cn/q="
 _SINA_KLINE_URL = (
     "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 )
+MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _fetch_public(req, timeout):
+    """One owned HTTPS read, with no environment proxy, redirect or retry."""
+    with (
+        public_network.sync_client(timeout=timeout) as client,
+        client.stream("GET", req.full_url, headers=dict(req.header_items())) as response,
+    ):
+        if response.status_code != 200:
+            raise ProviderUnavailable("market public source HTTP failure")
+        parts, size = [], 0
+        for part in response.iter_bytes():
+            size += len(part)
+            if size > MAX_BODY_BYTES:
+                raise ProviderUnavailable("market public source response too large")
+            parts.append(part)
+        return b"".join(parts)
 
 
 def _sina_symbol(ticker: str) -> str:
@@ -64,8 +83,7 @@ def _fetch_tencent_quotes(codes: list[str], timeout: float = 8) -> dict:
     url = _TENCENT_URL + ",".join(prefixed)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = _decode_gbk(resp.read())
+        body = _decode_gbk(_fetch_public(req, timeout))
     except Exception as e:
         raise ProviderUnavailable(f"Tencent quote fetch failed: {e}") from e
 
@@ -111,8 +129,8 @@ class TencentProvider:
                 price=price,
                 change=change,
                 change_pct=change_pct,
-                volume=float(f[6]) if len(f) > 6 and f[6] else 0.0,
-                turnover=float(f[37]) if len(f) > 37 and f[37] else 0.0,
+                volume=float(f[6]) * 100 if len(f) > 6 and f[6] else 0.0,  # lots -> shares
+                turnover=float(f[37]) * 10_000 if len(f) > 37 and f[37] else 0.0,  # 10k CNY -> CNY
                 high=float(f[33]) if len(f) > 33 and f[33] else None,
                 low=float(f[34]) if len(f) > 34 and f[34] else None,
                 open=float(f[5]) if len(f) > 5 and f[5] else None,
@@ -127,7 +145,11 @@ class TencentProvider:
         except (ValueError, IndexError) as e:
             raise ProviderUnavailable(f"tencent: bad quote data: {e}") from e
 
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> list[KLine]:
+        if adjustment != "none":
+            raise ProviderUnavailable("Sina daily endpoint only supports unadjusted bars")
         if period not in {"1d", "1w", "1m"}:
             raise ProviderUnavailable(f"tencent: unsupported K-line period {period}")
         symbol = _sina_symbol(ticker)
@@ -159,6 +181,7 @@ class TencentProvider:
                     continue
                 out.append(
                     KLine(
+                        adjustment=adjustment,
                         timestamp=ts,
                         open=float(b["open"]),
                         high=float(b["high"]),
@@ -184,5 +207,4 @@ class TencentProvider:
     @staticmethod
     def _fetch_kline_sync(req, timeout: int) -> str:
         """Sync helper for asyncio.to_thread — reads the response body."""
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+        return _fetch_public(req, timeout).decode("utf-8", errors="replace")

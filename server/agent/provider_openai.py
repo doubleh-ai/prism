@@ -442,7 +442,7 @@ class OpenAIResponsesProvider(P.AnthropicMessagesProvider):
         body = P._json_bytes(payload, "provider_input_error")
         P._need(len(body) <= self.limits.max_request_bytes, "provider_input_error")
         client = httpx.AsyncClient(
-            transport=self.transport,
+            transport=P._transport(model_cfg, "https://api.openai.com/v1/responses", self.transport),
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_seconds),
@@ -469,7 +469,8 @@ class OpenAIResponsesProvider(P.AnthropicMessagesProvider):
                         401: "provider_auth_error",
                         403: "provider_auth_error",
                         429: "provider_rate_limited",
-                    }.get(response.status_code, "provider_http_error")
+                    }.get(response.status_code, "provider_http_error"),
+                    http_status=response.status_code,
                 )
             P._need(
                 response.headers.get("content-type", "").split(";", 1)[0].strip().lower()

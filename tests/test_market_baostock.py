@@ -149,7 +149,8 @@ async def test_get_quote_builds_from_latest_bar():
 
 
 @pytest.mark.asyncio
-async def test_get_kline_normalizes_rows():
+@pytest.mark.parametrize("adjustment, flag", [("none", "3"), ("qfq", "2"), ("hfq", "1")])
+async def test_get_kline_normalizes_rows(adjustment, flag):
     fake_bs = MagicMock()
     fake_bs.login.return_value = MagicMock(error_code="0", error_msg="success")
     kline_fields = ["date", "open", "high", "low", "close", "volume", "amount"]
@@ -163,7 +164,9 @@ async def test_get_kline_normalizes_rows():
         from server.market.baostock_provider import BaostockProvider
 
         p = BaostockProvider()
-        bars = await p.get_kline("sh.600519", period="1d", limit=120)
+        bars = await p.get_kline("sh.600519", period="1d", limit=120, adjustment=adjustment)
+        assert fake_bs.query_history_k_data_plus.call_args.kwargs["adjustflag"] == flag
+        assert all(bar.adjustment == adjustment for bar in bars)
     assert len(bars) == 2
     assert bars[0].close == 1680.5
     assert bars[1].close == 1695.0

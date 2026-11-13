@@ -52,5 +52,5 @@ class ScanRequest(BaseModel):
     min_turnover: float = Field(default=0, ge=0, le=100000000000)
     max_universe: int = Field(default=0, ge=0, le=6000)
     max_results: int = Field(default=100, ge=10, le=300)
-    sort: str = Field(default="strength", pattern="^(strength|recent_signal|latest_value)$")
+    sort: str = Field(default="recent_signal", pattern="^(recent_signal|latest_value)$")
     direction: str = Field(default="desc", pattern="^(asc|desc)$")

@@ -1,0 +1,10 @@
+<section id="futuresWorkspace" class="futures-workspace" aria-label="期货研究">
+  <p id="futuresNotice" class="notice" role="status" aria-live="polite" hidden></p>
+  <form id="futuresForm" class="futures-form">
+    <label for="futureSymbol">研究品种<select id="futureSymbol"><option value="RB">螺纹钢 · SHFE</option><option value="CU">铜 · SHFE</option><option value="AU">黄金 · SHFE</option><option value="M">豆粕 · DCE</option><option value="SC">原油 · INE</option></select></label>
+    <button type="button" class="market-primary-btn" id="futuresStartResearch" onclick="App._startFuturesResearch()">开始研究</button>
+    <button type="submit" class="admin-secondary">查看资料</button>
+  </form>
+  <p class="futures-help">使用<span id="futuresModelLabel">当前选择的模型</span>，分析基本面、技术面和成交持仓，并保留来源与缺口。连续行情不对应可直接下单的合约。</p>
+  <div id="futuresResult" aria-live="polite"></div>
+</section>

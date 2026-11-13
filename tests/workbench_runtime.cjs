@@ -20,7 +20,7 @@ function element() {
 function environment() {
   const elements = new Map();
   const listeners={};
-  const doc={cookie:'csrf_token=test-csrf',addEventListener(type,callback){(listeners[type]||(listeners[type]=[])).push(callback);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,documentElement:element(),getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
+  const doc={cookie:'',addEventListener(type,callback){(listeners[type]||(listeners[type]=[])).push(callback);},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,documentElement:element(),getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
   const context={console,document:doc,marked:markedModule.marked,crypto,AbortController,TextDecoder,TextEncoder,URL,Intl,Set,Map,Date,JSON,Promise,
     location:{href:''},navigator:{},localStorage:{getItem(){return null;},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;},setItem(){},removeItem(){}},
     addEventListener(){},matchMedia(){return {matches:false};},requestAnimationFrame(){return 1;},cancelAnimationFrame(){},setInterval(){return 1;},clearInterval(){},setTimeout,clearTimeout,
@@ -34,6 +34,23 @@ function environment() {
   return {context,app,elements,doc,shippedRenderOne,shippedRenderAll,listeners};
 }
 const settled=()=>new Promise(setImmediate);
+
+function shippedRenderingContracts() {
+  const {context,app}=environment();
+  assert.equal(context.esc('<script>&'), '&lt;script&gt;&amp;');
+  const chunks=[{t:'tool',c:'indicator_list',d:'<img src=x onerror=alert(1)>'},{t:'tool',c:'research_read'}];
+  const original=JSON.stringify(chunks);
+  for(const streaming of [true,false]) {
+    const html=app._renderMsg(chunks,'',streaming,{});
+    assert.equal((html.match(/class="step-fold"/g)||[]).length,1);
+    assert(html.includes('工具调用 · 2 项')&&!html.includes('已完成 2 步'));
+    assert(html.includes('&lt;img')&&!html.includes('<img'));
+    assert(!html.includes('step-now'));
+  }
+  assert.equal(JSON.stringify(chunks),original);
+  const text=app._renderMsg([{t:'text',c:'普通回答'}],'',false,{});
+  assert(text.includes('普通回答')&&!text.includes('step-bar'));
+}
 
 function imeEnterCommitsWithoutSending() {
   const {app, doc} = environment();
@@ -382,10 +399,26 @@ function persistedAndOfflineResearchStatus() {
   assert(bubble.innerHTML.includes('连接暂时中断')&&!bubble.innerHTML.includes('research-progress'));
 }
 
+async function headerDefenseAndFactBasedScan() {
+  const {context,app,doc}=environment();
+  let sent;
+  context.fetch=async(url,opts)=>{sent=opts;return {ok:true,status:200};};
+  await app.api('/api/convs',{method:'POST'});
+  assert(!Object.hasOwn(sent.headers,'X-CSRF-Token'));
+  assert.equal(sent.headers['X-Requested-With'],'XMLHttpRequest');
+  vm.runInContext(fs.readFileSync('static/js/app.indicators.js','utf8'),context);
+  app._renderScanResults('指标',{scanned:1,matches:[{ticker:'000001',triggered_at:1,price:10,days_ago:8,strength:99}]});
+  const html=doc.getElementById('indicatorPreview').innerHTML;
+  assert(html.includes('8 根 K 线前触发'));
+  assert(!html.includes('width:99')&&!html.includes('强度'));
+}
+
 (async()=>{
+  await headerDefenseAndFactBasedScan();
+  shippedRenderingContracts();
   imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
   await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();await historyAndErrorsAppearOnlyWhenRelevant();
   compactResearchProgress();researchExceptionsRemainVisible();persistedAndOfflineResearchStatus();
-  console.log('workbench runtime ok: 20 scenarios');
+  console.log('workbench runtime ok');
 })().catch(error=>{console.error(error);process.exitCode=1;});

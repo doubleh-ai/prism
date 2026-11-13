@@ -1,22 +1,37 @@
 <!DOCTYPE html>
 <html lang="zh-CN" class="light"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>DoubleH · 登录</title>
-<link rel="stylesheet" href="/static/css/app.css?v=111">
-<link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=111">
+<link rel="stylesheet" href="/static/css/app.css?v=124">
+<link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=124">
 </head><body class="workbench-login">
 
 <div class="login-card">
-  <div class="login-mark"><svg width="1em" height="1em" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=111#mark"/></svg></div><h1>DoubleH</h1>
+  <div class="login-mark"><svg width="1em" height="1em" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=124#mark"/></svg></div><h1>DoubleH</h1>
   <form onsubmit="event.preventDefault(); doLogin()">
     <label for="username">账号</label><input id="username" placeholder="用户名" autocomplete="username" required>
-    <label for="password">密码</label><input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <label for="password">密码</label>
+    <div class="login-password">
+      <input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button class="login-password-toggle" type="button" aria-label="显示密码" aria-pressed="false" aria-controls="password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="login-eye-slash" d="M4 4l16 16"/></svg>
+      </button>
+    </div>
     <div class="login-error" id="loginError"></div>
     <button type="submit" id="loginSubmit">进入工作台 →</button>
   </form>
-  <p><a href="/recover">管理员忘记密码？</a> · <a href="/">DoubleH</a></p>
+  <p class="login-recovery"><a href="/recover">管理员忘记密码？</a></p>
 </div>
 
 <script>
+document.querySelector('.login-password-toggle').addEventListener('click', function () {
+  var input = document.getElementById('password');
+  var start = input.selectionStart, end = input.selectionEnd, direction = input.selectionDirection;
+  var showing = input.type === 'password';
+  input.type = showing ? 'text' : 'password';
+  this.setAttribute('aria-pressed', String(showing));
+  this.setAttribute('aria-label', showing ? '隐藏密码' : '显示密码');
+  if (start !== null && end !== null) input.setSelectionRange(start, end, direction);
+});
 async function doLogin() {
   var submit = document.getElementById('loginSubmit');
   if (submit.disabled) return false;

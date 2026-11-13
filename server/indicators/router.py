@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import time
 import uuid
 
@@ -407,7 +408,6 @@ def _df_from_kline_rows(kline_rows, limit=500):
         return None
     df = df.sort_values("t").tail(limit).reset_index(drop=True)
     df["t"] = df["t"].astype(int)
-    df["amount"] = df["amount"].fillna(df["volume"] * df["close"])
     return df
 
 
@@ -427,7 +427,7 @@ async def _fund_for_ticker(chain, ticker):
         return {}
 
 
-async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
+async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True, *, require_amount=False):
     """Fetch OHLCV + fundamentals for a ticker -> (df, fund_dict)."""
     from ..market.router import get_chain
 
@@ -441,7 +441,12 @@ async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
     kls = []
     for fetch_limit in fallback_limits:
         try:
-            kls, _ = await chain.get_kline(ticker, period=period, limit=fetch_limit)
+            kls, _ = await chain.get_kline(
+                ticker,
+                period=period,
+                limit=fetch_limit,
+                **({"require_amount": require_amount} if require_amount else {}),
+            )
         except Exception as exc:
             log.warning("kline fetch failed for %s period=%s limit=%s: %s", ticker, period, fetch_limit, exc)
             continue
@@ -501,7 +506,7 @@ def _signal_events(ind, df, res, limit=60):
                 "label": marker,
                 "name": ind["name"],
                 "reason": _event_reason(ind, idx, df, res),
-                "strength": max(30, 100 - days_ago * 12),
+                "days_ago": days_ago,
                 "price": float(df["close"].iloc[idx]),
                 "color": color,
             }
@@ -723,7 +728,10 @@ async def eval_indicator(ind_id: str, req: EvalRequest, request: Request):
     fund = {}
     if df is None:
         df, fund = await _build_df(
-            req.ticker, req.period, include_fundamentals=scanner.uses_fundamentals(ind["dsl"])
+            req.ticker,
+            req.period,
+            include_fundamentals=scanner.uses_fundamentals(ind["dsl"]),
+            **({"require_amount": "all"} if scanner.uses_amount(ind["dsl"]) else {}),
         )
     elif scanner.uses_fundamentals(ind["dsl"]):
         from ..market.router import get_chain
@@ -762,7 +770,7 @@ async def eval_indicator(ind_id: str, req: EvalRequest, request: Request):
             "zones": _signal_zones(ind, df, res),
             "latest": latest,
             "reason": events[-1]["reason"] if events else "最近没有触发",
-            "strength": events[-1]["strength"] if events else 0,
+            "days_ago": events[-1]["days_ago"] if events else None,
             "visual": ind.get("visual") or _default_visual("signal"),
             "params": pvals,
         }
@@ -792,17 +800,19 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
     tickers = [t for t in req.tickers if t][:100]
     pvals = _param_values(ind.get("params"), req.params)
     matches = []
+    amount_requirement = "all" if scanner.uses_amount(ind["dsl"]) else bool(req.min_turnover)
     for tk in tickers:
         df, fund = await _build_df(
             tk,
             req.period,
             req.lookback,
             include_fundamentals=scanner.uses_fundamentals(ind["dsl"]),
+            **({"require_amount": amount_requirement} if amount_requirement else {}),
         )
         if df is None or len(df) == 0:
             continue
-        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else 0.0
-        if req.min_turnover and turnover < req.min_turnover:
+        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else float("nan")
+        if req.min_turnover and (not math.isfinite(turnover) or turnover < req.min_turnover):
             continue
         try:
             res = evaluate(ind["dsl"], df, fund, pvals)
@@ -818,10 +828,10 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
                     "ticker": tk,
                     "triggered_at": int(df["t"].iloc[idx]),
                     "price": float(df["close"].iloc[-1]),
-                    "turnover": turnover,
-                    "strength": max(30, 100 - days_ago * 12),
+                    "turnover": turnover if math.isfinite(turnover) else None,
+                    "days_ago": days_ago,
                     "reason": _event_reason(ind, idx, df, res),
                 }
             )
-    matches.sort(key=lambda x: (x.get("strength", 0), x.get("triggered_at", 0)), reverse=True)
+    matches.sort(key=lambda x: x["days_ago"])
     return {"matches": matches, "scanned": len(tickers)}

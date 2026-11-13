@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from ..database import get_db
 from ..preferences import init_preferences_db, run_profile, snapshot_run
+from ..release import APP_VERSION
 from ..source_urls import redact_source_text, source_display_payload
 
 TERMINAL = frozenset({"completed", "partial", "failed", "cancelled"})
@@ -200,6 +201,17 @@ def init_agent_db():
                 user_message_id INTEGER NOT NULL, assistant_message_id INTEGER,
                 history_anchor_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS native_agent_diagnostic_delivery (
+                run_id TEXT PRIMARY KEY, version TEXT NOT NULL,
+                delivered_at REAL, event_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_native_diagnostic_pending
+                ON native_agent_diagnostic_delivery(delivered_at, run_id);
+            CREATE TRIGGER IF NOT EXISTS native_agent_diagnostic_delete
+            AFTER DELETE ON native_agent_runs
+            BEGIN
+                DELETE FROM native_agent_diagnostic_delivery WHERE run_id=OLD.run_id;
+            END;
             CREATE TRIGGER IF NOT EXISTS native_agent_conversation_delete
             AFTER DELETE ON conversations
             BEGIN
@@ -220,7 +232,8 @@ def init_agent_db():
 
 @contextmanager
 def _transaction():
-    init_agent_db()
+    # The application initializes the schema once at startup. Event writes and
+    # polling must not reacquire a schema write lock on every operation.
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -320,6 +333,12 @@ def create_run(user, conv_id, question, model_id, workflow, request_id=None, *, 
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
             [run_id, user, conv_id, safe_question, model_id, workflow, request_id, fingerprint, now, now],
         )
+        # Capture the originating release with admission. Historical runs with
+        # no such provenance are not backfilled as incidents of a new release.
+        db.execute(
+            "INSERT INTO native_agent_diagnostic_delivery(run_id,version) VALUES(?,?)",
+            [run_id, APP_VERSION],
+        )
         snapshot_run(db, user, run_id)
         row = _owned(db, user, run_id)
         _insert_event(db, row, {"type": "run_created", "status": "queued"})
@@ -327,7 +346,6 @@ def create_run(user, conv_id, question, model_id, workflow, request_id=None, *, 
 
 
 def get_run(user, run_id):
-    init_agent_db()
     with get_db() as db:
         return _public_run(_owned(db, user, run_id))
 
@@ -344,7 +362,6 @@ def append_event(user, run_id, event):
 def list_events(user, run_id, after_seq=0, limit=200):
     if type(after_seq) is not int or after_seq < 0 or type(limit) is not int or limit < 1:
         _reject()
-    init_agent_db()
     with get_db() as db:
         _owned(db, user, run_id)
         rows = db.execute(
@@ -368,7 +385,6 @@ def list_events(user, run_id, after_seq=0, limit=200):
 def list_runs(user, conv_id=None, limit=50):
     if type(limit) is not int or limit < 1:
         _reject()
-    init_agent_db()
     with get_db() as db:
         query = (
             "SELECT r.* FROM native_agent_runs r WHERE r.username=? "

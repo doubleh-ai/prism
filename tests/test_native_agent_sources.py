@@ -11,6 +11,63 @@ import pytest
 from server.agent import sources
 
 
+def test_delegated_source_uses_same_http_parser_dates_and_redirect_guards(network, monkeypatch):
+    from server import public_network
+
+    hosts = []
+
+    class Adapter:
+        def sync_transport(self):
+            raise AssertionError("source parser must retain its bounded socket reader")
+
+        def async_transport(self):
+            raise AssertionError("source parser must retain its bounded socket reader")
+
+        def connect_tls(self, host, timeout):
+            hosts.append(host)
+            # Synthetic TLS fixture only; actual Unix peer/TLS is tested by the
+            # deployment adapter, not inferred from this parser test.
+            return sources._tls_socket(host, (socket.AF_INET, "8.8.8.8"), sources.time.monotonic() + timeout)
+
+    monkeypatch.setattr(public_network, "_network", None)
+    public_network.install(Adapter())
+    network["wires"] = [
+        wire(status=302, headers=(("Location", "/original"),)),
+        wire(b'<meta property="article:published_time" content="2026-11-01"><p>public original</p>'),
+    ]
+    value = sources.fetch_public_source("https://www.sse.com.cn/start")
+    assert value["status"] == "ok" and value["url"].endswith("/original")
+    assert value["published_at"] == "2026-11-01"
+    assert value["semantic_status"] == "unreviewed" and value["original_preserved"] is False
+    assert hosts == ["www.sse.com.cn"] * 2
+    assert network["dns_calls"] == [] and network["closed"] == 2
+
+
+@pytest.mark.parametrize("reader", [sources.fetch_public_source, sources.fetch_public_index])
+def test_failed_delegated_connector_never_attempts_direct_dns_or_tcp(network, monkeypatch, reader):
+    from server import public_network
+
+    calls = []
+
+    class Adapter:
+        def sync_transport(self):
+            raise AssertionError("unexpected HTTP client")
+
+        def async_transport(self):
+            raise AssertionError("unexpected HTTP client")
+
+        def connect_tls(self, host, timeout):
+            calls.append(host)
+            raise OSError("synthetic relay unavailable")
+
+    monkeypatch.setattr(public_network, "_network", None)
+    public_network.install(Adapter())
+    result = reader("https://www.sse.com.cn/original")
+    assert result["status"] == "network_failed"
+    assert calls == ["www.sse.com.cn"]
+    assert network["dns_calls"] == network["connects"] == network["requests"] == []
+
+
 def test_pdf_late_disclosure_uses_selected_physical_pages_and_original_body_hash(network):
     from test_pdf_source import pdf
 
@@ -40,6 +97,38 @@ def test_pdf_page_out_of_range_is_not_an_invalid_document_or_empty_success(netwo
     assert value["status"] == "pdf_page_out_of_range" and value["total_pages"] == 2
     assert value["text"] == "" and value["original_obtained"] is False
     assert len(network["requests"]) == network["closed"] == 1
+
+
+@pytest.mark.parametrize("encoding", ["length", "eof", "chunked"])
+def test_pdf_larger_than_html_limit_reaches_actual_parser(network, encoding):
+    from test_pdf_source import pdf
+
+    raw = pdf(attachment_bytes=700 * 1024)
+    if encoding == "length":
+        payload = wire(raw, content_type="application/pdf")
+    else:
+        headers = b"Transfer-Encoding: chunked\r\n" if encoding == "chunked" else b""
+        body = f"{len(raw):x}\r\n".encode() + raw + b"\r\n0\r\n\r\n" if encoding == "chunked" else raw
+        payload = b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n" + headers + b"\r\n" + body
+    network["wires"] = [payload]
+    value = sources.fetch_public_source("https://www.sse.com.cn/report.pdf")
+    assert value["status"] == "ok" and "Revenue 120" in value["text"]
+    assert value["body_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert network["closed"] == 1
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_pdf_body_still_cannot_exceed_pdf_limit(network, declared):
+    from server.agent.pdf_text import MAX_PDF_BYTES
+
+    raw = b"%PDF-" + b"x" * MAX_PDF_BYTES
+    payload = wire(raw, content_type="application/pdf")
+    if not declared:
+        payload = payload.replace(f"Content-Length: {len(raw)}\r\n".encode(), b"")
+    network["wires"] = [payload]
+    value = sources.fetch_public_source("https://www.sse.com.cn/report.pdf")
+    assert value["status"] == "body_too_large" and value["text"] == ""
+    assert network["closed"] == 1
 
 
 @pytest.mark.parametrize(

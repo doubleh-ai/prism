@@ -3,7 +3,7 @@ Object.assign(App, {
 
   _indicators: [],
   _indicatorOverlays: [],   // [{name,color,points:[{t,v}]}] read by renderKlineChart
-  _indicatorMarkers: [],    // [{t,label,reason,strength,color}] read by renderKlineChart
+  _indicatorMarkers: [],    // [{t,label,reason,days_ago,color}] read by renderKlineChart
   _indicatorTracks: [],     // [{name,color,events:[...]}] read by renderKlineChart
   _indicatorZones: [],      // [{start,end,name,color}] read by renderKlineChart
   _indicatorPreview: null,
@@ -249,7 +249,7 @@ Object.assign(App, {
           this._planSelect("period", "周期", plan.period || "1d", [["1d","日线"],["1w","周线"],["1m","月线"]]) +
           this._planNumber("lookback", "回看K线", plan.lookback || 120, 30, 500, 10) +
           this._planNumber("trigger_window", "信号回溯窗口", plan.trigger_window || 5, 1, 30, 1) +
-          this._planSelect("score", "排序", plan.score || (p.kind === "signal" ? "recent_signal" : "latest_value"), [["recent_signal","最近触发"],["strength","信号强度"],["latest_value","最新数值"]]) +
+          this._planSelect("score", "排序", plan.score || (p.kind === "signal" ? "recent_signal" : "latest_value"), [["recent_signal","最近触发"],["latest_value","最新数值"]]) +
           this._planSelect("direction", "排序方向", plan.direction || "desc", [["desc","从高到低"],["asc","从低到高"]]) +
           this._planTurnover(plan.min_turnover || 0) +
           this._planNumber("max_results", "结果上限", plan.max_results || 100, 10, 300, 10) +
@@ -601,7 +601,7 @@ Object.assign(App, {
     for (var i = 0; i < ms.length; i++) {
       h += '<div class="mi-scan-item" onclick="App._pickScanTicker(\'' + escAttr(ms[i].ticker) + "')\">" +
         '<div><b>' + esc(ms[i].ticker) + "</b><span>" + esc(this._indicatorDate(ms[i].triggered_at)) + " · " + esc(String(ms[i].price)) + "</span></div>" +
-        '<em style="width:' + Math.max(5, Math.min(100, ms[i].strength || 0)) + '%"></em>' +
+        '<span>' + esc(String(ms[i].days_ago)) + ' 根 K 线前触发</span>' +
         '<p>' + esc(ms[i].reason || "") + "</p></div>";
     }
     h += "</div></div>";

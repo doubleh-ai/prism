@@ -18,7 +18,7 @@ import time
 from ..config import AKSHARE_TIMEOUT
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
-from .models import Fundamentals, KLine, Quote, SearchHit
+from .models import Fundamentals, KLine, PriceAdjustment, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
 
@@ -258,7 +258,11 @@ class AkshareProvider:
             source=self.name,
         )
 
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> list[KLine]:
+        if adjustment not in {"none", "qfq", "hfq"}:
+            raise ProviderUnavailable("unsupported price adjustment")
         if period not in {"1d", "1w", "1m"}:
             raise ProviderUnavailable(f"akshare: unsupported K-line period {period}")
         _akshare_or_raise()
@@ -269,7 +273,7 @@ class AkshareProvider:
                     "market",
                     ak.stock_zh_a_daily,
                     symbol=symbol,
-                    adjust="qfq",
+                    adjust="" if adjustment == "none" else adjustment,
                 )
             )
         except ProviderUnavailable:
@@ -280,16 +284,25 @@ class AkshareProvider:
             return []
         out: list[KLine] = []
         for _, r in df.tail(daily_fetch_limit(period, limit)).iterrows():
+            # Amount can be absent even when the day's OHLCV is valid. Keep
+            # that day so filters cannot silently use an earlier/partial bar.
+            try:
+                amount = float(r.get("amount"))
+            except (TypeError, ValueError):
+                amount = None
+            if amount is not None and (not math.isfinite(amount) or amount < 0):
+                amount = None
             try:
                 out.append(
                     KLine(
+                        adjustment=adjustment,
                         timestamp=int(_pd_timestamp(r["date"])),
                         open=float(r["open"]),
                         high=float(r["high"]),
                         low=float(r["low"]),
                         close=float(r["close"]),
                         volume=float(r["volume"]),
-                        turnover=float(r.get("amount", 0)) if r.get("amount") is not None else None,
+                        turnover=amount,
                     )
                 )
             except Exception:

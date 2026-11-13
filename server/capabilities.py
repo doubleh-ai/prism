@@ -32,7 +32,7 @@ from .work_lifecycle import Lease, LifecycleError, current_lease, get_manager
 router = APIRouter(prefix="/api")
 Ticker = Annotated[str, Field(pattern=r"^[A-Za-z0-9.\-]{1,16}$")]
 RecordId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_\-]{1,128}$")]
-View = Literal["market", "industry", "indicators", "screener", "reports", "analysis", "vibe"]
+View = Literal["market", "futures", "industry", "indicators", "screener", "reports", "analysis", "vibe"]
 
 
 class Arguments(BaseModel):
@@ -97,7 +97,7 @@ class ScanArgs(Arguments):
     )
     exclude_st: bool = True
     min_turnover: float = Field(default=0, ge=0, le=100000000000)
-    sort: Literal["strength", "recent_signal", "latest_value"] = "strength"
+    sort: Literal["recent_signal", "latest_value"] = "recent_signal"
     direction: Literal["asc", "desc"] = "desc"
 
 
@@ -267,7 +267,7 @@ _TOOLS = (
         "读取连续日线、技术指标、成交持仓、已覆盖品种的同日交易所仓单、具体合约结算曲线和分别披露的会员排名。保留来源、日期和缺口。",
         FuturesArgs,
         "platform_market",
-        "market",
+        "futures",
     ),
     Capability(
         "market_quote",
@@ -931,7 +931,8 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         from .futures import snapshot
 
         value = await snapshot(data["symbol"])
-        target["href"] = "/futures?symbol=" + data["symbol"]
+        target["href"] = "/prism?mode=futures&symbol=" + data["symbol"]
+        target["symbol"] = data["symbol"]
         summary = (
             "已取得部分期货资料，缺失项见结果" if value.get("status") == "partial" else "已取得期货研究资料"
         )
@@ -1115,16 +1116,11 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         }.get(entry.get("status"), "未知")
         return entry, target, f"研究状态：{status_label}"
     if name.startswith("vibe_"):
-        from .models import VibePlanRequest
         from .vibe import (
-            _insert_vibe_plan,
-            _start_task,
-            build_vibe_plan,
             cancel_owned_plan,
             execution_status,
             get_owned_plan,
             list_owned_plans,
-            start_owned_followup,
         )
 
         if name == "vibe_list":
@@ -1149,18 +1145,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         if name == "vibe_cancel":
             result = await cancel_owned_plan(user, data["id"])
             return result, target, "研究已停止" if result["cancelled"] else "尚未确认引擎停止，请核对当前任务"
-        if name == "vibe_followup":
-            plan = start_owned_followup(user, data["id"], data["question"])
-            return {"plan": plan}, target, "追问已排队，原报告保留"
-
-        if name == "vibe_start":
-            plan = build_vibe_plan(VibePlanRequest(**data, agent=True))
-            plan["id"] = secrets.token_hex(10)
-            _insert_vibe_plan(user, plan)
-            _start_task(plan["id"], user)
-            target["id"] = plan["id"]
-        else:
-            plan = get_owned_plan(user, data["id"])
+        plan = get_owned_plan(user, data["id"])
         result = {
             k: plan.get(k)
             for k in (
@@ -1183,9 +1168,7 @@ async def _execute(name: str, args: Arguments, context: dict) -> tuple[dict, dic
         return (
             {"plan": result, "history_only": True, "execution": execution_status()},
             target,
-            "Vibe 研究已启动"
-            if name == "vibe_start"
-            else f"已保存 Vibe 记录状态：{plan.get('status', 'unknown')}；不是旧引擎实时状态，本版暂停执行",
+            f"已保存 Vibe 记录状态：{plan.get('status', 'unknown')}；不是旧引擎实时状态，本版暂停执行",
         )
     raise HTTPException(404)
 

@@ -17,7 +17,15 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from . import exchange_futures, futures_parameters, warehouse_receipts
+from . import (
+    exchange_futures,
+    futures_fundamentals,
+    futures_gold,
+    futures_parameters,
+    futures_soybean,
+    public_network,
+    warehouse_receipts,
+)
 from .auth import require_auth
 from .data_availability import source_failure
 from .database import check_rate_limit
@@ -42,13 +50,13 @@ PRODUCTS = {
         "黄金",
         "SHFE",
         "https://www.shfe.cn/",
-        ["实际利率与美元", "央行及实物需求", "库存与交割", "地缘与流动性变化"],
+        ["国内黄金产量与消费背景", "实际利率与美元", "央行需求", "库存、交割与流动性变化"],
     ),
     "M": (
         "豆粕",
         "DCE",
         "https://www.dce.com.cn/",
-        ["大豆进口与到港", "油厂压榨与库存", "饲料需求", "现货基差"],
+        ["大豆年度供需与压榨背景", "油厂库存与开工", "饲料需求", "现货基差"],
     ),
     "SC": (
         "原油",
@@ -332,7 +340,7 @@ async def snapshot(symbol):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 15
         async with asyncio.timeout_at(deadline), _slots:
-            async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False) as client:
+            async with public_network.async_client(timeout=8) as client:
                 now = datetime.now(SHANGHAI)
                 value, error = await _continuous(client, symbol, now, min(deadline - 6.25, loop.time() + 6))
                 has_series = value is not None
@@ -342,14 +350,39 @@ async def snapshot(symbol):
                     value["gaps"].insert(
                         0, "未取得连续日线，技术指标与连续持仓变化未计算；其他来源按各自日期显示"
                     )
-                reports, attempts = await _reports(client, symbol, now.date(), deadline - 0.25)
+                # Keep both asynchronous readers owned until normal exit,
+                # cancellation or an unexpected failure has closed siblings.
+                async with asyncio.TaskGroup() as sources:
+                    dated = sources.create_task(_reports(client, symbol, now.date(), deadline - 0.25))
+                    monthly = sources.create_task(
+                        (
+                            futures_soybean
+                            if symbol == "M"
+                            else futures_gold
+                            if symbol == "AU"
+                            else futures_fundamentals
+                        ).read_supply(client, symbol, now.date(), deadline - 0.25)
+                    )
+                reports, attempts = dated.result()
+                supply = monthly.result()
                 value.update(reports)
+                value["fundamental_supply"] = supply
+                if symbol in {"RB", "SC", "M", "AU"}:
+                    value["fundamentals"][0] = {
+                        **supply,
+                        "official_url": supply.get("source_url", supply["index_url"]),
+                    }
                 value["source_attempts"] = attempts
                 value["report_date_basis"] = "bounded_calendar_window"
                 if value["exchange_daily"]["status"] == "collected":
                     value["positioning"]["member_rankings"] = value["exchange_daily"]["member_positioning"]
                     value["gaps"][1 if not has_series else 0] = (
-                        "社会库存和同日同规格现货基差尚需原始数据；已取得的合约期限结构与会员排名见各自日期和范围"
+                        "社会库存和同日同规格现货基差尚需原始数据；合约资料见其日期和范围。"
+                        + (
+                            "会员排名已取得，见对应披露范围。"
+                            if value["exchange_daily"]["member_positioning"].get("status") == "collected"
+                            else "会员排名尚未取得，不据成交或持仓手数推断资金方向。"
+                        )
                     )
                 coverage = {
                     "continuous_series": value["series_status"],
@@ -358,6 +391,7 @@ async def snapshot(symbol):
                 coverage["member_positioning"] = (
                     value["exchange_daily"].get("member_positioning", {}).get("status", "unavailable")
                 )
+                coverage["fundamental_supply"] = supply["status"]
                 value["coverage"] = coverage
                 if not any(status == "collected" for status in coverage.values()):
                     raise HTTPException(
@@ -373,11 +407,30 @@ async def snapshot(symbol):
                 dates.extend(
                     item["data_as_of"]
                     for item in reports.values()
-                    if item["status"] == "collected" and item.get("data_as_of")
+                    if item["status"] == "collected"
+                    and item.get("data_as_of")
+                    and item.get("date_provenance") != "request_parameter"
                 )
+                ranking = value["exchange_daily"].get("member_positioning", {})
+                if ranking.get("status") == "collected" and ranking.get("data_as_of"):
+                    dates.append(ranking["data_as_of"])
+                value["observation_date_gaps"] = [
+                    key
+                    for key, item in reports.items()
+                    if item["status"] == "collected" and item.get("date_provenance") == "request_parameter"
+                ]
                 value["observation_dates"] = sorted(set(dates))
+                value["date_alignment_scope"] = (
+                    "daily_observations_only; monthly supply retains its own periods"
+                )
                 value["date_alignment"] = (
-                    "mixed" if len(set(dates)) > 1 else "same_day" if len(dates) >= 2 else "not_compared"
+                    "mixed"
+                    if len(set(dates)) > 1
+                    else "unverified"
+                    if value["observation_date_gaps"]
+                    else "same_day"
+                    if len(dates) >= 2
+                    else "not_compared"
                 )
             _cache[symbol] = (time.monotonic(), value)
             return copy.deepcopy({**value, "cached": False})

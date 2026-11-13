@@ -12,6 +12,8 @@ DATA_DIR = Path(os.environ.get("STOCK_DATA_DIR", PROJECT_ROOT / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TEMPLATE_DIR = PROJECT_ROOT / "templates"
 STATIC_DIR = PROJECT_ROOT / "static"
+# Presentation only. A Beta label does not establish deployment acceptance.
+INSTANCE_CHANNEL = "beta" if os.environ.get("PRISM_INSTANCE_CHANNEL") == "beta" else ""
 
 # ── 密钥（持久化到 data/，不会进 git） ──
 SECRET_KEY_FILE = DATA_DIR / "secret_key"
@@ -31,6 +33,7 @@ else:
 _LEGACY_KEY = os.environ.get("LLM_API_KEY", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", _LEGACY_KEY)
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+MINIMAX_CN_API_KEY = os.environ.get("MINIMAX_CN_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # ── 模型列表 ──
@@ -71,6 +74,12 @@ MODELS = {
         "model": "MiniMax-M2.7-highspeed",
     },
     # Explicit opt-in: no guessed model, inherited key or provider fallback.
+    "minimax-cn-m3": {
+        "name": "MiniMax M3（国内）",
+        "base_url": "https://api.minimaxi.com/anthropic/v1/",
+        "api_key": MINIMAX_CN_API_KEY,
+        "model": "MiniMax-M3",
+    },
     "openai": {
         "name": "OpenAI GPT",
         "protocol": "openai_responses",

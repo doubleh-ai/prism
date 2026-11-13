@@ -345,7 +345,77 @@ async def test_http_error_body_never_read_echoed_or_retried(status, code):
     with pytest.raises(P.ProviderError) as caught:
         await collect(provider)
     assert str(caught.value) == code and "secret" not in repr(caught.value)
+    assert caught.value.diagnostic == {"http_status": status}
     assert wire.reads == 0 and wire.closed and len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "base", ["https://api.minimax.io/anthropic/v1", "https://api.minimaxi.com/anthropic/v1"]
+)
+@pytest.mark.parametrize(
+    "envelope,expected",
+    [
+        ({"error": {"message": "synthetic-sensitive-message (2061)", "type": "bad_request_error"}}, 2061),
+        ({"base_resp": {"status_code": 2013, "status_msg": "synthetic-sensitive-message"}}, 2013),
+        (
+            {"error": {"code": 2067, "message": "synthetic-sensitive-message", "headers": {"key": "secret"}}},
+            2067,
+        ),
+        ({"error": {"code": "2061", "message": "synthetic-sensitive-message"}}, None),
+        ({"error": {"code": True}}, None),
+        ({"error": {"code": 999999}}, None),
+        ({"error": {"code": 2061}, "base_resp": {"status_code": 2013}}, None),
+    ],
+)
+async def test_minimax_error_exports_only_bounded_known_numeric_diagnostics(base, envelope, expected):
+    provider, wire, requests = source(
+        [json.dumps(envelope).encode()],
+        status=400,
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+    with pytest.raises(P.ProviderError) as caught:
+        await collect(provider, model_cfg=config(base))
+    diagnostic = {"http_status": 400}
+    if expected is not None:
+        diagnostic["provider_status"] = expected
+    assert caught.value.diagnostic == diagnostic
+    assert str(caught.value) == "provider_http_error"
+    assert "sensitive" not in repr(caught.value) and "secret" not in json.dumps(caught.value.diagnostic)
+    assert wire.closed and len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [b'{"error":{"code":2061,"code":2013}}'],
+        [b'{"error":{"code":NaN}}'],
+        [b"not-json-secret"],
+        [b'{"error":{"message":"' + b"x" * 20000],
+    ],
+)
+async def test_minimax_malformed_diagnostic_preserves_original_failure_without_retry(chunks):
+    provider, wire, requests = source(chunks, status=400, headers={"content-type": "application/json"})
+    with pytest.raises(P.ProviderError, match="^provider_http_error$") as caught:
+        await collect(provider, model_cfg=config("https://api.minimaxi.com/anthropic/v1"))
+    assert caught.value.diagnostic == {"http_status": 400}
+    assert wire.closed and len(requests) == 1
+
+
+async def test_minimax_error_diagnostic_cannot_wait_past_the_original_call_deadline():
+    provider, wire, requests = source(
+        Chunks([b'{"error":'], wait_after=asyncio.Event()),
+        status=400,
+        headers={"content-type": "application/json"},
+    )
+    with pytest.raises(P.ProviderError, match="^provider_http_error$") as caught:
+        await asyncio.wait_for(
+            collect(
+                provider, model_cfg=config("https://api.minimaxi.com/anthropic/v1"), timeout_seconds=0.05
+            ),
+            0.5,
+        )
+    assert caught.value.diagnostic == {"http_status": 400}
+    assert wire.closed and len(requests) == 1
 
 
 @pytest.mark.parametrize(

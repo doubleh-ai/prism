@@ -106,7 +106,7 @@
         signalData.push([
           dates[eidx],
           tname,
-          evs[ei].strength || 60,
+          evs[ei].days_ago,
           evs[ei].label || '▲',
           evs[ei].reason || '',
           evs[ei].color || tr.color || '#22c55e'
@@ -143,7 +143,7 @@
       for (var ei2 = 0; ei2 < evs2.length; ei2++) {
         lines.push('<span style="color:' + esc(evs2[ei2].color || '#22c55e') + '">' +
           esc(evs2[ei2].label || '▲') + ' ' + esc(evs2[ei2].reason || evs2[ei2].name || '指标触发') +
-          ' · 强度 ' + esc(String(evs2[ei2].strength || '-')) + '</span>');
+          ' · ' + esc(String(evs2[ei2].days_ago)) + ' 根 K 线前触发' + '</span>');
       }
       return lines.join('<br>');
     }
@@ -212,10 +212,10 @@
         xAxisIndex: 2,
         yAxisIndex: 2,
         data: signalData,
-        symbolSize: function(v) { return Math.max(8, Math.min(18, 6 + (Number(v[2]) || 50) / 10)); },
+        symbolSize: 12,
         itemStyle: {color: function(p) { return p.data[5] || '#22c55e'; }},
         label: {show: true, formatter: function(p) { return p.data[3] || '▲'; }, position: 'top', fontSize: 10, color: P.tipTxt},
-        tooltip: {formatter: function(p) { return '<b>' + esc(p.data[0]) + '</b><br>' + esc(p.data[4] || '指标触发') + '<br>强度 ' + esc(String(p.data[2] || '-')); }}
+        tooltip: {formatter: function(p) { return '<b>' + esc(p.data[0]) + '</b><br>' + esc(p.data[4] || '指标触发') + '<br>' + esc(String(p.data[2])) + ' 根 K 线前触发'; }}
       });
     }
 

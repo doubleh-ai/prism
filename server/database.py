@@ -274,6 +274,16 @@ def init_db():
                 ON diagnostic_events(fingerprint, version, username);
         """)
         # Migrations
+        diagnostic_columns = {row[1] for row in conn.execute("PRAGMA table_info(diagnostic_events)")}
+        for name, default in (
+            ("repair_scope", "unknown"),
+            ("recorded_revision", ""),
+            ("origin_revision", ""),
+        ):
+            if name not in diagnostic_columns:
+                conn.execute(
+                    f"ALTER TABLE diagnostic_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'"
+                )
         with suppress(sqlite3.OperationalError):
             conn.execute("ALTER TABLE users ADD COLUMN disabled_at INTEGER")
         try:

@@ -19,3 +19,6 @@ def test_runtime_shell_login_and_diagnostics_share_asset_generation():
     assert f"app.css?v={version}" in login
     recovery = (root / "templates/recover.html").read_text()
     assert set(re.findall(r'/static/[^"?]+\?v=([^"#]+)', recovery)) == {version}
+    for name in ("portal", "work", "projects", "calendar"):
+        markup = (root / f"templates/{name}.html").read_text()
+        assert set(re.findall(r'/static/[^"?]+\?v=([^"#]+)', markup)) == {version}, name

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 import json
 import logging
 import math
@@ -26,9 +25,7 @@ _UNIVERSE_TTL = 1800
 _TASKS: dict[str, WorkHandle] = {}
 _CANCEL_REQUESTED: set[str] = set()
 _GATES: dict[int, asyncio.Semaphore] = {}
-_SINA_KLINE_URL = (
-    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
-)
+_MAX_SCAN_WORKERS = 4
 
 
 def _market_for_code(code: str) -> str:
@@ -306,6 +303,16 @@ def _persist_job(
         )
 
 
+def uses_amount(node: Any) -> bool:
+    if isinstance(node, dict):
+        if "amount" in node or node.get("price") == "amount":
+            return True
+        return any(uses_amount(value) for value in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(uses_amount(value) for value in node)
+    return False
+
+
 def uses_fundamentals(node: Any) -> bool:
     if isinstance(node, dict):
         if "fund" in node:
@@ -326,92 +333,14 @@ def _coerce_param_values(indicator: dict[str, Any], override: dict[str, Any]) ->
     return values
 
 
-def _sina_symbol(ticker: str) -> str:
-    if ticker.startswith("6"):
-        return "sh" + ticker
-    if ticker.startswith(("4", "8", "92")):
-        return "bj" + ticker
-    return "sz" + ticker
-
-
-async def _fast_kline_df(client, ticker: str, period: str, lookback: int):
-    """Fetch technical-scan bars through one shared keep-alive HTTP client."""
-    import pandas as pd
-
-    multiplier = 1 if period == "1d" else 6 if period == "1w" else 24
-    daily_limit = max(30, min(1023, int(lookback) * multiplier))
-    response = await client.get(
-        _SINA_KLINE_URL,
-        params={
-            "symbol": _sina_symbol(ticker),
-            "scale": 240,
-            "ma": "no",
-            "datalen": daily_limit,
-        },
-    )
-    response.raise_for_status()
-    bars = response.json()
-    if not isinstance(bars, list) or not bars:
-        return None
-    rows = []
-    for bar in bars:
-        try:
-            day = datetime.date.fromisoformat(str(bar["day"])[:10])
-            close = float(bar["close"])
-            volume = float(bar.get("volume") or 0)
-            rows.append(
-                {
-                    "t": int(
-                        datetime.datetime.combine(
-                            day, datetime.time(), tzinfo=datetime.timezone(datetime.timedelta(hours=8))
-                        ).timestamp()
-                    ),
-                    "open": float(bar["open"]),
-                    "high": float(bar["high"]),
-                    "low": float(bar["low"]),
-                    "close": close,
-                    "volume": volume,
-                    "amount": volume * close,
-                }
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-    if not rows:
-        return None
-    frame = pd.DataFrame(rows).sort_values("t")
-    if period in {"1w", "1m"}:
-        frame["date"] = pd.to_datetime(frame["t"], unit="s", utc=True).dt.tz_convert("Asia/Shanghai")
-        frame = (
-            frame.set_index("date")
-            .resample("W-FRI" if period == "1w" else "ME")
-            .agg(
-                {
-                    "t": "last",
-                    "open": "first",
-                    "high": "max",
-                    "low": "min",
-                    "close": "last",
-                    "volume": "sum",
-                    "amount": "sum",
-                }
-            )
-            .dropna(subset=["open", "high", "low", "close"])
-            .reset_index(drop=True)
-        )
-    return frame.tail(lookback).reset_index(drop=True)
-
-
 def _sort_matches(matches: list[dict[str, Any]], config: dict[str, Any], signal: bool) -> None:
-    sort_key = config.get("sort") or ("strength" if signal else "latest_value")
+    sort_key = config.get("sort") or ("recent_signal" if signal else "latest_value")
     direction = config.get("direction", "desc")
-    key = "strength"
-    if sort_key == "recent_signal":
-        key = "triggered_at"
-    elif sort_key == "latest_value":
-        key = "value"
     matches.sort(
         key=lambda row: (
-            float(row.get(key) if row.get(key) is not None else -math.inf),
+            float(row.get("value") if row.get("value") is not None else -math.inf)
+            if sort_key == "latest_value"
+            else -float(row.get("days_ago", math.inf)),
             float(row.get("turnover") or 0),
         ),
         reverse=direction != "asc",
@@ -422,7 +351,6 @@ async def _run_job(
     job: dict[str, Any],
     indicator: dict[str, Any],
     build_df: Callable[..., Awaitable[tuple[Any, dict[str, Any]]]],
-    fast_fetch: bool = True,
 ) -> None:
     config = job["config"]
     try:
@@ -467,17 +395,9 @@ async def _run_job(
             needs_fund = uses_fundamentals(indicator.get("dsl"))
             trigger_window = int(config.get("trigger_window") or 5)
             min_turnover = float(config.get("min_turnover") or 0)
+            amount_requirement = "all" if uses_amount(indicator.get("dsl")) else bool(min_turnover)
             max_keep = max(int(config.get("max_results") or 100) * 4, 400)
             progress_lock = asyncio.Lock()
-            fast_client = None
-            if fast_fetch and not needs_fund:
-                import httpx
-
-                fast_client = httpx.AsyncClient(
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=httpx.Timeout(12),
-                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
-                )
 
             async def worker() -> None:
                 while True:
@@ -488,27 +408,17 @@ async def _run_job(
                     except asyncio.QueueEmpty:
                         return
                     try:
-                        df, fund = None, {}
-                        if fast_client is not None:
-                            try:
-                                df = await _fast_kline_df(
-                                    fast_client,
-                                    row["ticker"],
-                                    config.get("period", "1d"),
-                                    int(config.get("lookback") or 120),
-                                )
-                            except Exception:
-                                df = None
-                        if df is None:
-                            df, fund = await asyncio.wait_for(
-                                build_df(
-                                    row["ticker"],
-                                    config.get("period", "1d"),
-                                    int(config.get("lookback") or 120),
-                                    include_fundamentals=needs_fund,
-                                ),
-                                timeout=24,
-                            )
+                        # Charts and scans share adjustment, cache and failover contracts.
+                        df, fund = await asyncio.wait_for(
+                            build_df(
+                                row["ticker"],
+                                config.get("period", "1d"),
+                                int(config.get("lookback") or 120),
+                                include_fundamentals=needs_fund,
+                                **({"require_amount": amount_requirement} if amount_requirement else {}),
+                            ),
+                            timeout=24,
+                        )
                         if df is None or len(df) == 0:
                             raise RuntimeError("no kline")
                         turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else float("nan")
@@ -536,9 +446,8 @@ async def _run_job(
                                     **row,
                                     "triggered_at": int(df["t"].iloc[idx]),
                                     "price": float(df["close"].iloc[-1]),
-                                    "turnover": turnover,
+                                    "turnover": turnover if math.isfinite(turnover) else None,
                                     "days_ago": days_ago,
-                                    "strength": max(30, 100 - days_ago * 12),
                                     "reason": f"{indicator.get('name', '指标')}：{days_ago} 根 K 线内触发",
                                 }
                         else:
@@ -549,9 +458,8 @@ async def _run_job(
                                     **row,
                                     "triggered_at": int(df["t"].iloc[-1]),
                                     "price": float(df["close"].iloc[-1]),
-                                    "turnover": turnover,
+                                    "turnover": turnover if math.isfinite(turnover) else None,
                                     "value": value,
-                                    "strength": 0,
                                     "reason": f"{indicator.get('name', '指标')} 最新值 {value:.4g}",
                                 }
                         if match:
@@ -577,14 +485,9 @@ async def _run_job(
                             _persist_job(job)
 
             async def run_workers(_lease):
-                # This registered owner holds every native async request until
-                # all workers and their shared client have actually finished.
-                workers = [asyncio.create_task(worker()) for _ in range(min(20, len(rows)))]
-                try:
-                    return await asyncio.gather(*workers, return_exceptions=True)
-                finally:
-                    if fast_client is not None:
-                        await fast_client.aclose()
+                # Keep all workers owned by the scanner through completion/cancel.
+                workers = [asyncio.create_task(worker()) for _ in range(min(_MAX_SCAN_WORKERS, len(rows)))]
+                return await asyncio.gather(*workers, return_exceptions=True)
 
             batch = get_manager().start("request", run_workers)
             outcomes = await batch.wait_result()

@@ -9,10 +9,11 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from .. import config
-from ..auth import require_auth
-from ..database import check_rate_limit
+from ..auth import require_account_context, require_auth
+from ..database import check_rate_limit, reset_connection
 from ..models import validation_error_message
 from ..source_urls import source_display_payload
 from ..work_lifecycle import LifecycleError, Manager, get_manager
@@ -73,12 +74,20 @@ def stream_run(
         raise HTTPException(422, "事件序号无效")
     service = get_service(manager or get_manager())
 
+    def read_page(cursor):
+        # These are read-only after startup. A blocked SQLite connection must
+        # not block all HTTP streams on the event loop. The threadpool waiter
+        # retains ownership until the read finishes; no detached database work.
+        try:
+            return store.get_run(user, run_id), store.list_events(user, run_id, cursor)
+        finally:
+            reset_connection()
+
     async def replay():
         cursor, pulse_at = after_seq, time.monotonic()
         while True:
             try:
-                run = store.get_run(user, run_id)
-                events = store.list_events(user, run_id, cursor)
+                run, events = await run_in_threadpool(read_page, cursor)
             except HTTPException as error:
                 if error.status_code in {401, 404}:
                     return
@@ -131,6 +140,7 @@ async def tools(request: Request):
 @router.post("/chat/stream")
 async def chat_stream(request: Request):
     user = require_auth(request)
+    require_account_context(request, user)
     try:
         req = ChatRequest(**(await request.json() or {}))
         workflow = workflow_id(req.workflow or req.skill)

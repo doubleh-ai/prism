@@ -7,7 +7,7 @@ import secrets
 from fastapi import HTTPException, Request
 
 from .agent.public_text import public_answer_text
-from .auth import require_auth
+from .auth import require_account_context, require_auth
 from .database import get_db
 from .legacy_history import init_legacy_history_db, migration_status, read_legacy_history
 from .source_urls import source_display_payload
@@ -420,6 +420,7 @@ async def create_conv(request: Request) -> dict:
     from .models import CreateConvRequest, validation_error_message
 
     u = require_auth(request)
+    require_account_context(request, u)
     body = await request.json()
     try:
         req = CreateConvRequest(**(body or {}))

@@ -1,8 +1,8 @@
 /* Prism research workspace. Navigation never starts a second research job. */
 (function() {
   'use strict';
-  var viewLabels = {chat:'研究对话',market:'行情工作区',vibe:'深度研究',analysis:'个股分析',reports:'网页研报',industry:'产业关系',indicators:'指标实验室',screener:'全市场选股',admin:'工作台管理'};
-  var capabilityViews = ['market','vibe','analysis','reports','industry','indicators','screener'];
+  var viewLabels = {chat:'研究对话',market:'行情工作区',futures:'期货研究',preferences:'研究偏好',vibe:'深度研究',analysis:'个股分析',reports:'研究库',industry:'产业关系',indicators:'指标实验室',screener:'全市场选股',admin:'工作台管理'};
+  var capabilityViews = ['market','futures','vibe','analysis','reports','industry','indicators','screener'];
   var originalSwitchMode = App.switchMode;
   var originalMarketWorkspace = App._showMarketWorkspace;
   Object.assign(App, {
@@ -60,7 +60,7 @@
     },
     _capabilityView: function(capability) {
       if (capabilityViews.indexOf(capability.target_view) >= 0) return capability.target_view;
-      var views = {quote:'market',market_quote:'market',market_search:'market',market_kline:'market',indicator_list:'indicators',indicator_evaluate:'indicators',indicator_eval:'indicators',industry_search:'industry',industry_node:'industry',industry_chain:'industry',report_list:'reports',report_read:'reports',analysis_start:'analysis',analysis_status:'analysis',vibe_start:'vibe',vibe_status:'vibe',scan_start:'screener',scan_status:'screener'};
+      var views = {quote:'market',market_quote:'market',market_search:'market',market_kline:'market',indicator_list:'indicators',indicator_evaluate:'indicators',indicator_eval:'indicators',industry_search:'industry',industry_node:'industry',industry_chain:'industry',report_list:'reports',report_read:'reports',analysis_start:'analysis',analysis_status:'analysis',vibe_start:'vibe',vibe_status:'vibe',futures_snapshot:'futures',scan_start:'screener',scan_status:'screener'};
       return views[capability.id] || '';
     },
     showWelcome: function() {
@@ -214,8 +214,9 @@
             if (view === 'industry') { this._researchTab = 'industry'; this._renderResearch(); }
             return;
           }
-          if (view==='market' && target.call_id) { await this._openCapabilitySnapshot(target.call_id); return; }
+          if ((view==='market'||view==='futures') && target.call_id) { await this._openCapabilitySnapshot(target.call_id); return; }
           if (view==='market' && target.ticker) { if(target.period) this._currentPeriod = target.period; await this._selectStock(target.ticker); }
+          else if (view==='futures' && target.symbol) this._selectFuturesSymbol(target.symbol);
           else if (view==='vibe' && target.id) await this._openVibePlan(target.id);
           else if (view==='reports' && target.id) await this._openSavedReport(target.id);
           else if (view==='industry' && target.id) await this._showIndustryNode(target.id);
@@ -228,6 +229,9 @@
     }
   });
   App.switchMode = function(mode) {
+    if (window.PrismHub && this._mode === 'futures' && mode !== 'futures') PrismHub.suspendFutures();
+    if (window.PrismPreferences && this._mode === 'preferences' && mode !== 'preferences') PrismPreferences.suspend();
+    if (window.PrismKnowledge && mode !== 'reports') PrismKnowledge.setActive(false);
     if (mode !== this._mode) {
       this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
       this._vibeSelectionSeq = (this._vibeSelectionSeq || 0) + 1;

@@ -1,9 +1,11 @@
 /* Account-bound forms. Private values remain in memory, never localStorage. */
 (function () {
   'use strict';
+  function createHub(page, workspaceRoot) {
   var user, epoch = 0, profileVersion = 0, calendarRows = [], editing = null, pending = null, dirty = false, profileReady = false;
-  var $ = function (id) { return document.getElementById(id); };
-  var page = document.body.dataset.page;
+  var embedded = !!workspaceRoot, embeddedFutures = embedded && page === 'futures';
+  var workspaceActive = false, workspaceReady = false, workspaceInitializing = null;
+  var $ = function (id) { return embedded && id === 'main' ? workspaceRoot : document.getElementById(embedded && id === 'notice' ? (page === 'futures' ? 'futuresNotice' : 'preferencesNotice') : id); };
   var zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
   function node(tag, text, cls) { var el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
   function notice(text) { var target=$('notice'); if(target){target.textContent = text || ''; target.hidden = !text;} }
@@ -218,7 +220,7 @@
   }
   function metric(label,value){var box=node('div',undefined,'metric');box.append(node('span',label),node('strong',value===null||value===undefined?'待核查':String(value)));return box;}
   async function loadFutures(event){
-    if(event)event.preventDefault();var ticket=++epoch,form=$('futuresForm'),button=form.querySelector('button');button.disabled=true;
+    if(event)event.preventDefault();var ticket=++epoch,form=$('futuresForm'),button=form.querySelector('[type=submit]');button.disabled=true;
     $('futuresResult').replaceChildren();notice('正在读取研究资料…');
     try {
       var value=await api('/api/futures/'+$('futureSymbol').value+'/snapshot');if(ticket!==epoch)return;
@@ -236,20 +238,21 @@
       var makeTable=function(headers,rows){var wrap=node('div',undefined,'table-scroll'),table=node('table'),head=node('thead'),hr=node('tr'),body=node('tbody');headers.forEach(function(h){hr.append(node('th',h));});head.append(hr);rows.forEach(function(row){var tr=node('tr');row.forEach(function(cell){tr.append(node('td',display(cell)));});body.append(tr);});table.append(head,body);wrap.append(table);return wrap;};
       var market=node('section',undefined,'card');market.append(node('h2','期限结构与会员持仓'));
       if(exchange.status==='collected'){
-        market.append(node('h3','期限结构'),node('p','交易所日期 '+display(exchange.data_as_of)+' · 当日成交量最高合约 '+display(exchange.active_contract)+'（非交易建议）','muted'));
+        var exchangeDate=exchange.date_provenance==='request_parameter'?'查询日期 ':'交易所日期 ';
+        market.append(node('h3','期限结构'),node('p',exchangeDate+display(exchange.data_as_of)+' · 当日成交量最高合约 '+display(exchange.active_contract)+'（非交易建议）'+(exchange.transport_authenticated===false?' · 公开来源未独立核验':''),'muted'));
         if(curve.status==='collected'){
           var shapes={contango:'远月升水',backwardation:'远月贴水',flat:'平水'};
           market.append(node('p',display(curve.near_contract)+'（结算 '+display(curve.near_settlement)+'） → '+display(curve.far_contract)+'（结算 '+display(curve.far_settlement)+'）'),node('p','远月减近月：'+display(curve.far_minus_near)+(exchange.quote_unit?' '+exchange.quote_unit:'')+' · '+(shapes[curve.shape]||'结构未知')));
         }else market.append(node('p',curve.status==='insufficient'?'可比较的合约不足，期限结构未计算。':'期限结构状态未知。','muted'));
         var contracts=Array.isArray(exchange.contracts)?exchange.contracts:[],contractDetails=node('details');contractDetails.append(node('summary','合约明细与原表'));
         if(contracts.length)contractDetails.append(makeTable(['合约','交割月','收盘','结算','成交量','持仓量'],contracts.map(function(c){return [c.contract,c.delivery_month,c.close,c.settlement,c.volume,c.open_interest];})));else contractDetails.append(node('p','未提供合约明细。','muted'));
-        var dailySource=sourceLink(exchange.source_url,'查看交易所原表 ↗');if(dailySource)contractDetails.append(dailySource);market.append(contractDetails);
-      }else market.append(node('h3','期限结构'),node('p',exchange.status==='not_covered'?'该品种的交易所合约数据尚未覆盖。':exchange.status==='unavailable'?'未取得交易所合约数据。':'交易所合约数据状态未知。','muted'));
+        var dailySource=sourceLink(exchange.source_url,'查看交易所原表 ↗');if(dailySource)contractDetails.append(dailySource);if(exchange.transport_authenticated===false&&exchange.notice)contractDetails.append(node('p',exchange.notice,'muted'));market.append(contractDetails);
+      }else market.append(node('h3','期限结构'),node('p',exchange.error_code==='automated_access_restricted'?'交易所限制自动读取，合约资料暂未取得；已取得的其他资料仍可查看。':exchange.status==='not_covered'?'该品种的交易所合约数据尚未覆盖。':exchange.status==='unavailable'?'未取得交易所合约数据。':'交易所合约数据状态未知。','muted'));
       market.append(node('h3','会员持仓'));
       if(members.status==='collected'){
         market.append(node('p','交易所日期 '+display(members.data_as_of)+' · 合约 '+display(members.contract),'muted'));
         var sides=members.sides||{},labels={volume:'成交量',long:'多头持仓',short:'空头持仓'};
-        ['volume','long','short'].forEach(function(key){var side=sides[key];if(!side){market.append(node('p',labels[key]+'：未提供','muted'));return;}market.append(node('p',labels[key]+'：前 '+display(side.ranked_members)+' 名合计 '+display(side.quantity_sum)+'，增减 '+display(side.change_sum)));});
+        ['volume','long','short'].forEach(function(key){var side=sides[key];if(!side){market.append(node('p',labels[key]+'：未提供','muted'));return;}if(side.status==='not_reported'){market.append(node('p',labels[key]+'：该列未披露','muted'));return;}market.append(node('p',labels[key]+'：前 '+display(side.ranked_members)+' 名合计 '+display(side.quantity_sum)+'，增减 '+display(side.change_sum)));});
         market.append(node('p',members.notice||'会员排名为交易所披露的分项数据，多空排名差不代表净资金流。','muted'));
         var memberDetails=node('details');memberDetails.append(node('summary','会员明细与原表'));
         ['volume','long','short'].forEach(function(key){var side=sides[key],rows=side&&Array.isArray(side.members)?side.members:[];memberDetails.append(node('h3',labels[key]));if(rows.length)memberDetails.append(makeTable(['排名','会员','数量','增减'],rows.map(function(m){return [m.rank,m.member,m.quantity,m.change];})));else memberDetails.append(node('p','未提供会员明细。','muted'));});
@@ -258,7 +261,7 @@
       var dates=value.contract_dates||{},params=value.exchange_parameters||{},terms=node('details');terms.append(node('summary','合约日期与交易所参数'));
       [[dates,'合约日期'],[params,'交易参数']].forEach(function(pair){var report=pair[0],label=pair[1];terms.append(node('h3',label));
         if(report.status!=='collected'){terms.append(node('p',report.status==='not_covered'?'该品种尚未覆盖。':'本次未取得。','muted'));return;}
-        terms.append(node('p','资料日期 '+display(report.data_as_of),'muted'));var rows=Array.isArray(report.contracts)?report.contracts:[];
+        terms.append(node('p','交易日 '+display(report.data_as_of)+(report.source_updated_at?' · 发布 '+display(report.source_updated_at):''),'muted'));var rows=Array.isArray(report.contracts)?report.contracts:[];
         if(label==='合约日期')terms.append(makeTable(['合约','上市日','列示到期日','交割开始','交割结束'],rows.map(function(c){return [c.contract,c.listed_on,c.listed_expiry_date,c.delivery_start,c.delivery_end];})));
         else terms.append(makeTable(['合约','一般买保证金（%）','一般卖保证金（%）','套保买保证金（%）','套保卖保证金（%）','涨停幅度（%）','跌停幅度（%）','另有特殊限制'],rows.map(function(c){return [c.contract,c.spec_long_margin_pct,c.spec_short_margin_pct,c.hedge_long_margin_pct,c.hedge_short_margin_pct,c.upper_limit_pct,c.lower_limit_pct,c.additional_limit_notice_required?'须查原公告':'未报告'];})));
         terms.append(node('p',report.notice,'muted'));var link=sourceLink(report.reference_url,'查看官方参数页面 ↗');if(link)terms.append(link);
@@ -270,19 +273,53 @@
       fund.append(node('h2','基本面'));
       var receipt=value.warehouse_receipt;
       if(receipt && receipt.status==='collected'){
-        fund.append(node('h3','交易所仓单 · '+receipt.table),node('p',receipt.data_as_of+' · '+receipt.row+' '+receipt.quantity+' '+receipt.unit+'，较上一期变化 '+receipt.change+' '+receipt.unit));
-        var reportLink=node('a','查看当日仓单原表 ↗');
-        reportLink.href=receipt.source_url;reportLink.target='_blank';reportLink.rel='noopener noreferrer';
-        fund.append(reportLink,node('p','仅覆盖该表已登记仓单，社会库存仍待核查。','muted'));
+        fund.append(node('h3','交易所仓单 · '+receipt.table),node('p',(receipt.date_provenance==='request_parameter'?'查询日期 ':'')+receipt.data_as_of+' · '+receipt.row+' '+receipt.quantity+' '+receipt.unit+'，较上一期变化 '+receipt.change+' '+receipt.unit));
+        var reportLink=sourceLink(receipt.source_url,'查看当日仓单原表 ↗');
+        if(reportLink)fund.append(reportLink);
+        fund.append(node('p',receipt.notice||'仅覆盖该表已登记仓单，社会库存仍待核查。','muted'));
       }else if(receipt){
-        fund.append(node('p',receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
+        fund.append(node('p',receipt.error_code==='automated_access_restricted'?'交易所限制自动读取，仓单资料暂未取得；已取得的其他资料仍保留。':receipt.status==='not_covered'?'该品种的仓单来源尚未接入。':'未取得该日期的官方仓单，已取得的其他资料仍保留。','muted'));
       }
-      fund.append(node('h3','待补证的关键问题'));value.fundamentals.forEach(function(item){var p=node('p',item.topic+'：尚未采集 · '),a=node('a','查看官方来源 ↗');a.href=item.official_url;a.target='_blank';a.rel='noopener noreferrer';p.append(a);fund.append(p);});value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});var action=node('a','在对话中继续综合研究 ↗','button');action.href='/prism?futures='+value.symbol;fund.append(action);root.append(fund);
+      fund.append(node('h3','基本面资料与待补证问题'));
+      value.fundamentals.forEach(function(item){
+        if(item.status==='collected'&&Array.isArray(item.observations)&&item.observations.length){
+          fund.append(node('h3',item.topic));
+          item.observations.slice(0,2).forEach(function(observation){
+            fund.append(node('p',display(observation.period_label)+' · 发布 '+display(observation.published_date),'muted'));
+            if(observation.series_kind==='soybean_annual_balance_estimates'){
+              var estimates=Array.isArray(observation.estimates)?observation.estimates:[],latest=estimates[estimates.length-1];
+              if(latest&&latest.values){
+                fund.append(node('p',display(latest.label)+' · 产量 '+display(latest.values.production)+'、进口 '+display(latest.values.imports)+'、压榨消费 '+display(latest.values.crush_consumption)+' '+display(observation.unit)));
+                var annual=node('details');annual.append(node('summary','年度口径与各期估计'));
+                annual.append(node('p','大豆市场年度 '+display(latest.period_start)+' 至 '+display(latest.period_end)+'；各列保留原报告的历史、估计或预测标注。','muted'));
+                annual.append(makeTable(['大豆 · '+display(observation.unit)].concat(estimates.map(function(column){return column.label;})),(Array.isArray(observation.metrics)?observation.metrics:[]).map(function(metric){return [metric.label].concat(estimates.map(function(column){return display((column.values||{})[metric.key]);}));})));
+                fund.append(annual);
+              }
+            }
+            var products=Array.isArray(observation.products)?observation.products:[],gold=observation.series_kind==='gold_year_to_date_production_consumption';
+            products.slice(0,gold?2:3).forEach(function(product){
+              var text=product.label+'：'+(gold?'年初至该期累计 ':'')+display(product.period_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.period_yoy_pct)+'%';
+              if(product.year_to_date_amount!==undefined)text+='；年初至该期 '+display(product.year_to_date_amount)+' '+display(product.unit)+' · 官方同比 '+display(product.year_to_date_yoy_pct)+'%';
+              fund.append(node('p',text));
+            });
+            if(gold){
+              var categories=node('details');categories.append(node('summary','原料与消费分类'));
+              categories.append(node('p',display(observation.period_start)+' 至 '+display(observation.period_end)+'；累计统计，不是单季数据。','muted'));
+              categories.append(makeTable(['统计项目','累计数量（吨）','官方同比（%）'],products.slice(0,7).map(function(product){return [product.label,display(product.period_amount),display(product.period_yoy_pct)];})));
+              fund.append(categories);
+            }
+            var original=sourceLink(observation.source_url,'查看本期原文 ↗');if(original)fund.append(original);
+          });
+          if(item.notice)fund.append(node('p',item.notice,'muted'));
+          if(item.history_window_complete===false)fund.append(node('p','本次历史窗口未收集完整，已取得的报告分别保留。','muted'));
+        }else{var p=node('p',item.topic+'：尚未采集 · '),a=sourceLink(item.official_url,'查看官方来源 ↗');if(a)p.append(a);fund.append(p);}
+      });
+      value.gaps.forEach(function(gap){fund.append(node('p',gap,'muted'));});root.append(fund);
       if(hasSeries){var source=node('p','行情来源：'),link=node('a',value.source.name+' ↗');link.href=value.source.url;link.target='_blank';link.rel='noopener noreferrer';source.append(link);root.append(source);}
     }catch(error){notice(error.message);}finally{button.disabled=false;}
   }
   async function init(){
-    document.querySelectorAll('form').forEach(function(form){
+    (embedded ? workspaceRoot : $('main')).querySelectorAll('form').forEach(function(form){
       form.onsubmit=function(event){event.preventDefault();notice('页面尚未准备好，请刷新后再试。');};
       if(page!=='futures')form.addEventListener('input',function(){dirty=true;});
     });
@@ -304,15 +341,35 @@
         ['start','end'].forEach(function(name){field($('eventForm'),name).onchange=function(){try{resolveTime($('eventForm'),name,true);notice('');}catch(error){notice(error.message);}};});
         await loadCalendar();
       }
-      if(page==='futures'){var symbol=new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;}
+      if(page==='futures'){var symbol=embeddedFutures ? null : new URLSearchParams(location.search).get('symbol');if(['RB','CU','AU','M','SC'].includes(symbol))$('futureSymbol').value=symbol;$('futuresForm').onsubmit=loadFutures;}
     }catch(error){notice(error.message);}
   }
   window.addEventListener('beforeunload',function(event){if(dirty||pending||portfolioDirty||portfolioUnknown){event.preventDefault();event.returnValue='';}});
   window.addEventListener('pageshow',function(event){if(event.persisted)location.reload();});
   document.addEventListener('visibilitychange',async function(){
+    if(embedded&&!workspaceActive)return;
     if(document.hidden){$('main').style.visibility='hidden';return;}
     try{await identify();$('main').style.visibility='';}catch(error){notice(error.message);$('main').style.visibility='';}
   });
-  window.PrismHub={api:api,resolveTime:resolveTime,loadCalendar:loadCalendar,loadFutures:loadFutures};
-  init();
+  var hub={api:api,resolveTime:resolveTime,loadCalendar:loadCalendar,loadFutures:loadFutures,
+    activate:async function(){
+      workspaceActive=true;
+      if(!workspaceReady){if(!workspaceInitializing)workspaceInitializing=init().then(function(){workspaceReady=true;}).finally(function(){workspaceInitializing=null;});await workspaceInitializing;}
+      else try{await identify();}catch(error){notice(error.message);}
+      workspaceRoot.style.visibility='';
+    },
+    suspend:function(){workspaceActive=false;}
+  };
+  hub.activateFutures=hub.activate;hub.suspendFutures=hub.suspend;
+  if(!embedded)init();
+  return hub;
+  }
+  var bodyPage=document.body&&document.body.dataset&&document.body.dataset.page;
+  if(bodyPage)window.PrismHub=createHub(bodyPage,null);
+  else {
+    var futuresRoot=document.getElementById('futuresWorkspace');
+    if(futuresRoot)window.PrismHub=createHub('futures',futuresRoot);
+    var preferencesRoot=document.getElementById('preferencesWorkspace');
+    if(preferencesRoot)window.PrismPreferences=createHub('preferences',preferencesRoot);
+  }
 }());

@@ -39,6 +39,9 @@ jobs:
           EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
 
+      - name: Check startup credential isolation before dependency installation
+        run: python3 -I -S -B scripts/check_provider_key_isolation.py
+
       - name: Set up Node for real browser-script regression tests
         uses: actions/setup-node@v7
         with:
@@ -51,18 +54,20 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
-            requirements.txt
-            requirements-extra.txt
+            requirements.lock
+            requirements-test.txt
 
       - name: Install runtime and test dependencies
         run: |
           python -m pip install --upgrade pip==26.1.2
-          python -m pip install -r requirements.txt -r requirements-extra.txt ruff==0.17.1
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps -r requirements-test.txt
+          python -m pip check
 
       - name: Lint
         run: |
-          ruff check server/ tests/ scripts/release_candidate.py scripts/release_controller.py scripts/remote_release.py scripts/secure_backup.py scripts/verify_backup_boot.py scripts/verify_database_compatibility.py scripts/build_jsonpath_wheel.py
-          ruff format --check server/ tests/ scripts/release_candidate.py scripts/release_controller.py scripts/remote_release.py scripts/secure_backup.py scripts/verify_backup_boot.py scripts/verify_database_compatibility.py scripts/build_jsonpath_wheel.py
+          ruff check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py
+          ruff format --check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py
 
       - name: Run tests with coverage
         env:
@@ -100,4 +105,4 @@ jobs:
           python -m pip install pip-audit==2.10.1
 
       - name: Audit dependencies
-        run: python -m pip_audit -r requirements.txt -r requirements-extra.txt --strict
+        run: python -m pip_audit --disable-pip --no-deps -r requirements.lock --strict

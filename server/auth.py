@@ -103,6 +103,18 @@ def require_auth(request: Request, optional: bool = False) -> str | None:
     return user
 
 
+def require_account_context(request: Request, authenticated_user: str) -> None:
+    """Fence a browser write to the account that prepared it, when supplied.
+
+    The caller must authenticate first. Resource ownership remains mandatory. Older clients may
+    omit this optional context; it is never an alternative login credential.
+    """
+    if not authenticated_user:
+        raise HTTPException(401)
+    if request.headers.get("X-Prism-Account", authenticated_user) != authenticated_user:
+        raise HTTPException(409, "账号已经切换，请刷新后再提交")
+
+
 def verify_csrf(request: Request) -> None:
     """Verify the request carries the CSRF defense header.
 
@@ -184,27 +196,13 @@ async def login(request: Request):
         status="success",
         request=request,
     )
-    # Generate a per-session CSRF token. The frontend mirrors this in the
-    # ``X-CSRF-Token`` header. This is the double-submit cookie pattern.
-    csrf_token = secrets.token_urlsafe(32)
-    resp = JSONResponse({"user": username, "csrf_token": csrf_token})
+    resp = JSONResponse({"user": username})
     resp.set_cookie(
         "token",
         token,
         max_age=30 * 86400,
         path="/",
         httponly=True,
-        samesite=COOKIE_SAMESITE,
-        secure=COOKIE_SECURE,
-    )
-    # CSRF token is NOT HttpOnly — JS must be able to read it. It's also
-    # bound to the session via the same samesite/secure attributes.
-    resp.set_cookie(
-        "csrf_token",
-        csrf_token,
-        max_age=30 * 86400,
-        path="/",
-        httponly=False,
         samesite=COOKIE_SAMESITE,
         secure=COOKIE_SECURE,
     )
@@ -229,5 +227,4 @@ def logout(request: Request):
         )
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("token", path="/")
-    resp.delete_cookie("csrf_token", path="/")
     return resp

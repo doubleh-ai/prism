@@ -27,6 +27,15 @@ def test_ma_evaluates():
     assert s.tail(10).notna().all()
 
 
+def test_missing_amount_stays_unknown_through_comparison_and_negation():
+    frame = _df()
+    assert evaluate({"amount": 0}, frame).isna().all()
+    assert evaluate({"not": [{"gt": [{"amount": 0}, 100]}]}, frame).isna().all()
+    frame["amount"] = [0.0] + [float("nan")] * (len(frame) - 1)
+    actual = evaluate({"amount": 0}, frame)
+    assert actual.iloc[0] == 0 and actual.iloc[1:].isna().all()
+
+
 def test_cross_up_is_signal_and_fires():
     s = evaluate({"cross_up": [{"ma": 5}, {"ma": 20}]}, _df())
     assert is_signal(s)
@@ -167,3 +176,33 @@ def test_natural_language_composite_translation_keeps_all_three_conditions():
     assert translated["dsl"]["and"][0]["and"][0]["within"][0]["cross_up"]
     volume_rhs = translated["dsl"]["and"][1]["gt"][1]["mul"][1]
     assert volume_rhs["ref"][1] == 1
+
+
+def test_rsi14_wilder_reversal_reference():
+    close = [
+        10.0,
+        10.5,
+        11.0,
+        11.5,
+        12.0,
+        12.5,
+        13.0,
+        13.5,
+        14.0,
+        14.5,
+        15.0,
+        15.5,
+        16.0,
+        16.5,
+        15.5,
+        14.0,
+        12.5,
+        11.0,
+        10.0,
+        9.5,
+    ]
+    actual = evaluate({"rsi": 14}, pd.DataFrame({"close": close, "high": close, "low": close, "volume": 1.0}))
+    assert actual.iloc[:14].isna().all()
+    assert actual.iloc[14:].tolist() == pytest.approx(
+        [86.6667, 71.3080, 59.8801, 51.0665, 46.1859, 43.9254], abs=1e-3
+    )

@@ -14,6 +14,7 @@ from . import feedback
 from .database import check_rate_limit, get_db
 from .internal_tokens import load_tokens
 from .release import APP_VERSION, _read_deployed_revision
+from .repair_scopes import signal_scope
 
 router = APIRouter()
 _HEADER = "X-Prism-Monitor-Token"
@@ -69,7 +70,7 @@ def _auth(request: Request) -> None:
 
 
 def _query(request: Request, *, queue: bool) -> tuple[int, int, int, str]:
-    allowed = {"since", "after_id", "limit"} | ({"category"} if queue else set())
+    allowed = {"since", "after_id", "limit"} | ({"category", "acceptance_id"} if queue else set())
     pairs = list(request.query_params.multi_items())
     if any(k not in allowed for k, _ in pairs) or len(pairs) != len(dict(pairs)):
         _deny(422)
@@ -130,21 +131,33 @@ async def queue_signals(request: Request):
     _auth(request)
     started_at = int(time.time())
     since, after_id, limit, category = _query(request, queue=True)
+    acceptance_id = feedback._acceptance_id(request)
+    selection = ""
+    selected = []
+    if acceptance_id is not None:
+        selection = (
+            " AND id=? AND username=? AND EXISTS"
+            " (SELECT 1 FROM users u WHERE u.username=feedback_items.username"
+            " AND u.disabled_at IS NULL)"
+        )
+        selected = [acceptance_id, "prism-acceptance"]
     # Deliberately avoid selecting titles, descriptions, identity, page paths,
     # triage JSON, reply/verification text or update history.
     with get_db() as db:
         rows = db.execute(
             """SELECT id, category, feature, status, version, revision,
-                      revision_number, created_at, updated_at
-               FROM feedback_items WHERE category=? AND updated_at>=? AND id>?
-               ORDER BY id LIMIT ?""",
-            [category, since, after_id, limit + 1],
+                      revision_number, created_at, updated_at, repair_scope
+               FROM feedback_items WHERE category=? AND updated_at>=? AND id>?"""
+            + selection
+            + " ORDER BY id LIMIT ?",
+            [category, since, after_id, *selected, limit + 1],
         ).fetchall()
     items = [
         {
             "id": _integer(row["id"]),
             "category": category,
             "feature": row["feature"] if row["feature"] in feedback._FEATURES else "unknown",
+            **signal_scope(row["repair_scope"], feature=row["feature"]),
             "status": row["status"] if row["status"] in feedback._STATUSES[category] else "unknown",
             "version": _version(row["version"]),
             "revision": _revision(row["revision"]),
@@ -165,7 +178,8 @@ async def diagnostic_signals(request: Request):
     kinds = sorted(_KINDS)
     with get_db() as db:
         rows = db.execute(
-            """SELECT id,kind,severity,version,substr(message,1,512) AS message,occurrences,first_seen,last_seen
+            """SELECT id,kind,severity,version,substr(message,1,512) AS message,occurrences,first_seen,last_seen,
+                      repair_scope,origin_revision
                FROM diagnostic_events WHERE resolved_at IS NULL AND last_seen>=? AND id>?
                AND kind IN ("""
             + ",".join("?" for _ in kinds)
@@ -186,6 +200,12 @@ async def diagnostic_signals(request: Request):
             {
                 "id": _integer(row["id"]),
                 "kind": row["kind"],
+                **signal_scope(row["repair_scope"]),
+                **(
+                    {"revision": _revision(row["origin_revision"])}
+                    if _revision(row["origin_revision"])
+                    else {}
+                ),
                 "severity": row["severity"]
                 if row["severity"] in {"info", "warning", "error", "critical"}
                 else "unknown",

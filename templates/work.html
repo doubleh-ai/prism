@@ -6,29 +6,35 @@
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="same-origin">
   <title>Work · 我的工作台</title>
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=111">
-  <link rel="stylesheet" href="/static/css/work.css?v=111">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=124">
+  <link rel="stylesheet" href="/static/css/work.css?v=124">
   <style>.sidebar-bottom{display:flex;gap:16px;flex-wrap:wrap}@media(max-width:760px){.sidebar-bottom{display:flex;grid-column:1/-1;margin:0;padding:0 0 12px;gap:18px}.sidebar-bottom a{min-height:36px;font-size:12px}.work-nav{flex-wrap:wrap}.work-nav a,.work-nav button{flex:1 1 23%;white-space:nowrap}}.assistant-preview{border-top:1px solid var(--work-line);margin-top:18px;padding-top:15px}.assistant-preview p{overflow-wrap:anywhere}.assistant-preview ul{padding-left:20px}.assistant-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.assistant-help{color:var(--work-muted);font-size:12px}.assistant-manual{margin-top:20px;border-top:1px solid var(--work-line);padding-top:15px}.assistant-manual summary{cursor:pointer;font-weight:600}.assistant-manual form{margin-top:16px}</style>
-  <script src="/static/js/app.work.js?v=111" defer></script>
-  <script src="/static/js/work.assistant.js?v=111" defer></script>
+  <script src="/static/js/app.work.js?v=124" defer></script>
+  <script src="/static/js/work.assistant.js?v=124" defer></script>
+<link rel="stylesheet" href="/static/css/work-notifications.css?v=124">
+<script src="/static/js/notifications.js?v=124" defer></script>
+<link rel="stylesheet" href="/static/css/feedback.css?v=124">
+<script src="/static/js/app.util.js?v=124" defer></script>
+<script src="/static/js/work.feedback.js?v=124" defer></script>
+<script src="/static/js/app.feedback.js?v=124" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#workMain">跳至任务</a>
   <div class="work-shell" id="workApp">
     <aside class="work-sidebar" aria-label="工作区导航">
-      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=111#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
+      <a class="work-brand" href="/work"><span class="brand-mark"><svg width="24" height="24" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=124#mark"/></svg></span><span>Work<span class="brand-caption">我的工作台</span></span></a>
 
-      <nav class="work-nav" aria-label="工作导航"><a class="button" href="/projects">项目</a><a class="button" href="/calendar">日历安排</a><a class="button" href="/notifications">提醒</a>
+      <nav class="work-nav" aria-label="工作导航"><a class="button" href="/projects">项目</a><a class="button" href="/calendar">日历安排</a>
         <button type="button" data-work-filter="today" aria-current="page"><span aria-hidden="true">◷</span>今日<span class="nav-count" id="workTodayCount"></span></button>
         <button type="button" data-work-filter="all"><span aria-hidden="true">☷</span>全部任务<span class="nav-count" id="workAllCount"></span></button>
         <button type="button" data-work-filter="done"><span aria-hidden="true">✓</span>已完成<span class="nav-count" id="workDoneCount"></span></button>
       </nav>
-      <div class="sidebar-bottom"><a href="/prism?feedback=work">反馈与建议</a><a href="/">DoubleH</a></div>
+      <div class="sidebar-bottom"><button type="button" class="context-feedback-entry" data-work-feedback aria-haspopup="dialog" aria-controls="feedbackDialog">反馈与建议</button><a href="/">DoubleH</a></div>
     </aside>
     <main class="work-main" id="workMain">
       <header class="work-header">
         <div><p class="eyebrow" id="workDate">我的工作</p><h1 id="workViewTitle">今日任务</h1></div>
-        <button type="button" class="button button-secondary" id="workRefresh">刷新</button>
+        <div class="work-header-actions"><button type="button" class="button button-secondary notification-entry" data-work-notifications aria-haspopup="dialog" aria-controls="workNotifications">提醒</button><button type="button" class="button button-secondary" id="workRefresh">刷新</button></div>
       </header>
       <p class="work-zone" id="workTimezone"></p>
       <div id="workNotice" class="work-notice" role="status" aria-live="polite" hidden></div>
@@ -84,5 +90,7 @@
       <div class="detail-history"><h3>更新记录</h3><ol id="workHistory"></ol></div>
     </section>
   </div>
+__WORK_NOTIFICATIONS__
+__FEEDBACK_DIALOG__
 </body>
 </html>

@@ -7,7 +7,7 @@ public surface here is async, and the chain handles mixing.
 
 from typing import Protocol, runtime_checkable
 
-from .models import Fundamentals, KLine, Quote, SearchHit
+from .models import Fundamentals, KLine, PriceAdjustment, Quote, SearchHit
 
 
 class ProviderError(Exception):
@@ -33,7 +33,9 @@ class MarketDataProvider(Protocol):
     name: str
 
     async def get_quote(self, ticker: str) -> Quote: ...
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]: ...
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> list[KLine]: ...
     async def get_fundamentals(self, ticker: str) -> Fundamentals: ...
     async def search(self, query: str, limit: int = 10) -> list[SearchHit]: ...
     async def health(self) -> bool: ...

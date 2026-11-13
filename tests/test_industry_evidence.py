@@ -204,6 +204,33 @@ def test_positive_advisory_is_still_only_a_hypothesis(relations):
     assert all("chain-alice-0" not in p["relation_ids"] for p in after["transmission_paths"])
 
 
+@pytest.mark.parametrize("compact", [False, True])
+def test_old_rule_advice_is_incomplete_during_graph_reuse_without_erasing_hypotheses(relations, compact):
+    _complete_review(_review_packet())
+    with get_db() as db:
+        original = json.loads(
+            db.execute("SELECT payload FROM research_runs WHERE run_id='chain-alice'").fetchone()[0]
+        )
+        original["model_review"]["method_sha256"] = "0" * 64
+        frozen = json.dumps(original)
+        db.execute("UPDATE research_runs SET payload=? WHERE run_id='chain-alice'", [frozen])
+    graph = evidence_graph("chain-alice", compact=compact)
+    assert all(row["model_review"]["status"] == "incomplete" for row in graph["relations"])
+    assert all(not row["model_review"]["reviewed_claim_ids"] for row in graph["relations"])
+    assert all("model_excerpt_review_incomplete" in row["review_gaps"] for row in graph["relations"])
+    assert graph["transmission_paths"]
+    assert all(
+        p["status"] == "hypothesis_requires_cross_link_review"
+        and not p["semantic_verification"]
+        and p["commercial_status"] == "not_established"
+        for p in graph["transmission_paths"]
+    )
+    with get_db() as db:
+        assert (
+            db.execute("SELECT payload FROM research_runs WHERE run_id='chain-alice'").fetchone()[0] == frozen
+        )
+
+
 def test_negative_opposing_advisory_does_not_erase_counterevidence(relations):
     _complete_review(_review_packet(), flagged="chain-alice-1")
     _change_relation("chain-alice-0", opposing_claims=["chain-alice-1"])

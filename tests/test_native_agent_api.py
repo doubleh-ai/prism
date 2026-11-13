@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import httpx
@@ -47,6 +48,7 @@ def native(monkeypatch, test_user):
         def __init__(self, body=None, username=user):
             self.user = username
             self.body = body or {}
+            self.headers = {}
             self.scope = {"app": SimpleNamespace(state=SimpleNamespace(work_manager=manager))}
 
         async def json(self):
@@ -63,6 +65,30 @@ def body(**changes):
         "request_id": "fixed-input",
         **changes,
     }
+
+
+async def test_replay_database_wait_does_not_block_event_loop(native, monkeypatch):
+    manager, user, _ = native
+    run = store.create_run(user, "native-conv", question="synthetic", model_id="mock", workflow="research")
+    store.finish_run(user, run["id"], "failed", "", "synthetic")
+    response = api.stream_run(user, run["id"], manager=manager)
+    entered, release = threading.Event(), threading.Event()
+    original = store.list_events
+
+    def slow_read(*args, **kwargs):
+        entered.set()
+        assert release.wait(2), "the event loop could not release a blocked read"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "list_events", slow_read)
+    task = asyncio.create_task(anext(response.body_iterator))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 1), 1.5)
+        assert not task.done()
+    finally:
+        release.set()
+    assert "run_created" in await asyncio.wait_for(task, 2)
+    await response.body_iterator.aclose()
 
 
 async def drain(response):
@@ -83,7 +109,9 @@ async def wait_empty(manager):
 
 
 @pytest.mark.parametrize("write", ["report", "terminal"])
-async def test_failed_write_stops_live_and_replay_readers_without_releasing_work(native, monkeypatch, write):
+async def test_failed_write_stops_live_and_replay_readers_without_releasing_work(
+    native, monkeypatch, write, caplog
+):
     manager, user, Request = native
     entered, resume = asyncio.Event(), asyncio.Event()
     model_calls = []
@@ -115,6 +143,10 @@ async def test_failed_write_stops_live_and_replay_readers_without_releasing_work
     resume.set()
     with pytest.raises((LifecycleError, sqlite3.IntegrityError)):
         await asyncio.wait_for(handle.wait_result(), 3)
+    phase = "finalization" if write == "report" else "terminal_persistence"
+    messages = [record.getMessage() for record in caplog.records if "native_" in record.getMessage()]
+    assert f"native_{phase}_unconfirmed error_type=IntegrityError" in messages
+    assert all("合成研究进度" not in message and "synthetic" not in message for message in messages)
     frames = await asyncio.wait_for(drain(response), 2)
     saved = store.get_run(user, run_id)
     notice = {"stream_error": "result_unconfirmed", "run_id": run_id, "after_seq": saved["last_seq"]}
@@ -184,6 +216,87 @@ async def test_two_step_tools_persist_and_duplicate_http_replays_without_new_mod
             == 1
         )
         assert db.execute("SELECT COUNT(*) FROM saved_reports WHERE source='native-agent'").fetchone()[0] == 1
+
+
+async def test_futures_research_tool_answer_report_and_replay_share_one_owned_run(
+    native, monkeypatch, client, auth_cookies
+):
+    from server import futures
+    from server.auth import create_session
+
+    manager, user, Request = native
+    model_calls, snapshots = [], []
+    observation = {
+        "symbol": "CU",
+        "status": "partial",
+        "data_as_of": "2026-11-06",
+        "warehouse_receipt": {
+            "status": "collected",
+            "quantity": 17,
+            "unit": "吨",
+            "data_as_of": "2026-11-05",
+            "source_url": "https://www.shfe.com.cn/fixture-warehouse",
+        },
+        "positioning": {"net_capital_flow": None},
+        "gaps": ["同日现货基差尚未取得"],
+    }
+
+    async def snapshot(symbol):
+        snapshots.append(symbol)
+        return observation
+
+    async def model(messages, **kwargs):
+        model_calls.append(messages)
+        if len(model_calls) == 1:
+            assert "先调用 futures_snapshot" in kwargs["system"]
+            assert "不能充当" in kwargs["system"] and "资金净流入" in kwargs["system"]
+            assert "futures_snapshot" in {tool["name"] for tool in kwargs["tools"]}
+            yield {
+                "type": "tool_call",
+                "id": "futures-data",
+                "name": "futures_snapshot",
+                "arguments": {"symbol": "CU"},
+            }
+            yield {
+                "type": "done",
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "futures-data",
+                        "name": "futures_snapshot",
+                        "input": {"symbol": "CU"},
+                    }
+                ],
+            }
+        else:
+            result = json.loads(messages[-1]["content"][0]["content"])
+            assert result["data"] == observation
+            assert result["call"]["target"]["view"] == "futures"
+            answer = "合成验收：仓单17吨，日期为2026-11-05；与行情日期不同。现货基差未取得，资金净流入未知。"
+            yield {"type": "text_delta", "text": answer}
+            yield {"type": "done", "stop_reason": "end_turn", "content": [{"type": "text", "text": answer}]}
+
+    monkeypatch.setattr(futures, "snapshot", snapshot)
+    monkeypatch.setattr(runtime, "model_stream", model)
+    request = body(skill="futures-research", question="研究铜（CU）的基本面、技术面和成交持仓", model="mock")
+    frames = await asyncio.wait_for(drain(await api.chat_stream(Request(request))), 5)
+    await wait_empty(manager)
+    run = store.list_runs(user)[0]
+    assert run["workflow"] == "futures" and run["status"] == "completed"
+    assert run["research_status"] == "unreviewed"
+    assert snapshots == ["CU"] and len(model_calls) == 2
+    assert frames == await drain(await api.chat_stream(Request(request)))
+    assert len(model_calls) == 2 and snapshots == ["CU"]
+    reports = (await client.get("/api/reports/library", cookies=auth_cookies)).json()["reports"]
+    assert len(reports) == 1
+    saved = (await client.get("/api/reports/library/" + reports[0]["id"], cookies=auth_cookies)).json()
+    assert saved["report"]["run_id"] == run["run_id"]
+    assert "资金净流入未知" in saved["report"]["final_decision"]
+    other = {"token": create_session("other")}
+    assert (await client.get("/api/reports/library/" + reports[0]["id"], cookies=other)).status_code == 404
+    calls = (await client.get("/api/capability-calls?view=futures", cookies=auth_cookies)).json()["calls"]
+    assert len(calls) == 1 and calls[0]["target"]["symbol"] == "CU"
 
 
 async def test_disconnect_only_closes_reader_refresh_shows_progress_and_get_replays(native, monkeypatch):

@@ -19,6 +19,7 @@ from .auth import require_admin, require_auth, verify_csrf
 from .database import check_rate_limit, get_db
 from .internal_tokens import load_tokens
 from .release import APP_VERSION, _read_deployed_revision
+from .repair_scopes import SCOPE_FEATURES, RepairScope
 from .source_urls import redact_source_text
 
 router = APIRouter()
@@ -88,6 +89,7 @@ class FeedbackCreate(BaseModel):
     description: str = Field(min_length=1, max_length=6000)
     page: str = Field(default="/", max_length=1000)
     feature: Feature = "unknown"
+    repair_scope: RepairScope = "unknown"
     request_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -135,6 +137,10 @@ def init_feedback_db() -> None:
             columns = {row[1] for row in db.execute("PRAGMA table_info(feedback_items)")}
             if "feature" not in columns:
                 db.execute("ALTER TABLE feedback_items ADD COLUMN feature TEXT NOT NULL DEFAULT 'unknown'")
+            if "repair_scope" not in columns:
+                db.execute(
+                    "ALTER TABLE feedback_items ADD COLUMN repair_scope TEXT NOT NULL DEFAULT 'unknown'"
+                )
             for table in ("feedback_items", "feedback_updates"):
                 if "target_revision" not in {
                     row[1] for row in db.execute("PRAGMA table_info(" + table + ")")
@@ -186,6 +192,16 @@ async def _payload(request: Request, model):
         return model.model_validate(value)
     except (ValueError, TypeError, RecursionError, ValidationError):
         raise HTTPException(422, "反馈格式无效，请检查类型、长度和必填项")
+
+
+def _acceptance_id(request: Request) -> int | None:
+    """Narrow a machine read to one dedicated test-account record, never a user."""
+    values = request.query_params.getlist("acceptance_id")
+    if not values:
+        return None
+    if len(values) != 1 or not re.fullmatch(r"[1-9][0-9]{0,15}", values[0]) or int(values[0]) > 2**53 - 1:
+        raise HTTPException(422, "验收记录编号无效", headers={"Cache-Control": "no-store"})
+    return int(values[0])
 
 
 def _text(value: str) -> str:
@@ -305,6 +321,8 @@ async def submit_feedback(request: Request):
     if not check_rate_limit("feedback:" + username, 6, 60):
         raise HTTPException(429, "反馈提交较频繁，请稍后再试")
     payload = await _payload(request, FeedbackCreate)
+    if payload.repair_scope != "unknown" and SCOPE_FEATURES[payload.repair_scope] != payload.feature:
+        raise HTTPException(422, "反馈范围与当前功能不一致，请重新打开反馈后提交")
     title, description, page = _text(payload.title), _text(payload.description), _page(payload.page)
     if not title or not description:
         raise HTTPException(422, "请填写标题和具体说明")
@@ -321,9 +339,10 @@ async def submit_feedback(request: Request):
             request_id = str(UUID(payload.request_id))
         except (ValueError, AttributeError):
             raise HTTPException(422, "request_id 必须是 UUID")
-    fingerprint = hashlib.sha256(
-        json.dumps([payload.category, title, description, page, payload.feature], ensure_ascii=False).encode()
-    ).hexdigest()
+    fingerprint_fields = [payload.category, title, description, page, payload.feature]
+    if payload.repair_scope != "unknown":
+        fingerprint_fields.append(payload.repair_scope)
+    fingerprint = hashlib.sha256(json.dumps(fingerprint_fields, ensure_ascii=False).encode()).hexdigest()
     reused = False
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -347,8 +366,8 @@ async def submit_feedback(request: Request):
             else:
                 cur = db.execute(
                     """INSERT INTO feedback_items
-            (username,category,title,description,page,feature,status,version,revision,triage_json,review_batch_date,request_id,request_fingerprint,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (username,category,title,description,page,feature,status,version,revision,triage_json,review_batch_date,request_id,request_fingerprint,created_at,updated_at,repair_scope)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         username,
                         payload.category,
@@ -365,6 +384,7 @@ async def submit_feedback(request: Request):
                         fingerprint,
                         now,
                         now,
+                        payload.repair_scope,
                     ],
                 )
                 feedback_id = cur.lastrowid

@@ -29,6 +29,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
+from .. import public_network
 from ..source_urls import public_source_url, redact_source_text
 
 MAX_BODY_BYTES = 512 * 1024
@@ -234,7 +235,11 @@ def _open_response(host, address, target, deadline, *, json_index=False, referer
         ),
         "invalid_headers",
     )
-    sock = _tls_socket(host, address, deadline)
+    sock = (
+        public_network.connect_tls(host, _remaining(deadline))
+        if public_network.delegated()
+        else _tls_socket(host, address, deadline)
+    )
     response = None
     try:
         _need(type(json_index) is bool, "invalid_headers")
@@ -259,11 +264,13 @@ def _open_response(host, address, target, deadline, *, json_index=False, referer
         sock.settimeout(_remaining(deadline))
         sock.sendall(request)
         sock.settimeout(_remaining(deadline))
-        response = http.client.HTTPResponse(_DeadlineSocket(sock, deadline), method=method)
+        bounded_socket = _DeadlineSocket(sock, deadline)
+        response = http.client.HTTPResponse(bounded_socket, method=method)
         response.begin()
         # The socket remains owned here throughout body reads, including when
         # the response declares Connection: close. No implicit hostname lookup.
         response._prism_socket = sock
+        response._prism_reader = bounded_socket.reader
         yield response
     finally:
         if response is not None:
@@ -276,6 +283,7 @@ class _DeadlineReader(io.RawIOBase):
 
     def __init__(self, sock, deadline):
         self.sock, self.deadline, self.received = sock, deadline, 0
+        self.maximum = MAX_BODY_BYTES + 65536
 
     def readable(self):
         return True
@@ -285,17 +293,17 @@ class _DeadlineReader(io.RawIOBase):
         count = self.sock.recv_into(buffer)
         _remaining(self.deadline)
         self.received += count
-        _need(self.received <= MAX_BODY_BYTES + 65536, "body_too_large")
+        _need(self.received <= self.maximum, "body_too_large")
         return count
 
 
 class _DeadlineSocket:
     def __init__(self, sock, deadline):
-        self.sock, self.deadline = sock, deadline
+        self.reader = _DeadlineReader(sock, deadline)
 
     def makefile(self, mode):
         _need(mode == "rb", "network_failed")
-        return io.BufferedReader(_DeadlineReader(self.sock, self.deadline), buffer_size=16384)
+        return io.BufferedReader(self.reader, buffer_size=16384)
 
 
 def _headers(response):
@@ -317,6 +325,11 @@ def _body(response, headers, deadline, maximum=MAX_BODY_BYTES):
     if length is not None:
         _need(length.isdecimal(), "invalid_headers")
         _need(int(length) <= maximum, "body_too_large")
+    # The selected content parser owns the body limit. Keep the original bound
+    # during header parsing, then allow PDF bodies their separate bounded size.
+    # Count already buffered bytes and cap headers/chunk framing as well as body.
+    response._prism_reader.maximum = maximum + 65536
+    _need(response._prism_reader.received <= response._prism_reader.maximum, "body_too_large")
     chunks, size = [], 0
     while True:
         response._prism_socket.settimeout(_remaining(deadline))
@@ -476,10 +489,10 @@ def fetch_public_source(url, *, timeout_seconds=10, allowed_hosts=None, first_pa
         while True:
             _remaining(deadline)
             current, host, source_class = _admit_url(candidate, extras)
-            addresses = _resolve(host, deadline)
+            address = None if public_network.delegated() else _resolve(host, deadline)[0]
             parsed = urlsplit(current)
             target = parsed.path + ("?" + parsed.query if parsed.query else "")
-            with _open_response(host, addresses[0], target, deadline) as response:
+            with _open_response(host, address, target, deadline) as response:
                 http_status = response.status
                 headers = _headers(response)
                 if http_status in _REDIRECTS:
@@ -674,13 +687,13 @@ def fetch_public_index(url, *, timeout_seconds=8, referer=None, disclosure_query
         candidate = url
         for redirects in range(MAX_REDIRECTS + 1):
             current, host, source_class = _admit_url(candidate, set())
-            addresses = _resolve(host, deadline)
+            address = None if public_network.delegated() else _resolve(host, deadline)[0]
             parsed = urlsplit(current)
             target = parsed.path + ("?" + parsed.query if parsed.query else "")
             options = {"json_index": True, "referer": referer}
             if query_body is not None:
                 options["query_body"] = query_body
-            with _open_response(host, addresses[0], target, deadline, **options) as response:
+            with _open_response(host, address, target, deadline, **options) as response:
                 http_status = response.status
                 headers = _headers(response)
                 if http_status in _REDIRECTS:

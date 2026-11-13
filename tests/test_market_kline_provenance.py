@@ -80,6 +80,7 @@ def bar(runtime, date="2026-10-19", *, provenance=None, opening=10, close=11, vo
     timestamp = int(datetime.fromisoformat(date).replace(tzinfo=timezone(timedelta(hours=8))).timestamp())
     return runtime.models.KLine(
         timestamp=timestamp,
+        adjustment="none",
         open=opening,
         high=max(opening, close) + 1,
         low=min(opening, close) - 1,
@@ -107,7 +108,7 @@ def make_provider(bars, name="tencent"):
         calls = 0
         failing = False
 
-        async def get_kline(self, ticker, period="1d", limit=120):
+        async def get_kline(self, ticker, period="1d", limit=120, *, adjustment="none"):
             self.calls += 1
             if self.failing:
                 raise RuntimeError("synthetic provider unavailable")
@@ -183,7 +184,7 @@ async def test_real_sqlite_cache_replay_and_expired_fallback_do_not_rewrite_fact
     provider.failing = True
     cache = runtime.cache.MarketCache()
     chain = runtime.chain.ProviderChain([provider], cache)
-    key = chain._cache_key("kline-v2", "tencent", "600519", "1d", "10")
+    key = chain._cache_key("kline-v3", "tencent", "600519", "1d", "10", "none")
     payload = [item.model_dump(exclude={"provenance"}) if legacy else item.model_dump() for item in bars]
     cache.set(key, payload, ttl=300)
     before = cache_row(runtime, key)
@@ -320,7 +321,7 @@ async def test_real_protected_http_owned_capability_ledger_and_history_share_met
         client.cookies.set("token", other)
         assert (await client.get("/api/capabilities/calls/" + call_id)).status_code == 404
         assert provider.calls == 1
-        key = chain._cache_key("kline-v2", "tencent", "600519", "1d", str(limit))
+        key = chain._cache_key("kline-v3", "tencent", "600519", "1d", str(limit), "none")
         expire(runtime, key)
         provider.failing = True
         client.cookies.set("token", owner)
