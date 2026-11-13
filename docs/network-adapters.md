@@ -29,6 +29,11 @@ TLS；失败直接返回来源不可用，不能退回直接联网。
 `httpx.AsyncBaseTransport`。用途包括 `research`、`work_planning` 和 `auxiliary`；
 部署方应只放行明确配置的用途、提供方与模型组合。
 
+MiniMax 国内站使用独立的 `minimax-cn-m3` 目录项和 `MINIMAX_CN_API_KEY`，固定访问
+`https://api.minimaxi.com/anthropic/v1/messages`；海外站继续使用自己的条目和凭证。
+两者不共享默认 Key、不互相回退。套餐专用 Key 应由配置者明确提供，不能假定普通
+余额 API Key 会抵扣包年额度。区域说明参见 [MiniMax 官方配置示例](https://github.com/MiniMax-AI/Mini-Agent/blob/main/mini_agent/config/config-example.yaml)。
+
 研究和 Work 分别从原用途路由取得配置，辅助任务单独标注用途。用途信息仅用于
 本机选择连接，不加入发往模型的 JSON。适配器工厂不接收 Key、问题或用户资料；
 实际传输仍承担敏感模型请求，必须遵循部署方的隔离与凭证策略。
