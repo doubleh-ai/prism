@@ -39,6 +39,9 @@ jobs:
           EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
 
+      - name: Check startup credential isolation before dependency installation
+        run: python3 -I -S -B scripts/check_provider_key_isolation.py
+
       - name: Set up Node for real browser-script regression tests
         uses: actions/setup-node@v7
         with:
@@ -61,8 +64,8 @@ jobs:
 
       - name: Lint
         run: |
-          ruff check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py
-          ruff format --check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py
+          ruff check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py
+          ruff format --check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py
 
       - name: Run tests with coverage
         env:
