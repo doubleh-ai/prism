@@ -29,10 +29,8 @@ from .capabilities import router as capabilities_router
 from .config import (
     CORS_ALLOW_CREDENTIALS,
     CORS_ORIGINS,
-    DEFAULT_MODEL,
     INSTANCE_CHANNEL,
     LOG_FILE,
-    MODELS,
     RATE_EXPLAIN_PER_MIN,
     STATIC_DIR,
     TEMPLATE_DIR,
@@ -722,6 +720,7 @@ async def api_batch_delete_convs(request: Request):
 
 @app.get("/api/models")
 async def api_models():
+    from . import config
     from .agent.provider import configuration_status
 
     return [
@@ -729,9 +728,9 @@ async def api_models():
             "id": key,
             "name": model["name"],
             "configured": configuration_status(model)["configured"],
-            "default": key == DEFAULT_MODEL,
+            "default": key == config.DEFAULT_MODEL,
         }
-        for key, model in MODELS.items()
+        for key, model in config.MODELS.items()
     ]
 
 
