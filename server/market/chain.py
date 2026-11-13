@@ -46,6 +46,9 @@ class ProviderChain:
         self._inflight: dict[str, WorkHandle] = {}
 
     def _cache_key(self, method: str, provider_name: str, *parts: str) -> str:
+        # Pre-normalization Tencent quotes used lots / 10k CNY, including stale cache.
+        if method == "quote" and provider_name == "tencent":
+            method = "quote-shares-cny"
         return f"{method}:{provider_name}:" + ":".join(parts)
 
     async def _coalesce(self, key: str, runner):
