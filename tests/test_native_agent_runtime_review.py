@@ -555,6 +555,23 @@ def test_native_failed_execution_reaches_diagnostics(engine, monkeypatch, code):
     assert "synthetic-isolated-test" not in json.dumps(row)
 
 
+def test_native_provider_failure_saves_only_safe_diagnostic_and_does_not_retry(engine, monkeypatch):
+    requests = []
+
+    async def failed(*args, **kwargs):
+        requests.append(True)
+        raise runtime.provider.ProviderError("provider_http_error", http_status=400, provider_status=2061)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(runtime, "model_stream", failed)
+    outcome = asyncio.run(execute(engine))
+    assert outcome.status == "failed" and outcome.error_code == "provider_http_error"
+    error = next(e for e in events(engine) if e["type"] == "run_error")
+    assert error["provider_diagnostic"] == {"http_status": 400, "provider_status": 2061}
+    assert len(requests) == 1
+    assert "synthetic-isolated-test" not in json.dumps(error)
+
+
 @pytest.mark.parametrize(
     "status,code,expected",
     [

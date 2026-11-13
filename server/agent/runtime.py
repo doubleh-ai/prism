@@ -72,6 +72,7 @@ class Outcome:
     status: str
     text: str = ""
     error_code: str | None = None
+    provider_diagnostic: dict | None = None
     limit_reason: str | None = None
     research_revision: str | None = None
     message_id: int | None = None
@@ -769,6 +770,7 @@ class NativeAgent:
             outcome.limit_reason = error.reason
         except provider.ProviderError as error:
             outcome.status, outcome.error_code = "partial" if full_text or pending else "failed", error.code
+            outcome.provider_diagnostic = error.diagnostic or None
         except HTTPException as error:
             if error.status_code in {401, 404}:
                 outcome.abandoned = True
@@ -817,6 +819,11 @@ class NativeAgent:
                     {"error": _error_message(outcome.error_code, outcome.limit_reason)},
                     error_code=outcome.error_code,
                     limit_reason=outcome.limit_reason,
+                    **(
+                        {"provider_diagnostic": outcome.provider_diagnostic}
+                        if outcome.provider_diagnostic
+                        else {}
+                    ),
                 )
             elif outcome.status == "cancelled":
                 emit("cancellation_acknowledged", {"status": "已停止模型等待，正在保存进度"})

@@ -469,7 +469,8 @@ class OpenAIResponsesProvider(P.AnthropicMessagesProvider):
                         401: "provider_auth_error",
                         403: "provider_auth_error",
                         429: "provider_rate_limited",
-                    }.get(response.status_code, "provider_http_error")
+                    }.get(response.status_code, "provider_http_error"),
+                    http_status=response.status_code,
                 )
             P._need(
                 response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
