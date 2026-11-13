@@ -113,7 +113,6 @@ async def client():
         return await _client.request(method, url, headers=headers, **kw)
 
     async with AsyncClient(transport=transport, base_url="http://test") as c:
-        c.cookies.set("csrf_token", "synthetic-test-csrf", domain="test.local", path="/")
         _client = c
 
         # Wrap with a helper that auto-injects CSRF headers
@@ -129,10 +128,16 @@ async def client():
             if method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
                 for k, v in CSRF_HEADERS.items():
                     headers.setdefault(k, v)
-                headers.setdefault(
-                    "X-CSRF-Token",
-                    (kw.get("cookies") or {}).get("csrf_token") or c.cookies.get("csrf_token", ""),
-                )
+                # Browser writes echo the cookie. Private worker requests deliberately
+                # carry no browser cookies and use their separate scoped identity.
+                if not str(url).startswith("/api/internal/"):
+                    cookies = dict(kw.get("cookies") or {})
+                    csrf = cookies.get("csrf_token") or c.cookies.get("csrf_token")
+                    if not csrf:
+                        csrf = "synthetic-test-csrf"
+                        cookies["csrf_token"] = csrf
+                        kw["cookies"] = cookies
+                    headers.setdefault("X-CSRF-Token", csrf)
             return await orig_request(method, url, headers=headers, **kw)
 
         c.request = patched_request
