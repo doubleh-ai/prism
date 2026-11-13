@@ -129,8 +129,8 @@ class TencentProvider:
                 price=price,
                 change=change,
                 change_pct=change_pct,
-                volume=float(f[6]) if len(f) > 6 and f[6] else 0.0,
-                turnover=float(f[37]) if len(f) > 37 and f[37] else 0.0,
+                volume=float(f[6]) * 100 if len(f) > 6 and f[6] else 0.0,  # lots -> shares
+                turnover=float(f[37]) * 10_000 if len(f) > 37 and f[37] else 0.0,  # 10k CNY -> CNY
                 high=float(f[33]) if len(f) > 33 and f[33] else None,
                 low=float(f[34]) if len(f) > 34 and f[34] else None,
                 open=float(f[5]) if len(f) > 5 and f[5] else None,

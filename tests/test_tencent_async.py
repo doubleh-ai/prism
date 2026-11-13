@@ -3,8 +3,10 @@
 import asyncio
 import json
 import threading
+from pathlib import Path
 
 import httpx
+import pandas as pd
 import pytest
 
 from server import public_network
@@ -110,3 +112,50 @@ async def test_market_response_is_bounded(network, monkeypatch):
     with pytest.raises(ProviderUnavailable, match="response too large"):
         await tencent_provider.TencentProvider().get_kline("600519")
     assert len(network["requests"]) == 1
+
+
+# Public closing quotes captured in PR #34; compare real provider conversion paths.
+UNIT_SAMPLES = json.loads((Path(__file__).parent / "fixtures" / "quote_units_20261113.json").read_text())[
+    "samples"
+]
+
+
+@pytest.mark.parametrize("sample", UNIT_SAMPLES, ids=lambda row: row["symbol"])
+@pytest.mark.parametrize("field", ["volume", "turnover"])
+async def test_quote_units_match_akshare_within_one_percent(network, monkeypatch, sample, field):
+    from server.market import akshare_provider
+
+    fields = [""] * 38
+    for index, value in sample["tencent_fields"].items():
+        fields[int(index)] = value
+    payload = f'v_{sample["symbol"]}="' + "~".join(fields) + '";'
+    network["handler"] = lambda request: httpx.Response(200, content=payload.encode("gbk"))
+
+    def daily(*, symbol, adjust):
+        assert symbol == sample["symbol"]
+        assert adjust == "qfq"
+        return pd.DataFrame([sample["akshare_row"]])
+
+    monkeypatch.setattr(akshare_provider, "_AKSHARE_AVAILABLE", True)
+    monkeypatch.setattr(akshare_provider.ak, "stock_zh_a_daily", daily)
+    ticker = sample["symbol"][2:]
+    tencent = await tencent_provider.TencentProvider().get_quote(ticker)
+    akshare = await akshare_provider.AkshareProvider().get_quote(ticker)
+    assert network["requests"][0].url.path == "/q=" + sample["symbol"]
+    actual, reference = getattr(tencent, field), getattr(akshare, field)
+    raw_field = "volume" if field == "volume" else "amount"
+    assert reference == sample["akshare_row"][raw_field]
+    assert abs(actual - reference) / reference < 0.01
+
+
+@pytest.mark.parametrize("raw", [None, "", "0"])
+async def test_quote_unit_conversion_keeps_missing_and_zero_values(network, raw):
+    fields = ["51", "三花智控", "002050", "45.74", "45.50", "45.80"]
+    if raw is not None:
+        fields += [""] * (38 - len(fields))
+        fields[6] = fields[37] = raw
+    payload = 'v_sz002050="' + "~".join(fields) + '";'
+    network["handler"] = lambda request: httpx.Response(200, content=payload.encode("gbk"))
+    quote = await tencent_provider.TencentProvider().get_quote("002050")
+    assert quote.volume == 0
+    assert quote.turnover == 0
