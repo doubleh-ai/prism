@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import httpx
@@ -66,6 +67,30 @@ def body(**changes):
     }
 
 
+async def test_replay_database_wait_does_not_block_event_loop(native, monkeypatch):
+    manager, user, _ = native
+    run = store.create_run(user, "native-conv", question="synthetic", model_id="mock", workflow="research")
+    store.finish_run(user, run["id"], "failed", "", "synthetic")
+    response = api.stream_run(user, run["id"], manager=manager)
+    entered, release = threading.Event(), threading.Event()
+    original = store.list_events
+
+    def slow_read(*args, **kwargs):
+        entered.set()
+        assert release.wait(2), "the event loop could not release a blocked read"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "list_events", slow_read)
+    task = asyncio.create_task(anext(response.body_iterator))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 1), 1.5)
+        assert not task.done()
+    finally:
+        release.set()
+    assert "run_created" in await asyncio.wait_for(task, 2)
+    await response.body_iterator.aclose()
+
+
 async def drain(response):
     frames = []
     async for chunk in response.body_iterator:
@@ -84,7 +109,9 @@ async def wait_empty(manager):
 
 
 @pytest.mark.parametrize("write", ["report", "terminal"])
-async def test_failed_write_stops_live_and_replay_readers_without_releasing_work(native, monkeypatch, write):
+async def test_failed_write_stops_live_and_replay_readers_without_releasing_work(
+    native, monkeypatch, write, caplog
+):
     manager, user, Request = native
     entered, resume = asyncio.Event(), asyncio.Event()
     model_calls = []
@@ -116,6 +143,10 @@ async def test_failed_write_stops_live_and_replay_readers_without_releasing_work
     resume.set()
     with pytest.raises((LifecycleError, sqlite3.IntegrityError)):
         await asyncio.wait_for(handle.wait_result(), 3)
+    phase = "finalization" if write == "report" else "terminal_persistence"
+    messages = [record.getMessage() for record in caplog.records if "native_" in record.getMessage()]
+    assert f"native_{phase}_unconfirmed error_type=IntegrityError" in messages
+    assert all("合成研究进度" not in message and "synthetic" not in message for message in messages)
     frames = await asyncio.wait_for(drain(response), 2)
     saved = store.get_run(user, run_id)
     notice = {"stream_error": "result_unconfirmed", "run_id": run_id, "after_seq": saved["last_seq"]}

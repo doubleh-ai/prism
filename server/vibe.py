@@ -24,7 +24,6 @@ from .models import VibeFollowUpRequest, VibePlanRequest, validation_error_messa
 from .research_context import build_research_context, build_research_prompt, source_timestamp
 from .vibe_engine import (
     VibeEngineError,
-    engine_cancel,
     engine_create_session,
     engine_events,
     engine_get_messages,
@@ -1196,74 +1195,14 @@ def _finish_cancelled(plan: dict) -> None:
 
 
 async def cancel_owned_plan(username: str, plan_id: str) -> dict:
+    """Historical sidecar records never authorize contacting a retired engine."""
     plan = get_owned_plan(username, plan_id, recover=False)
-    if plan.get("status") not in _ACTIVE_STATUSES:
-        return {"plan": plan, "cancelled": False, "cancel_requested": False}
-    session_id = str(plan.get("engine_session_id") or "")
-    if not session_id:
-        task = _TASKS.pop(plan_id, None)
-        if not task or task.done():
-            return {
-                "plan": plan,
-                "cancelled": False,
-                "cancel_requested": False,
-                "detail": "未保留可取消的引擎会话，无法确认旧任务已停止；历史状态保持不变。",
-            }
-        task.cancel()
-        _finish_cancelled(plan)
-        requested, confirmed = True, True
-    else:
-        requested, confirmed = False, False
-        # Prevent a follow-up from starting while the cancellation response for
-        # this exact attempt is still in flight.
-        plan.update(status="cancelling")
-        _update_vibe_plan(username, plan_id, plan)
-        _CANCEL_INFLIGHT.add(plan_id)
-        try:
-            response = await engine_cancel(session_id)
-            requested = True
-            confirmed = isinstance(response, dict) and (
-                response.get("cancelled") is True or response.get("status") == "cancelled"
-            )
-        except VibeEngineError:
-            # Preserve monitoring and the exact attempt while cancellation is unknown.
-            pass
-        finally:
-            _CANCEL_INFLIGHT.discard(plan_id)
-        latest = get_owned_plan(username, plan_id, recover=False)
-        if latest.get("status") not in _ACTIVE_STATUSES:
-            _update_vibe_plan(username, plan_id, latest)
-            return {
-                "plan": latest,
-                "cancelled": latest.get("status") == "cancelled",
-                "cancel_requested": requested,
-            }
-        plan = latest
-        if confirmed:
-            task = _TASKS.pop(plan_id, None)
-            if task and not task.done():
-                task.cancel()
-            _finish_cancelled(plan)
-        else:
-            plan.update(
-                status="cancelling",
-                stage="cancelling",
-                stage_label="正在核实停止状态",
-                agent_summary="已请求引擎停止，等待确认。"
-                if requested
-                else "取消请求未确认；保留原记录，不自动恢复监控。",
-            )
-    _append_activity(
-        plan,
-        {
-            "kind": "system",
-            "label": "研究已停止" if confirmed else "请求停止研究",
-            "status": "cancelled" if confirmed else "cancelling",
-            "summary": "引擎确认停止" if confirmed else "未确认停止，不视为已取消",
-        },
-    )
-    _update_vibe_plan(username, plan_id, plan)
-    return {"plan": plan, "cancelled": confirmed, "cancel_requested": requested}
+    return {
+        "plan": plan,
+        "cancelled": False,
+        "cancel_requested": False,
+        "detail": "旧研究引擎已停用，无法通过本平台确认旧任务是否停止；历史状态保持不变。",
+    }
 
 
 @router.delete("/plans/{plan_id}")

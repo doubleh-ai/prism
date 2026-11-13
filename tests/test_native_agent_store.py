@@ -2,6 +2,7 @@
 
 import json
 import re
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -49,6 +50,28 @@ def test_create_and_reopen_persists_execution_and_distinguishes_research_review(
         "assistant_delta",
         "run_finished",
     ]
+
+
+def test_history_polling_does_not_take_write_lock_or_reinitialize_schema(owners):
+    from server.database import DB_PATH
+
+    run = create()
+    with get_db() as reader:
+        reader.execute("PRAGMA busy_timeout=25")
+        statements = []
+        reader.set_trace_callback(statements.append)
+        writer = sqlite3.connect(DB_PATH, isolation_level=None)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            for _ in range(3):
+                assert store.get_run("alice", run["id"])["status"] == "queued"
+                assert len(store.list_events("alice", run["id"])) == 1
+                assert len(store.list_runs("alice")) == 1
+        finally:
+            writer.rollback()
+            writer.close()
+            reader.set_trace_callback(None)
+        assert statements and all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
 
 
 def test_request_key_scopes_and_changed_input_conflict(owners):

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.market.models import Quote
+from server.market.models import KLine, Quote
 
 
 @pytest.fixture
@@ -94,3 +94,27 @@ async def test_search_exact_code_has_direct_fallback(market_client):
     data = r.json()
     assert data["hits"][0]["ticker"] == "300607"
     assert data["hits"][0]["market"] == "SZ"
+
+
+@pytest.mark.parametrize("adjustment", [None, "none", "qfq", "hfq"])
+async def test_kline_http_preserves_requested_adjustment(market_client, adjustment):
+    expected = adjustment or "none"
+    bar = KLine(timestamp=1, open=10, high=10, low=10, close=10, volume=1, adjustment=expected)
+    with patch("server.market.router.get_chain") as factory:
+        chain = factory.return_value
+        chain.get_kline = AsyncMock(return_value=([bar], False))
+        response = await market_client.get(
+            "/api/quote/600519/kline", params={} if adjustment is None else {"adjustment": adjustment}
+        )
+    assert response.status_code == 200
+    chain.get_kline.assert_awaited_once_with("600519", period="1d", limit=120, adjustment=expected)
+    data = response.json()
+    assert data["adjustment"] == data["kline"][0]["adjustment"] == expected
+    assert data["kline"][0]["turnover"] is None
+
+
+async def test_invalid_adjustment_does_not_query_providers(market_client):
+    with patch("server.market.router.get_chain") as factory:
+        response = await market_client.get("/api/quote/600519/kline?adjustment=unknown")
+    assert response.status_code == 422
+    factory.assert_not_called()

@@ -35,7 +35,7 @@ def test_protocol_is_runtime_checkable():
         async def get_quote(self, ticker):
             return Quote(ticker=ticker, price=1.0, timestamp=1, source="fake")
 
-        async def get_kline(self, ticker, period="1d", limit=120):
+        async def get_kline(self, ticker, period="1d", limit=120, *, adjustment="none"):
             return []
 
         async def get_fundamentals(self, ticker):

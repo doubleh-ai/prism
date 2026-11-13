@@ -1,6 +1,5 @@
 """Owner isolation, immutable results and lifecycle behaviour across real APIs."""
 
-import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -293,34 +292,34 @@ async def test_vibe_page_and_agent_read_only_history_without_resuming_or_rewriti
     assert starts == []
 
 
-async def test_vibe_cancel_requires_confirmation_and_does_not_overwrite_completion(owners, monkeypatch):
+async def test_vibe_cancel_does_not_contact_retired_engine_or_overwrite_history(owners, monkeypatch):
     from server import vibe
     from server.models import VibePlanRequest
-    from server.vibe_engine import VibeEngineError
 
     plan = vibe.build_vibe_plan(VibePlanRequest(prompt="A cancellation test", agent=True))
     plan.update(
         id="cancel-vibe", status="running", engine_session_id="session-one", engine_attempt_id="attempt-one"
     )
     vibe._insert_vibe_plan(owners["user"], plan)
-    monkeypatch.setattr(vibe, "engine_cancel", AsyncMock(side_effect=VibeEngineError("offline")))
+    cancel = AsyncMock(side_effect=AssertionError("retired engine must not be contacted"))
+    monkeypatch.setattr(vibe, "engine_cancel", cancel, raising=False)
+    before = vibe._load_vibe_plan(plan["id"], owners["user"])
     result = await vibe.cancel_owned_plan(owners["user"], plan["id"])
-    assert result["cancelled"] is False and result["plan"]["status"] == "cancelling"
+    assert result["cancelled"] is False and result["cancel_requested"] is False
+    assert vibe._load_vibe_plan(plan["id"], owners["user"]) == before
 
-    async def completed_while_cancelling(_session):
-        current = vibe._load_vibe_plan(plan["id"], owners["user"])
-        vibe._finish_with_report(current, "# Completed report", "attempt-one")
-        vibe._update_vibe_plan(owners["user"], plan["id"], current)
-        with pytest.raises(HTTPException) as blocked:
-            vibe.start_owned_followup(owners["user"], plan["id"], "New follow up")
-        assert blocked.value.status_code == 503
-        await asyncio.sleep(0)
-        return {"status": "cancelled"}
-
-    monkeypatch.setattr(vibe, "engine_cancel", completed_while_cancelling)
+    # A locally retained completed report also remains untouched.
+    plan.update(status="complete", report_markdown="# Completed report")
+    vibe._update_vibe_plan(owners["user"], plan["id"], plan)
+    before = vibe._load_vibe_plan(plan["id"], owners["user"])
     result = await vibe.cancel_owned_plan(owners["user"], plan["id"])
     assert result["cancelled"] is False and result["plan"]["status"] == "complete"
     assert result["plan"]["report_markdown"] == "# Completed report"
+    assert vibe._load_vibe_plan(plan["id"], owners["user"]) == before
+    cancel.assert_not_awaited()
+    with pytest.raises(HTTPException) as blocked:
+        vibe.start_owned_followup(owners["user"], plan["id"], "New follow up")
+    assert blocked.value.status_code == 503
 
 
 def test_catalog_explicitly_excludes_management_and_arbitrary_access():

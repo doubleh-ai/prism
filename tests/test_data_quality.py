@@ -22,6 +22,38 @@ def bars(values):
     )
 
 
+def test_chart_frame_keeps_missing_amount_separate_from_zero():
+    from server.indicators.router import _df_from_kline_rows
+
+    rows = bars([10, 11, 12]).to_dict("records")
+    del rows[0]["amount"]
+    rows[1]["amount"] = None
+    rows[2]["amount"] = 0
+    frame = _df_from_kline_rows(rows)
+    assert frame["amount"].iloc[:2].isna().all()
+    assert frame["amount"].iloc[2] == 0
+
+
+async def test_scan_without_amount_requirement_serializes_missing_amount_as_null():
+    import json
+
+    from server.indicators import scanner
+
+    indicator = {"id": "prices", "name": "prices", "kind": "plot", "dsl": {"price": "close"}}
+    job = scanner.create_job("owner", indicator, {"scope": "watchlist", "tickers": ["600519"]})
+    calls = []
+
+    async def build(*args, **kwargs):
+        calls.append(args[0])
+        return bars([10.0] * 20).drop(columns="amount"), {}
+
+    await scanner._run_job(job, indicator, build)
+    result = scanner.get_job(job["id"], "owner")
+    assert calls == ["600519"] and result["status"] == "completed"
+    assert result["matches"][0]["turnover"] is None
+    json.dumps(result, allow_nan=False)
+
+
 @pytest.mark.parametrize(
     "values,expected", [(list(range(40)), 100), (list(range(40, 0, -1)), 0), ([10] * 40, 50)]
 )
@@ -97,7 +129,7 @@ async def test_scan_coverage_is_not_silently_completed(mode, expected):
         fund = {} if mode == "missing" or mode == "mixed" and ticker == "000001" else {"pe": 30}
         return bars([10] * 20), fund
 
-    await scanner._run_job(job, indicator, build, fast_fetch=False)
+    await scanner._run_job(job, indicator, build)
     result = scanner.get_job(job["id"], "owner")
     assert result["status"] == expected
     assert result["evaluated"] + result["failed"] + result["insufficient"] + result["excluded"] == 2
@@ -124,7 +156,7 @@ async def test_scan_never_labels_unknown_latest_as_valid(mode):
             df.loc[df.index[-1], "close"] = float("nan")
         return df, {}
 
-    await scanner._run_job(job, indicator, build, fast_fetch=False)
+    await scanner._run_job(job, indicator, build)
     result = scanner.get_job(job["id"], "owner")
     assert result["status"] == "failed"
     assert result["insufficient"] == 1

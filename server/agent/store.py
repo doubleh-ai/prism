@@ -232,7 +232,8 @@ def init_agent_db():
 
 @contextmanager
 def _transaction():
-    init_agent_db()
+    # The application initializes the schema once at startup. Event writes and
+    # polling must not reacquire a schema write lock on every operation.
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -345,7 +346,6 @@ def create_run(user, conv_id, question, model_id, workflow, request_id=None, *, 
 
 
 def get_run(user, run_id):
-    init_agent_db()
     with get_db() as db:
         return _public_run(_owned(db, user, run_id))
 
@@ -362,7 +362,6 @@ def append_event(user, run_id, event):
 def list_events(user, run_id, after_seq=0, limit=200):
     if type(after_seq) is not int or after_seq < 0 or type(limit) is not int or limit < 1:
         _reject()
-    init_agent_db()
     with get_db() as db:
         _owned(db, user, run_id)
         rows = db.execute(
@@ -386,7 +385,6 @@ def list_events(user, run_id, after_seq=0, limit=200):
 def list_runs(user, conv_id=None, limit=50):
     if type(limit) is not int or limit < 1:
         _reject()
-    init_agent_db()
     with get_db() as db:
         query = (
             "SELECT r.* FROM native_agent_runs r WHERE r.username=? "

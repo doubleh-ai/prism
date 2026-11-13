@@ -15,7 +15,7 @@ import urllib.request
 from .. import public_network
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
-from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
+from .models import Fundamentals, KLine, KLineProvenance, PriceAdjustment, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
 
@@ -145,7 +145,11 @@ class TencentProvider:
         except (ValueError, IndexError) as e:
             raise ProviderUnavailable(f"tencent: bad quote data: {e}") from e
 
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> list[KLine]:
+        if adjustment != "none":
+            raise ProviderUnavailable("Sina daily endpoint only supports unadjusted bars")
         if period not in {"1d", "1w", "1m"}:
             raise ProviderUnavailable(f"tencent: unsupported K-line period {period}")
         symbol = _sina_symbol(ticker)
@@ -177,6 +181,7 @@ class TencentProvider:
                     continue
                 out.append(
                     KLine(
+                        adjustment=adjustment,
                         timestamp=ts,
                         open=float(b["open"]),
                         high=float(b["high"]),

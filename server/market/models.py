@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+PriceAdjustment = Literal["none", "qfq", "hfq"]
+
 
 class Quote(BaseModel):
     """Real-time quote for a single ticker."""
@@ -52,6 +54,7 @@ class KLine(BaseModel):
     close: float
     volume: float = Field(..., ge=0)
     turnover: float | None = Field(default=None, ge=0)
+    adjustment: Literal["none", "qfq", "hfq", "unknown"] = "unknown"
     provenance: KLineProvenance | None = None
 
 
@@ -81,6 +84,9 @@ def describe_kline(bars: list[KLine], *, stale: bool) -> dict:
         "timestamp_kind": "bar_date",
         "data_kind": "kline",
         "period_completeness": "unknown",
+        "adjustment": bars[0].adjustment
+        if bars and all(b.adjustment == bars[0].adjustment for b in bars)
+        else "unknown",
         "stale": stale,
     }
 
