@@ -166,18 +166,6 @@ async def test_permanent_delete_requires_owner_and_trash_state(client, auth_cook
         assert db.execute("SELECT COUNT(*) FROM messages WHERE conv_id='trash'").fetchone()[0] == 0
 
 
-def test_fake_links_and_tool_volume_never_upgrade_vibe_trust():
-    from server.vibe import _quality_after_report
-
-    quality = _quality_after_report(
-        {"quality": {"tool_calls": 99, "tool_success": 99}},
-        "[a](https://example.invalid/a) [b](https://example.invalid/b) [c](https://example.invalid/c)",
-    )
-    assert quality["source_links"] == 3
-    assert quality["grade"] == "来源待核验"
-    assert quality["verified_sources"] == 0
-
-
 def test_legacy_vibe_heuristic_grade_is_not_displayed_as_verification():
     from server.vibe import _row_to_plan
 
@@ -190,87 +178,3 @@ def test_legacy_vibe_heuristic_grade_is_not_displayed_as_verification():
     assert quality["grade"] == "来源待核验"
     assert quality["verified_sources"] == 0
     assert quality["tool_calls"] == 10
-
-
-def test_vibe_attempt_counters_are_replay_safe_and_do_not_leak_between_followups():
-    from server.vibe import _apply_engine_event, _begin_attempt
-
-    plan = {"engine_attempt_id": "first", "activity": []}
-    _begin_attempt(plan, "first")
-    for _ in range(2):
-        _apply_engine_event(plan, "tool_call", {"tool": "web_search", "tool_call_id": "call"}, "e1")
-        _apply_engine_event(
-            plan, "tool_result", {"tool": "web_search", "tool_call_id": "call", "preview": "result"}, "e2"
-        )
-    _apply_engine_event(plan, "tool_call", {"tool": "web_search", "tool_call_id": "call"}, "new-event-id")
-    assert plan["quality"]["tool_calls"] == plan["quality"]["tool_success"] == 1
-    _begin_attempt(plan, "first")
-    assert plan["quality"]["tool_success"] == 1
-    plan["engine_attempt_id"] = "second"
-    _begin_attempt(plan, "second")
-    _apply_engine_event(plan, "tool_call", {"tool": "web_search", "attempt_id": "first"}, "old")
-    _apply_engine_event(plan, "tool_call", {"tool": "web_search", "tool_call_id": "call"}, "e1")
-    _apply_engine_event(
-        plan, "tool_result", {"tool": "web_search", "tool_call_id": "call", "preview": "未获取到数据"}, "e2"
-    )
-    assert plan["quality"]["tool_calls"] == 1
-    assert plan["quality"]["tool_success"] == 0
-    assert plan["quality"]["tool_degraded"] == 1
-    assert plan["activity"][-1]["published_at"] is None
-    assert plan["activity"][-1]["retrieved_at"] is None
-    assert plan["activity"][-1]["observed_at"].endswith("+08:00")
-
-
-def test_vibe_simultaneous_calls_match_by_id_not_last_tool_name():
-    from server.vibe import _apply_engine_event, _begin_attempt
-
-    plan = {"engine_attempt_id": "attempt", "activity": []}
-    _begin_attempt(plan, "attempt")
-    for call_id in ("first", "second"):
-        _apply_engine_event(plan, "tool_call", {"tool": "web_search", "call_id": call_id}, call_id)
-    _apply_engine_event(
-        plan, "tool_result", {"tool": "web_search", "call_id": "first", "preview": "result"}, "result"
-    )
-    assert plan["activity"][0]["status"] == "complete"
-    assert plan["activity"][1]["status"] == "running"
-
-
-async def test_vibe_followup_gets_new_clock_without_rewriting_original_report(
-    client, auth_cookies, monkeypatch
-):
-    from server import vibe
-
-    old = build_research_context(run_id="old", now=datetime(2026, 7, 2, tzinfo=UTC), engine="vibe")
-    new = build_research_context(run_id="new", now=datetime(2026, 10, 21, tzinfo=UTC), engine="vibe")
-    plan = {
-        "id": "clock",
-        "prompt": "research",
-        "market": "A股",
-        "horizon": "swing",
-        "risk_level": "balanced",
-        "created_at": 1,
-        "status": "complete",
-        "engine_session_id": "session",
-        "report_markdown": "original",
-        "report_research": old,
-        "research": old,
-        "quality": {"tool_calls": 9},
-    }
-    vibe._insert_vibe_plan("testuser", plan)
-    # Pure mocked legacy clock contract; the shipped execution gate stays closed.
-    monkeypatch.setattr(vibe, "require_vibe_execution", lambda: None)
-    monkeypatch.setattr(vibe, "build_research_context", lambda **kwargs: new)
-    monkeypatch.setattr(vibe, "_start_task", lambda *args, **kwargs: None)
-    response = await client.post(
-        "/api/vibe/plans/clock/follow-up", cookies=auth_cookies, json={"question": "最新进展？"}
-    )
-    assert response.status_code == 200
-    result = response.json()["plan"]
-    assert result["research"] == result["followups"][0]["research"] == new
-    assert result["report_research"] == old
-    assert result["quality"]["tool_calls"] == 0
-    assert result["report_quality"]["tool_calls"] == 9
-    assert result["engine_attempt_id"] == ""
-    prompt = vibe._followup_prompt(result, "最新进展？")
-    assert new["as_of"] in prompt
-    assert old["as_of"] not in prompt

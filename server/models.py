@@ -103,20 +103,6 @@ class SavedReportSaveRequest(BaseModel):
     summary: str | None = Field(default="", max_length=500)
 
 
-# ── Vibe Trading ──
-class VibePlanRequest(BaseModel):
-    prompt: str = Field(..., min_length=2, max_length=2000)
-    market: str = Field(default="A股", min_length=1, max_length=32)
-    horizon: str = Field(default="swing", pattern=r"^(intraday|swing|position|long)$")
-    risk_level: str = Field(default="balanced", pattern=r"^(defensive|balanced|aggressive)$")
-    research_depth: str = Field(default="deep", pattern=r"^(focused|deep|swarm)$")
-    agent: bool = True
-
-
-class VibeFollowUpRequest(BaseModel):
-    question: str = Field(..., min_length=2, max_length=3000)
-
-
 # ── Conversations ──
 class CreateConvRequest(BaseModel):
     skill: str | None = Field(default="prism-research", max_length=64)
