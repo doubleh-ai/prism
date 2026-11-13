@@ -14,13 +14,93 @@ from server.productivity.assistant import parse_routine
 
 
 @pytest.fixture(autouse=True)
-def work_schema():
+def work_schema(monkeypatch):
     from server.productivity import calendar, notifications, projects, store
 
     store.init_productivity_db()
     calendar.init_calendar_db()
     projects.init_projects_db()
     notifications.init_notifications_db()
+    monkeypatch.setattr(model_routes, "_deployment_routes", None)
+
+
+def deployment_setting(**changes):
+    return {
+        "model_id": model_routes.config.DEFAULT_MODEL,
+        "enabled": True,
+        "allow_private_work": False,
+        "output_tokens_max": 1024,
+        "model_calls_max": 1,
+        "wall_seconds_max": 60,
+        "daily_calls_max": 2,
+        **changes,
+    }
+
+
+def test_deployment_routes_do_not_write_admin_settings_or_erase_unknown_usage(monkeypatch):
+    policy = {"research": deployment_setting(daily_calls_max=1)}
+    with monkeypatch.context() as isolated:
+        isolated.setattr(model_routes, "get_db", lambda: pytest.fail("startup must not open a database"))
+        model_routes.install_defaults(policy)
+    policy["research"]["daily_calls_max"] = 1000
+    model_id, _, route = model_routes.resolve("research")
+    assert route["version"] == 0 and route["daily_calls_max"] == 1
+    model_routes.reserve("research", "synthetic", "unobserved", model_id, expected_route_version=0)
+    with pytest.raises(HTTPException) as denied:
+        model_routes.reserve("research", "synthetic", "next", model_id, expected_route_version=0)
+    assert denied.value.status_code == 429
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM model_routes").fetchone()[0] == 0
+        assert tuple(
+            db.execute("SELECT status,input_tokens,output_tokens FROM model_request_reservations").fetchone()
+        ) == ("unknown", None, None)
+    with pytest.raises(ValueError, match="already_installed"):
+        model_routes.install_defaults({})
+
+
+@pytest.mark.parametrize("purpose", ["research", "work_planning"])
+def test_explicit_empty_deployment_policy_closes_every_unlisted_purpose(purpose):
+    model_routes.install_defaults({})
+    with pytest.raises(HTTPException) as denied:
+        model_routes.resolve(purpose, explicit_model=model_routes.config.DEFAULT_MODEL)
+    assert denied.value.status_code == 503
+
+
+def test_existing_admin_setting_overrides_deployment_default():
+    model_routes.init_model_routes_db()
+    stored = {
+        **deployment_setting(enabled=False),
+        "purpose": "research",
+        "configured": True,
+        "version": 7,
+    }
+    with get_db() as db:
+        db.execute("INSERT INTO model_routes VALUES(?,?,?)", ["research", 7, json.dumps(stored)])
+    model_routes.install_defaults({"research": deployment_setting()})
+    with pytest.raises(HTTPException) as denied:
+        model_routes.resolve("research")
+    assert denied.value.status_code == 503
+    with get_db() as db:
+        assert json.loads(db.execute("SELECT payload FROM model_routes").fetchone()[0]) == stored
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"model_id": "not-registered"},
+        {"enabled": 1},
+        {"daily_calls_max": True},
+        {"model_calls_max": 0},
+        {"wall_seconds_max": 181},
+        {"output_tokens_max": 2049},
+        {"allow_private_work": True},
+        {"api_key": "synthetic-forbidden"},
+    ],
+)
+def test_invalid_deployment_policy_does_not_attach_partial_settings(change):
+    with pytest.raises(ValueError, match="defaults_invalid"):
+        model_routes.install_defaults({"research": deployment_setting(**change)})
+    assert not model_routes.defaults_installed()
 
 
 def test_routine_intents_preserve_wall_time_and_reject_ambiguous_writes():
@@ -57,17 +137,11 @@ async def test_native_http_work_plan_keeps_purpose_quota_and_human_confirmation(
     )
     monkeypatch.setattr(model_routes.config, "DEFAULT_MODEL", "synthetic-work")
     model_routes.init_model_routes_db()
-    route = {
-        "purpose": "work_planning",
-        "version": 1,
-        "configured": True,
-        "enabled": True,
-        "allow_private_work": True,
-        "daily_calls_max": 2,
-        "model_id": "synthetic-work",
-    }
-    with get_db() as db:
-        db.execute("INSERT INTO model_routes VALUES(?,?,?)", ["work_planning", 1, json.dumps(route)])
+    model_routes.install_defaults(
+        {
+            "work_planning": deployment_setting(model_id="synthetic-work", allow_private_work=True),
+        }
+    )
     descriptor, requests = [], []
     plan = {"actions": [{"kind": "create_task", "fields": {"title": "合成模型安排"}}]}
     raw = b"".join(
@@ -123,6 +197,7 @@ async def test_native_http_work_plan_keeps_purpose_quota_and_human_confirmation(
     assert "_model_purpose" not in requests[0]
     with get_db() as db:
         assert db.execute("SELECT COUNT(*) FROM work_tasks").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM model_routes").fetchone()[0] == 0
         usage = dict(
             db.execute(
                 "SELECT purpose,status,input_tokens,output_tokens FROM model_request_reservations"

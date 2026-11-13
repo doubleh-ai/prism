@@ -44,6 +44,51 @@ class RouteUpdate(ClosedModel):
     daily_calls_max: int = Field(default=50, ge=1, le=1000)
 
 
+_deployment_routes: dict[str, dict] | None = None
+
+
+def validate_defaults(value):
+    """Validate startup policy without opening or modifying any database.
+
+    An explicit deployment policy closes unlisted purposes. Stored admin
+    settings remain authoritative; reservations always use the durable ledger.
+    """
+    fields = set(RouteUpdate.model_fields) - {"expected_version"}
+    if type(value) is not dict or set(value) - PURPOSES.keys():
+        raise ValueError("model_route_defaults_invalid")
+    result = {}
+    for purpose, item in value.items():
+        if not (
+            type(item) is dict
+            and set(item) == fields
+            and type(item["model_id"]) is str
+            and item["model_id"] in config.MODELS
+            and all(type(item[k]) is bool for k in ("enabled", "allow_private_work"))
+            and all(type(item[k]) is int for k in fields - {"model_id", "enabled", "allow_private_work"})
+            and (not item["allow_private_work"] or purpose == "work_planning")
+        ):
+            raise ValueError("model_route_defaults_invalid")
+        try:
+            result[purpose] = RouteUpdate.model_validate({"expected_version": 0, **item}).model_dump(
+                exclude={"expected_version"}
+            )
+        except ValueError:
+            raise ValueError("model_route_defaults_invalid") from None
+    return result
+
+
+def defaults_installed():
+    return _deployment_routes is not None
+
+
+def install_defaults(value):
+    """Attach one reviewed startup policy; never write an admin setting."""
+    global _deployment_routes
+    if defaults_installed():
+        raise ValueError("model_route_defaults_already_installed")
+    _deployment_routes = validate_defaults(value)
+
+
 def init_model_routes_db():
     with get_db() as db:
         db.executescript("""
@@ -62,7 +107,17 @@ def init_model_routes_db():
 
 def _route(db, purpose):
     row = db.execute("SELECT payload FROM model_routes WHERE purpose=?", [purpose]).fetchone()
-    return json.loads(row[0]) if row else {"purpose": purpose, "version": 0, "configured": False}
+    if row:
+        return json.loads(row[0])
+    if _deployment_routes is not None:
+        return {
+            "purpose": purpose,
+            "version": 0,
+            "configured": True,
+            "enabled": False,
+            **_deployment_routes.get(purpose, {}),
+        }
+    return {"purpose": purpose, "version": 0, "configured": False}
 
 
 def _choices():
