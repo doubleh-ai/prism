@@ -427,7 +427,7 @@ async def _fund_for_ticker(chain, ticker):
         return {}
 
 
-async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
+async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True, *, require_amount=False):
     """Fetch OHLCV + fundamentals for a ticker -> (df, fund_dict)."""
     from ..market.router import get_chain
 
@@ -441,7 +441,12 @@ async def _build_df(ticker, period="1d", limit=150, include_fundamentals=True):
     kls = []
     for fetch_limit in fallback_limits:
         try:
-            kls, _ = await chain.get_kline(ticker, period=period, limit=fetch_limit)
+            kls, _ = await chain.get_kline(
+                ticker,
+                period=period,
+                limit=fetch_limit,
+                **({"require_amount": True} if require_amount else {}),
+            )
         except Exception as exc:
             log.warning("kline fetch failed for %s period=%s limit=%s: %s", ticker, period, fetch_limit, exc)
             continue
@@ -798,6 +803,7 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
             req.period,
             req.lookback,
             include_fundamentals=scanner.uses_fundamentals(ind["dsl"]),
+            **({"require_amount": True} if req.min_turnover else {}),
         )
         if df is None or len(df) == 0:
             continue

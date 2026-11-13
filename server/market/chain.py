@@ -9,6 +9,7 @@ exists either, raises :class:`NoProviderAvailable`.
 
 import json
 import logging
+import math
 import time
 from typing import Any
 
@@ -158,7 +159,13 @@ class ProviderChain:
 
     @async_work("market")
     async def get_kline(
-        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+        self,
+        ticker: str,
+        period: str = "1d",
+        limit: int = 120,
+        *,
+        adjustment: PriceAdjustment = "none",
+        require_amount: bool = False,
     ) -> tuple[list[KLine], bool]:
         if adjustment not in {"none", "qfq", "hfq"}:
             raise ValueError("unsupported price adjustment")
@@ -167,6 +174,11 @@ class ProviderChain:
             bars = [KLine(**row) for row in rows]
             if any(bar.adjustment != adjustment for bar in bars):
                 raise ProviderUnavailable("K-line adjustment does not match request")
+            # Turnover filters need the latest period's actual traded amount, including on cache hits.
+            if require_amount and bars:
+                amount = max(bars, key=lambda bar: bar.timestamp).turnover
+                if amount is None or not math.isfinite(amount):
+                    raise ProviderUnavailable("latest K-line traded amount is unavailable")
             return bars
 
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
@@ -179,7 +191,7 @@ class ProviderChain:
             for bar in normalized:
                 if bar.provenance is None:
                     bar.provenance = KLineProvenance(adapter=p.name, retrieved_at=completed_at)
-            return resample_kline(normalized, period, limit)
+            return checked([bar.model_dump() for bar in resample_kline(normalized, period, limit)])
 
         # Custom path — bypass _with_failover's list handling
         last_err = None
@@ -197,7 +209,7 @@ class ProviderChain:
                     pass
 
         # Coalesce concurrent identical requests
-        co_key = f"kline-v3:{ticker}:{period}:{limit}:{adjustment}"
+        co_key = f"kline-v3:{ticker}:{period}:{limit}:{adjustment}:amount={require_amount}"
 
         async def _runner():
             nonlocal last_err

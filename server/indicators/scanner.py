@@ -404,6 +404,7 @@ async def _run_job(
                                 config.get("period", "1d"),
                                 int(config.get("lookback") or 120),
                                 include_fundamentals=needs_fund,
+                                **({"require_amount": True} if min_turnover else {}),
                             ),
                             timeout=24,
                         )
