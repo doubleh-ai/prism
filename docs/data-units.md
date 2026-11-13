@@ -41,6 +41,7 @@
 
 - 同日沪深北三个样本均支持：腾讯 f[6] 为手，f[37] 为万元；依据是约 100 / 10000 的实测比例及 f[35] 金额与 AK amount 一致，并非凭字段索引记忆判定。
 - AKShare 此接口 volume 为股、amount 为元，符合官方文档；不能推广到 AKShare 的所有接口。
-- 两个 provider 原样映射后，`Quote.volume` 和 `Quote.turnover` 的单位不一致；同一 `min_turnover` 数值门槛不能跨两家直接比较，成交额存在约 10⁴ 倍尺度差异。
+- 在上述修复前基线中，两个 provider 原样映射的 `Quote.volume` / `Quote.turnover` 单位不一致，成交额存在约 10⁴ 倍尺度差异；报价归一化见 [PR #36](https://github.com/doubleh-ai/prism/pull/36)。
+- `min_turnover` 实际读取 K 线的 `amount`，不读取报价 `Quote.turnover`；K 线取证及修正见 [PR #37](https://github.com/doubleh-ai/prism/pull/37)。报价样本不能证明 K 线门槛的单位或行为。
 - 比例不精确等于 100 / 10000，符合腾讯字段展示精度差异；上表保留差异，没有补齐或改写数值。
 - `tests/test_tencent_async.py` 的报价夹具仅 11 字段，不含 f[37]，未覆盖此成交额映射；本 PR 不修改它。
