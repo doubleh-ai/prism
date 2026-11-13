@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from vibe_history import historical_plan, insert_historical_plan, update_historical_plan
 
 from server import capabilities as cap
 from server.database import get_db
@@ -273,34 +274,32 @@ async def test_scan_tool_uses_account_watchlist_and_all_real_conditions(owners, 
 
 async def test_vibe_page_and_agent_read_only_history_without_resuming_or_rewriting(owners, monkeypatch):
     from server import vibe
-    from server.models import VibePlanRequest
 
     starts = []
-    monkeypatch.setattr(vibe, "_start_task", lambda *a, **kw: starts.append((a, kw)))
-    plan = vibe.build_vibe_plan(VibePlanRequest(prompt="Research a company", agent=True))
+    monkeypatch.setattr(vibe, "_start_task", lambda *a, **kw: starts.append((a, kw)), raising=False)
+    plan = historical_plan("Research a company")
     plan.update(
         id="resumed-vibe", status="running", engine_session_id="session-one", engine_attempt_id="attempt-one"
     )
-    vibe._insert_vibe_plan(owners["user"], plan)
+    insert_historical_plan(owners["user"], plan)
     vibe.get_owned_plan(owners["user"], plan["id"])
     result, _, _ = await cap._execute("vibe_status", cap.IdArgs(id=plan["id"]), {"username": owners["user"]})
     assert result["plan"]["id"] == plan["id"] and starts == []
     assert result["plan"]["status"] == "running"
     plan.update(id="uncertain-vibe", engine_attempt_id="")
-    vibe._insert_vibe_plan(owners["user"], plan)
+    insert_historical_plan(owners["user"], plan)
     assert vibe.get_owned_plan(owners["user"], plan["id"])["status"] == "running"
     assert starts == []
 
 
 async def test_vibe_cancel_does_not_contact_retired_engine_or_overwrite_history(owners, monkeypatch):
     from server import vibe
-    from server.models import VibePlanRequest
 
-    plan = vibe.build_vibe_plan(VibePlanRequest(prompt="A cancellation test", agent=True))
+    plan = historical_plan("A cancellation test")
     plan.update(
         id="cancel-vibe", status="running", engine_session_id="session-one", engine_attempt_id="attempt-one"
     )
-    vibe._insert_vibe_plan(owners["user"], plan)
+    insert_historical_plan(owners["user"], plan)
     cancel = AsyncMock(side_effect=AssertionError("retired engine must not be contacted"))
     monkeypatch.setattr(vibe, "engine_cancel", cancel, raising=False)
     before = vibe._load_vibe_plan(plan["id"], owners["user"])
@@ -310,16 +309,13 @@ async def test_vibe_cancel_does_not_contact_retired_engine_or_overwrite_history(
 
     # A locally retained completed report also remains untouched.
     plan.update(status="complete", report_markdown="# Completed report")
-    vibe._update_vibe_plan(owners["user"], plan["id"], plan)
+    update_historical_plan(owners["user"], plan["id"], plan)
     before = vibe._load_vibe_plan(plan["id"], owners["user"])
     result = await vibe.cancel_owned_plan(owners["user"], plan["id"])
     assert result["cancelled"] is False and result["plan"]["status"] == "complete"
     assert result["plan"]["report_markdown"] == "# Completed report"
     assert vibe._load_vibe_plan(plan["id"], owners["user"]) == before
     cancel.assert_not_awaited()
-    with pytest.raises(HTTPException) as blocked:
-        vibe.start_owned_followup(owners["user"], plan["id"], "New follow up")
-    assert blocked.value.status_code == 503
 
 
 def test_catalog_explicitly_excludes_management_and_arbitrary_access():
@@ -491,10 +487,8 @@ def test_restart_revokes_old_bridge_grants_and_preserves_completed_calls(owners,
 
 
 async def test_vibe_original_and_followup_save_distinct_immutable_versions(client, auth_cookies, owners):
-    from server import vibe
-    from server.models import VibePlanRequest
 
-    plan = vibe.build_vibe_plan(VibePlanRequest(prompt="Version preservation", agent=False))
+    plan = historical_plan("Version preservation")
     plan.update(
         id="version-vibe",
         status="complete",
@@ -509,7 +503,7 @@ async def test_vibe_original_and_followup_save_distinct_immutable_versions(clien
             }
         ],
     )
-    vibe._insert_vibe_plan(owners["user"], plan)
+    insert_historical_plan(owners["user"], plan)
     url = "/api/vibe/plans/version-vibe/save-report"
     original = (await client.post(url, json={}, cookies=auth_cookies)).json()["report"]
     followup = (await client.post(url, json={"turn_id": "turn-one"}, cookies=auth_cookies)).json()["report"]
