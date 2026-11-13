@@ -116,7 +116,7 @@ def require_account_context(request: Request, authenticated_user: str) -> None:
 
 
 def verify_csrf(request: Request) -> None:
-    """Verify the request carries the CSRF defense header.
+    """Verify the defense header and matching double-submit CSRF token.
 
     For state-changing methods we require ``X-Requested-With: XMLHttpRequest``.
     Browsers will not add custom headers to cross-site form submissions
@@ -136,6 +136,15 @@ def verify_csrf(request: Request) -> None:
             status_code=403,
             detail=f"Missing {CSRF_REQUIRED_HEADER}: {CSRF_HEADER_VALUE} header",
         )
+
+    cookie_token = request.cookies.get("csrf_token", "")
+    header_token = request.headers.get("X-CSRF-Token", "")
+    if (
+        not cookie_token
+        or not header_token
+        or not secrets.compare_digest(cookie_token.encode("utf-8"), header_token.encode("utf-8"))
+    ):
+        raise HTTPException(status_code=403, detail="Missing or mismatched CSRF token")
 
     # Optional Origin pinning (configure ALLOWED_ORIGINS in production).
     if ALLOWED_ORIGINS:

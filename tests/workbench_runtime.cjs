@@ -399,7 +399,22 @@ function persistedAndOfflineResearchStatus() {
   assert(bubble.innerHTML.includes('连接暂时中断')&&!bubble.innerHTML.includes('research-progress'));
 }
 
+async function csrfEchoAndFactBasedScan() {
+  const {context,app,doc}=environment();
+  let sent;
+  context.fetch=async(url,opts)=>{sent=opts;return {ok:true,status:200};};
+  await app.api('/api/convs',{method:'POST'});
+  assert.equal(sent.headers['X-CSRF-Token'],'test-csrf');
+  assert.equal(sent.headers['X-Requested-With'],'XMLHttpRequest');
+  vm.runInContext(fs.readFileSync('static/js/app.indicators.js','utf8'),context);
+  app._renderScanResults('指标',{scanned:1,matches:[{ticker:'000001',triggered_at:1,price:10,days_ago:8,strength:99}]});
+  const html=doc.getElementById('indicatorPreview').innerHTML;
+  assert(html.includes('8 根 K 线前触发'));
+  assert(!html.includes('width:99')&&!html.includes('强度'));
+}
+
 (async()=>{
+  await csrfEchoAndFactBasedScan();
   shippedRenderingContracts();
   imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();

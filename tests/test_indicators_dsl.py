@@ -176,3 +176,33 @@ def test_natural_language_composite_translation_keeps_all_three_conditions():
     assert translated["dsl"]["and"][0]["and"][0]["within"][0]["cross_up"]
     volume_rhs = translated["dsl"]["and"][1]["gt"][1]["mul"][1]
     assert volume_rhs["ref"][1] == 1
+
+
+def test_rsi14_wilder_reversal_reference():
+    close = [
+        10.0,
+        10.5,
+        11.0,
+        11.5,
+        12.0,
+        12.5,
+        13.0,
+        13.5,
+        14.0,
+        14.5,
+        15.0,
+        15.5,
+        16.0,
+        16.5,
+        15.5,
+        14.0,
+        12.5,
+        11.0,
+        10.0,
+        9.5,
+    ]
+    actual = evaluate({"rsi": 14}, pd.DataFrame({"close": close, "high": close, "low": close, "volume": 1.0}))
+    assert actual.iloc[:14].isna().all()
+    assert actual.iloc[14:].tolist() == pytest.approx(
+        [86.6667, 71.3080, 59.8801, 51.0665, 46.1859, 43.9254], abs=1e-3
+    )

@@ -388,8 +388,8 @@ async def test_nonconsumer_purposes_cannot_be_saved_resolved_or_reserved(
                 (),
                 {
                     "method": "PUT",
-                    "cookies": auth_cookies,
-                    "headers": {"X-Requested-With": "XMLHttpRequest"},
+                    "cookies": {**auth_cookies, "csrf_token": "synthetic-test-csrf"},
+                    "headers": {"X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": "synthetic-test-csrf"},
                 },
             )(),
         )

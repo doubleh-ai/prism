@@ -501,7 +501,7 @@ def _signal_events(ind, df, res, limit=60):
                 "label": marker,
                 "name": ind["name"],
                 "reason": _event_reason(ind, idx, df, res),
-                "strength": max(30, 100 - days_ago * 12),
+                "days_ago": days_ago,
                 "price": float(df["close"].iloc[idx]),
                 "color": color,
             }
@@ -762,7 +762,7 @@ async def eval_indicator(ind_id: str, req: EvalRequest, request: Request):
             "zones": _signal_zones(ind, df, res),
             "latest": latest,
             "reason": events[-1]["reason"] if events else "最近没有触发",
-            "strength": events[-1]["strength"] if events else 0,
+            "days_ago": events[-1]["days_ago"] if events else None,
             "visual": ind.get("visual") or _default_visual("signal"),
             "params": pvals,
         }
@@ -819,9 +819,9 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
                     "triggered_at": int(df["t"].iloc[idx]),
                     "price": float(df["close"].iloc[-1]),
                     "turnover": turnover if math.isfinite(turnover) else None,
-                    "strength": max(30, 100 - days_ago * 12),
+                    "days_ago": days_ago,
                     "reason": _event_reason(ind, idx, df, res),
                 }
             )
-    matches.sort(key=lambda x: (x.get("strength", 0), x.get("triggered_at", 0)), reverse=True)
+    matches.sort(key=lambda x: x["days_ago"])
     return {"matches": matches, "scanned": len(tickers)}

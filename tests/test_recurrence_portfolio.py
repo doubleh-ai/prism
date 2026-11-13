@@ -66,7 +66,8 @@ async def owned_client():
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
-        headers={"X-Requested-With": "XMLHttpRequest"},
+        headers={"X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": "synthetic-test-csrf"},
+        cookies={"csrf_token": "synthetic-test-csrf"},
     ) as client:
         yield client, cookies
 

@@ -424,6 +424,7 @@ async def test_actual_http_auth_csrf_catalog_and_stream_use_native_engine(native
     ) as client:
         assert (await client.get("/api/agent/workflows")).status_code == 401
         client.cookies.set("token", auth.create_session(user))
+        client.cookies.set("csrf_token", "synthetic-test-csrf")
         assert {r["workflow"] for r in (await client.get("/api/agent/workflows")).json()} == {
             "research",
             "industry",
@@ -435,7 +436,9 @@ async def test_actual_http_auth_csrf_catalog_and_stream_use_native_engine(native
         assert "analysis_start" not in {row["id"] for row in catalog}
         assert (await client.post("/api/agent/chat/stream", json=body())).status_code == 403
         result = await client.post(
-            "/api/agent/chat/stream", json=body(), headers={"X-Requested-With": "XMLHttpRequest"}
+            "/api/agent/chat/stream",
+            json=body(),
+            headers={"X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": "synthetic-test-csrf"},
         )
         assert (
             result.status_code == 200

@@ -324,16 +324,13 @@ def _coerce_param_values(indicator: dict[str, Any], override: dict[str, Any]) ->
 
 
 def _sort_matches(matches: list[dict[str, Any]], config: dict[str, Any], signal: bool) -> None:
-    sort_key = config.get("sort") or ("strength" if signal else "latest_value")
+    sort_key = config.get("sort") or ("recent_signal" if signal else "latest_value")
     direction = config.get("direction", "desc")
-    key = "strength"
-    if sort_key == "recent_signal":
-        key = "triggered_at"
-    elif sort_key == "latest_value":
-        key = "value"
     matches.sort(
         key=lambda row: (
-            float(row.get(key) if row.get(key) is not None else -math.inf),
+            float(row.get("value") if row.get("value") is not None else -math.inf)
+            if sort_key == "latest_value"
+            else -float(row.get("days_ago", math.inf)),
             float(row.get("turnover") or 0),
         ),
         reverse=direction != "asc",
@@ -439,7 +436,6 @@ async def _run_job(
                                     "price": float(df["close"].iloc[-1]),
                                     "turnover": turnover if math.isfinite(turnover) else None,
                                     "days_ago": days_ago,
-                                    "strength": max(30, 100 - days_ago * 12),
                                     "reason": f"{indicator.get('name', '指标')}：{days_ago} 根 K 线内触发",
                                 }
                         else:
@@ -452,7 +448,6 @@ async def _run_job(
                                     "price": float(df["close"].iloc[-1]),
                                     "turnover": turnover if math.isfinite(turnover) else None,
                                     "value": value,
-                                    "strength": 0,
                                     "reason": f"{indicator.get('name', '指标')} 最新值 {value:.4g}",
                                 }
                         if match:

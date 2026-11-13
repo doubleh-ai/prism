@@ -266,7 +266,8 @@ class TestCSRFVerify:
 
         class R:
             method = "POST"
-            headers = {"X-Requested-With": "XMLHttpRequest"}
+            headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": "issued"}
+            cookies = {"csrf_token": "issued"}
 
         verify_csrf(R())  # No raise
 
