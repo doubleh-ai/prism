@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = {
     "build_jsonpath_wheel.py",
+    "check_provider_key_isolation.py",
     "create_user.py",
     "import_legacy_history.py",
     "release_candidate.py",
