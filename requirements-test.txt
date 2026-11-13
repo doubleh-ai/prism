@@ -9,3 +9,7 @@ pluggy==1.7.0
 packaging==26.3
 pygments==2.21.0
 ruff==0.17.1
+mypy==1.19.1
+mypy_extensions==1.1.0
+pathspec==0.12.1
+librt==0.6.2
