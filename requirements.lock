@@ -33,6 +33,11 @@ akshare==1.18.64 \
     --hash=sha256:27792ca5b3dd4bee47fe83f212da7d3a9d0f43f327eef3beee5f2399e58eb390 \
     --hash=sha256:6ea525cc278204d5957e7bc1b68c93185ccecf004f7df81d9865982825fd94b9
 
+# AkShare also requires this distribution on Linux; it has no dependencies.
+akracer==0.0.14 ; platform_system == "Linux" \
+    --hash=sha256:629eaccd0e1d18366804b797eb2692ed47bed0028f55b5a5af3cc277d521df04 \
+    --hash=sha256:e084c14bf6d9a02d5da375e3af1cba3d46f103aa1cf3a2010593b3e95bf1c29a
+
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
     --hash=sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb
