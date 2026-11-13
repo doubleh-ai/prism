@@ -123,7 +123,7 @@ Research chat uses Prism's owned direct HTTP runtime. The entire application pro
 
 SSE frames carry `agent.run_id`, `agent.seq`, `agent.status` and `agent.event`. Readers deduplicate sequence numbers and reconnect with GET. Browser refresh checks owned history before attaching to the existing run. Execution `completed` is distinct from research `unreviewed`; collection and historical reuse do not certify facts. `/api/chat/stream` and `/api/chat/cancel` only alias Native behavior. No environment flag enables the old runner. `/api/chat/respond` returns 409 and asks the user to send a new message.
 
-Owned conversation history reads platform SQLite only. `history_migration.status` distinguishes `imported`, `pending_import` and `not_required`; pending import still exposes existing platform messages. The explicit offline importer is not an API or startup job and never restores a CLI runtime dependency. Vibe execution remains disabled with 503; owned saved history remains available.
+Owned conversation history reads platform SQLite only. `history_migration.status` distinguishes `imported`, `pending_import` and `not_required`; pending import still exposes existing platform messages. The explicit offline importer is not an API or startup job and never restores a CLI runtime dependency. Vibe plan creation (`POST /api/vibe/plan`) and follow-up (`POST /api/vibe/plans/{plan_id}/follow-up`) routes have been removed. Owned saved history remains available through `GET /api/vibe/plans` and `GET /api/vibe/plans/{plan_id}`.
 
 Endpoints are JSON over HTTP unless a stream or file is documented.
 Authentication is via a session
@@ -525,8 +525,10 @@ fields are omitted when they do not apply. Views are `market`, `industry`,
 `indicators`, `screener`, `reports`, `analysis`, and `vibe`.
 
 Capability results link to existing records; **navigation does not execute
-the capability again**. `analysis_start`, `vibe_start`, and `scan_start`
-create tasks and advertise `read_only: false`. A completed *start call*
+the capability again**. `scan_start` creates a task and advertises
+`read_only: false`. `analysis_start`, `vibe_start`, and `vibe_followup`
+remain catalog entries with `available: false` and an `unavailable_reason`;
+they cannot create tasks. A completed *start call*
 means that a task was accepted, not that the underlying research finished;
 open the task or use its status capability to inspect progress. Platform
 call records are not original external evidence.

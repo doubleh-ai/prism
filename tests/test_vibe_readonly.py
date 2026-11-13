@@ -27,6 +27,12 @@ def test_execution_routes_and_engine_client_are_removed():
     assert not any(name.startswith("engine_") for name in vars(vibe_engine))
 
 
+@pytest.mark.parametrize("path", ["/api/vibe/plan", "/api/vibe/plans/saved/follow-up"])
+async def test_removed_execution_endpoints_return_not_found(client, auth_cookies, path):
+    response = await client.post(path, cookies=auth_cookies, json={"question": "synthetic"})
+    assert response.status_code == 404
+
+
 @pytest.mark.parametrize("path", ["/api/vibe/plans", "/api/vibe/plans/saved"])
 async def test_history_requires_auth(client, path):
     assert (await client.get(path)).status_code == 401
