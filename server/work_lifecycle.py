@@ -20,9 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-KINDS = frozenset(
-    {"request", "agent", "analysis", "scan", "market", "auxiliary", "capability", "diagnostic"}
-)
+KINDS = frozenset({"request", "agent", "analysis", "scan", "market", "auxiliary", "capability", "diagnostic"})
 DURABLE_KINDS = frozenset({"agent", "analysis", "scan", "capability"})
 OS_FRESH_NS = 10_000_000_000
 _CURRENT = contextvars.ContextVar("prism_work_lease", default=None)
