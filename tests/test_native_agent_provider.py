@@ -92,14 +92,65 @@ async def collect(provider, **kw):
 
 
 @pytest.mark.parametrize(
-    "base,expected",
+    "base",
+    ["https://api.minimaxi.com/anthropic/v1/", "https://api.minimax.io/anthropic/v1/"],
+)
+async def test_minimax_uses_bearer_authentication_without_changing_request(base):
+    # MiniMax's Messages contract requires Authorization: Bearer <API_KEY>.
+    # This is a protocol fixture, not a reproduction of a live billing error.
+    requests = []
+    cfg = config(base)
+
+    def handler(request):
+        requests.append(request)
+        if request.headers.get("authorization") != "Bearer " + cfg["api_key"]:
+            return httpx.Response(401, json={"base_resp": {"status_code": 1004}})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text_stream())
+
+    provider = P.AnthropicMessagesProvider(transport=httpx.MockTransport(handler))
+    events = await collect(provider, model_cfg=cfg)
+    assert events[-1]["content"] == [{"type": "text", "text": "hello"}]
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == base.rstrip("/") + "/messages"
+    assert "x-api-key" not in request.headers
+    assert cfg["api_key"].encode() not in request.content
+    assert json.loads(request.content) == {
+        "model": cfg["model"],
+        "stream": True,
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "synthetic"}],
+        "system": "synthetic system",
+        "tools": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "base,expected,auth_header,auth_prefix",
     [
-        ("https://api.deepseek.com/anthropic", "https://api.deepseek.com/anthropic/v1/messages"),
-        ("https://api.deepseek.com/anthropic/v1/", "https://api.deepseek.com/anthropic/v1/messages"),
-        ("https://api.minimax.io/anthropic/v1/", "https://api.minimax.io/anthropic/v1/messages"),
+        (
+            "https://api.deepseek.com/anthropic",
+            "https://api.deepseek.com/anthropic/v1/messages",
+            "x-api-key",
+            "",
+        ),
+        (
+            "https://api.deepseek.com/anthropic/v1/",
+            "https://api.deepseek.com/anthropic/v1/messages",
+            "x-api-key",
+            "",
+        ),
+        (
+            "https://api.minimax.io/anthropic/v1/",
+            "https://api.minimax.io/anthropic/v1/messages",
+            "authorization",
+            "Bearer ",
+        ),
     ],
 )
-async def test_fragmented_utf8_frames_exact_endpoint_and_request_boundary(base, expected, monkeypatch):
+async def test_fragmented_utf8_frames_exact_endpoint_and_request_boundary(
+    base, expected, auth_header, auth_prefix, monkeypatch
+):
     wire_bytes = text_stream("中文界面")
     provider, wire, requests = source([wire_bytes[i : i + 1] for i in range(len(wire_bytes))])
     options = []
@@ -116,7 +167,9 @@ async def test_fragmented_utf8_frames_exact_endpoint_and_request_boundary(base, 
     assert events[-2] == {"type": "usage", "input_tokens": 3, "output_tokens": 7}
     assert events[-1]["usage_complete"] is True
     assert wire.closed and len(requests) == 1 and str(requests[0].url) == expected
-    assert requests[0].headers["x-api-key"] == config()["api_key"]
+    assert requests[0].headers[auth_header] == auth_prefix + config()["api_key"]
+    other_auth_header = "authorization" if auth_header == "x-api-key" else "x-api-key"
+    assert other_auth_header not in requests[0].headers
     assert config()["api_key"].encode() not in requests[0].content
     assert requests[0].headers["accept-encoding"] == "identity"
     assert options[0]["trust_env"] is False and options[0]["follow_redirects"] is False
