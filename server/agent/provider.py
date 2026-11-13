@@ -19,6 +19,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from .. import model_network
+
 _ENDPOINTS = {
     "https://api.deepseek.com/anthropic": "https://api.deepseek.com/anthropic/v1/messages",
     "https://api.deepseek.com/anthropic/v1": "https://api.deepseek.com/anthropic/v1/messages",
@@ -119,6 +121,18 @@ class ProviderError(RuntimeError):
     def __init__(self, code: str):
         self.code = code if code in _ERROR_CODES else "provider_protocol_error"
         super().__init__(self.code)
+
+
+def _transport(model_cfg, endpoint, supplied):
+    if not model_network.delegated():
+        return supplied
+    _need(supplied is None, "provider_configuration_error")
+    try:
+        return model_network.async_transport(
+            purpose=model_cfg.get("_model_purpose"), endpoint=endpoint, model=model_cfg["model"]
+        )
+    except model_network.ModelNetworkError:
+        raise ProviderError("provider_configuration_error") from None
 
 
 @dataclass(frozen=True)
@@ -497,7 +511,7 @@ class AnthropicMessagesProvider:
         body = _json_bytes(payload, "provider_input_error")
         _need(len(body) <= self.limits.max_request_bytes, "provider_input_error")
         client = httpx.AsyncClient(
-            transport=self.transport,
+            transport=_transport(model_cfg, endpoint, self.transport),
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_seconds),

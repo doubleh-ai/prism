@@ -31,7 +31,7 @@ def _model(model_id):
         isinstance(model.get(key), str) and model[key] for key in ("api_key", "model", "base_url")
     ):
         raise AuxiliaryModelUnavailable("辅助模型尚未配置")
-    return dict(model)
+    return {**model, "_model_purpose": "auxiliary"}
 
 
 def _object(pairs):

@@ -33,6 +33,117 @@ def test_routine_intents_preserve_wall_time_and_reject_ambiguous_writes():
     assert parse_routine("今天上午7点提醒我开项目会", "Asia/Shanghai", now=now).clarification
 
 
+async def test_native_http_work_plan_keeps_purpose_quota_and_human_confirmation(
+    client, auth_cookies, monkeypatch
+):
+    """Exercise the actual Messages parser and Work consumer, with synthetic HTTP."""
+    import httpx
+    from test_model_network import frame
+
+    from server import model_network
+
+    monkeypatch.setattr(model_network, "_network", None)
+    monkeypatch.setattr(
+        model_routes.config,
+        "MODELS",
+        {
+            "synthetic-work": {
+                "name": "Synthetic planner",
+                "base_url": "https://api.deepseek.com/anthropic",
+                "model": "synthetic-work",
+                "api_key": "synthetic-work-key",
+            }
+        },
+    )
+    monkeypatch.setattr(model_routes.config, "DEFAULT_MODEL", "synthetic-work")
+    model_routes.init_model_routes_db()
+    route = {
+        "purpose": "work_planning",
+        "version": 1,
+        "configured": True,
+        "enabled": True,
+        "allow_private_work": True,
+        "daily_calls_max": 2,
+        "model_id": "synthetic-work",
+    }
+    with get_db() as db:
+        db.execute("INSERT INTO model_routes VALUES(?,?,?)", ["work_planning", 1, json.dumps(route)])
+    descriptor, requests = [], []
+    plan = {"actions": [{"kind": "create_task", "fields": {"title": "合成模型安排"}}]}
+    raw = b"".join(
+        [
+            frame(
+                "message_start", message={"role": "assistant", "content": [], "usage": {"input_tokens": 2}}
+            ),
+            frame(
+                "content_block_start",
+                index=0,
+                content_block={
+                    "type": "tool_use",
+                    "id": "synthetic-tool",
+                    "name": "propose_work",
+                    "input": plan,
+                },
+            ),
+            frame("content_block_stop", index=0),
+            frame("message_delta", delta={"stop_reason": "tool_use"}, usage={"output_tokens": 3}),
+            frame("message_stop"),
+        ]
+    )
+
+    class WorkNetwork:
+        def async_transport(self, **selected):
+            descriptor.append(selected)
+
+            def send(request):
+                requests.append(json.loads(request.content))
+                return httpx.Response(200, content=raw, headers={"content-type": "text/event-stream"})
+
+            return httpx.MockTransport(send)
+
+    model_network.install(WorkNetwork())
+    body = {
+        "request_id": str(uuid4()),
+        "text": "请把这段合成想法整理成一个待办：先梳理评审重点。",
+        "timezone": "Asia/Shanghai",
+        "allow_model": True,
+    }
+    response = await client.post("/api/work/assistant/proposals", json=body, cookies=auth_cookies)
+    assert response.status_code == 200, response.text
+    proposal = response.json()["proposal"]
+    assert proposal["source"] == "model" and proposal["state"] == "ready"
+    assert descriptor == [
+        {
+            "purpose": "work_planning",
+            "endpoint": "https://api.deepseek.com/anthropic/v1/messages",
+            "model": "synthetic-work",
+        }
+    ]
+    assert requests[0]["tools"][0]["name"] == "propose_work"
+    assert "_model_purpose" not in requests[0]
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM work_tasks").fetchone()[0] == 0
+        usage = dict(
+            db.execute(
+                "SELECT purpose,status,input_tokens,output_tokens FROM model_request_reservations"
+            ).fetchone()
+        )
+    assert usage == {"purpose": "work_planning", "status": "complete", "input_tokens": 2, "output_tokens": 3}
+    assert (
+        await client.post("/api/work/assistant/proposals", json=body, cookies=auth_cookies)
+    ).json() == response.json()
+    assert len(descriptor) == 1
+    path = f"/api/work/assistant/proposals/{proposal['id']}"
+    assert (
+        await client.post(path + "/confirm", json={"digest": proposal["digest"]}, cookies=auth_cookies)
+    ).status_code == 200
+    with get_db() as db:
+        assert db.execute("SELECT title FROM work_tasks").fetchone()[0] == "合成模型安排"
+    assert (
+        await client.post(path + "/undo", json={"digest": proposal["digest"]}, cookies=auth_cookies)
+    ).status_code == 200
+
+
 async def test_preview_changes_nothing_confirmation_replays_one_object(client, auth_cookies):
     body = {"request_id": str(uuid4()), "text": "创建任务 整理合成评审材料", "timezone": "Asia/Shanghai"}
     response = await client.post("/api/work/assistant/proposals", json=body, cookies=auth_cookies)

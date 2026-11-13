@@ -442,7 +442,7 @@ class OpenAIResponsesProvider(P.AnthropicMessagesProvider):
         body = P._json_bytes(payload, "provider_input_error")
         P._need(len(body) <= self.limits.max_request_bytes, "provider_input_error")
         client = httpx.AsyncClient(
-            transport=self.transport,
+            transport=P._transport(model_cfg, "https://api.openai.com/v1/responses", self.transport),
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_seconds),

@@ -98,7 +98,7 @@ def resolve(purpose, *, explicit_model=None, private_work=False):
     model = config.MODELS.get(model_id)
     if not configuration_status(model)["configured"]:
         raise HTTPException(503, "该用途尚未配置可用模型")
-    return model_id, dict(model), route
+    return model_id, {**model, "_model_purpose": purpose}, route
 
 
 def reserve(purpose, actor, request_id, model_id, *, expected_route_version, minimum_available=1):
