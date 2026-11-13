@@ -284,6 +284,14 @@ class AkshareProvider:
             return []
         out: list[KLine] = []
         for _, r in df.tail(daily_fetch_limit(period, limit)).iterrows():
+            # Amount can be absent even when the day's OHLCV is valid. Keep
+            # that day so filters cannot silently use an earlier/partial bar.
+            try:
+                amount = float(r.get("amount"))
+            except (TypeError, ValueError):
+                amount = None
+            if amount is not None and (not math.isfinite(amount) or amount < 0):
+                amount = None
             try:
                 out.append(
                     KLine(
@@ -294,7 +302,7 @@ class AkshareProvider:
                         low=float(r["low"]),
                         close=float(r["close"]),
                         volume=float(r["volume"]),
-                        turnover=float(r.get("amount", 0)) if r.get("amount") is not None else None,
+                        turnover=amount,
                     )
                 )
             except Exception:

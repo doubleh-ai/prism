@@ -52,8 +52,8 @@ class KLine(BaseModel):
     high: float
     low: float
     close: float
-    volume: float = Field(..., ge=0)
-    turnover: float | None = Field(default=None, ge=0)
+    volume: float = Field(..., ge=0)  # shares for A-share bars
+    turnover: float | None = Field(default=None, ge=0)  # traded CNY amount; None means unavailable
     adjustment: Literal["none", "qfq", "hfq", "unknown"] = "unknown"
     provenance: KLineProvenance | None = None
 

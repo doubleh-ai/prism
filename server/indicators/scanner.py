@@ -303,6 +303,16 @@ def _persist_job(
         )
 
 
+def uses_amount(node: Any) -> bool:
+    if isinstance(node, dict):
+        if "amount" in node or node.get("price") == "amount":
+            return True
+        return any(uses_amount(value) for value in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(uses_amount(value) for value in node)
+    return False
+
+
 def uses_fundamentals(node: Any) -> bool:
     if isinstance(node, dict):
         if "fund" in node:
@@ -385,6 +395,7 @@ async def _run_job(
             needs_fund = uses_fundamentals(indicator.get("dsl"))
             trigger_window = int(config.get("trigger_window") or 5)
             min_turnover = float(config.get("min_turnover") or 0)
+            amount_requirement = "all" if uses_amount(indicator.get("dsl")) else bool(min_turnover)
             max_keep = max(int(config.get("max_results") or 100) * 4, 400)
             progress_lock = asyncio.Lock()
 
@@ -404,6 +415,7 @@ async def _run_job(
                                 config.get("period", "1d"),
                                 int(config.get("lookback") or 120),
                                 include_fundamentals=needs_fund,
+                                **({"require_amount": amount_requirement} if amount_requirement else {}),
                             ),
                             timeout=24,
                         )

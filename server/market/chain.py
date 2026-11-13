@@ -9,8 +9,9 @@ exists either, raises :class:`NoProviderAvailable`.
 
 import json
 import logging
+import math
 import time
-from typing import Any
+from typing import Any, Literal
 
 from ..work_adapters import async_work
 from ..work_lifecycle import WorkHandle, get_manager
@@ -49,6 +50,9 @@ class ProviderChain:
         # Pre-normalization Tencent quotes used lots / 10k CNY, including stale cache.
         if method == "quote" and provider_name == "tencent":
             method = "quote-shares-cny"
+        # Old AKShare bars may have silently dropped dates with missing amount.
+        if method == "kline-v3" and provider_name == "akshare":
+            method = "kline-v4"
         return f"{method}:{provider_name}:" + ":".join(parts)
 
     async def _coalesce(self, key: str, runner):
@@ -161,7 +165,13 @@ class ProviderChain:
 
     @async_work("market")
     async def get_kline(
-        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+        self,
+        ticker: str,
+        period: str = "1d",
+        limit: int = 120,
+        *,
+        adjustment: PriceAdjustment = "none",
+        require_amount: bool | Literal["all"] = False,
     ) -> tuple[list[KLine], bool]:
         if adjustment not in {"none", "qfq", "hfq"}:
             raise ValueError("unsupported price adjustment")
@@ -170,6 +180,12 @@ class ProviderChain:
             bars = [KLine(**row) for row in rows]
             if any(bar.adjustment != adjustment for bar in bars):
                 raise ProviderUnavailable("K-line adjustment does not match request")
+            # Filters need the latest amount; amount formulas also need history.
+            # Apply the same requirement to providers, fresh cache and stale cache.
+            if require_amount and bars:
+                required = bars if require_amount == "all" else [max(bars, key=lambda bar: bar.timestamp)]
+                if any(bar.turnover is None or not math.isfinite(bar.turnover) for bar in required):
+                    raise ProviderUnavailable("required K-line traded amount is unavailable")
             return bars
 
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
@@ -182,7 +198,7 @@ class ProviderChain:
             for bar in normalized:
                 if bar.provenance is None:
                     bar.provenance = KLineProvenance(adapter=p.name, retrieved_at=completed_at)
-            return resample_kline(normalized, period, limit)
+            return checked([bar.model_dump() for bar in resample_kline(normalized, period, limit)])
 
         # Custom path — bypass _with_failover's list handling
         last_err = None
@@ -200,7 +216,7 @@ class ProviderChain:
                     pass
 
         # Coalesce concurrent identical requests
-        co_key = f"kline-v3:{ticker}:{period}:{limit}:{adjustment}"
+        co_key = f"kline-v3:{ticker}:{period}:{limit}:{adjustment}:amount={require_amount}"
 
         async def _runner():
             nonlocal last_err
