@@ -15,7 +15,7 @@ from typing import Any
 from ..work_adapters import async_work
 from ..work_lifecycle import WorkHandle, get_manager
 from .cache import MarketCache
-from .models import Fundamentals, KLine, KLineProvenance, Quote, SearchHit
+from .models import Fundamentals, KLine, KLineProvenance, PriceAdjustment, Quote, SearchHit
 from .provider import (
     MarketDataProvider,
     NoProviderAvailable,
@@ -157,14 +157,25 @@ class ProviderChain:
             raise
 
     @async_work("market")
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> tuple[list[KLine], bool]:
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> tuple[list[KLine], bool]:
+        if adjustment not in {"none", "qfq", "hfq"}:
+            raise ValueError("unsupported price adjustment")
+
+        def checked(rows):
+            bars = [KLine(**row) for row in rows]
+            if any(bar.adjustment != adjustment for bar in bars):
+                raise ProviderUnavailable("K-line adjustment does not match request")
+            return bars
+
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
         async def _invoke(p):
-            kls = await p.get_kline(ticker, period=period, limit=limit)
+            kls = await p.get_kline(ticker, period=period, limit=limit, adjustment=adjustment)
             # Only a completed provider call establishes acquisition time. Cache
             # reads below never stamp now or infer origin from a cache/provider key.
             completed_at = int(time.time())
-            normalized = [KLine(**k.model_dump()) for k in kls]
+            normalized = checked([k.model_dump() for k in kls])
             for bar in normalized:
                 if bar.provenance is None:
                     bar.provenance = KLineProvenance(adapter=p.name, retrieved_at=completed_at)
@@ -175,13 +186,18 @@ class ProviderChain:
 
         # Check cache first
         for p in self.providers:
-            key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
+            key = self._cache_key("kline-v3", p.name, ticker, period, str(limit), adjustment)
             val, _ = self.cache.get(key)
             if val is not None:
-                return [KLine(**k) for k in val], False
+                try:
+                    cached = checked(val)
+                    if cached:
+                        return cached, False
+                except (ValueError, ProviderUnavailable):
+                    pass
 
         # Coalesce concurrent identical requests
-        co_key = f"kline-v2:{ticker}:{period}:{limit}"
+        co_key = f"kline-v3:{ticker}:{period}:{limit}:{adjustment}"
 
         async def _runner():
             nonlocal last_err
@@ -198,15 +214,20 @@ class ProviderChain:
                     # provider instead of caching/returning an empty chart.
                     last_err = ProviderNotFound(f"{p.name}: no kline for {ticker}")
                     continue
-                key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
+                key = self._cache_key("kline-v3", p.name, ticker, period, str(limit), adjustment)
                 self.cache.set(key, [k.model_dump() for k in kls], ttl=self.ttls.get("kline", 300))
                 return kls, False
             # All providers failed — fall back to stale
             for p in self.providers:
-                key = self._cache_key("kline-v2", p.name, ticker, period, str(limit))
+                key = self._cache_key("kline-v3", p.name, ticker, period, str(limit), adjustment)
                 val, _ = self.cache.get_stale(key)
                 if val is not None:
-                    return [KLine(**k) for k in val], True
+                    try:
+                        cached = checked(val)
+                        if cached:
+                            return cached, True
+                    except (ValueError, ProviderUnavailable):
+                        pass
             raise NoProviderAvailable(
                 f"all providers failed: {[p.name for p in self.providers]}"
             ) from last_err

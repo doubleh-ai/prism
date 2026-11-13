@@ -27,6 +27,15 @@ def test_ma_evaluates():
     assert s.tail(10).notna().all()
 
 
+def test_missing_amount_stays_unknown_through_comparison_and_negation():
+    frame = _df()
+    assert evaluate({"amount": 0}, frame).isna().all()
+    assert evaluate({"not": [{"gt": [{"amount": 0}, 100]}]}, frame).isna().all()
+    frame["amount"] = [0.0] + [float("nan")] * (len(frame) - 1)
+    actual = evaluate({"amount": 0}, frame)
+    assert actual.iloc[0] == 0 and actual.iloc[1:].isna().all()
+
+
 def test_cross_up_is_signal_and_fires():
     s = evaluate({"cross_up": [{"ma": 5}, {"ma": 20}]}, _df())
     assert is_signal(s)

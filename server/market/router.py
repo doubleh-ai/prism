@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from ..auth import require_auth
 from .factory import get_chain
-from .models import SearchHit
+from .models import PriceAdjustment, SearchHit
 from .provider import NoProviderAvailable, ProviderNotFound
 
 log = logging.getLogger("stock-app")
@@ -97,6 +97,7 @@ async def api_kline(
     request: Request,
     period: str = "1d",
     limit: int = 120,
+    adjustment: PriceAdjustment = "none",
 ):
     from .models import describe_kline
 
@@ -106,7 +107,7 @@ async def api_kline(
     if limit < 1 or limit > 500:
         raise HTTPException(400, "limit must be 1..500")
     try:
-        kls, stale = await get_chain().get_kline(ticker, period=period, limit=limit)
+        kls, stale = await get_chain().get_kline(ticker, period=period, limit=limit, adjustment=adjustment)
     except NoProviderAvailable as e:
         return JSONResponse(
             status_code=503,

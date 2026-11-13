@@ -35,6 +35,23 @@ function environment() {
 }
 const settled=()=>new Promise(setImmediate);
 
+function shippedRenderingContracts() {
+  const {context,app}=environment();
+  assert.equal(context.esc('<script>&'), '&lt;script&gt;&amp;');
+  const chunks=[{t:'tool',c:'indicator_list',d:'<img src=x onerror=alert(1)>'},{t:'tool',c:'research_read'}];
+  const original=JSON.stringify(chunks);
+  for(const streaming of [true,false]) {
+    const html=app._renderMsg(chunks,'',streaming,{});
+    assert.equal((html.match(/class="step-fold"/g)||[]).length,1);
+    assert(html.includes('工具调用 · 2 项')&&!html.includes('已完成 2 步'));
+    assert(html.includes('&lt;img')&&!html.includes('<img'));
+    assert(!html.includes('step-now'));
+  }
+  assert.equal(JSON.stringify(chunks),original);
+  const text=app._renderMsg([{t:'text',c:'普通回答'}],'',false,{});
+  assert(text.includes('普通回答')&&!text.includes('step-bar'));
+}
+
 function imeEnterCommitsWithoutSending() {
   const {app, doc} = environment();
   const input = doc.getElementById('input');
@@ -383,9 +400,10 @@ function persistedAndOfflineResearchStatus() {
 }
 
 (async()=>{
+  shippedRenderingContracts();
   imeEnterCommitsWithoutSending();
   await conversationOrder();await cachedForbiddenIsNotShown();immutableRefsAndMetadata();await backgroundHttpFailure();await backgroundEvents();await noDuplicatePostOnNetworkFailure();await logoutUsesServer();await vibeRetriesAfterNetworkFailure();await navigationOpensExistingRecord();controlsAndLiveCapabilityCards();hostileSourcesAndOptionsRemainData();timeFormatsPreserveMeaning();
   await marketDatesDoNotDependOnBrowserTimezone();await completedAnalysisUsesRecordedDuration();await managementDoesNotRequestCapabilityHistory();await historyAndErrorsAppearOnlyWhenRelevant();
   compactResearchProgress();researchExceptionsRemainVisible();persistedAndOfflineResearchStatus();
-  console.log('workbench runtime ok: 20 scenarios');
+  console.log('workbench runtime ok');
 })().catch(error=>{console.error(error);process.exitCode=1;});

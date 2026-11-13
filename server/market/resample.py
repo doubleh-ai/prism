@@ -23,6 +23,8 @@ def daily_fetch_limit(period: str, limit: int) -> int:
 def resample_kline(bars: Iterable[KLine], period: str, limit: int) -> list[KLine]:
     """Aggregate sorted daily/native bars into genuine weekly or monthly bars."""
     ordered = sorted(bars, key=lambda item: item.timestamp)
+    if len({bar.adjustment for bar in ordered}) > 1:
+        raise ValueError("cannot combine different price adjustments")
     limit = max(1, int(limit or 1))
     if period not in {"1w", "1m"}:
         return ordered[-limit:]
@@ -48,12 +50,13 @@ def resample_kline(bars: Iterable[KLine], period: str, limit: int) -> list[KLine
         result.append(
             KLine(
                 timestamp=last.timestamp,
+                adjustment=first.adjustment,
                 open=first.open,
                 high=max(bar.high for bar in group),
                 low=min(bar.low for bar in group),
                 close=last.close,
                 volume=sum(bar.volume for bar in group),
-                turnover=sum(turnovers) if turnovers else None,
+                turnover=sum(turnovers) if len(turnovers) == len(group) else None,
                 # Aggregation cannot invent a common origin or acquisition time.
                 provenance=(
                     first.provenance.model_copy(deep=True)

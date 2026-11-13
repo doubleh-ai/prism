@@ -781,7 +781,8 @@ class NativeAgent:
             )
         except asyncio.CancelledError:
             outcome.status, outcome.error_code = "cancelled", "execution_interrupted_unknown"
-        except Exception:
+        except Exception as error:
+            log.error("native_execution_failed error_type=%s", type(error).__name__)
             outcome.status, outcome.error_code = (
                 "partial" if full_text or pending else "failed",
                 "research_unavailable",
@@ -902,6 +903,12 @@ class NativeAgent:
                 outcome.abandoned = True
                 return outcome
             raise
+        except Exception as error:
+            # Failed persistence is not a terminal success. Keep the manager's
+            # blocked lease and the reader's result_unconfirmed notice; record
+            # only the phase/class, never exception text containing user input.
+            log.error("native_finalization_unconfirmed error_type=%s", type(error).__name__)
+            raise
 
     def _persist(self, outcome: Outcome):
         if outcome.abandoned:
@@ -947,6 +954,9 @@ class NativeAgent:
                 raise
             outcome.abandoned = True
             _retire_removed_owner(outcome)
+        except Exception as error:
+            log.error("native_terminal_persistence_unconfirmed error_type=%s", type(error).__name__)
+            raise
 
 
 def _retire_removed_owner(outcome: Outcome):

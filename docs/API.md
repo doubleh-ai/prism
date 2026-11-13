@@ -714,12 +714,17 @@ Real-time quote.
 ### `GET /api/quote/{ticker}/kline`
 
 K-line bars. Query params: `period` ∈ `1d|1w|1m|5m|15m|30m|60m`
-(default `1d`); `limit` 1..500 (default `120`).
+(default `1d`); `limit` 1..500 (default `120`);
+`adjustment` ∈ `none|qfq|hfq` (default `none`, unadjusted).
+Provider fallbacks and caches must match the requested adjustment. Unsupported
+adjusted sources fail explicitly rather than returning a different series.
 
-- 200: `{"ticker": "...", "period": "1d", "stale": false,
-  "kline": [{"ts": ..., "open": ..., "high": ..., "low": ...,
-  "close": ..., "volume": ...}, ...]}`
+- 200: `{"ticker": "...", "period": "1d", "stale": false, "adjustment": "none",
+  "kline": [{"timestamp": ..., "open": ..., "high": ..., "low": ...,
+  "close": ..., "volume": ..., "turnover": null, "adjustment": "none"}, ...]}`
+- Missing turnover remains `null`, distinct from zero; it is not estimated from volume and close.
 - 400: invalid period or limit.
+- 422: invalid adjustment.
 - 503: no provider available.
 
 ### `GET /api/fundamentals/{ticker}`

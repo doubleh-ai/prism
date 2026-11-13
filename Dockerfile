@@ -20,8 +20,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock && pip check
 
 
 # ── Runtime stage — minimal image, non-root user ──
@@ -29,8 +29,8 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PRISM_DATA_DIR=/app/data \
-    PRISM_LOG_FILE=/app/logs/app.log \
+    STOCK_DATA_DIR=/app/data \
+    STOCK_LOG_FILE=/app/logs/app.log \
     PRISM_LOG_LEVEL=INFO
 
 # Create non-root user

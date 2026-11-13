@@ -4,13 +4,25 @@ Start with the [Project Guide](docs/PROJECT_GUIDE.md) for local setup and the [a
 
 ## Development setup
 
-Use Python 3.12+ and an isolated virtual environment, HOME and data directory. Install `requirements.txt`; install development tools such as pytest-cov and Ruff separately. Node.js is needed for browser-script regression tests. `install.sh` only prepares local Python dependencies; it does not start a service or perform a deployment.
+Use Python 3.12 and an isolated virtual environment, HOME and data directory. Run
+`make install-dev`: application dependencies come from the hashed `requirements.lock`,
+then pinned test tools from `requirements-test.txt` without replacing runtime packages.
+CI and the container use the same application lock. `requirements.txt` describes the
+top-level dependencies; it is not evidence of a reproducible environment. Node.js is
+needed for browser-script regression tests. `install.sh` prepares local Python
+dependencies only; it does not start a service or perform a deployment.
 
 The app can start without model credentials. Real research needs a configured provider loaded into the process environment. DeepSeek and MiniMax use direct Messages HTTP; OpenAI uses direct Responses HTTP and requires both `OPENAI_API_KEY` and an explicit `OPENAI_MODEL`. No model is selected on the operator's behalf for the OpenAI slot. `.env.example` is a template, not an automatically loaded configuration file. Keep credentials out of command history, commits and test output.
 
 **No part of Prism may depend on or fall back to Claude Code CLI.** Do not install the CLI or external Skills for development, tests, candidate acceptance or recovery. Anthropic-compatible Messages denotes the direct HTTP protocol, not a Claude Code dependency. Application prompts belong in `server/agent/prompts.py`; auxiliary model tasks use `server/services/auxiliary_model.py`. Missing configuration or provider failure must remain an explicit failure.
 
 ## Validation and style
+
+Pytest configuration lives in `pyproject.toml`. Test the affected behavior while
+developing; run the full suite once the candidate is frozen, and rerun it when a
+shared dependency or cross-component change warrants it. Browser behavior tests
+must execute shipped JavaScript; Python reimplementations cannot validate it.
+See [quality acceptance](docs/quality-acceptance.md) for this hardening scope.
 
 Use synthetic accounts, temporary data and mocked providers for offline tests. Set isolated paths before importing the application: importing it initializes the database. Never use a production database or inherited credentials for development checks.
 

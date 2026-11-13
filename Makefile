@@ -15,11 +15,12 @@ help: ## Show this help.
 
 # ── Install ──
 install: ## Install runtime dependencies.
-	$(PIP) install -r requirements.txt
+	$(PIP) install --require-hashes -r requirements.lock
+	$(PIP) check
 
-install-dev: ## Install dev/test/lint dependencies.
-	$(PIP) install -r requirements.txt
-	$(PIP) install pytest-cov ruff mypy
+install-dev: install ## Install pinned test/lint tools without changing runtime versions.
+	$(PIP) install --no-deps -r requirements-test.txt
+	$(PIP) check
 
 # ── Tests ──
 test: ## Run full test suite.
@@ -40,10 +41,10 @@ coverage-open: coverage ## Open the HTML coverage report in a browser.
 
 # ── Lint / type / format ──
 lint: ## Run ruff linter.
-	$(PYTHON) -m ruff check server/ tests/ || true
+	$(PYTHON) -m ruff check server/ tests/
 
 format: ## Run ruff formatter (safe; check-only by default).
-	$(PYTHON) -m ruff format --check server/ tests/ || true
+	$(PYTHON) -m ruff format --check server/ tests/
 
 type-check: ## Run mypy on the server package.
 	$(PYTHON) -m mypy server/ --ignore-missing-imports --no-strict-optional

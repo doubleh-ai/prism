@@ -70,7 +70,8 @@ async def test_get_quote_unknown_ticker_raises():
 
 
 @pytest.mark.asyncio
-async def test_get_kline_builds_real_weekly_bars_from_daily_source():
+@pytest.mark.parametrize("adjustment, argument", [("none", ""), ("qfq", "qfq"), ("hfq", "hfq")])
+async def test_get_kline_builds_real_weekly_bars_from_daily_source(adjustment, argument):
     frame = pd.DataFrame(
         [
             {
@@ -111,10 +112,12 @@ async def test_get_kline_builds_real_weekly_bars_from_daily_source():
             },
         ]
     )
-    with patch("akshare.stock_zh_a_daily", return_value=frame):
+    with patch("akshare.stock_zh_a_daily", return_value=frame) as upstream:
         from server.market.akshare_provider import AkshareProvider
 
-        bars = await AkshareProvider().get_kline("600519", period="1w", limit=10)
+        bars = await AkshareProvider().get_kline("600519", period="1w", limit=10, adjustment=adjustment)
+        assert upstream.call_args.kwargs["adjust"] == argument
+        assert all(bar.adjustment == adjustment for bar in bars)
 
     assert len(bars) == 2
     assert (bars[0].open, bars[0].high, bars[0].low, bars[0].close) == (10, 14, 9, 13)

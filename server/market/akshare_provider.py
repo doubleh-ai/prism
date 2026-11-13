@@ -18,7 +18,7 @@ import time
 from ..config import AKSHARE_TIMEOUT
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
-from .models import Fundamentals, KLine, Quote, SearchHit
+from .models import Fundamentals, KLine, PriceAdjustment, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 from .resample import daily_fetch_limit, resample_kline
 
@@ -258,7 +258,11 @@ class AkshareProvider:
             source=self.name,
         )
 
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> list[KLine]:
+        if adjustment not in {"none", "qfq", "hfq"}:
+            raise ProviderUnavailable("unsupported price adjustment")
         if period not in {"1d", "1w", "1m"}:
             raise ProviderUnavailable(f"akshare: unsupported K-line period {period}")
         _akshare_or_raise()
@@ -269,7 +273,7 @@ class AkshareProvider:
                     "market",
                     ak.stock_zh_a_daily,
                     symbol=symbol,
-                    adjust="qfq",
+                    adjust="" if adjustment == "none" else adjustment,
                 )
             )
         except ProviderUnavailable:
@@ -283,6 +287,7 @@ class AkshareProvider:
             try:
                 out.append(
                     KLine(
+                        adjustment=adjustment,
                         timestamp=int(_pd_timestamp(r["date"])),
                         open=float(r["open"]),
                         high=float(r["high"]),

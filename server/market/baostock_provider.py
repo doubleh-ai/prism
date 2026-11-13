@@ -16,7 +16,7 @@ import time
 from ..config import BAOSTOCK_TIMEOUT
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
-from .models import Fundamentals, KLine, Quote, SearchHit
+from .models import Fundamentals, KLine, PriceAdjustment, Quote, SearchHit
 from .provider import ProviderNotFound, ProviderUnavailable
 
 log = logging.getLogger("stock-app")
@@ -167,7 +167,11 @@ class BaostockProvider:
             source=self.name,
         )
 
-    async def get_kline(self, ticker: str, period: str = "1d", limit: int = 120) -> list[KLine]:
+    async def get_kline(
+        self, ticker: str, period: str = "1d", limit: int = 120, *, adjustment: PriceAdjustment = "none"
+    ) -> list[KLine]:
+        if adjustment not in {"none", "qfq", "hfq"}:
+            raise ProviderUnavailable("unsupported price adjustment")
         _bs_or_raise()
         if period not in _PERIOD_MAP:
             raise ProviderUnavailable(f"baostock: unsupported K-line period {period}")
@@ -185,20 +189,21 @@ class BaostockProvider:
             "date,open,high,low,close,volume,amount",
             start,
             bs_period,
-            "2",  # forward-adjusted (qfq)
+            {"none": "3", "qfq": "2", "hfq": "1"}[adjustment],
         )
         out: list[KLine] = []
         for r in rows[-limit:]:
             try:
                 out.append(
                     KLine(
+                        adjustment=adjustment,
                         timestamp=self._date_to_ts(r.get("date")),
                         open=float(r["open"]),
                         high=float(r["high"]),
                         low=float(r["low"]),
                         close=float(r["close"]),
                         volume=float(r.get("volume") or 0),
-                        turnover=float(r.get("amount") or 0) or None,
+                        turnover=float(r["amount"]) if r.get("amount") not in (None, "") else None,
                     )
                 )
             except (TypeError, ValueError, KeyError):

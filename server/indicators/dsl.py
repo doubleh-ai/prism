@@ -67,7 +67,7 @@ def _b_vol(df, fund, _):
 def _b_amount(df, fund, _):
     if "amount" in df.columns:
         return df["amount"].astype(float)
-    return df["volume"].astype(float) * df["close"].astype(float)
+    return pd.Series(float("nan"), index=df.index)
 
 
 def _b_mavol(df, fund, n):

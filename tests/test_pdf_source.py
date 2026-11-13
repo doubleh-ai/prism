@@ -9,8 +9,10 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from server.agent import pdf_text
 
 
-def pdf(*, pages=1, encrypted=False):
+def pdf(*, pages=1, encrypted=False, attachment_bytes=0):
     writer = PdfWriter()
+    if attachment_bytes:
+        writer.add_attachment("synthetic.bin", b"x" * attachment_bytes)
     for index in range(pages):
         page = writer.add_blank_page(width=400, height=400)
         font = DictionaryObject(

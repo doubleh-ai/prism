@@ -40,6 +40,9 @@ def temp_data_dir(monkeypatch):
         # would be reused.
         server.database.reset_connection()
         server.database.init_db()
+        from server.agent.store import init_agent_db
+
+        init_agent_db()
         # Default network transports cannot spend model quota or send test data
         # outside loopback. Explicit MockTransport and ASGI tests stay real.
         import httpx

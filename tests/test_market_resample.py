@@ -2,6 +2,8 @@
 
 import datetime as dt
 
+import pytest
+
 from server.market.models import KLine
 from server.market.resample import daily_fetch_limit, resample_kline
 
@@ -36,7 +38,7 @@ def test_weekly_resample_uses_first_open_last_close_and_sums_volume():
     assert len(bars) == 2
     assert (bars[0].open, bars[0].high, bars[0].low, bars[0].close) == (10, 14, 9, 13)
     assert bars[0].volume == 600
-    assert bars[0].turnover == 4000
+    assert bars[0].turnover is None  # One daily amount is missing; a partial sum is not a weekly amount.
     assert bars[0].timestamp == _daily_bars()[2].timestamp
     assert (bars[1].open, bars[1].close, bars[1].volume) == (13, 14, 400)
 
@@ -66,3 +68,14 @@ def test_daily_fetch_limit_expands_source_history_for_period_bars():
     assert daily_fetch_limit("1m", 20) == 480
     assert daily_fetch_limit("1w", 2) == 60
     assert daily_fetch_limit("1m", 2) == 250
+
+
+def test_aggregation_preserves_zero_and_complete_amount_but_rejects_mixed_prices():
+    bars = [_bar("2024-01-29", 10, 12, 9, 11, 0, 0), _bar("2024-01-30", 11, 13, 10, 12, 200, 2400)]
+    for bar in bars:
+        bar.adjustment = "qfq"
+    result = resample_kline(bars, "1w", 10)[0]
+    assert result.turnover == 2400 and result.adjustment == "qfq"
+    bars[0].adjustment = "none"
+    with pytest.raises(ValueError, match="different price adjustments"):
+        resample_kline(bars, "1w", 10)

@@ -99,6 +99,38 @@ def test_pdf_page_out_of_range_is_not_an_invalid_document_or_empty_success(netwo
     assert len(network["requests"]) == network["closed"] == 1
 
 
+@pytest.mark.parametrize("encoding", ["length", "eof", "chunked"])
+def test_pdf_larger_than_html_limit_reaches_actual_parser(network, encoding):
+    from test_pdf_source import pdf
+
+    raw = pdf(attachment_bytes=700 * 1024)
+    if encoding == "length":
+        payload = wire(raw, content_type="application/pdf")
+    else:
+        headers = b"Transfer-Encoding: chunked\r\n" if encoding == "chunked" else b""
+        body = f"{len(raw):x}\r\n".encode() + raw + b"\r\n0\r\n\r\n" if encoding == "chunked" else raw
+        payload = b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n" + headers + b"\r\n" + body
+    network["wires"] = [payload]
+    value = sources.fetch_public_source("https://www.sse.com.cn/report.pdf")
+    assert value["status"] == "ok" and "Revenue 120" in value["text"]
+    assert value["body_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert network["closed"] == 1
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_pdf_body_still_cannot_exceed_pdf_limit(network, declared):
+    from server.agent.pdf_text import MAX_PDF_BYTES
+
+    raw = b"%PDF-" + b"x" * MAX_PDF_BYTES
+    payload = wire(raw, content_type="application/pdf")
+    if not declared:
+        payload = payload.replace(f"Content-Length: {len(raw)}\r\n".encode(), b"")
+    network["wires"] = [payload]
+    value = sources.fetch_public_source("https://www.sse.com.cn/report.pdf")
+    assert value["status"] == "body_too_large" and value["text"] == ""
+    assert network["closed"] == 1
+
+
 @pytest.mark.parametrize(
     "selection",
     [{"first_page": value} for value in (0, -1, 2001, True, "2", 1.5)]

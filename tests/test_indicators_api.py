@@ -449,7 +449,7 @@ async def test_background_scan_returns_partial_signal_results():
             }
         ), {}
 
-    await scanner._run_job(job, indicator, fake_build_df, fast_fetch=False)
+    await scanner._run_job(job, indicator, fake_build_df)
     completed = scanner.get_job(job["id"], "testuser")
 
     assert completed["status"] == "completed"

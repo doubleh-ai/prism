@@ -164,27 +164,29 @@ async def test_all_internal_launch_and_monitor_paths_are_closed():
         assert blocked.value.status_code == 503
 
 
-async def test_cancel_is_explicit_owned_fixed_operation_without_reading_messages(test_user, monkeypatch):
+async def test_cancel_keeps_owned_history_without_contacting_retired_engine(test_user, monkeypatch):
     plan = saved_plan(test_user["username"])
     cancel = AsyncMock(return_value={"cancelled": True})
     messages = AsyncMock(side_effect=AssertionError("no shared history reads"))
-    monkeypatch.setattr(vibe, "engine_cancel", cancel)
+    monkeypatch.setattr(vibe, "engine_cancel", cancel, raising=False)
     monkeypatch.setattr(vibe, "engine_get_messages", messages)
     with pytest.raises(HTTPException) as foreign:
         await vibe.cancel_owned_plan("another-account", plan["id"])
     assert foreign.value.status_code == 404
     cancel.assert_not_awaited()
     result = await vibe.cancel_owned_plan(test_user["username"], plan["id"])
-    cancel.assert_awaited_once_with("legacy-session")
+    cancel.assert_not_awaited()
     messages.assert_not_awaited()
-    assert result["cancelled"] is True
+    assert result["cancelled"] is False
+    assert result["cancel_requested"] is False
+    assert result["plan"]["status"] == "running"
 
 
 async def test_unknown_legacy_task_is_not_falsely_marked_cancelled(test_user, monkeypatch):
     plan = saved_plan(test_user["username"], session="")
     before = stored_rows()
     cancel = AsyncMock(side_effect=AssertionError("no session to cancel"))
-    monkeypatch.setattr(vibe, "engine_cancel", cancel)
+    monkeypatch.setattr(vibe, "engine_cancel", cancel, raising=False)
     result = await vibe.cancel_owned_plan(test_user["username"], plan["id"])
     assert result["cancelled"] is False
     assert result["cancel_requested"] is False
@@ -192,24 +194,11 @@ async def test_unknown_legacy_task_is_not_falsely_marked_cancelled(test_user, mo
     cancel.assert_not_awaited()
 
 
-@pytest.mark.parametrize("payload", [None, [], ["cancelled"], "cancelled"])
-async def test_malformed_cancel_response_keeps_unconfirmed_history(test_user, monkeypatch, payload):
-    plan = saved_plan(test_user["username"])
-    cancel = AsyncMock(return_value=payload)
-    monkeypatch.setattr(vibe, "engine_cancel", cancel)
-    result = await vibe.cancel_owned_plan(test_user["username"], plan["id"])
-    cancel.assert_awaited_once_with("legacy-session")
-    assert result["cancelled"] is False
-    assert result["cancel_requested"] is True
-    assert result["plan"]["status"] == "cancelling"
-    assert result["plan"]["engine_attempt_id"] == "legacy-attempt"
-
-
 async def test_delete_cannot_implicitly_cancel_old_task(client, auth_cookies, test_user, monkeypatch):
     plan = saved_plan(test_user["username"])
     before = stored_rows()
     cancel = AsyncMock(side_effect=AssertionError("delete is not cancellation authorization"))
-    monkeypatch.setattr(vibe, "engine_cancel", cancel)
+    monkeypatch.setattr(vibe, "engine_cancel", cancel, raising=False)
     response = await client.delete(f"/api/vibe/plans/{plan['id']}", cookies=auth_cookies)
     assert response.status_code == 409
     assert stored_rows() == before

@@ -34,7 +34,7 @@ class FakeProvider:
             raise ProviderUnavailable(f"{self.name} down")
         return self._quote.model_copy(update={"source": self.name, "ticker": ticker})
 
-    async def get_kline(self, ticker, period="1d", limit=120):
+    async def get_kline(self, ticker, period="1d", limit=120, *, adjustment="none"):
         if self._fail:
             raise ProviderUnavailable(f"{self.name} down")
         return []
@@ -51,6 +51,36 @@ class FakeProvider:
 
     async def health(self):
         return not self._fail
+
+
+async def test_adjustment_contract_separates_cache_and_rejects_wrong_fallback():
+    class Bars(FakeProvider):
+        async def get_kline(self, ticker, period="1d", limit=120, *, adjustment="none"):
+            self.calls += 1
+            actual = "unknown" if self.name == "unknown" else adjustment
+            return [KLine(timestamp=1, open=10, high=10, low=10, close=10, volume=1, adjustment=actual)]
+
+    unknown, correct = Bars("unknown"), Bars("correct")
+    cache = MarketCache()
+    # Old cache data cannot certify its adjustment and must not be reused.
+    cache.set("kline-v2:correct:600519:1d:120", [{"timestamp": 1, "close": 999}], ttl=60)
+    chain = ProviderChain([unknown, correct], cache=cache)
+    for adjustment in ("none", "qfq", "hfq"):
+        bars, stale = await chain.get_kline("600519", adjustment=adjustment)
+        assert not stale and bars[0].adjustment == adjustment
+        assert (await chain.get_kline("600519", adjustment=adjustment))[0] == bars
+    assert unknown.calls == correct.calls == 3
+    correct._fail = True
+    with pytest.raises(NoProviderAvailable):
+        await ProviderChain([unknown], cache=MarketCache()).get_kline("600519")
+
+
+async def test_mismatched_stale_cache_is_not_a_valid_fallback():
+    bar = KLine(timestamp=1, open=10, high=10, low=10, close=10, volume=1, adjustment="qfq")
+    cache = MarketCache()
+    cache.set("kline-v3:down:600519:1d:120:none", [bar.model_dump()], ttl=-1)
+    with pytest.raises(NoProviderAvailable):
+        await ProviderChain([FakeProvider("down", fail=True)], cache=cache).get_kline("600519")
 
 
 @pytest.mark.asyncio
@@ -172,15 +202,19 @@ async def test_concurrent_requests_coalesce_to_single_upstream_call():
 
 
 @pytest.mark.asyncio
-async def test_kline_chain_normalizes_daily_only_provider_and_uses_v2_cache_key():
+async def test_kline_chain_normalizes_daily_only_provider_and_uses_adjustment_cache_key():
     class DailyOnlyProvider(FakeProvider):
         name = "daily-only"
 
-        async def get_kline(self, ticker, period="1d", limit=120):
+        async def get_kline(self, ticker, period="1d", limit=120, *, adjustment="none"):
             return [
-                KLine(timestamp=1706486400, open=10, high=12, low=9, close=11, volume=100),
-                KLine(timestamp=1706832000, open=11, high=14, low=10, close=13, volume=200),
-                KLine(timestamp=1707091200, open=13, high=15, low=12, close=14, volume=300),
+                KLine(adjustment="none", timestamp=1706486400, open=10, high=12, low=9, close=11, volume=100),
+                KLine(
+                    adjustment="none", timestamp=1706832000, open=11, high=14, low=10, close=13, volume=200
+                ),
+                KLine(
+                    adjustment="none", timestamp=1707091200, open=13, high=15, low=12, close=14, volume=300
+                ),
             ]
 
     cache = MarketCache()
@@ -190,5 +224,5 @@ async def test_kline_chain_normalizes_daily_only_provider_and_uses_v2_cache_key(
     assert stale is False
     assert len(bars) == 2
     assert (bars[0].open, bars[0].close, bars[0].volume) == (10, 13, 300)
-    cached, _ = cache.get("kline-v2:daily-only:600519:1w:2")
+    cached, _ = cache.get("kline-v3:daily-only:600519:1w:2:none")
     assert cached is not None

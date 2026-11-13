@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import time
 import uuid
 
@@ -407,7 +408,6 @@ def _df_from_kline_rows(kline_rows, limit=500):
         return None
     df = df.sort_values("t").tail(limit).reset_index(drop=True)
     df["t"] = df["t"].astype(int)
-    df["amount"] = df["amount"].fillna(df["volume"] * df["close"])
     return df
 
 
@@ -801,8 +801,8 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
         )
         if df is None or len(df) == 0:
             continue
-        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else 0.0
-        if req.min_turnover and turnover < req.min_turnover:
+        turnover = float(df["amount"].iloc[-1]) if "amount" in df.columns else float("nan")
+        if req.min_turnover and (not math.isfinite(turnover) or turnover < req.min_turnover):
             continue
         try:
             res = evaluate(ind["dsl"], df, fund, pvals)
@@ -818,7 +818,7 @@ async def scan_indicator(ind_id: str, req: ScanRequest, request: Request):
                     "ticker": tk,
                     "triggered_at": int(df["t"].iloc[idx]),
                     "price": float(df["close"].iloc[-1]),
-                    "turnover": turnover,
+                    "turnover": turnover if math.isfinite(turnover) else None,
                     "strength": max(30, 100 - days_ago * 12),
                     "reason": _event_reason(ind, idx, df, res),
                 }
