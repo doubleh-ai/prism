@@ -97,7 +97,7 @@ class ScanArgs(Arguments):
     )
     exclude_st: bool = True
     min_turnover: float = Field(default=0, ge=0, le=100000000000)
-    sort: Literal["strength", "recent_signal", "latest_value"] = "strength"
+    sort: Literal["recent_signal", "latest_value"] = "recent_signal"
     direction: Literal["asc", "desc"] = "desc"
 
 

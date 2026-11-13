@@ -13,7 +13,7 @@ function element() {
 }
 function env() {
   const elements=new Map(),listeners={},timers=new Map();let timer=0;
-  const document={cookie:'csrf_token=synthetic',documentElement:element(),addEventListener(){},querySelectorAll(){return [];},querySelector(){return null;},getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
+  const document={cookie:'',documentElement:element(),addEventListener(){},querySelectorAll(){return [];},querySelector(){return null;},getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
   const ctx={console,document,crypto,AbortController,WeakSet,URL,Intl,Date,JSON,Map,Set,Promise,
     location:{pathname:'/',search:'?token=DO_NOT_UPLOAD_QUERY',hash:'#DO_NOT_UPLOAD_FRAGMENT',href:'http://local.test/'},navigator:{},
     localStorage:{getItem(){return null;},setItem(){}},sessionStorage:{getItem(){return null;},setItem(){}},matchMedia(){return {matches:false};},

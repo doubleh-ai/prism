@@ -316,7 +316,8 @@ async def test_eval_signal_returns_chart_events_and_params(client, auth_cookies,
     assert data["kind"] == "signal"
     assert data["latest"] is True
     assert data["events"][-1]["reason"]
-    assert data["events"][-1]["strength"] == 100
+    assert data["events"][-1]["days_ago"] == 0
+    assert "strength" not in data and all("strength" not in event for event in data["events"])
     assert data["tracks"][0]["events"]
     assert data["zones"]
     assert data["visual"]["color"] == "#22c55e"
@@ -430,7 +431,7 @@ async def test_background_scan_returns_partial_signal_results():
         "exclude_st": True,
         "min_turnover": 0,
         "max_results": 20,
-        "sort": "strength",
+        "sort": "recent_signal",
         "direction": "desc",
     }
     job = scanner.create_job("testuser", indicator, config)
@@ -457,3 +458,13 @@ async def test_background_scan_returns_partial_signal_results():
     assert completed["matched"] == 1
     assert completed["matches"][0]["ticker"] == "000001"
     assert completed["matches"][0]["name"] == "平安银行"
+    assert completed["matches"][0]["days_ago"] == 0
+    assert "strength" not in completed["matches"][0]
+
+    # Recent-signal ordering uses actual bar age, including beyond the old score floor.
+
+    rows = [{"days_ago": age, "turnover": 1000 - age, "triggered_at": age} for age in [15, 0, 8, 6, 1]]
+    scanner._sort_matches(rows, {}, signal=True)
+    assert [row["days_ago"] for row in rows] == [0, 1, 6, 8, 15]
+    scanner._sort_matches(rows, {"sort": "recent_signal", "direction": "asc"}, signal=True)
+    assert [row["days_ago"] for row in rows] == [15, 8, 6, 1, 0]

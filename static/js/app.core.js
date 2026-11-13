@@ -173,19 +173,13 @@ var App = {
 
   api: async function(url, opts) {
     opts = Object.assign({}, opts || {});
-    // Inject CSRF defense headers on every API call. The double-submit
-    // cookie pattern: the server sets csrf_token (non-HttpOnly), JS mirrors
-    // it in the X-CSRF-Token header. X-Requested-With additionally blocks
-    // browser cross-site requests (browsers won't add custom headers to
-    // cross-origin form submissions).
+    // Custom headers prevent cross-site form submissions without CORS preflight.
     opts.headers = Object.assign({
       'X-Requested-With': 'XMLHttpRequest',
     }, opts.headers || {});
     var method = (opts.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
       if (this.user && !opts.headers['X-Prism-Account']) opts.headers['X-Prism-Account'] = this.user;
-      var csrf = this._getCookie('csrf_token');
-      if (csrf) opts.headers['X-CSRF-Token'] = csrf;
     }
     var r, deadline, expired = false, upstream = opts.signal;
     var controller = new AbortController();
@@ -242,11 +236,6 @@ var App = {
         target_label: targetLabel || ''
       })
     }).catch(function() {});
-  },
-
-  _getCookie: function(name) {
-    var m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : '';
   },
 
   /* ═══ Theme ═══ */

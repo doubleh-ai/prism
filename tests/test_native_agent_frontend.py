@@ -21,7 +21,7 @@ function element() {
 }
 function environment() {
   const elements = new Map(), notices = [];
-  const document = {cookie:'csrf_token=synthetic',documentElement:element(),addEventListener(){},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,
+  const document = {cookie:'',documentElement:element(),addEventListener(){},querySelectorAll(){return [];},querySelector(){return null;},createElement:element,
     getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);}};
   const context = {console,document,crypto,TextDecoder,TextEncoder,AbortController,URL,Intl,Date,JSON,Map,Set,Promise,Uint8Array,
     navigator:{},location:{href:''},localStorage:{getItem(){return null;},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;},setItem(){}},

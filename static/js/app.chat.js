@@ -754,7 +754,6 @@ Object.assign(App, {
         headers: {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
-          'X-CSRF-Token': self._getCookie('csrf_token'),
         },
         body: JSON.stringify({term: term, context: ''})
       });
@@ -1280,7 +1279,6 @@ Object.assign(App, {
         headers: {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
-          'X-CSRF-Token': self._getCookie('csrf_token'),
           'X-Prism-Account': requestOwner || '',
         },
         body: JSON.stringify({question: q, skill: skillForReq, conv_id: sid, model: requestModel, request_id: requestId}),

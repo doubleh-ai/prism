@@ -216,7 +216,7 @@ if CORS_ORIGINS:
         allow_origins=CORS_ORIGINS,
         allow_credentials=CORS_ALLOW_CREDENTIALS,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Requested-With", "X-CSRF-Token", "X-Request-ID"],
+        allow_headers=["Content-Type", "X-Requested-With", "X-Request-ID"],
         max_age=600,
     )
 

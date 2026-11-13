@@ -238,8 +238,8 @@ class TestLoginSession:
         set_cookies = r.headers.get_list("set-cookie")
         names = [c.split("=")[0] for c in set_cookies]
         assert "token" in names
-        # And a csrf_token is also set
-        assert "csrf_token" in names
+        assert "csrf_token" not in names
+        assert body == {"user": test_user["username"]}
 
     @pytest.mark.asyncio
     async def test_login_wrong_password_is_403(self, client, test_user):
