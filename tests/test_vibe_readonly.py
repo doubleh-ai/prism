@@ -54,3 +54,21 @@ async def test_history_reads_are_owner_scoped_without_network(client, auth_cooki
     assert detail.json()["plan"]["report_markdown"] == "# Saved report"
     assert detail.json()["plan"]["followups"] == own["followups"]
     assert (await client.get("/api/vibe/plans/foreign", cookies=auth_cookies)).status_code == 404
+
+
+async def test_cancel_response_does_not_claim_engine_stopped_or_change_history(
+    client, auth_cookies, test_user
+):
+    own = historical_plan("saved running research")
+    own.update(id="cancel-history", status="running")
+    insert_historical_plan(test_user["username"], own)
+    before = (await client.get("/api/vibe/plans/cancel-history", cookies=auth_cookies)).json()
+    response = await client.post("/api/vibe/plans/cancel-history/cancel", cookies=auth_cookies)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["cancelled"] is False
+    assert result["cancel_requested"] is False
+    assert result["detail"] == "旧研究引擎已停用，无法通过本平台确认旧任务是否停止；历史状态保持不变。"
+    assert result["plan"] == before["plan"]
+    after = (await client.get("/api/vibe/plans/cancel-history", cookies=auth_cookies)).json()
+    assert after == before

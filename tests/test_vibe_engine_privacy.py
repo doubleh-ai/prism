@@ -40,11 +40,7 @@ def test_legacy_failed_plan_does_not_reexpose_saved_provider_errors():
     assert json.loads(raw) == saved
 
 
-async def test_health_route_never_echoes_sidecar_exception(client, auth_cookies, monkeypatch):
-    async def failure():
-        raise AssertionError(OPAQUE + SECRET)
-
-    monkeypatch.setattr(vibe_engine, "engine_health", failure, raising=False)
+async def test_engine_route_returns_only_unavailable_metadata(client, auth_cookies):
     response = await client.get("/api/vibe/engine", cookies=auth_cookies)
     assert response.status_code == 200
     assert response.json()["status"] == "execution_unavailable"
