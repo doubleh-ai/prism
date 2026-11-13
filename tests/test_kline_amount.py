@@ -2,6 +2,7 @@
 
 import json
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,162 @@ from server.market.tencent_provider import TencentProvider
 SAMPLES = json.loads((Path(__file__).parent / "fixtures" / "kline_amount_20261113.json").read_text())[
     "samples"
 ]
+
+
+@pytest.mark.parametrize("amount", [None, float("nan"), float("inf"), -1, "unavailable", 0])
+async def test_invalid_amount_preserves_the_bar_and_latest_trade_date(sources, amount):
+    sources["sample"] = deepcopy(SAMPLES[0])
+    sources["sample"]["akshare"]["rows"][-1]["amount"] = amount
+    bars = await akshare_provider.AkshareProvider().get_kline("600519", limit=10)
+    dates = [pd.Timestamp(bar.timestamp, unit="s", tz="Asia/Shanghai").date().isoformat() for bar in bars]
+    assert dates == [pd.Timestamp(row["date"]).date().isoformat() for row in SAMPLES[0]["akshare"]["rows"]]
+    assert bars[-1].close == SAMPLES[0]["akshare"]["rows"][-1]["close"]
+    assert bars[-1].turnover == (0 if amount == 0 else None)
+
+
+@pytest.mark.parametrize("period,missing_index", [("1d", -1), ("1w", -2), ("1m", -2)])
+async def test_nan_amount_cannot_become_previous_day_or_partial_period(sources, period, missing_index):
+    from server.market.provider import NoProviderAvailable
+
+    sources["sample"] = deepcopy(SAMPLES[0])
+    sources["sample"]["akshare"]["rows"][missing_index]["amount"] = float("nan")
+    with pytest.raises(NoProviderAvailable):
+        await sources["chain"].get_kline("600519", period=period, limit=10, require_amount=True)
+
+
+@pytest.mark.parametrize("ttl", [60, -1])
+async def test_old_akshare_cache_with_dropped_bar_is_not_reused(sources, ttl):
+    from server.market.provider import NoProviderAvailable
+
+    bars = await akshare_provider.AkshareProvider().get_kline("600519", limit=10)
+    sources["chain"].cache.set(
+        "kline-v3:akshare:600519:1d:10:none", [bar.model_dump() for bar in bars[:-1]], ttl=ttl
+    )
+    sources["fail"] = True
+    with pytest.raises(NoProviderAvailable):
+        await sources["chain"].get_kline("600519", limit=10, require_amount=True)
+
+
+@pytest.mark.parametrize("dsl", [{"amount": 0}, {"ref": [{"amount": 0}, 1]}, {"price": "amount"}])
+async def test_amount_formula_without_threshold_falls_back_in_background_scan(sources, dsl):
+    indicator = {"id": "amount-formula", "name": "amount", "kind": "plot", "dsl": dsl}
+    job = scanner.create_job(
+        "owner", indicator, {"scope": "watchlist", "tickers": ["600519"], "lookback": 10}
+    )
+    await scanner._run_job(job, indicator, indicators._build_df)
+    result = scanner.get_job(job["id"], "owner")
+    assert result["matched"] == 1
+    assert result["failed"] == result["insufficient"] == 0
+    assert sources["ak_calls"] == 1
+
+
+@pytest.mark.parametrize("endpoint", ["scan", "eval"])
+async def test_amount_formula_without_threshold_falls_back_in_http_paths(
+    sources, client, auth_cookies, endpoint
+):
+    from server.indicators.models import IndicatorCreate
+
+    amount = SAMPLES[0]["akshare"]["rows"][-2]["amount"]
+    ind = indicators.create_owned_indicator(
+        "testuser",
+        IndicatorCreate(
+            name="previous amount", kind="signal", dsl={"gt": [{"ref": [{"amount": 0}, 1]}, amount * 0.99]}
+        ),
+    )
+    response = await client.post(
+        f"/api/indicators/{ind['id']}/{endpoint}",
+        cookies=auth_cookies,
+        json={"tickers": ["600519"]} if endpoint == "scan" else {"ticker": "600519"},
+    )
+    assert response.status_code == 200
+    assert response.json()["matches"] if endpoint == "scan" else response.json()["latest"]
+    assert sources["ak_calls"] == 1
+
+
+@pytest.mark.parametrize("ttl", [60, -1])
+async def test_amount_formula_rejects_missing_historical_amount_in_cache(sources, ttl):
+    from server.market.provider import NoProviderAvailable
+
+    chain = sources["chain"]
+    bars = await akshare_provider.AkshareProvider().get_kline("600519", limit=10)
+    bars[-2].turnover = None
+    chain.cache.set(
+        chain._cache_key("kline-v3", "akshare", "600519", "1d", "10", "none"),
+        [bar.model_dump() for bar in bars],
+        ttl=ttl,
+    )
+    sources["fail"] = True
+    latest, _ = await chain.get_kline("600519", limit=10, require_amount=True)
+    assert latest[-1].turnover is not None
+    with pytest.raises(NoProviderAvailable):
+        await chain.get_kline("600519", limit=10, require_amount="all")
+
+
+async def test_amount_eval_keeps_explicit_client_bars_authoritative(sources, client, auth_cookies):
+    from server.indicators.models import IndicatorCreate
+
+    ind = indicators.create_owned_indicator(
+        "testuser", IndicatorCreate(name="amount", kind="plot", dsl={"amount": 0})
+    )
+    response = await client.post(
+        f"/api/indicators/{ind['id']}/eval",
+        cookies=auth_cookies,
+        json={
+            "ticker": "600519",
+            "kline": [{"t": 1, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}],
+        },
+    )
+    assert response.status_code == 422
+    assert sources["sina_calls"] == sources["ak_calls"] == 0
+
+
+@pytest.mark.parametrize("cached", [False, True])
+async def test_history_amount_requirement_falls_back_past_partial_provider(sources, cached):
+    complete = await akshare_provider.AkshareProvider().get_kline("600519", limit=10)
+    partial = [bar.model_copy() for bar in complete]
+    partial[-2].turnover = None
+
+    class Partial:
+        name = "partial"
+
+        async def get_kline(self, *args, **kwargs):
+            return partial
+
+    chain = ProviderChain([Partial(), akshare_provider.AkshareProvider()], MarketCache())
+    if cached:
+        chain.cache.set(
+            chain._cache_key("kline-v3", "partial", "600519", "1d", "10", "none"),
+            [bar.model_dump() for bar in partial],
+            ttl=60,
+        )
+    bars, _ = await chain.get_kline("600519", limit=10, require_amount="all")
+    assert [bar.turnover for bar in bars] == [bar.turnover for bar in complete]
+
+
+async def test_latest_amount_request_does_not_coalesce_with_history_requirement(sources):
+    import asyncio
+
+    partial = await akshare_provider.AkshareProvider().get_kline("600519", limit=10)
+    partial[-2].turnover = None
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Partial:
+        name = "partial"
+
+        async def get_kline(self, *args, **kwargs):
+            entered.set()
+            await release.wait()
+            return partial
+
+    chain = ProviderChain([Partial(), akshare_provider.AkshareProvider()], MarketCache())
+    latest = asyncio.create_task(chain.get_kline("600519", limit=10, require_amount=True))
+    await asyncio.wait_for(entered.wait(), 1)
+    history = asyncio.create_task(chain.get_kline("600519", limit=10, require_amount="all"))
+    await asyncio.sleep(0)
+    release.set()
+    latest_result, history_result = await asyncio.wait_for(asyncio.gather(latest, history), 3)
+    assert latest_result[0][-2].turnover is None
+    assert history_result[0][-2].turnover == SAMPLES[0]["akshare"]["rows"][-2]["amount"]
 
 
 @pytest.fixture

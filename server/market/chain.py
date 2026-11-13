@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import time
-from typing import Any
+from typing import Any, Literal
 
 from ..work_adapters import async_work
 from ..work_lifecycle import WorkHandle, get_manager
@@ -47,6 +47,9 @@ class ProviderChain:
         self._inflight: dict[str, WorkHandle] = {}
 
     def _cache_key(self, method: str, provider_name: str, *parts: str) -> str:
+        # Old AKShare bars may have silently dropped dates with missing amount.
+        if method == "kline-v3" and provider_name == "akshare":
+            method = "kline-v4"
         return f"{method}:{provider_name}:" + ":".join(parts)
 
     async def _coalesce(self, key: str, runner):
@@ -165,7 +168,7 @@ class ProviderChain:
         limit: int = 120,
         *,
         adjustment: PriceAdjustment = "none",
-        require_amount: bool = False,
+        require_amount: bool | Literal["all"] = False,
     ) -> tuple[list[KLine], bool]:
         if adjustment not in {"none", "qfq", "hfq"}:
             raise ValueError("unsupported price adjustment")
@@ -174,11 +177,12 @@ class ProviderChain:
             bars = [KLine(**row) for row in rows]
             if any(bar.adjustment != adjustment for bar in bars):
                 raise ProviderUnavailable("K-line adjustment does not match request")
-            # Turnover filters need the latest period's actual traded amount, including on cache hits.
+            # Filters need the latest amount; amount formulas also need history.
+            # Apply the same requirement to providers, fresh cache and stale cache.
             if require_amount and bars:
-                amount = max(bars, key=lambda bar: bar.timestamp).turnover
-                if amount is None or not math.isfinite(amount):
-                    raise ProviderUnavailable("latest K-line traded amount is unavailable")
+                required = bars if require_amount == "all" else [max(bars, key=lambda bar: bar.timestamp)]
+                if any(bar.turnover is None or not math.isfinite(bar.turnover) for bar in required):
+                    raise ProviderUnavailable("required K-line traded amount is unavailable")
             return bars
 
         # Note: KLine is a list; cache the list of dicts, return as KLine list.
