@@ -963,7 +963,7 @@ the existing CSRF protection and reject account switches.
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /api/work/assistant/proposals` | UUID `request_id`, `text`, IANA `timezone`, explicit `allow_model` (default false); returns a validated preview or clarification, with no business write |
+| `POST /api/work/assistant/proposals` | UUID `request_id`, `text`, IANA `timezone`, explicit `allow_model` (default false). Returns a preview, clarification, or a terminal `model_rejected` proposal with reason `access`, `billing` or `rate_limit` and no actions. Replaying the request returns the stored outcome. |
 | `GET /api/work/assistant/proposals/by-request/{request_id}` | Reconcile a lost response using the original request, without resending a model call |
 | `GET /api/work/assistant/proposals/{id}` | Read the original proposal, execution state and receipt |
 | `POST /api/work/assistant/proposals/{id}/confirm` | Exact preview `digest`, live owner and 15-minute validity; creates/updates proposed objects and records the whole result in one transaction |

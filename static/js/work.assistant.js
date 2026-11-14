@@ -106,6 +106,12 @@
       if(conflicts||truncated)box.append(element('p','存在'+(truncated?'至少 ':' ')+conflicts+' 条日程时间重叠，请查看日历核对。'));
       button('assistantUndo',!!proposal.digest&&proposal.can_undo!==false&&!onlyReads);notice('');if(!onlyReads)$('workRefresh').click();
     }
+    else if(proposal.state==='model_rejected'){
+      $('assistantPreviewTitle').textContent='本次未生成草稿';
+      var reasons={billing:'模型服务因计费问题拒绝了这次请求。',access:'模型服务拒绝了这次访问。',rate_limit:'模型服务当前限制请求频率。'};
+      box.append(element('p',reasons[proposal.reason]||'模型服务拒绝了这次请求。'));
+      notice('');
+    }
     else if(proposal.state==='undone'){ $('assistantPreviewTitle').textContent='已撤销';notice('');$('workRefresh').click();}
     else {state.unknown=true;box.append(element('p',proposal.state==='planning'?'正在整理，请稍后核对。':'结果尚未确定，请先核对。'));button('assistantCheck',true);notice('');}
   }
