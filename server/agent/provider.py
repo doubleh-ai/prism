@@ -27,6 +27,7 @@ _ENDPOINTS = {
     "https://api.deepseek.com/anthropic": "https://api.deepseek.com/anthropic/v1/messages",
     "https://api.deepseek.com/anthropic/v1": "https://api.deepseek.com/anthropic/v1/messages",
     "https://api.minimax.io/anthropic/v1": "https://api.minimax.io/anthropic/v1/messages",
+    "https://api.minimax.cn/anthropic/v1": "https://api.minimax.cn/anthropic/v1/messages",
     "https://api.minimaxi.com/anthropic/v1": "https://api.minimaxi.com/anthropic/v1/messages",
 }
 _OPENAI_ENDPOINTS = {"https://api.openai.com", "https://api.openai.com/v1"}
@@ -57,7 +58,7 @@ def configuration_status(model_cfg: dict) -> dict:
         else "minimax"
         if base == "https://api.minimax.io/anthropic/v1"
         else "minimax-cn"
-        if base == "https://api.minimaxi.com/anthropic/v1"
+        if base in {"https://api.minimax.cn/anthropic/v1", "https://api.minimaxi.com/anthropic/v1"}
         else "deepseek"
         if base in _ENDPOINTS
         else "unknown"
@@ -620,6 +621,7 @@ class AnthropicMessagesProvider:
                 if endpoint
                 in {
                     "https://api.minimax.io/anthropic/v1/messages",
+                    "https://api.minimax.cn/anthropic/v1/messages",
                     "https://api.minimaxi.com/anthropic/v1/messages",
                 }
                 else {"x-api-key": key}
@@ -648,6 +650,7 @@ class AnthropicMessagesProvider:
                     minimax=endpoint
                     in {
                         "https://api.minimax.io/anthropic/v1/messages",
+                        "https://api.minimax.cn/anthropic/v1/messages",
                         "https://api.minimaxi.com/anthropic/v1/messages",
                     },
                     deadline=deadline,
