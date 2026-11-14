@@ -39,6 +39,16 @@ async function main(){
  proposal={id:'p',state:'ready',digest:'digest',actions:[{kind:'update_task',target:{title:'任务'},before:{status:'todo'},fields:{unknown_field:'value'}}]};e('assistantForm').fire('submit');await tick();await tick();assert.equal(e('assistantConfirm').hidden,true);assert.match(e('assistantNotice').textContent,/预览信息不完整/);
  proposal={id:'p',state:'ready',digest:'digest',actions:[actions[0]]};e('assistantForm').fire('submit');await tick();await tick();mode='unknown';e('assistantConfirm').click();await tick();await tick();assert.match(e('assistantNotice').textContent,/操作结果未知/);let count=requests.filter(r=>r.path.endsWith('/confirm')).length;e('assistantConfirm').click();await tick();assert.equal(requests.filter(r=>r.path.endsWith('/confirm')).length,count);assert.equal(e('assistantCheck').hidden,false);
  mode='ready';e('assistantCheck').click();await tick();await tick();proposal={id:'p2',state:'clarification',clarification:'找到多个同名任务，请区分名称。',can_use_model:false};e('assistantForm').fire('submit');await tick();await tick();assert.equal(e('assistantModel').hidden,true);assert.equal(e('assistantModelHelp').hidden,true);assert.match(text(e('assistantDetails')),/多个同名/);proposal={id:'p3',state:'clarification',clarification:'已经是要求的状态。',can_use_model:false};e('assistantForm').fire('submit');await tick();await tick();assert.equal(e('assistantModel').hidden,true);assert.match(text(e('assistantDetails')),/已经是要求的状态/);
+ for(const [reason,message] of [['billing','计费'],['access','访问'],['rate_limit','频率']]){
+  proposal={id:'p4',state:'model_rejected',reason,actions:[],digest:null};
+  const before=requests.length;
+  e('assistantForm').fire('submit');await tick();await tick();
+  assert.equal(requests.length,before+1);
+  assert.match(e('assistantPreviewTitle').textContent,/未生成草稿/);
+  assert.ok(text(e('assistantDetails')).includes(message));
+  for(const id of ['assistantCheck','assistantModel','assistantConfirm','assistantUndo'])assert.equal(e(id).hidden,true);
+  assert.equal(e('assistantText').value,'合成安排');
+ }
  user='bob';document.hidden=false;await docListeners.visibilitychange();assert.equal(e('assistantText').value,'');assert.equal(e('assistantPreview').hidden,true);
  console.log('work assistant frontend ok: update preview, results, IME, unknown and account');
 }

@@ -219,6 +219,60 @@ async def test_native_http_work_plan_keeps_purpose_quota_and_human_confirmation(
     ).status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [(401, "access"), (402, "billing"), (403, "access"), (429, "rate_limit"), (504, None)],
+)
+async def test_model_refusal_replays_without_another_call(client, auth_cookies, monkeypatch, status, reason):
+    import httpx
+
+    from server import model_network
+
+    monkeypatch.setattr(model_network, "_network", None)
+    model_routes.init_model_routes_db()
+    model_routes.install_defaults({"work_planning": deployment_setting(allow_private_work=True)})
+    calls = []
+
+    class WorkNetwork:
+        def async_transport(self, **selected):
+            def send(request):
+                calls.append(selected["purpose"])
+                return httpx.Response(status, json={"error": {"message": "untrusted synthetic text"}})
+
+            return httpx.MockTransport(send)
+
+    model_network.install(WorkNetwork())
+    path = "/api/work/assistant/proposals"
+    body = {"request_id": str(uuid4()), "text": "请整理这条合成想法", "allow_model": True}
+    first = await client.post(path, json=body, cookies=auth_cookies)
+    readback = await client.get(f"{path}/by-request/{body['request_id']}", cookies=auth_cookies)
+    assert readback.status_code == 200
+    proposal = readback.json()["proposal"]
+    if reason:
+        assert first.status_code == 200
+        assert first.json() == readback.json()
+        assert proposal["state"] == "model_rejected"
+        assert proposal["reason"] == reason
+    else:
+        assert first.status_code == 502
+        assert proposal["state"] == "unknown"
+    assert proposal["actions"] == [] and proposal["digest"] is None
+    assert "untrusted synthetic text" not in readback.text
+    by_id = await client.get(f"{path}/{proposal['id']}", cookies=auth_cookies)
+    assert by_id.json() == readback.json()
+    assert (await client.post(path, json=body, cookies=auth_cookies)).json() == readback.json()
+    confirm = await client.post(
+        f"{path}/{proposal['id']}/confirm", json={"digest": "0" * 64}, cookies=auth_cookies
+    )
+    assert confirm.status_code == 409
+    assert calls == ["work_planning"]
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM work_tasks").fetchone()[0] == 0
+        assert tuple(
+            db.execute("SELECT status,input_tokens,output_tokens FROM model_request_reservations").fetchone()
+        ) == ("unknown", None, None)
+
+
 async def test_preview_changes_nothing_confirmation_replays_one_object(client, auth_cookies):
     body = {"request_id": str(uuid4()), "text": "创建任务 整理合成评审材料", "timezone": "Asia/Shanghai"}
     response = await client.post("/api/work/assistant/proposals", json=body, cookies=auth_cookies)

@@ -404,6 +404,29 @@ async def propose(request: Request):
             )
         return response
     except BaseException as failure:
+        if isinstance(failure, provider.ProviderError):
+            # These HTTP responses reject the request before a proposal is delivered.
+            reason = {401: "access", 402: "billing", 403: "access", 429: "rate_limit"}.get(
+                failure.diagnostic.get("http_status")
+            )
+            if reason:
+                response = {
+                    "proposal": {
+                        "id": proposal_id,
+                        "state": "model_rejected",
+                        "reason": reason,
+                        "source": "model",
+                        "digest": None,
+                        "expires_at": now + _PROPOSAL_TTL,
+                        "actions": [],
+                    }
+                }
+                with get_db() as db:
+                    db.execute(
+                        "UPDATE work_proposals SET state='model_rejected',response_json=? WHERE id=? AND owner=?",
+                        [_json(response), proposal_id, owner],
+                    )
+                return response
         with get_db() as db:
             db.execute(
                 "UPDATE work_proposals SET state='unknown' WHERE id=? AND owner=?", [proposal_id, owner]
