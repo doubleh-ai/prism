@@ -92,14 +92,79 @@ async def collect(provider, **kw):
 
 
 @pytest.mark.parametrize(
-    "base,expected",
+    "base",
     [
-        ("https://api.deepseek.com/anthropic", "https://api.deepseek.com/anthropic/v1/messages"),
-        ("https://api.deepseek.com/anthropic/v1/", "https://api.deepseek.com/anthropic/v1/messages"),
-        ("https://api.minimax.io/anthropic/v1/", "https://api.minimax.io/anthropic/v1/messages"),
+        "https://api.minimax.cn/anthropic/v1/",
+        "https://api.minimaxi.com/anthropic/v1/",
+        "https://api.minimax.io/anthropic/v1/",
     ],
 )
-async def test_fragmented_utf8_frames_exact_endpoint_and_request_boundary(base, expected, monkeypatch):
+async def test_minimax_uses_bearer_authentication_without_changing_request(base):
+    # MiniMax's Messages contract requires Authorization: Bearer <API_KEY>.
+    # This is a protocol fixture, not a reproduction of a live billing error.
+    requests = []
+    cfg = {**config(base), "model": "MiniMax-M3"}
+    assert P.configuration_status(cfg)["endpoint_host"] == (
+        "minimax" if "api.minimax.io" in base else "minimax-cn"
+    )
+    assert not P.supports_search(cfg)
+
+    def handler(request):
+        requests.append(request)
+        if request.headers.get("authorization") != "Bearer " + cfg["api_key"]:
+            return httpx.Response(401, json={"base_resp": {"status_code": 1004}})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text_stream())
+
+    provider = P.AnthropicMessagesProvider(transport=httpx.MockTransport(handler))
+    events = await collect(provider, model_cfg=cfg)
+    assert events[-1]["content"] == [{"type": "text", "text": "hello"}]
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == base.rstrip("/") + "/messages"
+    assert "x-api-key" not in request.headers
+    assert cfg["api_key"].encode() not in request.content
+    assert json.loads(request.content) == {
+        "model": cfg["model"],
+        "stream": True,
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "synthetic"}],
+        "system": "synthetic system",
+        "tools": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "base,expected,auth_header,auth_prefix",
+    [
+        (
+            "https://api.deepseek.com/anthropic",
+            "https://api.deepseek.com/anthropic/v1/messages",
+            "x-api-key",
+            "",
+        ),
+        (
+            "https://api.deepseek.com/anthropic/v1/",
+            "https://api.deepseek.com/anthropic/v1/messages",
+            "x-api-key",
+            "",
+        ),
+        (
+            "https://api.minimax.cn/anthropic/v1/",
+            "https://api.minimax.cn/anthropic/v1/messages",
+            "authorization",
+            "Bearer ",
+        ),
+        (
+            "https://api.minimax.io/anthropic/v1/",
+            "https://api.minimax.io/anthropic/v1/messages",
+            "authorization",
+            "Bearer ",
+        ),
+    ],
+)
+async def test_fragmented_utf8_frames_exact_endpoint_and_request_boundary(
+    base, expected, auth_header, auth_prefix, monkeypatch
+):
     wire_bytes = text_stream("中文界面")
     provider, wire, requests = source([wire_bytes[i : i + 1] for i in range(len(wire_bytes))])
     options = []
@@ -116,7 +181,9 @@ async def test_fragmented_utf8_frames_exact_endpoint_and_request_boundary(base, 
     assert events[-2] == {"type": "usage", "input_tokens": 3, "output_tokens": 7}
     assert events[-1]["usage_complete"] is True
     assert wire.closed and len(requests) == 1 and str(requests[0].url) == expected
-    assert requests[0].headers["x-api-key"] == config()["api_key"]
+    assert requests[0].headers[auth_header] == auth_prefix + config()["api_key"]
+    other_auth_header = "authorization" if auth_header == "x-api-key" else "x-api-key"
+    assert other_auth_header not in requests[0].headers
     assert config()["api_key"].encode() not in requests[0].content
     assert requests[0].headers["accept-encoding"] == "identity"
     assert options[0]["trust_env"] is False and options[0]["follow_redirects"] is False
@@ -350,7 +417,12 @@ async def test_http_error_body_never_read_echoed_or_retried(status, code):
 
 
 @pytest.mark.parametrize(
-    "base", ["https://api.minimax.io/anthropic/v1", "https://api.minimaxi.com/anthropic/v1"]
+    "base",
+    [
+        "https://api.minimax.cn/anthropic/v1",
+        "https://api.minimax.io/anthropic/v1",
+        "https://api.minimaxi.com/anthropic/v1",
+    ],
 )
 @pytest.mark.parametrize(
     "envelope,expected",
@@ -399,6 +471,20 @@ async def test_minimax_malformed_diagnostic_preserves_original_failure_without_r
         await collect(provider, model_cfg=config("https://api.minimaxi.com/anthropic/v1"))
     assert caught.value.diagnostic == {"http_status": 400}
     assert wire.closed and len(requests) == 1
+
+
+async def test_current_minimax_billing_error_does_not_retry_or_switch_endpoint():
+    base = "https://api.minimax.cn/anthropic/v1"
+    provider, wire, requests = source(
+        [b'{"base_resp":{"status_code":1008}}'],
+        status=402,
+        headers={"content-type": "application/json"},
+    )
+    with pytest.raises(P.ProviderError, match="^provider_http_error$") as caught:
+        await collect(provider, model_cfg={**config(base), "model": "MiniMax-M3"})
+    assert caught.value.diagnostic == {"http_status": 402, "provider_status": 1008}
+    assert wire.closed and len(requests) == 1
+    assert str(requests[0].url) == base + "/messages"
 
 
 async def test_minimax_error_diagnostic_cannot_wait_past_the_original_call_deadline():

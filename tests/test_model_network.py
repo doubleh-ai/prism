@@ -46,6 +46,7 @@ def config(*, purpose="research", vendor="deepseek"):
             "deepseek": "https://api.deepseek.com/anthropic",
             "minimax": "https://api.minimax.io/anthropic/v1",
             "minimax-cn": "https://api.minimaxi.com/anthropic/v1",
+            "minimax-cn-current": "https://api.minimax.cn/anthropic/v1",
             "openai": "https://api.openai.com/v1",
         }[vendor],
         "model": "synthetic-model",
@@ -92,7 +93,7 @@ def test_installed_network_cannot_be_replaced():
         model_network.install(Adapter())
 
 
-@pytest.mark.parametrize("vendor", ["deepseek", "minimax", "minimax-cn", "openai"])
+@pytest.mark.parametrize("vendor", ["deepseek", "minimax", "minimax-cn", "minimax-cn-current", "openai"])
 async def test_native_protocols_use_their_fixed_model_transport_without_giving_it_credentials(vendor):
     adapter = Adapter(status=401)
     model_network.install(adapter)

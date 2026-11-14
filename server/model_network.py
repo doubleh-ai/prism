@@ -16,6 +16,7 @@ ENDPOINTS = frozenset(
     {
         "https://api.deepseek.com/anthropic/v1/messages",
         "https://api.minimax.io/anthropic/v1/messages",
+        "https://api.minimax.cn/anthropic/v1/messages",
         "https://api.minimaxi.com/anthropic/v1/messages",
         "https://api.openai.com/v1/responses",
     }

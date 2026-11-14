@@ -40,7 +40,7 @@ expected=json.loads(sys.argv[2])
 actual=[config.DEEPSEEK_API_KEY,config.MINIMAX_API_KEY,config.OPENAI_API_KEY,config.MINIMAX_CN_API_KEY]
 assert actual==expected
 endpoints={'https://api.deepseek.com/anthropic':0,'https://api.minimax.io/anthropic/v1':1,
- 'https://api.openai.com/v1':2,'https://api.minimaxi.com/anthropic/v1':3}
+ 'https://api.openai.com/v1':2,'https://api.minimax.cn/anthropic/v1':3}
 for model in config.MODELS.values():
  assert model['api_key']==expected[endpoints[model['base_url'].rstrip('/')]]
 print(json.dumps({'provider_key_isolation':True,'network_requests':0}))

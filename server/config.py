@@ -76,7 +76,7 @@ MODELS = {
     # Explicit opt-in: no guessed model, inherited key or provider fallback.
     "minimax-cn-m3": {
         "name": "MiniMax M3（国内）",
-        "base_url": "https://api.minimaxi.com/anthropic/v1/",
+        "base_url": "https://api.minimax.cn/anthropic/v1/",
         "api_key": MINIMAX_CN_API_KEY,
         "model": "MiniMax-M3",
     },
