@@ -10,8 +10,7 @@ async def test_beta_environment_is_visible_without_claiming_a_published_release(
 
     notes = tmp_path / "CHANGELOG.md"
     notes.write_text(
-        "## [Unreleased]\n### Added\n- Pending candidate\n\n"
-        "## [v0.23.0]\n### Fixed\n- Published change\n",
+        "## [Unreleased]\n### Added\n- Pending candidate\n\n## [v0.23.0]\n### Fixed\n- Published change\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(release, "CHANGELOG_PATH", notes)
