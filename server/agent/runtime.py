@@ -289,6 +289,37 @@ _CONTEXT_WRAP_UP = (
 )
 
 
+def _release_context(messages: list, target: int) -> int:
+    """Shrink the oldest tool bodies until the prompt fits under ``target``.
+
+    A single turn of parallel tools can add more than the ceiling allows. Instead
+    of failing the run, drop the bodies of the oldest tool results; the model
+    keeps the identifiers, the order and everything recent, and the next call is
+    turned into a wrap-up call anyway.
+    """
+    used = len(json.dumps(messages, ensure_ascii=False))
+    if used <= target:
+        return used
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if used <= target:
+                return used
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            body = block.get("content")
+            if not isinstance(body, str) or len(body) <= 400:
+                continue
+            dropped = len(body) - 400
+            block["content"] = (
+                body[:400] + f"\n…（较早的工具输出已释放 {dropped} 字符，以给收尾报告腾出上下文）…\n"
+            )
+            used -= dropped
+    return len(json.dumps(messages, ensure_ascii=False))
+
+
 def _truncate_tool_result(
     text: str,
     *,
@@ -471,7 +502,13 @@ class NativeAgent:
                 for index in range(limits.model_calls):
                     context_used = len(json.dumps(messages, ensure_ascii=False))
                     if context_used > limits.context_characters:
-                        raise BudgetExceeded("context_characters")
+                        # A single turn can still jump past the ceiling. Drop the
+                        # oldest tool output bodies until there is room instead of
+                        # failing the whole run; the report keeps what matters.
+                        context_used = _release_context(messages, limits.context_characters * 4 // 5)
+                        if context_used > limits.context_characters:
+                            raise BudgetExceeded("context_characters")
+                        wrap_up = True
                     # Near the context ceiling, stop collecting evidence and make
                     # the next call write the report instead of failing the run.
                     # This is a soft threshold: 3/4 of the hard context budget.
@@ -823,13 +860,21 @@ class NativeAgent:
                             )
                             if candidate["status"] == "ready":
                                 review_packet = candidate["packet"]
-                                review_pending = (
-                                    limits.model_calls - index - 1 >= 2
-                                    and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
-                                    and limits.output_tokens_per_call >= 512
-                                )
-                                if not review_pending:
-                                    review_skip = "run_budget"
+                                packet_size = len(json.dumps(review_packet, ensure_ascii=False))
+                                if packet_size > limits.context_characters // 3:
+                                    # The review prompt is rebuilt from scratch, so
+                                    # an oversized packet would hit the ceiling.
+                                    review_pending = False
+                                    review_skip = "packet_too_large"
+                                    review_packet = None
+                                else:
+                                    review_pending = (
+                                        limits.model_calls - index - 1 >= 2
+                                        and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
+                                        and limits.output_tokens_per_call >= 512
+                                    )
+                                    if not review_pending:
+                                        review_skip = "run_budget"
                             else:
                                 review_skip = candidate["reason"]
                     elif completed["stop_reason"] in {"end_turn", "stop_sequence", "refusal"}:
