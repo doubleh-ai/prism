@@ -44,13 +44,14 @@ model_stream = provider.stream
 
 @dataclass(frozen=True)
 class Limits:
-    model_calls: int = 6
-    tool_calls: int = 16
+    model_calls: int = 8
+    tool_calls: int = 20
     server_search_calls: int = 4
-    output_tokens_per_call: int = 2048
-    wall_seconds: float = 180
+    output_tokens_per_call: int = 4096
+    token_continuations: int = 4
+    wall_seconds: float = 480
     output_characters: int = 60000
-    context_characters: int = 100000
+    context_characters: int = 200000
     concurrent_runs: int = 4
 
 
@@ -267,6 +268,81 @@ def _error_message(code: str, limit_reason: str | None = None) -> str:
     }.get(code, "本轮研究未完成，已保存进度。请查看记录后决定是否继续研究。")
 
 
+TOOL_RESULT_CHARACTERS = 20000
+TOOL_RESULT_TURN_CHARACTERS = 30000
+_TOOL_RESULT_HEAD = 15000
+_TOOL_RESULT_TAIL = 5000
+# Each pending tool_result keeps a minimum envelope so a later tool_use in the
+# same turn can still carry its truncation marker instead of disappearing.
+_TURN_RESULT_RESERVE = 64
+
+# A whole fetched document can dwarf everything else in the prompt. The tools
+# already redact and size-check their own output; this bound is applied to the
+# serialized tool_result string afterwards so one oversized source cannot use
+# up the run's context before the model can write an answer. The per-turn cap
+# keeps one batch of parallel reads bounded: the wrap-up threshold is three
+# quarters of the context limit, so context-before-turn < 150,000 plus at most
+# 30,000 of tool results stays below the 200,000 hard ceiling.
+_CONTEXT_WRAP_UP = (
+    "上下文即将用尽：请立即基于已经获得的证据写出完整报告，不要再调用工具；"
+    "尚未核实的关键点明确标记为缺口，不要编造完整结论。"
+)
+
+
+def _release_context(messages: list, target: int) -> int:
+    """Shrink the oldest tool bodies until the prompt fits under ``target``.
+
+    A single turn of parallel tools can add more than the ceiling allows. Instead
+    of failing the run, drop the bodies of the oldest tool results; the model
+    keeps the identifiers, the order and everything recent, and the next call is
+    turned into a wrap-up call anyway.
+    """
+    used = len(json.dumps(messages, ensure_ascii=False))
+    if used <= target:
+        return used
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if used <= target:
+                return used
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            body = block.get("content")
+            if not isinstance(body, str) or len(body) <= 400:
+                continue
+            dropped = len(body) - 400
+            block["content"] = (
+                body[:400] + f"\n…（较早的工具输出已释放 {dropped} 字符，以给收尾报告腾出上下文）…\n"
+            )
+            used -= dropped
+    return len(json.dumps(messages, ensure_ascii=False))
+
+
+def _truncate_tool_result(
+    text: str,
+    *,
+    limit: int = TOOL_RESULT_CHARACTERS,
+    reason: str = "工具输出过长",
+) -> str:
+    """Keep the head and tail of an oversized tool result inside one string cap."""
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    marker = f"\n…（{reason}，已截断 {len(text) - limit} 字符）…\n"
+    room = limit - len(marker)
+    if room <= 0:
+        return marker[:limit]
+    # The documented split is 15,000 head + 5,000 tail when the cap allows it;
+    # the marker itself is charged to the tail so the string never exceeds the
+    # cap. Smaller caps (the per-turn budget) keep the same 3:1 head/tail shape.
+    head = _TOOL_RESULT_HEAD if room >= _TOOL_RESULT_HEAD else room * 3 // 4
+    tail = min(_TOOL_RESULT_TAIL, room - head)
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
 class NativeAgent:
     def __init__(self, manager: Manager, *, limits: Limits | None = None):
         self.manager = manager
@@ -421,9 +497,29 @@ class NativeAgent:
                 search_available = provider.supports_search(model_cfg)
                 definitions = tools.definitions()
                 finished = False
+                token_continuations = 0
+                wrap_up = wrap_up_announced = False
                 for index in range(limits.model_calls):
-                    if len(json.dumps(messages, ensure_ascii=False)) > limits.context_characters:
-                        raise BudgetExceeded("context_characters")
+                    context_used = len(json.dumps(messages, ensure_ascii=False))
+                    if context_used > limits.context_characters:
+                        # A single turn can still jump past the ceiling. Drop the
+                        # oldest tool output bodies until there is room instead of
+                        # failing the whole run; the report keeps what matters.
+                        context_used = _release_context(messages, limits.context_characters * 4 // 5)
+                        if context_used > limits.context_characters:
+                            raise BudgetExceeded("context_characters")
+                        wrap_up = True
+                    # Near the context ceiling, stop collecting evidence and make
+                    # the next call write the report instead of failing the run.
+                    # This is a soft threshold: 3/4 of the hard context budget.
+                    wrap_up = context_used > limits.context_characters * 3 // 4
+                    if wrap_up and not wrap_up_announced:
+                        wrap_up_announced = True
+                        note = {"type": "text", "text": _CONTEXT_WRAP_UP}
+                        if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
+                            messages[-1]["content"].append(note)
+                        else:
+                            messages.append({"role": "user", "content": note})
                     if cancel.is_set() or store.is_cancelled(user, run_id):
                         raise RunStopped
                     if time.monotonic() >= end:
@@ -431,10 +527,13 @@ class NativeAgent:
                     reviewing, review_pending = review_pending, False
                     # Reserve the last permitted call for an answer. This is
                     # still the same bounded run, never an extra retry/budget.
-                    concluding = not reviewing and (
-                        index == limits.model_calls - 1
-                        or usage["tool_calls"] >= max(1, limits.tool_calls - 2)
-                        or (index > 0 and end - time.monotonic() <= 45)
+                    concluding = wrap_up or (
+                        not reviewing
+                        and (
+                            index == limits.model_calls - 1
+                            or usage["tool_calls"] >= max(1, limits.tool_calls - 2)
+                            or (index > 0 and end - time.monotonic() <= 45)
+                        )
                     )
                     purpose_request = None
                     if "_purpose_route" in model_cfg:
@@ -476,6 +575,7 @@ class NativeAgent:
                         attempt=index + 1,
                         concluding=concluding,
                         phase="evidence_review" if reviewing else "research",
+                        **({"wrap_up": True} if wrap_up else {}),
                     )
                     usage["model_calls"] += 1
                     if reviewing:
@@ -522,6 +622,10 @@ class NativeAgent:
                             "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
                             "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
                         )
+                    if wrap_up:
+                        # The prompt above is shared with the call/time budget
+                        # wrap-up; this sentence explains the context ceiling too.
+                        system += "\n" + _CONTEXT_WRAP_UP
                     request_messages = messages
                     call_end = end
                     review_text, review_error = "", None
@@ -694,6 +798,8 @@ class NativeAgent:
                         if not requested:
                             raise provider.ProviderError("provider_protocol_error")
                         results = []
+                        turn_characters = TOOL_RESULT_TURN_CHARACTERS
+                        results_left = len(requested)
                         for call in requested:
                             usage["tool_calls"] += 1
                             if usage["tool_calls"] > limits.tool_calls:
@@ -715,11 +821,28 @@ class NativeAgent:
                                 refs.append(ref)
                                 chunks.append({"t": "ref", **ref})
                                 emit("source_recorded", {"ref": ref})
+                            # First come first served: earlier results keep their
+                            # text, later ones are bounded by what is left of this
+                            # turn's budget so one batch of reads cannot leap over
+                            # the hard context ceiling before the next checks.
+                            allowance = max(0, turn_characters - (results_left - 1) * _TURN_RESULT_RESERVE)
+                            limit = min(TOOL_RESULT_CHARACTERS, allowance)
+                            tool_content = _truncate_tool_result(
+                                json.dumps(result, ensure_ascii=False),
+                                limit=limit,
+                                reason=(
+                                    "本轮工具输出总量超限"
+                                    if limit < TOOL_RESULT_CHARACTERS
+                                    else "工具输出过长"
+                                ),
+                            )
+                            turn_characters -= len(tool_content)
+                            results_left -= 1
                             results.append(
                                 {
                                     "type": "tool_result",
                                     "tool_use_id": call_id,
-                                    "content": json.dumps(result, ensure_ascii=False),
+                                    "content": tool_content,
                                     "is_error": not result["ok"],
                                 }
                             )
@@ -737,13 +860,21 @@ class NativeAgent:
                             )
                             if candidate["status"] == "ready":
                                 review_packet = candidate["packet"]
-                                review_pending = (
-                                    limits.model_calls - index - 1 >= 2
-                                    and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
-                                    and limits.output_tokens_per_call >= 512
-                                )
-                                if not review_pending:
-                                    review_skip = "run_budget"
+                                packet_size = len(json.dumps(review_packet, ensure_ascii=False))
+                                if packet_size > limits.context_characters // 3:
+                                    # The review prompt is rebuilt from scratch, so
+                                    # an oversized packet would hit the ceiling.
+                                    review_pending = False
+                                    review_skip = "packet_too_large"
+                                    review_packet = None
+                                else:
+                                    review_pending = (
+                                        limits.model_calls - index - 1 >= 2
+                                        and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
+                                        and limits.output_tokens_per_call >= 512
+                                    )
+                                    if not review_pending:
+                                        review_skip = "run_budget"
                             else:
                                 review_skip = candidate["reason"]
                     elif completed["stop_reason"] in {"end_turn", "stop_sequence", "refusal"}:
@@ -751,6 +882,16 @@ class NativeAgent:
                         break
                     elif completed["stop_reason"] == "pause_turn":
                         continue  # A successful RAM continuation, never a failed-request retry.
+                    elif completed["stop_reason"] == "max_tokens":
+                        # A truncated response is not a failed request. Continue the
+                        # same bounded run with the model's own partial output; this
+                        # never adds budget beyond model_calls/output_characters.
+                        if token_continuations >= limits.token_continuations:
+                            outcome.error_code = "output_incomplete"
+                            break
+                        token_continuations += 1
+                        emit("model_continuation", {"attempt": token_continuations}, status="running")
+                        continue
                     else:
                         outcome.error_code = "output_incomplete"
                         break
@@ -820,6 +961,10 @@ class NativeAgent:
                     {"error": _error_message(outcome.error_code, outcome.limit_reason)},
                     error_code=outcome.error_code,
                     limit_reason=outcome.limit_reason,
+                    # Name the exhausted budget (context_characters, model_calls,
+                    # wall_time, ...) so a bounded stop is diagnosable without
+                    # reading the provider calls or the user-facing message.
+                    **({"budget": outcome.limit_reason} if outcome.limit_reason else {}),
                     **(
                         {"provider_diagnostic": outcome.provider_diagnostic}
                         if outcome.provider_diagnostic
@@ -936,7 +1081,14 @@ class NativeAgent:
                     store.get_run(outcome.user, outcome.run_id)
                     raise RuntimeError("native_terminal_persistence_unconfirmed")
             terminal = store.finish_run(
-                outcome.user, outcome.run_id, outcome.status, outcome.text, outcome.error_code
+                outcome.user,
+                outcome.run_id,
+                outcome.status,
+                outcome.text,
+                outcome.error_code,
+                # Only a bounded stop has a budget to name; the plain terminal
+                # paths keep the historical call shape.
+                **({"limit_reason": outcome.limit_reason} if outcome.limit_reason else {}),
             )
             if terminal["status"] != outcome.status:
                 raise RuntimeError("native_terminal_persistence_unconfirmed")

@@ -432,13 +432,17 @@ def set_run_status(user, run_id, status):
         return _public_run(_owned(db, user, run_id))
 
 
-def finish_run(user, run_id, status, summary, error_code=None):
+def finish_run(user, run_id, status, summary, error_code=None, *, limit_reason=None):
     if (
         not isinstance(status, str)
         or status not in TERMINAL
         or (
             error_code is not None
             and (not isinstance(error_code, str) or not _ERROR_CODE.fullmatch(error_code))
+        )
+        or (
+            limit_reason is not None
+            and (not isinstance(limit_reason, str) or not _ERROR_CODE.fullmatch(limit_reason))
         )
     ):
         _reject()
@@ -454,7 +458,12 @@ def finish_run(user, run_id, status, summary, error_code=None):
             "UPDATE native_agent_runs SET status=?,summary=?,error_code=?,finished_at=?,updated_at=? WHERE run_id=?",
             [status, summary, error_code, now, now, run_id],
         )
-        _insert_event(db, row, {"type": "run_finished", "status": status, "error_code": error_code})
+        payload = {"type": "run_finished", "status": status, "error_code": error_code}
+        if limit_reason is not None:
+            # Terminal events name the exhausted budget; the run row schema is
+            # unchanged, so the detail lives in the append-only event record.
+            payload["budget"] = limit_reason
+        _insert_event(db, row, payload)
         return _public_run(_owned(db, user, run_id))
 
 

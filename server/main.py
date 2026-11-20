@@ -543,6 +543,13 @@ async def api_admin_health(request: Request):
     result["background"]["native_diagnostics"] = (
         delivery.health() if delivery is not None else {"status": "not_started"}
     )
+    manager = getattr(request.app.state, "work_manager", None)
+    if manager is not None:
+        try:
+            result["work"] = manager.observe()
+        except Exception:
+            # Health stays available even when a stale/incomplete manager cannot answer.
+            result["work"] = {"status": "unavailable"}
     return result
 
 
