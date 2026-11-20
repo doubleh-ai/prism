@@ -281,6 +281,7 @@ class Manager:
         self._nonce = secrets.token_hex(16)
         self._state = "running"
         self._os = None
+        self._drain_counts = {"begin": 0, "seal": 0, "resume": 0}
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="prism-work")
 
     def declare(self, kind, *, enabled=True):
@@ -561,6 +562,9 @@ class Manager:
 
     def begin_drain(self, ticket):
         with self._lock:
+            # Count every control attempt, including rejected ones; this is
+            # observation only and never changes the state machine.
+            self._drain_counts["begin"] += 1
             if self._state != "running":
                 fail("drain_state_rejected")
             self._command(ticket)
@@ -633,6 +637,7 @@ class Manager:
                 "state": self._state,
                 "epoch": self._epoch,
                 "generation": self._generation,
+                "drain_counts": dict(self._drain_counts),
                 "leases": counts,
                 "pending_async": sum(lease._async_pending for lease in self._leases.values()),
                 "pending_requests": len(self._requests),
@@ -669,6 +674,7 @@ class Manager:
 
     def seal(self, ticket):
         with self._lock:
+            self._drain_counts["seal"] += 1
             value = self.observe()
             if (
                 self._state != "draining"
@@ -686,6 +692,7 @@ class Manager:
 
     def resume(self, ticket):
         with self._lock:
+            self._drain_counts["resume"] += 1
             if self._state != "quiescent" or not self._empty():
                 fail("quiescence_unproven")
             self._command(ticket)

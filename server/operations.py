@@ -29,6 +29,8 @@ CACHE_SECONDS = 180  # Two public GETs per refresh; stays below the anonymous qu
 RETRY_SECONDS = 180
 RELEASE_STATUS = Path("/var/lib/prism-operations/status.json")
 RELEASE_STATUS_OWNER = 0
+BACKUP_STATE = Path("/var/backups/prism/state")
+BACKUP_RECEIPT_SCHEMA = "prism.backup.receipt.v1"
 OPERATOR_RECORD = f"{WEB}/issues/9"
 _SHA = re.compile(r"^[a-fA-F0-9]{40}$")
 _WORKFLOW_KINDS = {
@@ -199,6 +201,55 @@ def _positive_id(value: Any) -> int | None:
     return value if type(value) is int and 0 < value < 10**18 else None
 
 
+def _backup_receipt(path: Path) -> dict:
+    """Read one bounded root-owned receipt. Never raises, never trusts a partial file."""
+    try:
+        with path.open("rb") as source:
+            data = json.loads(source.read(128_001))
+    except PermissionError:
+        return {"status": "unreadable", "path": str(path)}
+    except (OSError, ValueError, TypeError, RecursionError):
+        return {"status": "missing", "path": str(path)}
+    if not isinstance(data, dict) or data.get("schema") != BACKUP_RECEIPT_SCHEMA:
+        return {"status": "missing", "path": str(path)}
+    name, digest, size = data.get("file"), data.get("sha256"), data.get("bytes")
+    if (
+        not isinstance(name, str)
+        or not name
+        or not isinstance(digest, str)
+        or not digest
+        or type(size) is not int
+        or size < 0
+    ):
+        return {"status": "missing", "path": str(path)}
+    receipt = {"status": "ok", "file": _text(name, 200), "sha256": _text(digest, 128), "bytes": size}
+    for key in ("created_at", "finished_at"):
+        stamp = data.get(key)
+        if stamp is None:
+            continue
+        if type(stamp) is not int:
+            return {"status": "missing", "path": str(path)}
+        receipt[key] = stamp
+    cos = data.get("cos")
+    if isinstance(cos, dict) and type(cos.get("uploaded")) is bool:
+        receipt["cos"] = {"uploaded": cos["uploaded"]}
+    return receipt
+
+
+def backup_observation() -> dict:
+    """Observe the private executor's backup/restore receipts, never modify them."""
+    last_backup = _backup_receipt(BACKUP_STATE / "last-backup.json")
+    last_restore = _backup_receipt(BACKUP_STATE / "last-restore.json")
+    statuses = (last_backup["status"], last_restore["status"])
+    if statuses == ("ok", "ok"):
+        status = "ok"
+    elif "unreadable" in statuses:
+        status = "unreadable"
+    else:
+        status = "missing"
+    return {"status": status, "last_backup": last_backup, "last_restore": last_restore}
+
+
 def _normalise_runs(payload: Any) -> list[dict]:
     if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
         raise ValueError("Invalid workflow observation")
@@ -331,6 +382,7 @@ async def operations_payload() -> dict:
             else "尚未读取到可信的生产执行记录；检查与候选结果不代表上线。请打开独立记录核对。",
         },
         "production": production,
+        "backup": backup_observation(),
         "links": {
             "actions": f"{WEB}/actions",
             "repository": WEB,

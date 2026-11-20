@@ -48,6 +48,7 @@ class Limits:
     tool_calls: int = 16
     server_search_calls: int = 4
     output_tokens_per_call: int = 2048
+    token_continuations: int = 3
     wall_seconds: float = 180
     output_characters: int = 60000
     context_characters: int = 100000
@@ -421,6 +422,7 @@ class NativeAgent:
                 search_available = provider.supports_search(model_cfg)
                 definitions = tools.definitions()
                 finished = False
+                token_continuations = 0
                 for index in range(limits.model_calls):
                     if len(json.dumps(messages, ensure_ascii=False)) > limits.context_characters:
                         raise BudgetExceeded("context_characters")
@@ -751,6 +753,16 @@ class NativeAgent:
                         break
                     elif completed["stop_reason"] == "pause_turn":
                         continue  # A successful RAM continuation, never a failed-request retry.
+                    elif completed["stop_reason"] == "max_tokens":
+                        # A truncated response is not a failed request. Continue the
+                        # same bounded run with the model's own partial output; this
+                        # never adds budget beyond model_calls/output_characters.
+                        if token_continuations >= limits.token_continuations:
+                            outcome.error_code = "output_incomplete"
+                            break
+                        token_continuations += 1
+                        emit("model_continuation", {"attempt": token_continuations}, status="running")
+                        continue
                     else:
                         outcome.error_code = "output_incomplete"
                         break
