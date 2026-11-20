@@ -103,11 +103,27 @@ async def test_repeated_max_tokens_is_bounded_and_then_output_incomplete(engine,
     monkeypatch.setattr(runtime, "model_stream", script)
     outcome = await execute(engine)
 
-    # 1 original call + exactly 3 permitted continuations, then the old failure.
-    assert len(calls) == 4
+    # The default budget allows 8 calls, but every call is again truncated at
+    # max_tokens: the original call plus exactly 4 permitted continuations are
+    # used, then the run stops as output_incomplete. Raising model_calls does
+    # not lift the per-run continuation cap, so the run cannot loop forever.
+    assert len(calls) == 5
     assert outcome.error_code == "output_incomplete"
     assert outcome.status != "completed"
-    assert len([e for e in events(engine) if e["type"] == "model_continuation"]) == 3
+    continuation_events = [e for e in events(engine) if e["type"] == "model_continuation"]
+    assert [e["ui"]["attempt"] for e in continuation_events] == [1, 2, 3, 4]
+    assert len([e for e in events(engine) if e["type"] == "model_started"]) == 5
+
+
+def test_default_limits_fit_one_complete_report():
+    # Production evidence on 2ab32d4: a real report used 6 calls x 2048 output
+    # tokens and was still truncated on the 6th call (output_incomplete). The
+    # defaults must fit a full report plus the bounded review/continuation work.
+    limits = runtime.Limits()
+    assert limits.model_calls == 8
+    assert limits.output_tokens_per_call == 4096
+    assert limits.token_continuations == 4
+    assert limits.wall_seconds == 300
 
 
 async def test_continuation_never_extends_the_model_call_budget(engine, monkeypatch):

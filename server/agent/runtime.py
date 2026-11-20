@@ -44,12 +44,12 @@ model_stream = provider.stream
 
 @dataclass(frozen=True)
 class Limits:
-    model_calls: int = 6
+    model_calls: int = 8
     tool_calls: int = 16
     server_search_calls: int = 4
-    output_tokens_per_call: int = 2048
-    token_continuations: int = 3
-    wall_seconds: float = 180
+    output_tokens_per_call: int = 4096
+    token_continuations: int = 4
+    wall_seconds: float = 300
     output_characters: int = 60000
     context_characters: int = 100000
     concurrent_runs: int = 4

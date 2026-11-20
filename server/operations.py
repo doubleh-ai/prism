@@ -31,6 +31,7 @@ RELEASE_STATUS = Path("/var/lib/prism-operations/status.json")
 RELEASE_STATUS_OWNER = 0
 BACKUP_STATE = Path("/var/backups/prism/state")
 BACKUP_RECEIPT_SCHEMA = "prism.backup.receipt.v1"
+RESTORE_RECEIPT_SCHEMA = "prism.backup.restore.v1"
 OPERATOR_RECORD = f"{WEB}/issues/9"
 _SHA = re.compile(r"^[a-fA-F0-9]{40}$")
 _WORKFLOW_KINDS = {
@@ -201,17 +202,8 @@ def _positive_id(value: Any) -> int | None:
     return value if type(value) is int and 0 < value < 10**18 else None
 
 
-def _backup_receipt(path: Path) -> dict:
-    """Read one bounded root-owned receipt. Never raises, never trusts a partial file."""
-    try:
-        with path.open("rb") as source:
-            data = json.loads(source.read(128_001))
-    except PermissionError:
-        return {"status": "unreadable", "path": str(path)}
-    except (OSError, ValueError, TypeError, RecursionError):
-        return {"status": "missing", "path": str(path)}
-    if not isinstance(data, dict) or data.get("schema") != BACKUP_RECEIPT_SCHEMA:
-        return {"status": "missing", "path": str(path)}
+def _backup_fields(data: dict) -> dict | None:
+    """Fields shared by last-backup.json; None means the receipt is invalid."""
     name, digest, size = data.get("file"), data.get("sha256"), data.get("bytes")
     if (
         not isinstance(name, str)
@@ -221,14 +213,14 @@ def _backup_receipt(path: Path) -> dict:
         or type(size) is not int
         or size < 0
     ):
-        return {"status": "missing", "path": str(path)}
-    receipt = {"status": "ok", "file": _text(name, 200), "sha256": _text(digest, 128), "bytes": size}
+        return None
+    receipt = {"file": _text(name, 200), "sha256": _text(digest, 128), "bytes": size}
     for key in ("created_at", "finished_at"):
         stamp = data.get(key)
         if stamp is None:
             continue
         if type(stamp) is not int:
-            return {"status": "missing", "path": str(path)}
+            return None
         receipt[key] = stamp
     cos = data.get("cos")
     if isinstance(cos, dict) and type(cos.get("uploaded")) is bool:
@@ -236,10 +228,76 @@ def _backup_receipt(path: Path) -> dict:
     return receipt
 
 
+def _restore_fields(data: dict) -> dict | None:
+    """Map the private restore receipt onto the same four safe fields."""
+    name = data.get("backup_file")
+    digest = data.get("backup_sha256")
+    size = data.get("backup_bytes")
+    created = data.get("at")
+    manifest_verified = data.get("manifest_verified")
+    sqlite_integrity = data.get("sqlite_integrity")
+    restored_to = data.get("restored_to")
+    production_data_restored = data.get("production_data_restored")
+    if (
+        not isinstance(name, str)
+        or not name
+        or not isinstance(digest, str)
+        or not digest
+        or type(size) is not int
+        or size < 0
+        or type(created) is not int
+        or type(manifest_verified) is not bool
+        or not isinstance(sqlite_integrity, str)
+        or not sqlite_integrity
+        or not isinstance(restored_to, str)
+        or not restored_to
+        or type(production_data_restored) is not bool
+    ):
+        return None
+    return {
+        "file": _text(name, 200),
+        "sha256": _text(digest, 128),
+        "bytes": size,
+        "created_at": created,
+        "manifest_verified": manifest_verified,
+        "sqlite_integrity": _text(sqlite_integrity, 64),
+        "restored_to": _text(restored_to, 100),
+        "production_data_restored": production_data_restored,
+    }
+
+
+def _backup_receipt(path: Path, kind: str) -> dict:
+    """Read one bounded root-owned receipt. Never raises, never trusts a partial file.
+
+    A backup receipt and the restore receipt written by the private executor use
+    different schemas; both map to the same bounded fields, tagged by ``kind``.
+    """
+    missing = {"status": "missing", "path": str(path), "kind": kind}
+    try:
+        with path.open("rb") as source:
+            data = json.loads(source.read(128_001))
+    except PermissionError:
+        return {"status": "unreadable", "path": str(path), "kind": kind}
+    except (OSError, ValueError, TypeError, RecursionError):
+        return missing
+    if not isinstance(data, dict):
+        return missing
+    schema = data.get("schema")
+    if schema == BACKUP_RECEIPT_SCHEMA:
+        fields = _backup_fields(data)
+    elif schema == RESTORE_RECEIPT_SCHEMA:
+        fields = _restore_fields(data)
+    else:
+        fields = None
+    if fields is None:
+        return missing
+    return {"status": "ok", "kind": kind, **fields}
+
+
 def backup_observation() -> dict:
     """Observe the private executor's backup/restore receipts, never modify them."""
-    last_backup = _backup_receipt(BACKUP_STATE / "last-backup.json")
-    last_restore = _backup_receipt(BACKUP_STATE / "last-restore.json")
+    last_backup = _backup_receipt(BACKUP_STATE / "last-backup.json", "backup")
+    last_restore = _backup_receipt(BACKUP_STATE / "last-restore.json", "restore")
     statuses = (last_backup["status"], last_restore["status"])
     if statuses == ("ok", "ok"):
         status = "ok"
