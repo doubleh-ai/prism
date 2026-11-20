@@ -45,13 +45,13 @@ model_stream = provider.stream
 @dataclass(frozen=True)
 class Limits:
     model_calls: int = 8
-    tool_calls: int = 16
+    tool_calls: int = 20
     server_search_calls: int = 4
     output_tokens_per_call: int = 4096
     token_continuations: int = 4
-    wall_seconds: float = 300
+    wall_seconds: float = 480
     output_characters: int = 60000
-    context_characters: int = 100000
+    context_characters: int = 200000
     concurrent_runs: int = 4
 
 
@@ -832,6 +832,10 @@ class NativeAgent:
                     {"error": _error_message(outcome.error_code, outcome.limit_reason)},
                     error_code=outcome.error_code,
                     limit_reason=outcome.limit_reason,
+                    # Name the exhausted budget (context_characters, model_calls,
+                    # wall_time, ...) so a bounded stop is diagnosable without
+                    # reading the provider calls or the user-facing message.
+                    **({"budget": outcome.limit_reason} if outcome.limit_reason else {}),
                     **(
                         {"provider_diagnostic": outcome.provider_diagnostic}
                         if outcome.provider_diagnostic
@@ -948,7 +952,14 @@ class NativeAgent:
                     store.get_run(outcome.user, outcome.run_id)
                     raise RuntimeError("native_terminal_persistence_unconfirmed")
             terminal = store.finish_run(
-                outcome.user, outcome.run_id, outcome.status, outcome.text, outcome.error_code
+                outcome.user,
+                outcome.run_id,
+                outcome.status,
+                outcome.text,
+                outcome.error_code,
+                # Only a bounded stop has a budget to name; the plain terminal
+                # paths keep the historical call shape.
+                **({"limit_reason": outcome.limit_reason} if outcome.limit_reason else {}),
             )
             if terminal["status"] != outcome.status:
                 raise RuntimeError("native_terminal_persistence_unconfirmed")

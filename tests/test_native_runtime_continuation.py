@@ -119,11 +119,42 @@ def test_default_limits_fit_one_complete_report():
     # Production evidence on 2ab32d4: a real report used 6 calls x 2048 output
     # tokens and was still truncated on the 6th call (output_incomplete). The
     # defaults must fit a full report plus the bounded review/continuation work.
+    # Production evidence on the next candidate: the run stopped at 5 model
+    # calls, 13 tool calls and 3 searches with 111,243 input tokens because the
+    # 100,000-character context ceiling was reached first, so the context and
+    # tool budgets must also fit the evidence a complete report needs. The same
+    # run spent 156s on 5 calls (~31s per call), so 8 calls plus the review
+    # round would leave only ~50s under a 300s wall; 480s keeps the clock from
+    # becoming the next failure while a build-and-switch cycle costs 15 minutes.
     limits = runtime.Limits()
     assert limits.model_calls == 8
     assert limits.output_tokens_per_call == 4096
     assert limits.token_continuations == 4
-    assert limits.wall_seconds == 300
+    assert limits.wall_seconds == 480
+    assert limits.tool_calls == 20
+    assert limits.context_characters == 200000
+
+
+async def test_context_budget_names_the_exhausted_limit_in_events(engine, monkeypatch):
+    # An over-context stop must be diagnosable from the persisted events alone:
+    # the production run reported only budget_exceeded, so ops had to infer the
+    # cause from input_tokens. The run_error and terminal run_finished events
+    # now carry the exhausted budget name.
+    engine.service.limits = runtime.Limits(context_characters=1)
+    outcome = await execute(engine)
+
+    assert outcome.status == "failed" and outcome.error_code == "budget_exceeded"
+    assert outcome.limit_reason == "context_characters"
+    error = next(e for e in events(engine) if e["type"] == "run_error")
+    assert error["budget"] == "context_characters"
+    assert error["limit_reason"] == "context_characters"
+    assert "上下文容量上限" in error["ui"]["error"]
+    finished = next(e for e in events(engine) if e["type"] == "run_finished")
+    assert finished["error_code"] == "budget_exceeded"
+    assert finished["budget"] == "context_characters"
+    # The context ceiling is checked before a call, so no truncated model call
+    # was made and no partial provider usage is reported as a completed call.
+    assert not any(e["type"] == "model_started" for e in events(engine))
 
 
 async def test_continuation_never_extends_the_model_call_budget(engine, monkeypatch):
