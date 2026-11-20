@@ -6,6 +6,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- 原生模型输出被单次长度上限截断时继续续写，并如实记录截断原因，不再把可用答案判为失败；研究在上下文接近上限时进入收尾轮，证据评审包过大时跳过评审并释放较早的工具输出。
+- 停止回执如实记录任务排空状态：停止前先围栏新任务、等待在跑任务自然结束再封存，`/api/admin/health` 暴露工作运行时状态与排空计数，不再固定写为未验证。
+- `/api/admin/operations` 读取加密备份与恢复回执，兼容 `prism.backup.restore.v1`；备份产物目录改为可穿透但不可列，回执保持只读可查。
+
 ## [v0.25.0]
 
 ### Added
