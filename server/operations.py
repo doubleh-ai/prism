@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
+import sqlite3
 import stat
 import time
 from dataclasses import dataclass, field
@@ -19,6 +21,7 @@ from fastapi.responses import JSONResponse
 
 from .auth import require_admin
 from .config import OPERATIONS_ENVIRONMENT
+from .database import get_db
 from .release import release_payload
 
 router = APIRouter(prefix="/api/admin")
@@ -91,6 +94,22 @@ _RELEASE_STATUSES = {
     "in_progress",
     "started",
 }
+# Read-only research quality telemetry: one bounded window, no N+1 queries.
+RESEARCH_WINDOW_DAYS = 30
+_RESEARCH_STATUSES = ("completed", "partial", "failed", "cancelled")
+_RESEARCH_BUDGET_REASONS = frozenset(
+    {
+        "context_characters",
+        "model_calls",
+        "tool_calls",
+        "search_calls",
+        "wall_time",
+        "output_characters",
+    }
+)
+# Claim verification lives in the claim payload JSON (no schema column); claims that
+# predate the field or carry an unknown value count conservatively as unverified.
+_RESEARCH_VERIFICATION_LEVELS = frozenset({"verified_source", "secondhand", "inferred", "unverified"})
 
 
 def _record_time(value) -> str | None:
@@ -308,6 +327,144 @@ def backup_observation() -> dict:
     return {"status": status, "last_backup": last_backup, "last_restore": last_restore}
 
 
+def _research_window_start(now: float | None = None) -> float:
+    """Unix cutoff for the admin telemetry window; tests inject a fixed clock."""
+    return (time.time() if now is None else now) - RESEARCH_WINDOW_DAYS * 86400
+
+
+def _research_percentile(samples: list[float], fraction: float) -> float | None:
+    if not samples:
+        return None
+    ordered = sorted(samples)
+    return round(ordered[max(0, math.ceil(fraction * len(ordered)) - 1)], 1)
+
+
+def _research_run_metrics(db, window_start: float) -> tuple[dict, float | None, dict]:
+    """One bounded read of run status, completion and latency for the window."""
+    rows = db.execute(
+        "SELECT status,created_at,finished_at FROM native_agent_runs WHERE created_at>=?",
+        [window_start],
+    ).fetchall()
+    counts = dict.fromkeys(_RESEARCH_STATUSES, 0)
+    latencies: list[float] = []
+    for row in rows:
+        if row["status"] in counts:
+            counts[row["status"]] += 1
+        created, finished = row["created_at"], row["finished_at"]
+        if (
+            type(created) in (int, float)
+            and type(finished) in (int, float)
+            and created >= window_start
+            and finished >= created
+        ):
+            latencies.append(float(finished - created))
+    total = len(rows)
+    completion_rate = round(counts["completed"] / total, 4) if total else None
+    latency = {
+        "p50": _research_percentile(latencies, 0.50),
+        "p95": _research_percentile(latencies, 0.95),
+        "max": round(max(latencies), 1) if latencies else None,
+    }
+    return {"total": total, **counts}, completion_rate, latency
+
+
+def _research_partial_reasons(db, window_start: float) -> dict:
+    """Budget stops are named on the terminal event; read one row per finished run."""
+    rows = db.execute(
+        "SELECT e.payload FROM native_agent_events e JOIN native_agent_runs r "
+        "ON r.run_id=e.run_id AND e.seq=r.last_seq "
+        "WHERE r.created_at>=? AND r.finished_at IS NOT NULL",
+        [window_start],
+    ).fetchall()
+    reasons: dict[str, int] = {}
+    for row in rows:
+        try:
+            event = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "run_finished":
+            continue
+        reason = event.get("budget")
+        if reason in _RESEARCH_BUDGET_REASONS:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return reasons
+
+
+def _research_claim_verification(db, window_start: float) -> dict:
+    """Read-only claim verification ratios, extracted from the claim payload JSON.
+
+    Verification is stored as ``payload["verification"]`` instead of a table column so
+    an application rollback to the previous release (which inserts three positional
+    columns) still works. Legacy claims without the key count as ``unverified``; if the
+    SQLite build has no JSON1, ``json_extract`` raises and the caller degrades this item.
+    """
+    cutoff = datetime.fromtimestamp(window_start, UTC).isoformat(timespec="seconds")
+    rows = db.execute(
+        "SELECT COALESCE(json_extract(c.payload,'$.verification'),'unverified') AS verification,"
+        "COUNT(*) FROM research_claims c JOIN research_runs r ON r.run_id=c.run_id "
+        "WHERE datetime(r.created_at)>=datetime(?) GROUP BY 1",
+        [cutoff],
+    ).fetchall()
+    counts = dict.fromkeys(_RESEARCH_VERIFICATION_LEVELS, 0)
+    for row in rows:
+        verification, count = row[0], row[1]
+        if verification not in counts:
+            verification = "unverified"
+        counts[verification] += count
+    denominator = sum(counts.values())
+    ratio = round(counts["verified_source"] / denominator, 4) if denominator else None
+    return {"verified_claim_ratio": ratio, "unsupported_claims": counts["unverified"]}
+
+
+def research_observation(now: float | None = None) -> dict:
+    """Read-only 30-day research quality telemetry; every metric degrades alone.
+
+    ``model_calls`` is intentionally omitted: native_agent_runs has no such column and
+    the runtime keeps usage counters only inside append-only native_agent_events, so
+    the metric is skipped instead of being approximated from unrelated counters.
+    Claim verification is read from the claim payload JSON, never from a new column.
+    """
+    window_start = _research_window_start(now)
+    degraded = False
+    runs: dict = {"status": "unavailable"}
+    completion_rate: float | None = None
+    latency: dict = {"p50": None, "p95": None, "max": None}
+    partial_reasons: dict = {}
+    verified_claim_ratio: float | None = None
+    unsupported_claims: int | None = None
+    claim_verification: dict = {"status": "unavailable"}
+    try:
+        with get_db() as db:
+            runs, completion_rate, latency = _research_run_metrics(db, window_start)
+    except (sqlite3.Error, ValueError, TypeError, OverflowError):
+        degraded = True
+    try:
+        with get_db() as db:
+            partial_reasons = _research_partial_reasons(db, window_start)
+    except (sqlite3.Error, ValueError, TypeError):
+        degraded = True
+    try:
+        with get_db() as db:
+            values = _research_claim_verification(db, window_start)
+    except (sqlite3.Error, ValueError, TypeError, OverflowError):
+        degraded = True
+    else:
+        verified_claim_ratio = values["verified_claim_ratio"]
+        unsupported_claims = values["unsupported_claims"]
+        claim_verification = {"status": "ok"}
+    return {
+        "status": "degraded" if degraded else "ok",
+        "window_days": RESEARCH_WINDOW_DAYS,
+        "runs": runs,
+        "completion_rate": completion_rate,
+        "partial_reasons": partial_reasons,
+        "latency_seconds": latency,
+        "verified_claim_ratio": verified_claim_ratio,
+        "unsupported_claims": unsupported_claims,
+        "claim_verification": claim_verification,
+    }
+
+
 def _normalise_runs(payload: Any) -> list[dict]:
     if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
         raise ValueError("Invalid workflow observation")
@@ -441,6 +598,7 @@ async def operations_payload() -> dict:
         },
         "production": production,
         "backup": backup_observation(),
+        "research": research_observation(),
         "links": {
             "actions": f"{WEB}/actions",
             "repository": WEB,

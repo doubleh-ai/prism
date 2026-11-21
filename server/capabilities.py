@@ -184,6 +184,11 @@ class ResearchClaim(Arguments):
     limitations: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
         default_factory=list, max_length=20, description="推断、假设的限制及失效条件。"
     )
+    verification: Literal["verified_source", "secondhand", "inferred", "unverified"] = Field(
+        default="unverified",
+        description="结论核验状态：verified_source 原文已核验、secondhand 二手转述、"
+        "inferred 模型推断、unverified 未核验；未实际核对原文时不得标为原文已核验。",
+    )
 
 
 class ClaimsArgs(Arguments):

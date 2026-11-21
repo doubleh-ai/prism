@@ -42,6 +42,10 @@ BLOCKS = (
     ("counterevidence", "反方与失效条件"),
     ("gaps", "未解决缺口"),
 )
+# 核验状态记录结论表述的核对方式，不自动证明结论为真：
+# verified_source 原文已核验 / secondhand 二手转述 / inferred 模型推断 / unverified 未核验。
+VERIFICATION_LEVELS = ("verified_source", "secondhand", "inferred", "unverified")
+DEFAULT_VERIFICATION = "unverified"
 
 
 def _json(value):
@@ -506,6 +510,11 @@ def _claim(candidate, passages, documents, existing):
     statement = _short(candidate.get("statement"), 3000)
     if not statement or not statement.strip():
         raise HTTPException(422, "结论表述不能为空")
+    verification = candidate.get("verification", DEFAULT_VERIFICATION)
+    if verification is None:
+        verification = DEFAULT_VERIFICATION
+    if verification not in VERIFICATION_LEVELS:
+        raise HTTPException(422, "结论核验状态须为 verified_source/secondhand/inferred/unverified")
     gaps = []
     links = {}
     for key in ("supports", "opposes", "background"):
@@ -647,6 +656,7 @@ def _claim(candidate, passages, documents, existing):
         "limitations": [v[:500] for v in limitations[:20]],
         "citation_status": "invalid" if "quote_not_in_passage" in gaps else ("partial" if gaps else "valid"),
         "semantic_status": "unreviewed",
+        "verification": verification,
         "gaps": gaps,
         "created_at": _now(),
     }
