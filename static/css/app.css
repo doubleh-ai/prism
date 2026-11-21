@@ -23,6 +23,7 @@
   --text:#26382e;--text2:#586d5b;--text3:#76866d;
   --accent:#2d6b58;--accent-bg:#edf4e9;--accent-dim:#7da58b;
   --warn:#d97706;--warn-bg:#fffbeb;
+  --verify:#1f7a4d;--verify-bg:#e6f4ea;--secondhand:#b45309;--secondhand-bg:#fef3c7;--infer:#5b6b7a;--infer-bg:#eef2f6;--danger:#b3261e;--danger-bg:#fdecea;
   --sidebar:#f0f3eb;--side-text:#5b6f54;--side-hover:#e5ebde;--side-active:#dce8d2;
   --shadow:0 1px 3px rgba(0,0,0,.04);
 }
@@ -32,6 +33,7 @@
   --text:#ece9e1;--text2:#c0beb6;--text3:#9c9d94;
   --accent:#8abb9e;--accent-bg:#1a2d22;--accent-dim:#456e54;
   --warn:#fbbf24;--warn-bg:#1a1408;
+  --verify:#7ed6a2;--verify-bg:#12291b;--secondhand:#fbbf24;--secondhand-bg:#1a1408;--infer:#a9b6c4;--infer-bg:#1a1f26;--danger:#f2726c;--danger-bg:#2a1312;
   --sidebar:#0a0b0e;--side-text:#c0beb6;--side-hover:#1a1c22;--side-active:#22242c;
   --shadow:0 1px 3px rgba(0,0,0,.2);
 }
@@ -2111,3 +2113,17 @@ body::after{display:none}
 .workbench-login .login-password-toggle:hover{color:var(--accent);background:var(--accent-bg)}
 .login-password-toggle svg{width:20px;height:20px}
 .login-password-toggle[aria-pressed="true"] .login-eye-slash{display:none}
+.research-level{display:inline-block;padding:0 .35em;border-radius:4px;font-size:.78em;line-height:1.6;font-style:normal;font-weight:600;vertical-align:middle;white-space:nowrap}
+.research-level-verified{color:var(--verify);background:var(--verify-bg)}
+.research-level-secondhand{color:var(--secondhand);background:var(--secondhand-bg)}
+.research-level-inferred{color:var(--infer);background:var(--infer-bg)}
+.research-level-unverified{color:var(--danger);background:var(--danger-bg)}
+.research-prose .research-level{font-size:.72em;vertical-align:super;padding:0 .2em}
+.research-missing{color:var(--danger);font-weight:600}
+.research-evidence-table{width:100%;border-collapse:collapse;font-size:.92em}
+.research-evidence-table th,.research-evidence-table td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;white-space:normal}
+.research-evidence-table th{font-size:.82em;color:var(--text3);font-weight:600;white-space:nowrap}
+.research-evidence-value{font-family:var(--mono);font-weight:600;color:var(--text)}
+.research-evidence-statement{display:block;color:var(--text2);font-size:.86em;line-height:1.5;margin-top:4px}
+.research-evidence-table a{color:var(--accent)}
+.research-report-narrative .research-note,.research-evidence-section .research-note{margin:2px 0 8px}
