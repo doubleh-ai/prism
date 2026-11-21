@@ -28,6 +28,7 @@ from ..research_context import (
 )
 from ..source_urls import redact_source_text, source_display_payload
 from .quantities import audit_claims
+from .reconciliation import reconcile_report, unavailable_result
 
 TERMINAL = {"completed", "partial", "failed", "cancelled"}
 STAGES = {"queued", "discovering", "collecting", "extracting", "checking", "synthesizing"}
@@ -719,6 +720,10 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
             claims = _records(db, "research_claims", run_id)
             relations = _records(db, "research_relations", run_id)
             numerical_checks = audit_claims(claims)
+            try:
+                claim_reconciliation = reconcile_report(claims, text)
+            except Exception:  # noqa: BLE001 - coverage telemetry must not cost the report
+                claim_reconciliation = unavailable_result()
             if (run.get("model_review") or {}).get("status") == "running":
                 run["model_review"] = {
                     **run["model_review"],
@@ -817,6 +822,7 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
                 "acceptance_status": status,
                 "semantic_status": "unreviewed",
                 "numerical_checks": numerical_checks,
+                "claim_reconciliation": claim_reconciliation,
                 "model_review": model_review,
                 "gaps": list(dict.fromkeys(gaps)),
             }

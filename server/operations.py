@@ -390,30 +390,62 @@ def _research_partial_reasons(db, window_start: float) -> dict:
     return reasons
 
 
-def _research_claim_verification(db, window_start: float) -> dict:
-    """Read-only claim verification ratios, extracted from the claim payload JSON.
+def _research_report_quality(db, window_start: float) -> dict:
+    """Read-only report-number coverage over the 30-day window.
 
-    Verification is stored as ``payload["verification"]`` instead of a table column so
-    an application rollback to the previous release (which inserts three positional
-    columns) still works. Legacy claims without the key count as ``unverified``; if the
-    SQLite build has no JSON1, ``json_extract`` raises and the caller degrades this item.
+    Newer releases store the server-side reconciliation in the immutable revision
+    payload JSON, so the run's report numbers are the supported unit. Runs without a
+    usable reconciliation (older revisions, or a degraded check) fall back to the
+    per-claim verification levels so the window stays comparable; both paths read
+    JSON, never a new column, keeping the three-positional-column claim INSERT and an
+    application rollback intact. Legacy or unknown claim levels count as
+    ``unverified``. If the SQLite build has no JSON1, ``json_extract`` raises and the
+    caller degrades this item instead of the whole observation.
     """
     cutoff = datetime.fromtimestamp(window_start, UTC).isoformat(timespec="seconds")
-    rows = db.execute(
-        "SELECT COALESCE(json_extract(c.payload,'$.verification'),'unverified') AS verification,"
-        "COUNT(*) FROM research_claims c JOIN research_runs r ON r.run_id=c.run_id "
-        "WHERE datetime(r.created_at)>=datetime(?) GROUP BY 1",
+    revision_rows = db.execute(
+        "SELECT rv.run_id, json_extract(rv.payload,'$.claim_reconciliation.status'),"
+        "json_extract(rv.payload,'$.claim_reconciliation.verified_claim_ratio'),"
+        "json_extract(rv.payload,'$.claim_reconciliation.unsupported_claims') "
+        "FROM research_revisions rv JOIN research_runs r ON r.run_id=rv.run_id "
+        "WHERE datetime(r.created_at)>=datetime(?)",
         [cutoff],
     ).fetchall()
-    counts = dict.fromkeys(_RESEARCH_VERIFICATION_LEVELS, 0)
-    for row in rows:
-        verification, count = row[0], row[1]
+    reconciled = set()
+    ratios: list[float] = []
+    unsupported = 0
+    for row in revision_rows:
+        if row[1] != "ok":
+            continue
+        reconciled.add(row[0])
+        ratio = row[2]
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and math.isfinite(ratio):
+            ratios.append(float(ratio))
+        count = row[3]
+        if isinstance(count, int) and not isinstance(count, bool):
+            unsupported += count
+    claim_rows = db.execute(
+        "SELECT c.run_id, COALESCE(json_extract(c.payload,'$.verification'),'unverified'),"
+        "COUNT(*) FROM research_claims c JOIN research_runs r ON r.run_id=c.run_id "
+        "WHERE datetime(r.created_at)>=datetime(?) GROUP BY c.run_id, 2",
+        [cutoff],
+    ).fetchall()
+    fallback: dict = {}
+    for row in claim_rows:
+        run_id, verification, count = row[0], row[1], row[2]
+        counts = fallback.setdefault(run_id, dict.fromkeys(_RESEARCH_VERIFICATION_LEVELS, 0))
         if verification not in counts:
             verification = "unverified"
         counts[verification] += count
-    denominator = sum(counts.values())
-    ratio = round(counts["verified_source"] / denominator, 4) if denominator else None
-    return {"verified_claim_ratio": ratio, "unsupported_claims": counts["unverified"]}
+    for run_id, counts in fallback.items():
+        if run_id in reconciled:
+            continue
+        denominator = sum(counts.values())
+        if denominator:
+            ratios.append(counts["verified_source"] / denominator)
+        unsupported += counts["unverified"]
+    ratio = round(sum(ratios) / len(ratios), 4) if ratios else None
+    return {"verified_claim_ratio": ratio, "unsupported_claims": unsupported}
 
 
 def research_observation(now: float | None = None) -> dict:
@@ -423,6 +455,8 @@ def research_observation(now: float | None = None) -> dict:
     the runtime keeps usage counters only inside append-only native_agent_events, so
     the metric is skipped instead of being approximated from unrelated counters.
     Claim verification is read from the claim payload JSON, never from a new column.
+    ``verified_claim_ratio`` and ``unsupported_claims`` prefer the report-level
+    reconciliation stored in the revision payload and fall back to claim levels.
     """
     window_start = _research_window_start(now)
     degraded = False
@@ -445,7 +479,7 @@ def research_observation(now: float | None = None) -> dict:
         degraded = True
     try:
         with get_db() as db:
-            values = _research_claim_verification(db, window_start)
+            values = _research_report_quality(db, window_start)
     except (sqlite3.Error, ValueError, TypeError, OverflowError):
         degraded = True
     else:

@@ -288,6 +288,23 @@ _CONTEXT_WRAP_UP = (
     "尚未核实的关键点明确标记为缺口，不要编造完整结论。"
 )
 
+# The wrap-up call runs with tools disabled, so it cannot register new claims. This
+# prompt therefore audits the key numbers against claims recorded earlier in the run
+# and keeps unverifiable numbers out of the conclusion instead of inventing sources.
+_WRAP_UP_VERIFICATION_PROMPT = (
+    "收尾前必须逐条自检报告中的关键数字：财务指标（营收、净利、扣非、毛利率、增速、"
+    "现金流、负债率）、交易与持仓数据（价格、成交额、持仓量、仓单量、会员排名、保证金率）、"
+    "产业数据（产量、库存、开工率、份额、产能），以及任何作为结论依据的数字。"
+    "每个关键数字都必须对应一条已通过 research_record_claims 登记的 claim，并逐项说明："
+    "source（来源链接或公告编号，claim 的 supports 必须指向原文）、"
+    "published_at（来源发布日期，不是采集日期）、scope（期间和统计口径）、"
+    "verification（核验等级）。核对不到原文的数字只能写 secondhand 或 inferred；"
+    "完全没有来源的写 unverified，绝不能为了好看写成 verified_source。"
+    "本轮已经不能再登记 claim：已在 claims 中但缺这四项的数字，在报告中标注未核验并列入缺口；"
+    "未登记的数字不得作为结论依据，应删除或列为缺口。"
+    "不要为了凑数编造来源、公告编号或发布日期。"
+)
+
 
 def _release_context(messages: list, target: int) -> int:
     """Shrink the oldest tool bodies until the prompt fits under ``target``.
@@ -626,6 +643,7 @@ class NativeAgent:
                         # The prompt above is shared with the call/time budget
                         # wrap-up; this sentence explains the context ceiling too.
                         system += "\n" + _CONTEXT_WRAP_UP
+                        system += "\n" + _WRAP_UP_VERIFICATION_PROMPT
                     request_messages = messages
                     call_end = end
                     review_text, review_error = "", None
@@ -982,10 +1000,17 @@ class NativeAgent:
                     error=outcome.status in {"failed", "partial"},
                     cancelled=outcome.status == "cancelled",
                 )
+                reconciliation = revision.get("claim_reconciliation") or {}
                 research.update(
                     status=revision["acceptance_status"],
                     revision_id=revision["revision_id"],
                     gaps=revision["gaps"],
+                    claim_reconciliation={
+                        "status": reconciliation.get("status", "unavailable"),
+                        "verified_claim_ratio": reconciliation.get("verified_claim_ratio"),
+                        "unsupported_claims": reconciliation.get("unsupported_claims"),
+                        "claims_checked": reconciliation.get("claims_checked"),
+                    },
                 )
                 outcome.research_revision = revision["revision_id"]
                 anchor = ensure_dialogue(user, run)
