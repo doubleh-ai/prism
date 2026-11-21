@@ -119,8 +119,10 @@ def test_range_bounds_and_negative_signs_are_handled():
     ]
     result = reconcile_report(claims, "增长 3%-5%，净利 -3.2 亿元。")
 
+    # "3%-5%" is one interval measurement, not two independent bounds; "-3.2" is a
+    # real negative amount, so both bounds stay covered and the count is range + amount.
     assert result["unsupported_claims"] == 0
-    assert result["report_numbers_checked"] == 3
+    assert result["report_numbers_checked"] == 2
 
 
 def test_repeated_number_is_counted_once():
@@ -270,3 +272,42 @@ def test_wrap_up_prompt_requires_a_complete_four_tuple():
         assert token in prompt
     assert "财务指标" in prompt and "产业数据" in prompt
     assert json.dumps(prompt, ensure_ascii=False)
+
+
+# ---- range measurements ----------------------------------------------------------------
+
+
+def test_a_range_is_covered_by_a_claim_inside_the_interval():
+    claims = [{"value": 4, "unit": "%", "verification": "verified_source"}]
+
+    section = reconcile_report(claims, "公司毛利率介于3%-5%之间。")
+
+    assert section["unsupported_claims"] == 0
+    assert section["report_numbers_checked"] == 1
+
+
+def test_a_range_is_unsupported_when_no_claim_falls_inside_it():
+    claims = [{"value": 9, "unit": "%", "verification": "verified_source"}]
+
+    section = reconcile_report(claims, "公司毛利率介于3%-5%之间。")
+
+    assert section["unsupported_claims"] == 1
+    assert [row["number"] for row in section["unsupported_numbers"]] == ["3%-5%"]
+
+
+def test_a_quantity_range_keeps_both_bounds():
+    claims = [{"value": 110, "unit": "万吨", "verification": "secondhand"}]
+
+    section = reconcile_report(claims, "产量预计100-120万吨。")
+
+    assert section["unsupported_claims"] == 0
+    assert section["report_numbers_checked"] == 1
+
+
+def test_ranges_and_single_measurements_coexist_in_one_sentence():
+    claims = [{"value": 4, "unit": "%"}, {"value": 120, "unit": "万吨"}]
+
+    section = reconcile_report(claims, "毛利率介于3%-5%之间，产量100-120万吨。")
+
+    assert section["unsupported_claims"] == 0
+    assert section["report_numbers_checked"] == 2

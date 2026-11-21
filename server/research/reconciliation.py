@@ -117,6 +117,11 @@ _RULE = re.compile(r"[-*_]{3,}")
 _SENTENCE_SPLIT = re.compile(r"(?<=[。；;！!？?])")
 _URL = re.compile(r"https?://[^\s)\]}>」』]+", re.IGNORECASE)
 _WHITESPACE = re.compile(r"\s+")
+# "3%-5%" / "100-120 万吨" / "40 至 50 亿元": one measurement with two bounds.
+_RANGE_SEPARATOR = re.compile(r"^\s*[-–—~至到]\s*$")
+_RANGE_SEPARATOR_LABEL = "-"
+_RANGE_SIGNS = frozenset("-–—~")
+_OPENING_BOUND = re.compile(r"(?<![\d.])(\d[\d,]*(?:\.\d+)?)\s*(万亿|亿|万|千)?\s*[-–—~至到]\s*$")
 # "3%-5%" and "3亿-5亿" use a hyphen between bounds; a hyphen after one of these
 # characters is a range separator, not a sign.
 _SIGNABLE_PREVIOUS = set("0123456789%％亿万千百倍吨手桶片台辆座度亩hH")
@@ -145,8 +150,9 @@ def _reconcile(claims, text) -> dict:
     report_numbers = _report_numbers(text if isinstance(text, str) else "")
     claim_keys = {key for claim in claim_list if (key := _claim_key(claim)) is not None}
     unsupported = []
-    for key, (display, sentence) in report_numbers.items():
-        if _covered(key, claim_keys):
+    for key, entry in report_numbers.items():
+        display, sentence = entry[0], entry[1]
+        if _covered_measurement(key, claim_keys):
             continue
         unsupported.append({"number": display, "sentence": _clip(sentence), "reason": "no_matching_claim"})
     if claim_list:
@@ -174,6 +180,7 @@ def _report_numbers(text: str) -> dict:
     for sentence in _sentences(text):
         masked = sentence
         taken: list = []
+        entries: list = []
         for kind, pattern in _PATTERNS:
             for match in pattern.finditer(masked):
                 start, end = match.span()
@@ -187,14 +194,58 @@ def _report_numbers(text: str) -> dict:
                     continue
                 taken.append((start, end))
                 key = _match_key(kind, match, number)
-                if key is None or key in numbers:
+                if key is None:
                     continue
                 display = masked[start:end]
                 if signless:
                     display = display.lstrip("+-")
                 display = re.sub(r"\s+%", "%", _WHITESPACE.sub(" ", display).strip())
-                numbers[key] = (display, sentence)
+                entries.append((start, end, key, display))
+        _merge_ranges(entries, masked, numbers, sentence)
     return numbers
+
+
+def _merge_ranges(entries: list, masked: str, numbers: dict, sentence: str) -> None:
+    """Fold ``3%-5%`` / ``100-120 万吨`` into one interval instead of two bounds.
+
+    A range is a single reported measurement: a claim inside the interval covers
+    it even when neither bound is claimed verbatim. Turning every bound into its
+    own requirement produced false ``unsupported`` entries.
+    """
+    entries.sort(key=lambda item: item[0])
+    paired: set = set()
+    for index in range(len(entries) - 1):
+        if index in paired or index + 1 in paired:
+            continue
+        first, second = entries[index], entries[index + 1]
+        gap = masked[first[1] : second[0]]
+        if not _RANGE_SEPARATOR.fullmatch(gap):
+            # "-5%" is matched as a signed number, so the range hyphen lives
+            # inside the second match instead of between the two matches.
+            if second[0] != first[1] or masked[second[0] : second[0] + 1] not in _RANGE_SIGNS:
+                continue
+            gap = masked[first[1] : second[0] + 1]
+            if not _RANGE_SEPARATOR.fullmatch(gap):
+                continue
+        if first[2][:2] != second[2][:2]:
+            continue
+        low, high = sorted((first[2][2], second[2][2]))
+        display = f"{first[3]}{gap.strip()}{second[3]}"
+        numbers[("range", first[2][0], first[2][1], low, high)] = (display, sentence)
+        paired.update({index, index + 1})
+    for index, (start, _end, key, display) in enumerate(entries):
+        if index in paired:
+            continue
+        opening = _OPENING_BOUND.search(masked[:start])
+        if opening is not None:
+            low = _decimal(opening.group(1))
+            if low is not None and low <= key[2] and low != key[2]:
+                label = f"{opening.group(1)}{opening.group(2) or ''}{_RANGE_SEPARATOR_LABEL}{display}"
+                numbers[("range", key[0], key[1], low, key[2])] = (label, sentence)
+                continue
+        if key in numbers:
+            continue
+        numbers[key] = (display, sentence)
 
 
 def _sentences(text: str):
@@ -277,6 +328,16 @@ def _covered(report_key: tuple, claim_keys: set) -> bool:
         and (currency is None or other_currency is None or currency == other_currency)
         for other_dimension, other_currency, other_magnitude in claim_keys
     )
+
+
+def _covered_measurement(report_key: tuple, claim_keys: set) -> bool:
+    """Coverage for one report measurement, including range intervals."""
+    if report_key[0] == "range":
+        _tag, dimension, currency, low, high = report_key
+        return any(
+            other[0] == dimension and other[1] == currency and low <= other[2] <= high for other in claim_keys
+        )
+    return _covered(report_key, claim_keys)
 
 
 def _decimal(value) -> Decimal | None:
