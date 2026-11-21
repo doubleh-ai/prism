@@ -75,7 +75,6 @@ from .middleware import configure_logging, install_error_handlers, install_reque
 from .model_routes import init_model_routes_db
 from .model_routes import router as model_routes_router
 from .operations import router as operations_router
-from .password_recovery import router as password_recovery_router
 from .portfolio import init_portfolio_db
 from .portfolio import router as portfolio_router
 from .preferences import init_preferences_db
@@ -766,7 +765,6 @@ async def api_chat_cancel(request: Request):
 
 # ── Market data (v0.6) ──
 
-app.include_router(password_recovery_router)
 app.include_router(market_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)

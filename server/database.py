@@ -126,6 +126,8 @@ def init_db():
                 expires INTEGER NOT NULL,
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             );
+            -- Historical table retained deliberately: the email password recovery
+            -- code path was removed in v0.26; existing rows stay for audit/compat.
             CREATE TABLE IF NOT EXISTS admin_recovery_challenges (
                 id TEXT PRIMARY KEY,
                 username TEXT NOT NULL,

@@ -2111,6 +2111,3 @@ body::after{display:none}
 .workbench-login .login-password-toggle:hover{color:var(--accent);background:var(--accent-bg)}
 .login-password-toggle svg{width:20px;height:20px}
 .login-password-toggle[aria-pressed="true"] .login-eye-slash{display:none}
-.workbench-login .login-card .login-recovery{margin:20px 0 0;font-size:12px}
-.login-recovery a{color:var(--text2);text-decoration:none}
-.login-recovery a:hover{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
