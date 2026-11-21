@@ -189,6 +189,21 @@ class ResearchClaim(Arguments):
         description="结论核验状态：verified_source 原文已核验、secondhand 二手转述、"
         "inferred 模型推断、unverified 未核验；未实际核对原文时不得标为原文已核验。",
     )
+    source: str | None = Field(
+        default=None,
+        max_length=500,
+        description="数字来源，写明机构或资料名称；证据清单缺省显示未提供，不能编造来源。",
+    )
+    published_at: str | None = Field(
+        default=None,
+        max_length=40,
+        description="来源发布日期，优先 ISO 日期；证据清单缺省显示未提供，不能猜测日期。",
+    )
+    scope: str | None = Field(
+        default=None,
+        max_length=300,
+        description="数字口径（期间/范围），例如 2025 年合并报表；留空时证据清单用 period 与 accounting_basis 推导。",
+    )
 
 
 class ClaimsArgs(Arguments):
