@@ -284,14 +284,14 @@ _TURN_RESULT_RESERVE = 64
 # quarters of the context limit, so context-before-turn < 150,000 plus at most
 # 30,000 of tool results stays below the 200,000 hard ceiling.
 _CONTEXT_WRAP_UP = (
-    "上下文即将用尽：请立即基于已经获得的证据写出完整报告，不要再调用工具；"
+    "上下文即将用尽：请立即基于已经获得的证据写出完整报告，停止检索和读取新资料；"
     "尚未核实的关键点明确标记为缺口，不要编造完整结论。"
 )
 
-# The wrap-up call runs with tools disabled, so it cannot register new claims. This
-# prompt therefore audits the key numbers against claims recorded earlier in the run
-# and keeps unverifiable numbers out of the conclusion instead of inventing sources.
-_WRAP_UP_VERIFICATION_PROMPT = (
+# Source, date and scope must come from the model: a server-side extraction would
+# invent provenance and pollute the claim-quality metric. Both wrap-up variants
+# therefore reuse this audit, but the claim-pass variant still has the tool.
+_NUMBER_VERIFICATION_RULES = (
     "收尾前必须逐条自检报告中的关键数字：财务指标（营收、净利、扣非、毛利率、增速、"
     "现金流、负债率）、交易与持仓数据（价格、成交额、持仓量、仓单量、会员排名、保证金率）、"
     "产业数据（产量、库存、开工率、份额、产能），以及任何作为结论依据的数字。"
@@ -300,10 +300,34 @@ _WRAP_UP_VERIFICATION_PROMPT = (
     "published_at（来源发布日期，不是采集日期）、scope（期间和统计口径）、"
     "verification（核验等级）。核对不到原文的数字只能写 secondhand 或 inferred；"
     "完全没有来源的写 unverified，绝不能为了好看写成 verified_source。"
-    "本轮已经不能再登记 claim：已在 claims 中但缺这四项的数字，在报告中标注未核验并列入缺口；"
+)
+
+# A wrap-up call reached after the one claim pass runs with tools disabled, so it
+# cannot register new claims. This prompt audits the key numbers against claims
+# recorded earlier and keeps unverifiable numbers out of the conclusion.
+_WRAP_UP_VERIFICATION_PROMPT = (
+    _NUMBER_VERIFICATION_RULES
+    + "本轮已经不能再登记 claim：已在 claims 中但缺这四项的数字，在报告中标注未核验并列入缺口；"
     "未登记的数字不得作为结论依据，应删除或列为缺口。"
     "不要为了凑数编造来源、公告编号或发布日期。"
 )
+
+# One bounded claim-registration report turn: the model still has the claim tool
+# even though the run is concluding, so the reconciliation metric sees the same
+# numbers the report will conclude with.
+_CLAIM_PASS_PROMPT = (
+    "本轮进入收尾阶段，不再检索或读取新资料。本轮唯一可用工具是 research_record_claims："
+    "先登记关键数字，再直接写报告正文。不要调用其它工具、不要继续检索。"
+    + _NUMBER_VERIFICATION_RULES
+    + "已登记的数字才能在正文中作为结论依据；确实无法登记的数字在报告中标注未核验并列入缺口。"
+    "不要为了凑数编造来源、公告编号或发布日期。"
+)
+
+# The claim pass needs its own call plus the report call after it. The runtime
+# forces a tool-free answer when at most 45 seconds of wall time remain, so the
+# pass only runs with more than twice that margin: a budget stop degrades to the
+# existing tool-free wrap-up instead of buying another call.
+_CLAIM_PASS_MIN_REMAINING_SECONDS = 90
 
 
 def _release_context(messages: list, target: int) -> int:
@@ -516,6 +540,7 @@ class NativeAgent:
                 finished = False
                 token_continuations = 0
                 wrap_up = wrap_up_announced = False
+                claim_pass_offered = claim_pass_done = False
                 for index in range(limits.model_calls):
                     context_used = len(json.dumps(messages, ensure_ascii=False))
                     if context_used > limits.context_characters:
@@ -552,6 +577,7 @@ class NativeAgent:
                             or (index > 0 and end - time.monotonic() <= 45)
                         )
                     )
+                    concluding_fallback = False
                     purpose_request = None
                     if "_purpose_route" in model_cfg:
                         from ..model_routes import reserve
@@ -570,6 +596,7 @@ class NativeAgent:
                             if not reviewing or error.status_code != 429:
                                 raise
                             reviewing, concluding, review_skip = False, True, "run_budget"
+                            concluding_fallback = True
                             reserve(
                                 "research",
                                 user,
@@ -580,6 +607,27 @@ class NativeAgent:
 
                     if reviewing and not model_review.history_current(user, run_id, review_packet):
                         reviewing, concluding, review_skip = False, True, "history_changed"
+                        concluding_fallback = True
+                    # One bounded claim-registration pass: the model may call the
+                    # claim tool once before the answer-only wrap-up, so the report
+                    # numbers exist in research_claims when reconciliation runs.
+                    # Only offer it when the claim call and the report call after it
+                    # both fit the model-call, tool-call and wall budgets; a budget
+                    # or history fallback, the last permitted call and a nearly
+                    # exhausted wall clock keep the existing tool-free wrap-up and
+                    # degrade nothing beyond the current behaviour.
+                    claim_pass = (
+                        concluding
+                        and not concluding_fallback
+                        and not reviewing
+                        and not claim_pass_offered
+                        and not claim_pass_done
+                        and index < limits.model_calls - 1
+                        and usage["tool_calls"] < limits.tool_calls
+                        and end - time.monotonic() > _CLAIM_PASS_MIN_REMAINING_SECONDS
+                    )
+                    if claim_pass:
+                        claim_pass_offered = True
                     emit(
                         "model_started",
                         {
@@ -619,6 +667,12 @@ class NativeAgent:
                         search_available and search_allowance > 0 and not concluding and not reviewing
                     )
                     request_definitions = [] if concluding or reviewing else list(definitions)
+                    if claim_pass:
+                        # Exactly the one tool the prompt names, nothing else: no
+                        # search, no reads, no check tools during the claim pass.
+                        request_definitions = [
+                            spec for spec in definitions if spec.get("name") == "research_record_claims"
+                        ]
                     if call_search_available:
                         request_definitions.append(
                             {
@@ -634,16 +688,20 @@ class NativeAgent:
                     system += profile_prompt(profile)
                     system += f"\n当前服务器时间：{clock['as_of']}；‘今天’以此为准，研究启动观察时点仍保留。"
                     if concluding:
-                        system += (
-                            "\n本轮进入收尾阶段，不再调用工具或继续搜索。基于已经取得的资料，"
-                            "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
-                            "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
-                        )
+                        if claim_pass:
+                            system += "\n" + _CLAIM_PASS_PROMPT
+                        else:
+                            system += (
+                                "\n本轮进入收尾阶段，不再调用工具或继续搜索。基于已经取得的资料，"
+                                "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
+                                "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
+                            )
                     if wrap_up:
                         # The prompt above is shared with the call/time budget
                         # wrap-up; this sentence explains the context ceiling too.
                         system += "\n" + _CONTEXT_WRAP_UP
-                        system += "\n" + _WRAP_UP_VERIFICATION_PROMPT
+                        if not claim_pass:
+                            system += "\n" + _WRAP_UP_VERIFICATION_PROMPT
                     request_messages = messages
                     call_end = end
                     review_text, review_error = "", None
@@ -809,12 +867,18 @@ class NativeAgent:
                     continuation = content.continuation() if hasattr(content, "continuation") else content
                     messages.append({"role": "assistant", "content": continuation})
                     if completed["stop_reason"] == "tool_use":
-                        if concluding:
+                        if concluding and not claim_pass:
                             raise BudgetExceeded(
                                 "model_calls" if index == limits.model_calls - 1 else "tool_calls"
                             )
                         if not requested:
                             raise provider.ProviderError("provider_protocol_error")
+                        if claim_pass and any(
+                            call.get("name") != "research_record_claims" for call in requested
+                        ):
+                            # The claim pass offers exactly one tool. A different
+                            # (or hallucinated) tool is not another evidence round.
+                            raise BudgetExceeded("tool_calls")
                         results = []
                         turn_characters = TOOL_RESULT_TURN_CHARACTERS
                         results_left = len(requested)
@@ -865,6 +929,10 @@ class NativeAgent:
                                 }
                             )
                         messages.append({"role": "user", "content": results})
+                        if claim_pass:
+                            # The one bounded registration pass has been used; the
+                            # next concluding call really runs with no tools.
+                            claim_pass_done = True
                         if not review_attempted and any(
                             call.get("name") == "research_record_claims" and not result.get("is_error")
                             for call, result in zip(requested, results, strict=True)

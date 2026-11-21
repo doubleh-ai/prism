@@ -194,10 +194,11 @@ def _tool_use_turn(call_id, name="research_read"):
     }
 
 
-async def test_context_wrap_up_forces_a_tool_free_report(engine, monkeypatch):
+async def test_context_wrap_up_offers_only_the_claim_tool(engine, monkeypatch):
     # Production evidence: a real run spent its whole 200k-character context on
     # reading and was cut off before writing the report. Near the ceiling the
-    # runtime must switch to a tool-free wrap-up call, not fail the run.
+    # runtime must switch to a wrap-up; the one tool kept is the claim pass, so
+    # the report numbers can still be registered before the tool-free report.
     engine.service.limits = runtime.Limits(context_characters=9000)
     _oversized_tool_patch(monkeypatch, "资料" * 3500)
     calls = []
@@ -210,6 +211,8 @@ async def test_context_wrap_up_forces_a_tool_free_report(engine, monkeypatch):
             yield _tool_use_turn("wrap-up-1")
             yield done("tool_use", content=[{"type": "tool_use", "id": "wrap-up-1"}])
         else:
+            # The model skips the offered claim tool and writes the report in the
+            # same call: that must still complete, never loop for the tool.
             yield {"type": "text_delta", "text": "合成收尾报告：基于已取得证据的完整结论。"}
             yield done()
 
@@ -217,10 +220,11 @@ async def test_context_wrap_up_forces_a_tool_free_report(engine, monkeypatch):
     outcome = await execute(engine)
 
     assert len(calls) == 2
-    # The wrap-up call must not offer tools, and it asks for the report in the
-    # prompt (system text and the persisted user note) instead of more reading.
-    assert calls[1]["tools"] == []
+    # The wrap-up call offers exactly the claim tool, and the prompt names it as
+    # the only available tool instead of demanding more reading.
+    assert [spec["name"] for spec in calls[1]["tools"]] == ["research_record_claims"]
     assert "上下文即将用尽" in calls[1]["system"]
+    assert "本轮唯一可用工具是 research_record_claims" in calls[1]["system"]
     # The same wrap-up call also demands a claim four-tuple for every key number.
     assert "published_at" in calls[1]["system"]
     assert "verified_source" in calls[1]["system"]
@@ -283,10 +287,13 @@ async def test_context_wrap_up_survives_a_max_tokens_continuation(engine, monkey
     outcome = await execute(engine)
 
     assert len(calls) == 3
-    # The continuation of the wrap-up call stays tool-free and keeps the wrap-up
-    # instruction; the note itself is not duplicated into the messages.
-    assert calls[1]["tools"] == [] and calls[2]["tools"] == []
+    # The first wrap-up call offers only the claim pass; every continuation after
+    # it is tool-free and keeps the wrap-up instruction. The note itself is not
+    # duplicated into the messages, and the claim pass is offered only once.
+    assert [spec["name"] for spec in calls[1]["tools"]] == ["research_record_claims"]
+    assert calls[2]["tools"] == []
     assert "上下文即将用尽" in calls[2]["system"]
+    assert "本轮已经不能再登记 claim" in calls[2]["system"]
     assert outcome.status == "completed" and outcome.error_code is None
     continuations = [e for e in events(engine) if e["type"] == "model_continuation"]
     assert len(continuations) == 1
