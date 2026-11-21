@@ -3,6 +3,10 @@
   'use strict';
   var kinds = {fact:'事实候选',calculation:'计算',inference:'推断',hypothesis:'假设'};
   var states = {queued:'等待开始',discovering:'发现线索',collecting:'采集资料',extracting:'提取内容',checking:'检查引用',synthesizing:'整理报告',completed:'已完成',partial:'部分完成',failed:'未完成',cancelled:'已取消',interrupted:'研究已中断'};
+  var levels = {verified_source:{label:'✅ 原文已核验',cls:'verified'},secondhand:{label:'◐ 二手来源',cls:'secondhand'},inferred:{label:'≈ 推算',cls:'inferred'},unverified:{label:'【待核验】',cls:'unverified'}};
+  var levelMarks = {'✅':'verified_source','◐':'secondhand','≈':'inferred'};
+  function levelOf(claim) { var value = claim && claim.verification; return levels[value] ? value : 'unverified'; }
+  function cell(value) { return value ? esc(String(value)) : '<span class="research-missing">未提供</span>'; }
   function text(value) { return esc(ChatRender.stringify(value)); }
   function list(value) { return Array.isArray(value) ? value : []; }
   function publication(doc) { if (!doc.published_at || doc.publication_precision === 'unknown') return '未知'; if (doc.publication_precision === 'day' || /^\d{4}-\d{2}-\d{2}$/.test(String(doc.published_at))) return String(doc.published_at).slice(0,10)+'（日精度）'; return ChatRender.formatTime(doc.published_at); }
@@ -58,13 +62,14 @@
         if (!revision) body += empty('本轮尚未保存结构化报告。可返回原会话阅读已生成内容，不会伪造完整报告。');
         else {
           body += '<p class="research-note">验收记录：'+text(states[revision.acceptance_status] || revision.acceptance_status || '未记录')+' · 原版本保持不变，追问形成新的研究记录。</p>';
-          if (revision.narrative) body += '<section class="research-section"><h3>报告正文</h3><p class="research-note">模型输出，语义待核验</p><div class="research-prose">'+ChatRender.renderContent(revision.narrative)+'</div></section>';
+          body += self._researchNarrativeHTML(revision);
           body += list(revision.blocks).map(function(block){
             var claims = list(data.claims).filter(function(claim){return list(block.claim_ids).indexOf(claim.claim_id)>=0;});
             if (block.kind==='gaps') return '<section class="research-section"><h3>未解决缺口</h3>'+note(revision.gaps)+'</section>';
             if (!claims.length && !block.text) return '';
             return '<section class="research-section"><h3>'+text(block.title || block.kind || '研究内容')+'</h3><div class="research-prose">'+ChatRender.renderContent(block.text || '')+'</div>'+(claims.length?self._researchClaimsHTML(claims):'')+'</section>';
           }).join('');
+          body += self._researchEvidenceHTML(revision);
         }
       } else if (tab === 'evidence') {
         body = '<div class="research-version-bar"><h3>资料与原文定位</h3><label><input id="researchUnverified" type="checkbox"'+(this._researchOnlyUnverified?' checked':'')+'> 仅看缺少原文定位</label></div>';
@@ -72,6 +77,56 @@
         body += documents.length ? documents.map(function(doc){var url=safeUrl(doc.url);return '<article class="research-source"><div><span class="research-tag">'+text(doc.content_scope==='search_snippet'?'搜索线索 · 非原文':doc.content_scope==='tool_returned_text'?'工具返回内容 · 非全文保证':'资料范围未知')+'</span><h3>'+text(doc.title || '未命名资料')+'</h3></div><p>'+ChatRender.publicationLabel(doc)+' '+text(publication(doc))+' · 获取 '+text(ChatRender.formatTime(doc.retrieved_at))+'</p><p>来源类别：'+text(doc.source_kind || '未知')+' · 日期依据：'+text(ChatRender.publicationBasis(doc))+'</p><footer><button data-research-document="'+escAttr(doc.document_id)+'">查看摘录与定位</button>'+(url?'<a href="'+escAttr(url)+'" target="_blank" rel="noopener noreferrer">打开原链接 ↗</a>':'')+'</footer></article>';}).join('') : empty('没有符合条件的资料；没有资料不等于事实不存在。');
       } else body = this._researchRelationsHTML(data);
       document.getElementById('researchBody').innerHTML = header + body;
+    },
+    _researchLevelTag:function(value) {
+      var level = levels[value] ? value : 'unverified', spec = levels[level];
+      return '<span class="research-level research-level-'+spec.cls+'" title="'+escAttr(spec.label)+'">'+esc(spec.label)+'</span>';
+    },
+    _researchMarked:function(html) {
+      return String(html || '').replace(/【待核验：([^】]{1,300})】/g, function(match, raw) {
+        return '<span class="research-level research-level-unverified" title="待核验">【待核验：'+raw+'】</span>';
+      }).replace(/[✅◐≈]/g, function(mark) {
+        var spec = levels[levelMarks[mark]];
+        return '<span class="research-level research-level-'+spec.cls+'" title="'+escAttr(spec.label)+'">'+mark+'</span>';
+      });
+    },
+    _researchNarrativeHTML:function(revision) {
+      var view = revision && revision.verification_render, rendered = view && view.narrative;
+      var marked = !!(rendered && typeof rendered.text === 'string');
+      var source = marked ? rendered.text : (revision && revision.narrative);
+      if (typeof source !== 'string' || !source) return '';
+      var html;
+      try { html = ChatRender.renderContent(String(source).replace(/</g, '&lt;')); }
+      catch(error) { html = esc(String(source)); }
+      var warning = !marked
+        ? '本版本未保存核验标注，以下为原始报告文本。'
+        : (view.status === 'degraded' ? '核验标注生成失败，以下为原始报告文本。' : '');
+      return '<section class="research-section research-report-narrative"><h3>报告正文</h3><p class="research-note">'+(warning ? esc(warning) : '模型输出，语义待核验；数字角标表示已登记 claim 的核验等级，未匹配数字按待核验显示。')+'</p><div class="research-prose">'+this._researchMarked(html)+'</div></section>';
+    },
+    _researchEvidenceHTML:function(revision) {
+      var view = revision && revision.verification_render, evidence = view && view.evidence;
+      if (!evidence || evidence.status !== 'ok') return '<section class="research-section research-evidence-section"><h3>证据清单</h3><p class="research-note">证据清单暂不可用；报告正文保持原样显示。</p></section>';
+      var rows = list(evidence.rows), counts = evidence.counts || {}, coverage = evidence.coverage || {};
+      var missing = evidence.missing || {}, self = this, ratio = coverage.verified_claim_ratio;
+      var summary = '共 '+Number(evidence.total || 0)+' 条已登记 claim · ✅ 原文已核验 '+(counts.verified_source || 0)+' · ◐ 二手来源 '+(counts.secondhand || 0)+' · ≈ 推算 '+(counts.inferred || 0)+' · 【待核验】 '+(counts.unverified || 0);
+      var coverageText = ratio == null
+        ? '核验覆盖率：暂无可计算 claim'
+        : '核验覆盖率 '+(Number(ratio)*100).toFixed(1)+'%（发布线 '+String(coverage.release_line || '≥90%')+'，'+(coverage.reached ? '已达到' : '未达到')+'）';
+      var missingText = '缺来源 '+(missing.source || 0)+' 条 · 缺发布日期 '+(missing.published_at || 0)+' 条 · 缺口径 '+(missing.scope || 0)+' 条';
+      var table = '<div class="research-table-scroll"><table class="research-table research-evidence-table"><thead><tr><th scope="col">关键数字</th><th scope="col">来源</th><th scope="col">发布日期</th><th scope="col">口径（期间/范围）</th><th scope="col">核验状态</th></tr></thead><tbody>'+rows.map(function(row){
+        var number = [];
+        if (row.metric) number.push(esc(String(row.metric)));
+        if (row.value != null) {
+          number.push('<span class="research-evidence-value">'+esc(String(row.value))+'</span>');
+          if (row.unit) number.push(esc(String(row.unit)));
+          if (row.currency) number.push(esc(String(row.currency)));
+        } else number.push('<span class="research-missing">未提供</span>');
+        if (row.statement) number.push('<span class="research-evidence-statement">'+esc(String(row.statement))+'</span>');
+        var sourceUrl = row.source_url ? safeUrl(row.source_url) : '';
+        var source = row.source ? (sourceUrl ? '<a href="'+escAttr(sourceUrl)+'" target="_blank" rel="noopener noreferrer">'+esc(String(row.source))+'</a>' : esc(String(row.source))) : cell(row.source);
+        return '<tr><td>'+number.join(' ')+'</td><td>'+source+'</td><td>'+cell(row.published_at)+'</td><td>'+cell(row.scope)+'</td><td>'+self._researchLevelTag(row.verification)+'</td></tr>';
+      }).join('')+'</tbody></table></div>';
+      return '<section class="research-section research-evidence-section"><h3>证据清单</h3><p class="research-note">'+esc(summary)+'</p><p class="research-note">'+esc(coverageText)+'</p><p class="research-note">'+esc(missingText)+'</p>'+table+(evidence.note?'<p class="research-note">'+esc(String(evidence.note))+'</p>':'')+'</section>';
     },
     _researchFormulaText:function(formula) {
       if (!formula || typeof formula!=='object') return text('计算式未完整记录');
@@ -85,7 +140,7 @@
       function hasConflict(id){return conflicts.some(function(group){return group && list(group.claim_ids).indexOf(id)>=0;});}
       function hasHistoricalConflict(id){return history.some(function(group){return group&&list(group.current_claim_ids).indexOf(id)>=0;});}
       function hasReviewIssue(id){return list((bundle.model_review||{}).assessments).some(function(a){return a&&a.claim_id===id&&['not_supported','partly_supported','insufficient_evidence'].indexOf(a.effective_verdict)>=0;});}
-      return '<div class="research-claims">'+claims.map(function(claim){return '<article class="research-claim"><div><span class="research-tag">'+text(kinds[claim.kind] || '判断类型未标注')+'</span><span class="research-note">语义待核验</span></div><p>'+text(claim.statement)+'</p>'+(claim.period?'<p class="research-note">所属期间：'+text(claim.period)+'</p>':'')+(claim.value!=null?'<p>数值 '+text(claim.value)+' '+text(claim.unit || '单位未提供')+' '+text(claim.currency || '')+(hasConflict(claim.claim_id)?' <strong class="research-note">同口径数值有差异，需核对原文</strong>':hasHistoricalConflict(claim.claim_id)?' <strong class="research-note">与历史同口径数值有差异，需核对原文</strong>':'')+'</p>':'')+(claim.formula?'<p class="research-note">计算式：'+self._researchFormulaText(claim.formula)+'</p>':'')+(hasReviewIssue(claim.claim_id)?'<p class="research-note">原文与表述有待核查项</p>':'')+'<button data-research-claim="'+escAttr(claim.claim_id)+'">查看支持、反方与限制 ↗</button></article>';}).join('')+'</div>';
+      return '<div class="research-claims">'+claims.map(function(claim){return '<article class="research-claim"><div><span class="research-tag">'+text(kinds[claim.kind] || '判断类型未标注')+'</span>'+self._researchLevelTag(levelOf(claim))+'<span class="research-note">语义待核验</span></div><p>'+text(claim.statement)+'</p>'+(claim.period?'<p class="research-note">所属期间：'+text(claim.period)+'</p>':'')+(claim.value!=null?'<p>数值 '+text(claim.value)+' '+text(claim.unit || '单位未提供')+' '+text(claim.currency || '')+(hasConflict(claim.claim_id)?' <strong class="research-note">同口径数值有差异，需核对原文</strong>':hasHistoricalConflict(claim.claim_id)?' <strong class="research-note">与历史同口径数值有差异，需核对原文</strong>':'')+'</p>':'')+(claim.formula?'<p class="research-note">计算式：'+self._researchFormulaText(claim.formula)+'</p>':'')+(hasReviewIssue(claim.claim_id)?'<p class="research-note">原文与表述有待核查项</p>':'')+'<button data-research-claim="'+escAttr(claim.claim_id)+'">查看支持、反方与限制 ↗</button></article>';}).join('')+'</div>';
     },
     _researchRelationsHTML:function(data) {
       var dimensions = [['supply','上游供给'],['certification','认证周期'],['substitution','替代路线'],['cost','成本传导'],['demand','下游需求']];

@@ -221,6 +221,9 @@ async def test_context_wrap_up_forces_a_tool_free_report(engine, monkeypatch):
     # prompt (system text and the persisted user note) instead of more reading.
     assert calls[1]["tools"] == []
     assert "上下文即将用尽" in calls[1]["system"]
+    # The same wrap-up call also demands a claim four-tuple for every key number.
+    assert "published_at" in calls[1]["system"]
+    assert "verified_source" in calls[1]["system"]
     assert "上下文即将用尽" in json.dumps(calls[1]["messages"], ensure_ascii=False)
     assert outcome.status == "completed" and outcome.error_code is None
     assert outcome.text.strip()

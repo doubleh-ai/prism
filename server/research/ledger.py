@@ -28,6 +28,8 @@ from ..research_context import (
 )
 from ..source_urls import redact_source_text, source_display_payload
 from .quantities import audit_claims
+from .reconciliation import reconcile_report, unavailable_result
+from .render import render_report, unavailable_view
 
 TERMINAL = {"completed", "partial", "failed", "cancelled"}
 STAGES = {"queued", "discovering", "collecting", "extracting", "checking", "synthesizing"}
@@ -649,6 +651,9 @@ def _claim(candidate, passages, documents, existing):
         "currency": currency,
         "accounting_basis": _short(candidate.get("accounting_basis"), 300),
         "metric": _short(candidate.get("metric"), 80),
+        "source": _short(candidate.get("source"), 500),
+        "published_at": _short(candidate.get("published_at"), 40),
+        "scope": _short(candidate.get("scope"), 300),
         "entities": [_short(v, 120) for v in candidate.get("entities", [])[:20] if isinstance(v, str)]
         if isinstance(candidate.get("entities", []), list)
         else [],
@@ -719,6 +724,20 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
             claims = _records(db, "research_claims", run_id)
             relations = _records(db, "research_relations", run_id)
             numerical_checks = audit_claims(claims)
+            try:
+                claim_reconciliation = reconcile_report(claims, text)
+            except Exception:  # noqa: BLE001 - coverage telemetry must not cost the report
+                claim_reconciliation = unavailable_result()
+            narrative = text[:200000]
+            try:
+                verification_render = render_report(
+                    claims,
+                    narrative,
+                    documents=_records(db, "research_documents", run_id),
+                    passages=_records(db, "research_passages", run_id),
+                )
+            except Exception:  # noqa: BLE001 - a derived view must not cost the report
+                verification_render = unavailable_view(narrative)
             if (run.get("model_review") or {}).get("status") == "running":
                 run["model_review"] = {
                     **run["model_review"],
@@ -812,11 +831,13 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
                 "cutoff_precision": run.get("cutoff_precision", "unknown"),
                 "requested_period": run.get("requested_period"),
                 "blocks": blocks,
-                "narrative": text[:200000],
+                "narrative": narrative,
                 "narrative_status": "model_output_unreviewed",
                 "acceptance_status": status,
                 "semantic_status": "unreviewed",
                 "numerical_checks": numerical_checks,
+                "claim_reconciliation": claim_reconciliation,
+                "verification_render": verification_render,
                 "model_review": model_review,
                 "gaps": list(dict.fromkeys(gaps)),
             }
