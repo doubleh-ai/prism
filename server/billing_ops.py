@@ -102,9 +102,9 @@ def _mask_key(key: str) -> str:
 def _clean_provider_api_key(raw: str) -> str:
     cleaned = _INVISIBLE_CHARS_RE.sub("", str(raw or "")).strip()
     if not cleaned:
-        raise ValueError("empty_api_key")
+        raise ValueError("key_empty")
     if "..." in cleaned or "…" in cleaned or "***" in cleaned or "•" in cleaned:
-        raise ValueError("masked_api_key")
+        raise ValueError("key_masked")
     if "=" in cleaned and ("API_KEY" in cleaned.upper() or cleaned.lower().startswith("export ")):
         cleaned = cleaned.split("=", 1)[1].strip()
     cleaned = cleaned.strip("\"'` \t\r\n")
@@ -113,7 +113,7 @@ def _clean_provider_api_key(raw: str) -> str:
     if "\n" in cleaned or "\r" in cleaned:
         cleaned = re.sub(r"[\r\n\t ]+", "", cleaned)
     if not _SAFE_API_KEY_RE.fullmatch(cleaned):
-        raise ValueError("invalid_api_key")
+        raise ValueError("key_invalid_format")
     return cleaned
 
 
@@ -242,7 +242,7 @@ def save_ops_provider_credential(
         elif existing and existing["api_key"]:
             clean_key = str(existing["api_key"])
         else:
-            raise ValueError("empty_api_key")
+            raise ValueError("key_empty")
 
         clean_model = ""
         if meta.get("needs_model_name"):
@@ -602,9 +602,9 @@ async def update_provider_credential(
         )
     except ValueError as exc:
         err_map = {
-            "empty_api_key": "请粘贴该服务商的完整 API Key",
-            "masked_api_key": "检测到粘贴内容包含省略号（...）或掩码，请从服务商后台复制完整未脱敏 Key",
-            "invalid_api_key": "API Key 格式无效（需为 12 位以上可见 ASCII 字符且不含空格）",
+            "key_empty": "请粘贴该服务商的完整 API Key",
+            "key_masked": "检测到粘贴内容包含省略号（...）或掩码，请从服务商后台复制完整未脱敏 Key",
+            "key_invalid_format": "API Key 格式无效（需为 12 位以上可见 ASCII 字符且不含空格）",
             "invalid_model_override": "OpenAI 模型名称格式无效（如 gpt-4.1 / gpt-5 / o4-mini）",
         }
         raise HTTPException(422, err_map.get(str(exc), "凭证参数无效")) from None
