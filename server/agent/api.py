@@ -1,0 +1,250 @@
+"""Authenticated HTTP delivery for the Prism-owned Agent event protocol."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
+
+from .. import config
+from ..auth import require_account_context, require_auth
+from ..database import check_rate_limit, reset_connection
+from ..models import validation_error_message
+from ..source_urls import source_display_payload
+from ..work_lifecycle import LifecycleError, Manager, get_manager
+from . import store
+from .prompts import workflow_catalog, workflow_id
+from .runtime import ensure_dialogue, get_service
+
+router = APIRouter(prefix="/api/agent")
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(min_length=1, max_length=20000)
+    conv_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    model: str | None = Field(default=None, max_length=64)
+    skill: str = Field(default="prism-research", max_length=64)
+    workflow: str | None = Field(default=None, max_length=32)
+    extra_skills: list[str] | None = Field(default=None, max_length=16)
+    request_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    page_context: dict[str, str] | None = Field(default=None)
+
+
+class CancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conv_id: str = Field(min_length=1, max_length=128)
+    run_id: str | None = Field(default=None, max_length=128)
+
+
+def event_payload(event: dict, run: dict) -> dict:
+    # Status belongs to this persisted event, not the latest run status. Replaying
+    # a completed run must not mark its first historical frame terminal.
+    ui = event.get("ui") if isinstance(event.get("ui"), dict) else {}
+    status = event.get("status", "running")
+    if event["type"] == "run_finished" and status == "cancelled":
+        ui = {**ui, "status": "本轮研究已停止，进度已保存"}
+    elif event["type"] == "run_interrupted":
+        ui = {**ui, "status": "研究执行被中断，已保存进度；未自动重新调用模型"}
+    return source_display_payload(
+        {
+            **ui,
+            "agent": {
+                "run_id": run["run_id"],
+                "conv_id": run["conv_id"],
+                "seq": event["seq"],
+                "status": status,
+                "event": event["type"],
+                "engine": "prism-native",
+                "workflow": run["workflow"],
+            },
+        }
+    )
+
+
+def stream_run(
+    user: str, run_id: str, *, after_seq: int = 0, manager: Manager | None = None
+) -> StreamingResponse:
+    initial = store.get_run(user, run_id)
+    if after_seq < 0 or after_seq > initial["last_seq"]:
+        raise HTTPException(422, "事件序号无效")
+    service = get_service(manager or get_manager())
+
+    def read_page(cursor):
+        # These are read-only after startup. A blocked SQLite connection must
+        # not block all HTTP streams on the event loop. The threadpool waiter
+        # retains ownership until the read finishes; no detached database work.
+        try:
+            return store.get_run(user, run_id), store.list_events(user, run_id, cursor)
+        finally:
+            reset_connection()
+
+    async def replay():
+        cursor, pulse_at = after_seq, time.monotonic()
+        while True:
+            try:
+                run, events = await run_in_threadpool(read_page, cursor)
+            except HTTPException as error:
+                if error.status_code in {401, 404}:
+                    return
+                raise
+            for event in events:
+                cursor = event["seq"]
+                payload = event_payload(event, run)
+                yield f"id: {cursor}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            if run["status"] in store.TERMINAL and cursor >= run["last_seq"]:
+                yield "data: [DONE]\n\n"
+                return
+            if events:
+                continue
+            active = service.active.get(run_id)
+            if active and active.handle.failed():
+                # The durable cursor stays on the last saved event. A blocked
+                # owner cannot publish a terminal event or release its lease.
+                notice = {"stream_error": "result_unconfirmed", "run_id": run_id, "after_seq": cursor}
+                yield f"data: {json.dumps(notice)}\n\n"
+                return
+            if time.monotonic() - pulse_at >= 5:
+                yield 'data: {"pulse":"wait"}\n\n'
+                pulse_at = time.monotonic()
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        replay(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/workflows")
+async def workflows(request: Request):
+    require_auth(request)
+    return workflow_catalog()
+
+
+@router.get("/tools")
+async def tools(request: Request):
+    require_auth(request)
+    from .tools import native_catalog
+
+    return {"capabilities": native_catalog()}
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: Request):
+    user = require_auth(request)
+    require_account_context(request, user)
+    try:
+        req = ChatRequest(**(await request.json() or {}))
+        workflow = workflow_id(req.workflow or req.skill)
+    except Exception as error:
+        return JSONResponse({"error": validation_error_message(error)}, status_code=422)
+    if not req.question.strip():
+        return JSONResponse({"error": "请输入研究问题"}, status_code=422)
+    if not check_rate_limit(f"native-chat:{user}", config.RATE_CHAT_PER_MIN, 60):
+        return JSONResponse({"error": "请求太频繁，请稍后再试"}, status_code=429)
+    if req.model is not None and req.model not in config.MODELS:
+        return JSONResponse({"error": "所选模型不存在，请重新选择"}, status_code=422)
+    from ..model_routes import resolve
+
+    try:
+        model_id, model_cfg, route = resolve("research", explicit_model=req.model)
+    except HTTPException as failure:
+        return JSONResponse({"error": failure.detail}, status_code=failure.status_code)
+    model_cfg["_purpose_route"] = route
+    manager = get_manager(getattr(request, "scope", None))
+    try:
+        request_lease = manager.admit("request", persist_required=False)
+    except LifecycleError:
+        return JSONResponse({"error": "服务维护中，请稍后重试"}, status_code=503)
+    with request_lease:
+        run = store.create_run(
+            user,
+            req.conv_id,
+            req.question.strip(),
+            model_id,
+            workflow,
+            request_id=req.request_id,
+            exclusive_conversation=True,
+            page_context=req.page_context,
+        )
+        try:
+            ensure_dialogue(user, run)
+        except Exception:
+            # A failed initial history check must not strand an unclaimed run
+            # in the conversation/user admission quota. Never finish a reused
+            # or already-claimed run on behalf of its actual executor.
+            if run["created"]:
+                try:
+                    store.fail_unclaimed_run(user, run["run_id"])
+                except HTTPException as cleanup_error:
+                    if cleanup_error.status_code != 404:
+                        raise
+                    from .runtime import Outcome, _retire_removed_owner
+
+                    _retire_removed_owner(Outcome(user, run["run_id"], "unclaimed-http", "cancelled"))
+            raise
+        # Duplicate running or terminal requests only replay. An unclaimed queued
+        # request may be scheduled again; the transaction claim prevents execution twice.
+        if run["status"] == "queued":
+            get_service(manager).start(user, run, dict(model_cfg), parent=request_lease)
+    return stream_run(user, run["run_id"], manager=manager)
+
+
+@router.get("/runs/{run_id}")
+async def get_run(run_id: str, request: Request):
+    return {"run": store.get_run(require_auth(request), run_id)}
+
+
+@router.get("/runs/{run_id}/events")
+async def events(run_id: str, request: Request, after_seq: int = 0):
+    user = require_auth(request)
+    run = store.get_run(user, run_id)
+    return {"run": run, "events": store.list_events(user, run_id, after_seq), "last_seq": run["last_seq"]}
+
+
+@router.get("/runs/{run_id}/stream")
+async def stream(run_id: str, request: Request, after_seq: int = 0):
+    if after_seq < 0:
+        raise HTTPException(422, "事件序号无效")
+    return stream_run(
+        require_auth(request),
+        run_id,
+        after_seq=after_seq,
+        manager=get_manager(getattr(request, "scope", None)),
+    )
+
+
+@router.post("/chat/cancel")
+async def cancel(request: Request):
+    user = require_auth(request)
+    try:
+        req = CancelRequest(**(await request.json() or {}))
+    except Exception as error:
+        return JSONResponse({"error": validation_error_message(error)}, status_code=422)
+    if req.run_id:
+        run = store.get_run(user, req.run_id)
+        if run["conv_id"] != req.conv_id:
+            raise HTTPException(404, "研究任务不存在或不可访问")
+    else:
+        runs = store.list_runs(user, req.conv_id, limit=1)
+        if not runs:
+            raise HTTPException(404, "研究任务不存在或不可访问")
+        run = runs[0]
+    service = get_service(get_manager(getattr(request, "scope", None)))
+    current = service.cancel(user, run["run_id"])
+    return {
+        "ok": True,
+        "run_id": run["run_id"],
+        "status": current["status"],
+        "cancel_requested": current["cancel_requested"],
+        "stopped": current["status"] in store.TERMINAL,
+    }

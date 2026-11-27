@@ -1,0 +1,17 @@
+[Unit]
+Description=Prism research workspace (generic template)
+After=network.target
+
+[Service]
+Type=simple
+User=prism
+Group=prism
+WorkingDirectory=/opt/prism/current
+Environment="PATH=/opt/prism/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/prism/runtime.env
+ExecStart=/opt/prism/venv/bin/python -m uvicorn server.main:app --host 127.0.0.1 --port 8088
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

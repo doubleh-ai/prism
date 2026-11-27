@@ -1,0 +1,799 @@
+"""Direct bounded model protocols, with explicit dispatch and no fallback.
+
+No SDK, environment/config import, credential discovery or retries. Only the
+caller-supplied key is used, in an authentication header to a fixed HTTPS URL.
+Protocol reference: https://platform.claude.com/docs/en/build-with-claude/streaming
+DeepSeek: https://api-docs.deepseek.com/guides/anthropic_api/
+MiniMax: https://platform.minimax.cn/docs/api-reference/text-chat-anthropic
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import math
+import re
+import time
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+from dataclasses import dataclass
+
+import httpx
+
+from .. import model_network
+
+_ENDPOINTS = {
+    "https://api.deepseek.com/anthropic": "https://api.deepseek.com/anthropic/v1/messages",
+    "https://api.deepseek.com/anthropic/v1": "https://api.deepseek.com/anthropic/v1/messages",
+    "https://api.minimax.io/anthropic/v1": "https://api.minimax.io/anthropic/v1/messages",
+    "https://api.minimax.cn/anthropic/v1": "https://api.minimax.cn/anthropic/v1/messages",
+    "https://api.minimaxi.com/anthropic/v1": "https://api.minimaxi.com/anthropic/v1/messages",
+}
+_OPENAI_ENDPOINTS = {"https://api.openai.com", "https://api.openai.com/v1"}
+
+
+def configuration_status(model_cfg: dict) -> dict:
+    """Local configuration only; never authenticates or exposes a credential."""
+    if type(model_cfg) is not dict:
+        model_cfg = {}
+    protocol = model_cfg.get("protocol", "anthropic_messages")
+    base, key, model = (model_cfg.get(k) for k in ("base_url", "api_key", "model"))
+    base = base.rstrip("/") if type(base) is str else ""
+    endpoints = (
+        _ENDPOINTS
+        if protocol == "anthropic_messages"
+        else _OPENAI_ENDPOINTS
+        if protocol == "openai_responses"
+        else ()
+    )
+    endpoint_supported = base in endpoints
+    credential_configured = (
+        type(key) is str and 0 < len(key) <= 8192 and all(33 <= ord(c) <= 126 for c in key)
+    )
+    model_configured = type(model) is str and 0 < len(model) <= 128 and all(32 <= ord(c) < 127 for c in model)
+    vendor = (
+        "openai"
+        if base in _OPENAI_ENDPOINTS
+        else "minimax"
+        if base == "https://api.minimax.io/anthropic/v1"
+        else "minimax-cn"
+        if base in {"https://api.minimax.cn/anthropic/v1", "https://api.minimaxi.com/anthropic/v1"}
+        else "deepseek"
+        if base in _ENDPOINTS
+        else "unknown"
+    )
+    return {
+        "configured": endpoint_supported and credential_configured and model_configured,
+        "credential_configured": credential_configured,
+        "endpoint_supported": endpoint_supported,
+        "model_configured": model_configured,
+        "protocol": protocol if protocol in ("anthropic_messages", "openai_responses") else "unsupported",
+        "endpoint_host": vendor,
+    }
+
+
+def supports_search(model_cfg: dict) -> bool:
+    """Only explicitly supported built-in web-search protocols; no live claim."""
+    status = configuration_status(model_cfg)
+    return status["configured"] and (
+        status["protocol"] == "openai_responses" or status["endpoint_host"] == "deepseek"
+    )
+
+
+_ERROR_CODES = frozenset(
+    {
+        "provider_configuration_error",
+        "provider_input_error",
+        "provider_http_error",
+        "provider_auth_error",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_connection_error",
+        "provider_protocol_error",
+        "provider_response_too_large",
+        "provider_event_too_large",
+        "provider_tool_json_too_large",
+        "provider_stream_truncated",
+        "provider_upstream_error",
+    }
+)
+_STOP_REASONS = frozenset(
+    {
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "tool_use",
+        "pause_turn",
+        "refusal",
+        "model_context_window_exceeded",
+    }
+)
+_SERVER_RESULTS = frozenset(
+    {
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+        "code_execution_tool_result",
+        "bash_code_execution_tool_result",
+        "text_editor_code_execution_tool_result",
+        "tool_search_tool_result",
+    }
+)
+
+
+class ProviderError(RuntimeError):
+    """A closed error code, never an upstream body, URL, key or exception string."""
+
+    def __init__(self, code: str, *, http_status=None, provider_status=None):
+        self.code = code if code in _ERROR_CODES else "provider_protocol_error"
+        self.diagnostic = {}
+        if type(http_status) is int and 300 <= http_status <= 599:
+            self.diagnostic["http_status"] = http_status
+        if type(provider_status) is int and provider_status in _MINIMAX_STATUS_CODES:
+            self.diagnostic["provider_status"] = provider_status
+        super().__init__(self.code)
+
+
+# Published numeric API errors only. Never retain a response message, trace,
+# header, request, URL or arbitrary upstream field in the owned event log.
+_MINIMAX_STATUS_CODES = frozenset(
+    {
+        1000,
+        1001,
+        1002,
+        1004,
+        1008,
+        1024,
+        1026,
+        1027,
+        1033,
+        1039,
+        1041,
+        1042,
+        1045,
+        1046,
+        2013,
+        2014,
+        2022,
+        2045,
+        2046,
+        2047,
+        2049,
+        2053,
+        2056,
+        2057,
+        2061,
+        2062,
+        2064,
+        2066,
+        2067,
+        2068,
+        2069,
+    }
+)
+
+
+async def _http_diagnostic(response, *, minimax, deadline):
+    """Read only a finite MiniMax error envelope, exporting known integers.
+
+    Other providers and redirects still close without reading the error body.
+    A diagnostic timeout or malformed response must preserve the original HTTP
+    failure and must never trigger another request.
+    """
+    result = {"http_status": response.status_code}
+    if not minimax or not 400 <= response.status_code <= 599:
+        return result
+    if response.headers.get("content-type", "").split(";", 1)[0].lower().strip() != "application/json":
+        return result
+    remaining = min(3, deadline - time.monotonic())
+    if remaining <= 0:
+        return result
+    try:
+        async with asyncio.timeout(remaining):
+            raw = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=2048):
+                if len(raw) + len(chunk) > 16384:
+                    return result
+                raw.extend(chunk)
+            value = _loads(raw)
+            if type(value) is not dict:
+                return result
+            candidates = []
+            for key in ("error", "base_resp"):
+                item = value.get(key)
+                if type(item) is not dict:
+                    continue
+                candidates.extend(item.get(field) for field in ("code", "status_code"))
+                # The Messages compatibility envelope may encode the numeric
+                # code at the end of its message. Export only an allowlisted int.
+                message = item.get("message")
+                if type(message) is str and len(message) <= 4096:
+                    match = re.search(r"\(([1-9][0-9]{3,4})\)\.?\s*$", message)
+                    if match:
+                        candidates.append(int(match.group(1)))
+            codes = {n for n in candidates if type(n) is int and n in _MINIMAX_STATUS_CODES}
+            if len(codes) == 1:
+                result["provider_status"] = codes.pop()
+    except (ProviderError, ValueError, TypeError, RecursionError, TimeoutError, httpx.HTTPError):
+        pass
+    return result
+
+
+def _transport(model_cfg, endpoint, supplied):
+    if not model_network.delegated():
+        return supplied
+    _need(supplied is None, "provider_configuration_error")
+    try:
+        return model_network.async_transport(
+            purpose=model_cfg.get("_model_purpose"), endpoint=endpoint, model=model_cfg["model"]
+        )
+    except model_network.ModelNetworkError:
+        raise ProviderError("provider_configuration_error") from None
+
+
+@dataclass(frozen=True)
+class ProviderLimits:
+    max_event_bytes: int = 256 * 1024
+    max_response_bytes: int = 8 * 1024 * 1024
+    max_tool_json_bytes: int = 256 * 1024
+    max_request_bytes: int = 2 * 1024 * 1024
+    max_blocks: int = 256
+    max_events: int = 20000
+
+
+class AssistantContent(list):
+    """JSON-safe public blocks with an explicitly requested, RAM-only continuation.
+
+    Never persist continuation() or expose it in UI/logs. Normal list iteration,
+    repr and JSON encoding include only public operational/text blocks.
+    """
+
+    __slots__ = ("_private_blocks",)
+
+    def __init__(self, public_blocks: list[dict], private_blocks: list[dict]):
+        super().__init__(copy.deepcopy(public_blocks))
+        self._private_blocks = copy.deepcopy(private_blocks)
+
+    def continuation(self) -> list[dict]:
+        return copy.deepcopy(self._private_blocks)
+
+
+def _need(value: bool, code: str = "provider_protocol_error") -> None:
+    if not value:
+        raise ProviderError(code)
+
+
+def _json_bytes(value, code: str) -> bytes:
+    try:
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, RecursionError, UnicodeError):
+        raise ProviderError(code) from None
+
+
+def _loads(raw: bytes | str):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            _need(key not in result)
+            result[key] = value
+        return result
+
+    def invalid_constant(_value):
+        raise ProviderError("provider_protocol_error")
+
+    try:
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ProviderError("provider_protocol_error") from None
+
+
+async def _frames(response: httpx.Response, limits: ProviderLimits, deadline: float) -> AsyncIterator[dict]:
+    """Parse SSE at the byte boundary, including split UTF-8/CRLF and multiline data."""
+    pending = bytearray()
+    data = []
+    event_name = None
+    total = event_bytes = count = 0
+    first_line = True
+    iterator = response.aiter_bytes().__aiter__()
+    while True:
+        remaining = deadline - time.monotonic()
+        _need(remaining > 0, "provider_timeout")
+        try:
+            chunk = await asyncio.wait_for(iterator.__anext__(), remaining)
+        except StopAsyncIteration:
+            # SSE dispatch requires a blank line; EOF is not a terminal event.
+            if pending or data:
+                raise ProviderError("provider_stream_truncated") from None
+            return
+        total += len(chunk)
+        _need(total <= limits.max_response_bytes, "provider_response_too_large")
+        pending.extend(chunk)
+        while pending:
+            _need(time.monotonic() < deadline, "provider_timeout")
+            positions = [p for p in (pending.find(b"\n"), pending.find(b"\r")) if p >= 0]
+            if not positions:
+                _need(event_bytes + len(pending) <= limits.max_event_bytes, "provider_event_too_large")
+                break
+            end = min(positions)
+            if pending[end] == 13 and end + 1 == len(pending):
+                _need(event_bytes + len(pending) <= limits.max_event_bytes, "provider_event_too_large")
+                break
+            width = 2 if pending[end : end + 2] == b"\r\n" else 1
+            line = bytes(pending[:end])
+            del pending[: end + width]
+            event_bytes += len(line) + width
+            _need(event_bytes <= limits.max_event_bytes, "provider_event_too_large")
+            if first_line:
+                line = line.removeprefix(b"\xef\xbb\xbf")
+                first_line = False
+            if not line:
+                count += 1
+                _need(count <= limits.max_events, "provider_response_too_large")
+                if data:
+                    try:
+                        payload = b"\n".join(data).decode("utf-8")
+                    except UnicodeError:
+                        raise ProviderError("provider_protocol_error") from None
+                    value = _loads(payload)
+                    _need(type(value) is dict and type(value.get("type")) is str)
+                    _need(event_name is None or event_name == value["type"])
+                    yield value
+                data, event_name, event_bytes = [], None, 0
+            elif not line.startswith(b":"):
+                field, separator, value = line.partition(b":")
+                if separator and value.startswith(b" "):
+                    value = value[1:]
+                if field == b"data":
+                    data.append(value)
+                elif field == b"event":
+                    try:
+                        event_name = value.decode("ascii")
+                    except UnicodeError:
+                        raise ProviderError("provider_protocol_error") from None
+
+
+def _public_block(block: dict) -> dict:
+    # Vendor/private extension fields (including reasoning) stay solely in the
+    # original RAM continuation, even when attached to a public block type.
+    if block["type"] == "text":
+        keys = {"type", "text", "citations"}
+    elif block["type"] in {"tool_use", "server_tool_use"}:
+        keys = {"type", "id", "name", "input"}
+    else:
+        keys = {"type", "tool_use_id", "content"}
+    return {key: copy.deepcopy(value) for key, value in block.items() if key in keys}
+
+
+def _valid_message_content(content) -> bool:
+    # The Messages API accepts a string or a non-empty list of content blocks.
+    # A bare dict (or any other shape) is rejected upstream with HTTP 422, which
+    # costs a whole model call; production run e09527c7 lost its claim pass that
+    # way. Reject the request locally before it is built or sent.
+    if type(content) is str:
+        return True
+    if type(content) is not list or not content:
+        return False
+    for block in content:
+        if type(block) is not dict or type(block.get("type")) is not str:
+            return False
+        kind = block["type"]
+        if kind == "text" and type(block.get("text")) is not str:
+            return False
+        if kind in {"tool_use", "server_tool_use"} and (
+            type(block.get("id")) is not str
+            or type(block.get("name")) is not str
+            or type(block.get("input")) is not dict
+        ):
+            return False
+        if kind == "tool_result" and type(block.get("tool_use_id")) is not str:
+            return False
+        # Opaque future block types (thinking, server results, ...) only need a
+        # string type; their vendor-private fields stay out of validation.
+    return True
+
+
+def _valid_messages(messages) -> bool:
+    return (
+        type(messages) is list
+        and 0 < len(messages) <= 2048
+        and all(
+            type(m) is dict
+            and type(m.get("role")) is str
+            and m.get("role") in {"user", "assistant"}
+            and _valid_message_content(m.get("content"))
+            for m in messages
+        )
+    )
+
+
+class _Message:
+    def __init__(self, limits: ProviderLimits):
+        self.limits = limits
+        self.started = self.stopped = False
+        self.blocks: list[dict] = []
+        self.open_index: int | None = None
+        self.pieces: dict[str, list[str]] = {}
+        self.tool_json_bytes = 0
+        self.tool_ids: set[str] = set()
+        self.pending_calls: list[dict] = []
+        self.stop_reason = None
+        self.usage = {"input_tokens": 0, "output_tokens": 0}
+        self.usage_seen: set[str] = set()
+        self.final_output_usage = False
+
+    def _usage(self, usage) -> list[dict]:
+        _need(type(usage) is dict)
+        changed = False
+        for key in self.usage:
+            if key in usage:
+                value = usage[key]
+                _need(type(value) is int and self.usage[key] <= value <= 10**12)
+                self.usage[key] = value
+                self.usage_seen.add(key)
+                changed = True
+        return [{"type": "usage", **{key: self.usage[key] for key in self.usage_seen}}] if changed else []
+
+    def _index(self, event) -> int:
+        value = event.get("index")
+        _need(type(value) is int and value == self.open_index)
+        return value
+
+    def feed(self, event: dict) -> list[dict]:
+        kind = event["type"]
+        _need(not self.stopped)
+        if kind == "ping":
+            return []
+        if kind == "error":
+            raise ProviderError("provider_upstream_error")
+        if kind == "message_start":
+            _need(not self.started)
+            message = event.get("message")
+            _need(
+                type(message) is dict and message.get("role") == "assistant" and message.get("content") == []
+            )
+            self.started = True
+            return self._usage(message.get("usage", {}))
+        _need(self.started)
+        if kind == "content_block_start":
+            _need(
+                self.open_index is None
+                and event.get("index") == len(self.blocks)
+                and type(event.get("index")) is int
+                and len(self.blocks) < self.limits.max_blocks
+            )
+            block = event.get("content_block")
+            _need(type(block) is dict and type(block.get("type")) is str)
+            block = copy.deepcopy(block)
+            block_type = block["type"]
+            self.blocks.append(block)
+            self.open_index = len(self.blocks) - 1
+            self.pieces = {}
+            if block_type in {"tool_use", "server_tool_use"}:
+                _need(
+                    type(block.get("id")) is str
+                    and 0 < len(block["id"]) <= 512
+                    and block["id"] not in self.tool_ids
+                    and type(block.get("name")) is str
+                    and 0 < len(block["name"]) <= 128
+                    and type(block.get("input")) is dict
+                )
+                self.tool_ids.add(block["id"])
+                self.tool_json_bytes += len(_json_bytes(block["input"], "provider_protocol_error"))
+                _need(self.tool_json_bytes <= self.limits.max_tool_json_bytes, "provider_tool_json_too_large")
+            if block_type == "text":
+                _need(type(block.get("text")) is str)
+                return [{"type": "text_delta", "text": block["text"]}] if block["text"] else []
+            return []
+        if kind == "content_block_delta":
+            block = self.blocks[self._index(event)]
+            delta = event.get("delta")
+            _need(type(delta) is dict and type(delta.get("type")) is str)
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                _need(block["type"] == "text" and type(delta.get("text")) is str)
+                self.pieces.setdefault("text", []).append(delta["text"])
+                return [{"type": "text_delta", "text": delta["text"]}]
+            if delta_type == "input_json_delta":
+                _need(
+                    block["type"] in {"tool_use", "server_tool_use"}
+                    and type(delta.get("partial_json")) is str
+                    and block["input"] == {}
+                )
+                self.tool_json_bytes += len(delta["partial_json"].encode("utf-8"))
+                _need(self.tool_json_bytes <= self.limits.max_tool_json_bytes, "provider_tool_json_too_large")
+                self.pieces.setdefault("input", []).append(delta["partial_json"])
+            elif delta_type in {"thinking_delta", "signature_delta"}:
+                field = "thinking" if delta_type == "thinking_delta" else "signature"
+                _need(
+                    block["type"] == "thinking"
+                    and type(delta.get(field)) is str
+                    and type(block.get(field, "")) is str
+                )
+                self.pieces.setdefault(field, []).append(delta[field])
+            elif delta_type == "citations_delta":
+                _need(block["type"] == "text" and type(delta.get("citation")) is dict)
+                citations = block.setdefault("citations", [])
+                _need(type(citations) is list)
+                citations.append(copy.deepcopy(delta["citation"]))
+            else:
+                # Unknown complete opaque blocks can be retained. Unknown
+                # mutations cannot be silently assembled into a valid follow-up.
+                raise ProviderError("provider_protocol_error")
+            return []
+        if kind == "content_block_stop":
+            block = self.blocks[self._index(event)]
+            invalid_input = False
+            for field, pieces in self.pieces.items():
+                if field == "input":
+                    joined = "".join(pieces)
+                    try:
+                        value = _loads(joined) if joined else block["input"]
+                    except ProviderError:
+                        value = None
+                    if type(value) is not dict:
+                        # A truncated, duplicated-key or wrong-shaped tool-argument
+                        # JSON only breaks this one call. Keep the closed block
+                        # protocol-valid and let the runtime answer with an is_error
+                        # tool result instead of killing the run before the wrap-up
+                        # report is written. Server tool inputs stay strict: the
+                        # runtime cannot answer those.
+                        if block["type"] != "tool_use":
+                            raise ProviderError("provider_protocol_error") from None
+                        invalid_input = True
+                        value = {}
+                    block["input"] = value
+                else:
+                    block[field] = block.get(field, "") + "".join(pieces)
+            self.open_index = None
+            self.pieces = {}
+            if block["type"] == "tool_use":
+                call = {
+                    "type": "tool_call",
+                    "id": block["id"],
+                    "name": block["name"],
+                }
+                if invalid_input:
+                    # None is not a tool argument dict, so the runtime's tool
+                    # layer rejects it with invalid_arguments and records one
+                    # is_error tool result without executing anything.
+                    call["arguments"] = None
+                    call["arguments_invalid"] = True
+                else:
+                    call["arguments"] = copy.deepcopy(block["input"])
+                self.pending_calls.append(call)
+            elif block["type"] == "server_tool_use":
+                return [{"type": "server_tool_use", "block": _public_block(block)}]
+            elif block["type"] in _SERVER_RESULTS:
+                return [{"type": "server_tool_result", "block": _public_block(block)}]
+            return []
+        if kind == "message_delta":
+            _need(self.open_index is None and type(event.get("delta")) is dict)
+            reason = event["delta"].get("stop_reason")
+            if reason is not None:
+                _need(type(reason) is str and reason in _STOP_REASONS)
+                self.stop_reason = reason
+            usage = event.get("usage", {})
+            result = self._usage(usage)
+            if "output_tokens" in usage:
+                self.final_output_usage = True
+            return result
+        if kind == "message_stop":
+            _need(self.open_index is None and self.stop_reason is not None)
+            if self.stop_reason == "max_tokens" and any(
+                call.get("arguments_invalid") for call in self.pending_calls
+            ):
+                # The output budget cut the turn after a tool_use block had already
+                # closed but its argument JSON could not be parsed. The block still
+                # belongs to this turn, so close it as the tool turn it was: the
+                # runtime records one is_error result for the truncated call and
+                # continues with the report instead of ending the run.
+                self.stop_reason = "tool_use"
+            _need(not self.pending_calls or self.stop_reason == "tool_use")
+            self.stopped = True
+            public = [
+                _public_block(b)
+                for b in self.blocks
+                if b["type"] in {"text", "tool_use", "server_tool_use"} | _SERVER_RESULTS
+            ]
+            return [
+                *self.pending_calls,
+                {
+                    "type": "done",
+                    "stop_reason": self.stop_reason,
+                    "content": AssistantContent(public, self.blocks),
+                    "usage_complete": self.usage_seen == {"input_tokens", "output_tokens"}
+                    and self.final_output_usage,
+                },
+            ]
+        # Forward-compatible extra top-level SSE events carry no public content.
+        return []
+
+
+class AnthropicMessagesProvider:
+    """A transport per request; inject only MockTransport in offline tests."""
+
+    def __init__(
+        self, *, transport: httpx.AsyncBaseTransport | None = None, limits: ProviderLimits | None = None
+    ):
+        self.transport = transport
+        self.limits = limits or ProviderLimits()
+        _need(
+            isinstance(self.limits, ProviderLimits)
+            and (transport is None or isinstance(transport, httpx.AsyncBaseTransport)),
+            "provider_configuration_error",
+        )
+        ceilings = ProviderLimits()
+        for name in ProviderLimits.__dataclass_fields__:
+            value = getattr(self.limits, name)
+            _need(type(value) is int and 0 < value <= getattr(ceilings, name), "provider_configuration_error")
+
+    async def stream(
+        self,
+        messages: list[dict],
+        *,
+        system: str,
+        tools: list[dict],
+        model_cfg: dict,
+        max_tokens: int,
+        timeout_seconds: float,
+    ) -> AsyncIterator[dict]:
+        _need(type(model_cfg) is dict, "provider_configuration_error")
+        base, key, model = (model_cfg.get(k) for k in ("base_url", "api_key", "model"))
+        _need(type(base) is str and base.rstrip("/") in _ENDPOINTS, "provider_configuration_error")
+        endpoint = _ENDPOINTS[base.rstrip("/")]
+        _need(
+            type(key) is str and 0 < len(key) <= 8192 and all(33 <= ord(c) <= 126 for c in key),
+            "provider_configuration_error",
+        )
+        _need(
+            type(model) is str and 0 < len(model) <= 128 and all(32 <= ord(c) < 127 for c in model),
+            "provider_configuration_error",
+        )
+        _need(
+            _valid_messages(messages)
+            and type(system) is str
+            and type(tools) is list
+            and len(tools) <= 256
+            and all(type(t) is dict for t in tools)
+            and type(max_tokens) is int
+            and 1 <= max_tokens <= 65536
+            and type(timeout_seconds) in {int, float}
+            and math.isfinite(timeout_seconds)
+            and 0 < timeout_seconds <= 600,
+            "provider_input_error",
+        )
+        payload = {
+            "model": model,
+            "stream": True,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "system": system,
+            "tools": tools,
+        }
+        body = _json_bytes(payload, "provider_input_error")
+        _need(len(body) <= self.limits.max_request_bytes, "provider_input_error")
+        client = httpx.AsyncClient(
+            transport=_transport(model_cfg, endpoint, self.transport),
+            trust_env=False,
+            follow_redirects=False,
+            timeout=httpx.Timeout(timeout_seconds),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        )
+        response = None
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            auth_headers = (
+                {"authorization": "Bearer " + key}
+                if endpoint
+                in {
+                    "https://api.minimax.io/anthropic/v1/messages",
+                    "https://api.minimax.cn/anthropic/v1/messages",
+                    "https://api.minimaxi.com/anthropic/v1/messages",
+                }
+                else {"x-api-key": key}
+            )
+            request = client.build_request(
+                "POST",
+                endpoint,
+                content=body,
+                headers={
+                    **auth_headers,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                    "accept": "text/event-stream",
+                    "accept-encoding": "identity",
+                },
+            )
+            response = await asyncio.wait_for(client.send(request, stream=True), timeout_seconds)
+            if response.status_code != 200:
+                code = {
+                    401: "provider_auth_error",
+                    403: "provider_auth_error",
+                    429: "provider_rate_limited",
+                }.get(response.status_code, "provider_http_error")
+                diagnostic = await _http_diagnostic(
+                    response,
+                    minimax=endpoint
+                    in {
+                        "https://api.minimax.io/anthropic/v1/messages",
+                        "https://api.minimax.cn/anthropic/v1/messages",
+                        "https://api.minimaxi.com/anthropic/v1/messages",
+                    },
+                    deadline=deadline,
+                )
+                raise ProviderError(code, **diagnostic)
+            _need(
+                response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                == "text/event-stream"
+            )
+            _need(response.headers.get("content-encoding", "identity").lower() in {"", "identity"})
+            message = _Message(self.limits)
+            async for frame in _frames(response, self.limits, deadline):
+                try:
+                    events = message.feed(frame)
+                except (KeyError, IndexError, TypeError, RecursionError, UnicodeError):
+                    raise ProviderError("provider_protocol_error") from None
+                if message.stopped:
+                    # Close before exposing executable tool calls or done, even
+                    # if a consumer stops iterating immediately upon that event.
+                    await _close_transport(response, client)
+                for event in events:
+                    yield event
+                if message.stopped:
+                    return
+            raise ProviderError("provider_stream_truncated")
+        except (TimeoutError, httpx.TimeoutException):
+            raise ProviderError("provider_timeout") from None
+        except httpx.HTTPError:
+            raise ProviderError("provider_connection_error") from None
+        finally:
+            await _close_transport(response, client)
+
+
+async def _close_transport(response: httpx.Response | None, client: httpx.AsyncClient) -> None:
+    failed = False
+    try:
+        if response is not None:
+            try:
+                await response.aclose()
+            except Exception:
+                failed = True
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            failed = True
+    if failed:
+        raise ProviderError("provider_connection_error") from None
+
+
+async def stream(
+    messages: list[dict],
+    *,
+    system: str,
+    tools: list[dict],
+    model_cfg: dict,
+    max_tokens: int,
+    timeout_seconds: float,
+) -> AsyncIterator[dict]:
+    """Default production entry; callers close the iterator when stopping early."""
+    protocol = model_cfg.get("protocol", "anthropic_messages") if type(model_cfg) is dict else None
+    if protocol == "anthropic_messages":
+        selected = AnthropicMessagesProvider()
+    elif protocol == "openai_responses":
+        from .provider_openai import OpenAIResponsesProvider
+
+        selected = OpenAIResponsesProvider()
+    else:
+        raise ProviderError("provider_configuration_error")
+    iterator = selected.stream(
+        messages,
+        system=system,
+        tools=tools,
+        model_cfg=model_cfg,
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+    )
+    async with aclosing(iterator):
+        async for event in iterator:
+            yield event

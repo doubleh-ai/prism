@@ -1,0 +1,25 @@
+<link rel="stylesheet" href="/static/css/futures-journal.css?v=141">
+<section class="futures-card journal-study" id="journal-study" data-symbol="__JOURNAL_SYMBOL__" aria-labelledby="journal-heading">
+  <div class="journal-study-head">
+    <div>
+      <h2 id="journal-heading">判断跟踪账本</h2>
+      <p class="journal-study-meta">从上方「可证伪情景路标」一键加入跟踪，或展开下方自定义单项查证；到期后系统自动核对结果。</p>
+    </div>
+    <label>研究时点 <select id="journal-session"><option value="current">当前资料</option>__JOURNAL_REPLAY_OPTION__</select></label>
+  </div>
+  <p id="journal-status" role="status" aria-live="polite"></p>
+  <div id="journal-analysis"></div>
+  <details id="journal-saved" open><summary>我的判断与自动对账记录</summary><div id="journal-list"></div></details>
+  <details id="journal-custom" class="journal-custom-lookup">
+    <summary>自定义指标核对与回放查证</summary>
+    <form id="journal-form">
+      <label for="journal-question">按预设规则核对单项指标</label>
+      <div class="journal-study-row">
+        <input id="journal-question" required maxlength="140" autocomplete="off">
+        <button type="submit" id="journal-submit">查证</button>
+      </div>
+    </form>
+    <div id="journal-presets" class="journal-study-presets" aria-label="示例问题"></div>
+  </details>
+</section>
+<script src="/static/js/futures-journal.js?v=141" defer></script>

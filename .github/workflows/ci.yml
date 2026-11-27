@@ -1,0 +1,116 @@
+# Prism — CI
+#
+# Runs on every push and PR. The pipeline is intentionally small:
+# model/network acceptance and exact served-revision verification require
+# separate real receipts. These offline checks do not establish a release.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  # Also check fixes stacked on an unmerged release candidate.
+  pull_request: {}
+
+permissions:
+  contents: read
+
+# Obsolete checks may stop; production writers use a separate serialized executor.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify tested source identity
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
+
+      - name: Check startup credential isolation before dependency installation
+        run: python3 -I -S -B scripts/check_provider_key_isolation.py
+
+      - name: Set up Node for real browser-script regression tests
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-test.txt
+
+      - name: Install runtime and test dependencies
+        run: |
+          python -m pip install --upgrade pip==26.1.2
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps -r requirements-test.txt
+          python -m pip check
+
+      - name: Lint
+        run: |
+          ruff check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py
+          ruff format --check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py
+
+      - name: Ensure nginx is available for the ingress regression
+        run: |
+          if ! command -v nginx >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends nginx
+          fi
+          nginx -v
+
+      - name: Run tests with coverage
+        env:
+          PRISM_LOG_LEVEL: WARNING
+        run: |
+          pytest tests/ \
+            --cov=server \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=45 \
+            -v
+
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify tested source identity
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip==26.1.2
+          python -m pip install pip-audit==2.10.1
+
+      - name: Audit dependencies
+        run: python -m pip_audit --disable-pip --no-deps -r requirements.lock --strict

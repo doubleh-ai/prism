@@ -1,0 +1,26 @@
+name: Feature Request
+description: 提出新功能、新数据源或体验改进建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与痛点
+      description: 你想在投研或量化流程中解决什么问题？当前为什么不方便？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 你希望实现怎样的交互、接口或数据能力？
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案或参考（可选）
+      description: 如有其他替代思路或外部数据源说明可在此补充。
+    validations:
+      required: false

@@ -1,0 +1,269 @@
+"""Cross-account, temporal and real database journeys for the new product paths."""
+
+import json
+from datetime import date, timedelta
+from uuid import uuid4
+
+import httpx
+import pytest
+
+from server import futures
+from server.agent import store as agent_store
+from server.database import get_db
+from server.preferences import init_preferences_db, profile_prompt
+
+
+@pytest.fixture
+def feature_db(auth_cookies):
+    init_preferences_db()
+    with get_db() as db:
+        db.execute("INSERT INTO users(username,password_hash) VALUES('second-user','synthetic-only')")
+    from server.auth import create_session
+
+    return auth_cookies, {"token": create_session("second-user")}
+
+
+def profile(**updates):
+    return {
+        "expected_version": 0,
+        "style": "conservative",
+        "horizon": "long",
+        "max_position_pct": 15,
+        "max_drawdown_pct": 8,
+        "allow_leverage": False,
+        **updates,
+    }
+
+
+async def test_profile_is_owned_versioned_and_bound_to_run(client, feature_db):
+    first, second = feature_db
+    assert (await client.get("/api/preferences/research", cookies=first)).json()["profile"] == {
+        "configured": False,
+        "version": 0,
+    }
+    saved = await client.put("/api/preferences/research", cookies=first, json=profile())
+    assert saved.status_code == 200
+    assert saved.json()["portfolio_risk_status"] == "not_evaluated"
+    with get_db() as db:
+        db.execute("INSERT INTO conversations(id,username) VALUES('profile-conv','testuser')")
+    run = agent_store.create_run("testuser", "profile-conv", "合成研究", "test-model", "research", "once")
+    updated = await client.put(
+        "/api/preferences/research", cookies=first, json=profile(expected_version=1, style="aggressive")
+    )
+    assert updated.status_code == 200
+    assert agent_store.get_run("testuser", run["id"])["profile"]["style"] == "conservative"
+    again = agent_store.create_run("testuser", "profile-conv", "合成研究", "test-model", "research", "once")
+    assert again["id"] == run["id"] and again["profile"]["version"] == 1
+    assert "未评估" in profile_prompt(again["profile"])
+    assert (await client.put("/api/preferences/research", cookies=first, json=profile())).status_code == 409
+    assert (await client.get("/api/preferences/research", cookies=second)).json()["profile"][
+        "configured"
+    ] is False
+    with get_db() as db:
+        db.execute("DELETE FROM conversations WHERE id='profile-conv'")
+        assert not db.execute("SELECT * FROM native_run_profiles").fetchall()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"max_drawdown_pct": 101},
+        {"style": "invented"},
+        {"allow_leverage": "yes"},
+        {"owner": "second-user"},
+        {"max_position_pct": True},
+    ],
+)
+async def test_invalid_profile_does_not_write(client, feature_db, change):
+    first, _ = feature_db
+    response = await client.put("/api/preferences/research", cookies=first, json=profile(**change))
+    assert response.status_code == 422
+    assert (await client.get("/api/preferences/research", cookies=first)).json()["profile"]["version"] == 0
+
+
+async def test_profile_rejects_duplicate_fields_and_oversized_json(client, feature_db):
+    first, _ = feature_db
+    endpoint = "/api/preferences/research"
+    payload = json.dumps(profile())
+    duplicate = payload[:-1] + ', "style": "aggressive"}'
+    assert (await client.put(endpoint, cookies=first, content=duplicate)).status_code == 422
+    assert (await client.put(endpoint, cookies=first, content=payload + " " * 32768)).status_code == 413
+    assert (await client.get(endpoint, cookies=first)).json()["profile"]["version"] == 0
+
+
+async def test_account_binding_and_auth(client, feature_db):
+    first, _ = feature_db
+    path = "/api/preferences/research"
+    assert (
+        await client.get(path, cookies=first, headers={"X-Prism-Account": "second-user"})
+    ).status_code == 409
+    assert (await client.get(path)).status_code == 401
+    response = await client.put(
+        "/api/preferences/research",
+        cookies=first,
+        content=json.dumps(profile()),
+        headers={"X-Requested-With": "invalid"},
+    )
+    assert response.status_code == 403
+
+
+async def test_account_deletion_removes_research_profile(client, feature_db):
+    first, _ = feature_db
+    assert (await client.put("/api/preferences/research", cookies=first, json=profile())).status_code == 200
+    with get_db() as db:
+        db.execute("DELETE FROM users WHERE username='testuser'")
+        assert not db.execute("SELECT * FROM research_profiles").fetchall()
+
+
+def bars(count=70):
+    start = date(2026, 7, 1)
+    return [
+        [(start + timedelta(days=i)).isoformat(), 100 + i, 102 + i, 99 + i, 101 + i, 1000 + i, 2000 + i, 0]
+        for i in range(count)
+    ]
+
+
+def test_futures_calculations_keep_missing_data_and_series_boundaries():
+    result = futures.analyze(
+        "RB", futures.parse_bars(json.dumps(bars()).encode(), date(2026, 10, 30)), "2026-10-30T12:00:00+08:00"
+    )
+    assert result["technical"]["sma20"] == 160.5
+    assert result["positioning"]["open_interest_change"] == 1
+    assert result["positioning"]["net_capital_flow"] is None
+    assert result["latest"]["settlement"] is None
+    assert not result["tradable_contract"]
+    assert result["freshness"] == "older_observation"
+    assert all(item["status"] == "not_collected" for item in result["fundamentals"])
+
+
+@pytest.mark.parametrize("change", ["duplicate", "future", "nan", "bad_ohlc"])
+def test_futures_rejects_malformed_observations(change):
+    rows = bars(2)
+    if change == "duplicate":
+        rows[1][0] = rows[0][0]
+    if change == "future":
+        rows[1][0] = "2030-01-01"
+    if change == "nan":
+        rows[1][4] = float("nan")
+    if change == "bad_ohlc":
+        rows[1][3] = 10000
+    with pytest.raises(ValueError):
+        futures.parse_bars(json.dumps(rows).encode(), date(2026, 10, 30))
+
+
+async def test_real_futures_http_parser_and_cache_without_external_calls(monkeypatch):
+    requests = []
+    monthly_calls = []
+
+    async def unrelated_monthly_source(_client, symbol, _today, _deadline):
+        # This case owns Sina parsing and the dated exchange/cache boundary.
+        # The monthly reader's real HTTP parsing and shared snapshot are tested
+        # independently in test_futures_fundamentals.py.
+        monthly_calls.append(symbol)
+        return {
+            "status": "unavailable",
+            "topic": "合成月度资料未采集",
+            "index_url": "https://www.stats.gov.cn/sj/zxfb/",
+            "observations": [],
+        }
+
+    monkeypatch.setattr(futures.futures_fundamentals, "read_supply", unrelated_monthly_source)
+
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "www.shfe.com.cn":
+            return httpx.Response(404)
+        assert request.url.host == "stock2.finance.sina.com.cn"
+        assert request.url.params["symbol"] == "RB0"
+        return httpx.Response(
+            200, text="/*<script>location.href='//sina.com';</script>*/\n=(" + json.dumps(bars()) + ");"
+        )
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        futures.httpx, "AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(handler))
+    )
+    monkeypatch.setattr(futures, "_cache", {})
+    first = await futures.snapshot("RB")
+    first["latest"]["close"] = 0
+    again = await futures.snapshot("RB")
+    assert len(requests) == 13 and again["cached"] and again["latest"]["close"] == 170
+    assert monthly_calls == ["RB"], "a cached snapshot must not reacquire the unrelated monthly source"
+    assert len({str(request.url) for request in requests}) == 13
+    assert len({item["requested_date"] for item in again["source_attempts"]}) == 3
+    assert again["warehouse_receipt"]["status"] == "unavailable"
+    assert again["exchange_daily"]["status"] == "unavailable"
+    assert again["contract_dates"]["status"] == "unavailable"
+    assert again["exchange_parameters"]["status"] == "unavailable"
+    assert {item["source"] for item in again["source_attempts"]} == {
+        "warehouse_receipt",
+        "exchange_daily",
+        "contract_dates",
+        "exchange_parameters",
+    }
+
+
+def test_native_catalog_and_futures_workflow_share_real_tool():
+    from server.agent.prompts import system_prompt, workflow_id
+    from server.agent.tools import native_catalog
+
+    assert "futures_snapshot" in {row["id"] for row in native_catalog()}
+    assert workflow_id("futures-research") == "futures"
+    from server.research_context import build_research_context
+
+    text = system_prompt(build_research_context(), "futures", search_available=False)
+    assert "futures_snapshot" in text and "多空方向" in text
+
+
+async def test_new_pages_require_auth_and_are_not_cacheable(client, feature_db):
+    for path in ["/preferences", "/futures"]:
+        assert (await client.get(path)).status_code == 307
+        response = await client.get(path, cookies=feature_db[0])
+        if path == "/preferences":
+            assert response.status_code == 307
+            assert response.headers["location"] == "/prism?copilot=persona"
+            assert response.headers["cache-control"] == "no-store"
+            response = await client.get(response.headers["location"], cookies=feature_db[0])
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("feature", ["futures", "preferences"])
+async def test_new_pages_keep_feedback_feature_and_owned_progress(client, feature_db, feature):
+    from server.feedback import init_feedback_db
+
+    init_feedback_db()
+    first, second = feature_db
+    result = await client.post(
+        "/api/feedback",
+        cookies=first,
+        json={
+            "request_id": str(uuid4()),
+            "category": "bug",
+            "feature": feature,
+            "page": "/" + feature,
+            "title": "合成页面检查",
+            "description": "仅使用合成描述验证功能归类和本人进度。",
+        },
+    )
+    assert result.status_code == 200
+    item = result.json()["feedback"]
+    assert item["feature"] == feature
+    response = await client.get("/api/feedback?feature=" + feature, cookies=first)
+    assert response.status_code == 200 and response.json()["items"][0]["id"] == item["id"]
+    assert (await client.get("/api/feedback/" + str(item["id"]), cookies=second)).status_code == 404
+
+
+def test_futures_descending_series_keeps_latest_observations():
+    rows = bars(210)
+    forward = futures.parse_bars(json.dumps(rows).encode(), date(2027, 12, 31))
+    reverse = futures.parse_bars(json.dumps(list(reversed(rows))).encode(), date(2027, 12, 31))
+    assert len(reverse) == 180 and reverse == forward
+
+
+def test_only_selected_futures_window_is_certified():
+    rows = bars(210)
+    rows[0][1] = 0
+    assert len(futures.parse_bars(json.dumps(rows).encode(), date(2027, 12, 31))) == 180
+    rows[-1][1] = 0
+    with pytest.raises(ValueError):
+        futures.parse_bars(json.dumps(rows).encode(), date(2027, 12, 31))

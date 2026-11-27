@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+  <title>Prism · 投研工作台</title>
+  <link rel="stylesheet" href="/static/css/app.css?v=141">
+  <link rel="stylesheet" href="/static/css/research-library.css?v=141">
+  <link rel="stylesheet" href="/static/css/research-preferences.css?v=141">
+  <link rel="stylesheet" href="/static/css/copilot.css?v=141">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=141">
+</head>
+<body>
+<div class="app-shell" id="appShell" data-mode="market">
+  <nav class="icon-rail" id="iconRail" aria-label="研究空间导航">
+    <div class="icon-rail-brand" title="Prism 投研工作台">
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=141#mark"/></svg>
+      <span class="rail-brand-word">Prism<small>投研工作台</small></span>
+    </div>
+
+    <span class="rail-section-label">研究空间</span>
+    <button type="button" class="icon-rail-btn active" data-mode="market" data-workbench-view="market" data-market-tab="quote" aria-selected="true" title="行情工作区" onclick="App._openMarketNav('quote')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19V5m0 14h16M8 15.5l3-4 3 2.2 4.5-6.2" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="rail-label">行情工作区</span>
+    </button>
+    <a class="icon-rail-btn" href="/futures" title="期货研究">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M9.5 7H17v7.5" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="rail-label">期货研究</span>
+    </a>
+    <button type="button" class="icon-rail-btn" data-mode="reports" data-workbench-view="reports" title="研究与复盘" onclick="App.switchMode('reports')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 3.5h8l4 4V20H6V3.5z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4M9 12h6M9 15.5h4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span class="rail-label">研究与复盘</span>
+    </button>
+
+    <span class="rail-section-label rail-section-second">筛选与验证</span>
+    <button type="button" class="icon-rail-btn" data-workbench-view="screener" data-market-tab="screener" aria-selected="false" title="全市场选股" onclick="App._openMarketNav('screener')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h9m4 0h3M13 5v4M4 12h4m4 0h8M8 10v4M4 17h11m4 0h1M15 15v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span class="rail-label">全市场选股</span>
+    </button>
+    <button type="button" class="icon-rail-btn" data-workbench-view="indicators" data-market-tab="library" aria-selected="false" title="指标实验室" onclick="App._openMarketNav('library')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15.5 4.5c-2.1 0-3 1.3-3.4 3.6l-1.2 7.8c-.4 2.3-1.3 3.6-3.4 3.6M8.5 10.5h6.5" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="rail-label">指标实验室</span>
+    </button>
+
+    <div class="rail-foot">
+      <button type="button" class="rail-collapse-btn" id="railCollapseBtn" onclick="App.toggleRailCollapse()" title="收起或展开主导航栏">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path class="rail-chevron-path" d="M14.5 6.5L9 12l5.5 5.5M19 6.5L13.5 12 19 17.5" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="rail-label">收起导航</span>
+      </button>
+    </div>
+  </nav>
+
+  <aside class="sidebar" id="contextSidebar">
+    <div class="sidebar-head"><span class="logo" id="workbenchSidebarTitle">行情工作区</span><button class="sidebar-close" onclick="App._closeMobileSidebar()" aria-label="关闭侧栏">×</button></div>
+
+    <div class="sidebar-market" id="sidebarMarket">
+      <p class="sidebar-mode-title">检索与自选池</p>
+      <div class="market-search-wrap">
+        <input type="search" id="marketSidebarQ" name="prism_symbol_filter" inputmode="search" placeholder="代码 / 简称，如 600519" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other" class="market-q-input">
+      </div>
+      <div class="market-sidebar-results" id="marketSidebarResults"></div>
+      <div class="watchlist-head"><span>我的自选</span><span class="watchlist-count" id="watchlistCount"></span></div>
+      <div class="watchlist" id="watchlist"></div>
+    </div>
+
+    <div class="sidebar-reports" id="sidebarReports" style="display:none">
+      <div class="watchlist-head"><span>精选研报</span><span class="watchlist-count" id="reportsSidebarCount"></span></div>
+      <div class="reports-sidebar-list" id="reportsSidebarList"></div>
+    </div>
+
+    <div class="sidebar-foot">
+      <span class="foot-user-name" id="userBadge"></span>
+      <span class="foot-ver" id="versionTag" title="更新日志">__APP_VERSION__</span>
+      <button class="logout-link" onclick="App.logout()">退出</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="loading-bar" id="loadingBar"></div>
+    <div class="topbar">
+      <button class="tb" id="sidebarToggleBtn" onclick="App.toggleSidebar()" title="收起/展开列表侧栏 (⌘B)" aria-label="收起或展开列表侧栏">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.75" y="2.5" width="12.5" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/><path d="M5.75 2.75v10.5" stroke="currentColor" stroke-width="1.3"/></svg>
+      </button>
+      <div class="workbench-page-title"><h1 id="workbenchPageTitle">行情工作区</h1></div>
+      <button id="workbenchHistoryEntry" class="workbench-history-btn" onclick="App._openWorkbenchPanel('history')" hidden style="display:none">调用记录 <span id="workbenchCallCount">0</span></button>
+      <button type="button" class="copilot-pill-btn" id="topbarPersonaBtn" onclick="App.openPersonaDialog()" title="管理我的独立投研画像与风控纪律">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19.5c1.4-3 3.8-4.5 6.5-4.5s5.1 1.5 6.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span>投研画像</span>
+      </button>
+      <button class="tb" onclick="App.toggleTheme()" title="切换明暗主题" aria-label="切换明暗主题"><svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M7.5 2a5.5 5.5 0 000 11V2z" fill="currentColor" opacity=".35"/></svg></button>
+      <button class="tb" onclick="App._toggleTour()" title="操作指引" aria-label="操作指引">?</button>
+    </div>
+
+    <div class="market-panel" id="marketPanel">
+      <div class="market-workbench" id="marketWorkbench">
+        <section class="market-workspace-view active" data-market-view="quote">
+          <div class="market-panel-inner" id="marketPanelInner"></div>
+        </section>
+
+        <section class="market-workspace-view" data-market-view="screener">
+          <div class="market-screener">
+            <div class="market-section-head">
+              <div><h3>全市场指标选股</h3><p>后台扫描沪深京股票池，命中结果可一键交给随行 Agent 按你的投研画像二次精选。</p></div>
+              <div class="market-scan-state" id="marketScanState">等待配置</div>
+            </div>
+            <div class="market-screener-layout">
+              <aside class="market-scan-config">
+                <label class="market-field"><span>指标</span><select id="marketScanIndicator" onchange="App._selectScannerIndicator(this.value)"></select></label>
+                <div class="market-field"><span>股票池</span><div class="market-segment" data-scan-segment="scope"><input type="hidden" id="marketScanScope" value="market"><button type="button" data-value="market" class="active" onclick="App._setScanSegment('scope','market')">全部 A 股</button><button type="button" data-value="watchlist" onclick="App._setScanSegment('scope','watchlist')">我的自选</button></div></div>
+                <div class="market-field"><span>周期</span><div class="market-segment" data-scan-segment="period"><input type="hidden" id="marketScanPeriod" value="1d"><button type="button" data-value="1d" class="active" onclick="App._setScanSegment('period','1d')">日线</button><button type="button" data-value="1w" onclick="App._setScanSegment('period','1w')">周线</button><button type="button" data-value="1m" onclick="App._setScanSegment('period','1m')">月线</button></div></div>
+                <div class="market-scan-number-grid">
+                  <label class="market-field"><span>回看 K 线</span><input type="number" id="marketScanLookback" min="30" max="500" step="10" value="120"></label>
+                  <label class="market-field"><span>信号回溯</span><input type="number" id="marketScanWindow" min="1" max="30" step="1" value="5"></label>
+                  <label class="market-field"><span>最低成交额（万元）</span><input type="number" id="marketScanTurnover" min="0" max="1000000" step="100" value="0"></label>
+                  <label class="market-field"><span>结果上限</span><input type="number" id="marketScanMaxResults" min="10" max="300" step="10" value="100"></label>
+                </div>
+                <div class="market-field"><span>市场</span><div class="market-check-grid"><label><input type="checkbox" name="scanMarket" value="SH" checked> 沪市</label><label><input type="checkbox" name="scanMarket" value="SZ" checked> 深市</label><label><input type="checkbox" name="scanMarket" value="BJ" checked> 北交所</label></div></div>
+                <div class="market-field"><span>板块</span><div class="market-check-grid"><label><input type="checkbox" name="scanBoard" value="main" checked> 主板</label><label><input type="checkbox" name="scanBoard" value="gem" checked> 创业板</label><label><input type="checkbox" name="scanBoard" value="star" checked> 科创板</label><label><input type="checkbox" name="scanBoard" value="bse" checked> 北交所</label></div></div>
+                <label class="market-switch"><input type="checkbox" id="marketScanExcludeST" checked><span>排除 ST 与退市整理股票</span></label>
+                <div class="market-scan-params" id="marketScanParams"></div>
+                <div class="market-universe-meta" id="marketUniverseMeta">正在读取股票池...</div>
+                <div class="market-scan-actions"><button type="button" class="market-primary-btn" id="marketScanStart" onclick="App._startMarketScan()"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>开始扫描</button><button type="button" class="market-secondary-btn" id="marketScanCancel" onclick="App._cancelMarketScan()" disabled>取消</button></div>
+              </aside>
+
+              <div class="market-scan-output">
+                <div class="market-scan-progress">
+                  <div><span id="marketScanStatus">选择指标并启动扫描</span><b id="marketScanProgressText">0%</b></div>
+                  <div class="market-scan-progress-track"><i id="marketScanProgressBar"></i></div>
+                  <div class="market-scan-kpis"><span>股票池 <b id="marketScanTotal">-</b></span><span>已扫描 <b id="marketScanProcessed">-</b></span><span>命中 <b id="marketScanMatched">-</b></span><span>失败 <b id="marketScanFailed">-</b></span></div>
+                </div>
+                <div class="market-scan-results-head">
+                  <div><h4>筛选结果</h4><span id="marketScanResultHint">结果会按信号强度与触发时间排序</span></div>
+                  <div style="display:flex;gap:8px;align-items:center;">
+                    <button type="button" class="copilot-trigger-chip" onclick="App.intervene('请读取当前量化选股任务命中标的与我的投研画像（含负面回避清单），逐一核查前排候选股的基本面与流动性，帮我优中选优筛出 2-3 只核心观察标的并说明风险。','prism-research')">✦ 按画像优中选优</button>
+                    <button type="button" onclick="App._loadRecentScans()">刷新任务</button>
+                  </div>
+                </div>
+                <div class="market-scan-results" id="marketScanResults"><div class="market-scan-empty">尚未执行扫描</div></div>
+                <div class="market-scan-history"><div class="market-scan-results-head"><div><h4>最近任务</h4><span>可恢复查看已完成或运行中的任务</span></div></div><div id="marketScanHistory"></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="market-workspace-view" data-market-view="library">
+          <div class="indicator-library-pane">
+            <div class="market-section-head">
+              <div><h3>指标实验室</h3><p>用自然语言例如「5日线上穿10日线，10日线上穿20日线，成交量大于前5日均量3倍」生成可调指标。</p></div>
+            </div>
+            <div class="indicator-translate-bar">
+              <input type="search" id="indicatorInput" name="prism_indicator_formula" inputmode="text" placeholder="例如：5日线上穿10日线，10日线上穿20日线，成交量大于前5日均量3倍" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other">
+              <button type="button" class="market-primary-btn" onclick="App._translateIndicator()">生成可调指标</button>
+            </div>
+            <div class="indicator-library-layout">
+              <div class="indicator-library-list"><div class="indicator-list" id="indicatorList"></div></div>
+              <aside class="indicator-editor"><div class="indicator-preview" id="indicatorPreview"><div class="indicator-editor-empty">从左侧选择指标进行配置，或在上方输入描述生成新指标。</div></div></aside>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="market-panel" id="reportsPanel" style="display:none"><div class="market-panel-inner">
+      <nav class="research-library-tabs" aria-label="研究与复盘内容">
+        <button type="button" id="researchReportsTab" aria-pressed="true" onclick="App._setResearchLibraryTab('reports')">精选研报归档</button>
+        <button type="button" id="researchJournalTab" aria-pressed="false" onclick="App._setResearchLibraryTab('journal')">全域判断与复盘账本</button>
+      </nav>
+      <div id="reportsPanelInner"><div class="market-empty-state">加载精选研报中...</div></div>
+      <section id="journalVaultPanel" class="journal-vault" hidden aria-label="全域判断与自动复盘账本"></section>
+    </div></div>
+  </main>
+</div>
+
+<!-- ═══ Cross-Module Resizable Omni-Agent Copilot ═══ -->
+<button type="button" id="copilotLauncher" class="copilot-launcher" onclick="App.openCopilot('docked')">
+  <span class="copilot-launcher__spark">✦</span>
+  <span class="copilot-launcher__meta">
+    <span>随行投研 Agent</span>
+    <span class="copilot-launcher__sub" id="copilotLauncherSub">已感知当前盘面上下文</span>
+  </span>
+  <span class="copilot-launcher__kbd">⌘K</span>
+</button>
+
+<aside class="copilot-shell" id="copilotShell" data-copilot-state="closed" aria-label="随行投研 Agent">
+  <div class="copilot-resizer" id="copilotResizer" role="separator" aria-orientation="vertical" title="左右拖拽调整 Agent 窗口宽度 · 双击恢复默认"></div>
+  <div class="copilot-hd">
+    <div class="copilot-hd__left">
+      <span class="copilot-brand"><i>✦</i> Prism Agent</span>
+      <button type="button" class="copilot-pill-btn" id="copilotPersonaBtn" onclick="App.openPersonaDialog()">画像 · 待设置 ▾</button>
+      <button type="button" class="copilot-pill-btn" id="copilotHistoryBtn" onclick="App.toggleCopilotHistory()">会话 <span id="convBadge"></span> ▾</button>
+    </div>
+    <div class="copilot-hd__right">
+      <button type="button" class="copilot-icon-btn" onclick="App.newConv()" title="新建随行会话">＋</button>
+      <button type="button" class="copilot-icon-btn" onclick="App._openWorkbenchPanel('capabilities')" title="平台能力目录与调用记录">⚙</button>
+      <button type="button" class="copilot-icon-btn" onclick="App.openLatestInReader()" title="居中宽屏沉浸阅读最新回复">⤢</button>
+      <button type="button" class="copilot-icon-btn" onclick="App.toggleCopilotWide()" title="切换宽屏/标准伴随宽度">⇔</button>
+      <button type="button" class="copilot-icon-btn" onclick="App.closeCopilot()" title="收起为悬浮胶囊 (⌘K)">✕</button>
+    </div>
+
+    <div class="copilot-history-pop" id="copilotHistoryPopover" hidden>
+      <button class="new-chat-btn" onclick="App.newConv();document.getElementById('copilotHistoryPopover').hidden=true;"><span>＋ 新建随行会话</span></button>
+      <div class="bulk-bar" id="bulkBar"></div>
+      <div class="conv-list" id="convList"><div class="conv-empty">暂无随行会话</div></div>
+      <div class="copilot-history-foot">
+        <span style="color:var(--text3);">仅展示当前账号会话</span>
+        <a class="trash-link footer-icon-link" id="trashLink" onclick="App.openTrash()" style="display:none" title="回收站" aria-label="回收站"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M10 11v6M14 11v6M8 7l1-3h6l1 3M7 7l1 13h8l1-13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+      </div>
+    </div>
+  </div>
+
+  <div class="copilot-ctx-bar" id="copilotContextBar">
+    <div class="copilot-ctx-top">
+      <span class="copilot-ctx-label" id="copilotCtxLabel">✦ 已感知：行情工作区</span>
+    </div>
+    <div class="copilot-ctx-actions" id="copilotCtxActions"></div>
+  </div>
+
+  <div class="copilot-proposal-bar" id="copilotProposalBar" hidden></div>
+
+  <div class="msgs-wrap">
+    <div class="msgs" id="msgList"></div>
+    <div class="scroll-track" id="scrollTrack"></div>
+    <div class="report-viewer" id="reportViewer" style="display:none">
+      <div class="report-viewer-bar">
+        <span class="report-viewer-title" id="reportViewerTitle">报告</span>
+        <div class="report-viewer-actions">
+          <button class="report-viewer-act" onclick="App.openReportInNewTab()" title="新标签页打开">新标签页</button>
+          <button class="report-viewer-act" onclick="App.closeReportViewer()" title="关闭">×</button>
+        </div>
+      </div>
+      <iframe id="reportFrame" class="report-viewer-frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+    </div>
+  </div>
+
+  <div class="input-zone">
+    <div id="modelConfigurationNotice" class="research-status-notice" role="status" hidden></div>
+    <div class="composer" id="composer">
+      <div class="composer-chips" id="composerChips"></div>
+      <textarea id="input" rows="1" placeholder="结合当前标的或投研画像提问，Agent 将自主调用行情/期货/公告原文核验…"></textarea>
+      <div class="composer-bar">
+        <button id="cmpTools" class="cmp-btn" onclick="App._toggleSkillDrawer()" title="切换研究方式">研究方式</button>
+        <select id="modelSelect" onchange="App.setModel(this.value)"></select>
+        <button id="reportsBtn" class="cmp-btn" onclick="App.openReports()" title="查看本会话报告" style="display:none">报告</button>
+        <button id="sendBtn" class="cmp-send" onclick="App.send()" title="发送 (Enter)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 8h12M8 2l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="input-hint">Enter 发送 · Shift+Enter 换行 · 拖拽左缘调整宽度 · ⌘K 收起</div>
+  </div>
+</aside>
+
+<div class="ac-dropdown" id="acDropdown" style="display:none"></div>
+<div class="gloss-panel" id="glossPanel" style="display:none"></div>
+<div class="app-toast" id="appToast"></div>
+
+<!-- ═══ Zen Reader Modal for Long Agent Outputs ═══ -->
+<dialog id="copilotReaderDialog" class="persona-dialog reader-dialog" aria-labelledby="readerDialogTitle">
+  <header class="persona-dialog__hd reader-dialog__hd">
+    <div class="persona-dialog__hd-copy">
+      <span class="persona-dialog__kicker">IMMERSIVE RESEARCH READER</span>
+      <h2 id="readerDialogTitle">投研深度精读视图</h2>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button type="button" class="market-secondary-btn" style="height:30px;font-size:12px;" onclick="App.copyReaderContent()">复制全文</button>
+      <button type="button" class="copilot-icon-btn" onclick="App.closeCopilotReader()" aria-label="返回看盘">✕</button>
+    </div>
+  </header>
+  <div class="reader-dialog__body" id="copilotReaderBody"></div>
+</dialog>
+
+<!-- ═══ Per-User Investment Persona & Risk Dialog ═══ -->
+<dialog id="personaDialog" class="persona-dialog" aria-labelledby="personaDialogTitle">
+  <header class="persona-dialog__hd">
+    <div class="persona-dialog__hd-copy">
+      <span class="persona-dialog__kicker">PERSONALIZED RESEARCH PERSONA</span>
+      <h2 id="personaDialogTitle">我的独立投研画像与风控纪律</h2>
+      <p>按账号独立隔离 · 决定随行 Agent 介入分析时的研究视角、仓位上限与排雷红线</p>
+    </div>
+    <button type="button" class="copilot-icon-btn" onclick="App.closePersonaDialog()" aria-label="关闭画像设置">✕</button>
+  </header>
+  <div class="persona-dialog__body">
+    <div id="personaCoreMount"></div>
+    <div id="preferencesPanel">__RESEARCH_PREFERENCES__</div>
+  </div>
+</dialog>
+
+<!-- ═══ Stock Judgment Quick-Recorder Dialog ═══ -->
+<dialog id="equityJudgmentDialog" class="persona-dialog persona-dialog--compact" aria-labelledby="eqJudgeTitle">
+  <header class="persona-dialog__hd">
+    <div class="persona-dialog__hd-copy">
+      <span class="persona-dialog__kicker">DECISION JOURNAL</span>
+      <h2 id="eqJudgeTitle">记录个股多空判断 · <span id="eqJudgeStockLabel"></span></h2>
+      <p>记入全域复盘账本，后续按实盘最新收盘价一键对账印证或证伪</p>
+    </div>
+    <button type="button" class="copilot-icon-btn" onclick="document.getElementById('equityJudgmentDialog').close()" aria-label="关闭">✕</button>
+  </header>
+  <form class="persona-dialog__body" onsubmit="App.submitEquityJudgment(event)">
+    <div class="persona-form-grid">
+      <label class="persona-field"><span>方向倾向</span><select id="eqJudgeDirection">
+        <option value="bullish">看多（逢低布局 / 突破跟进）</option>
+        <option value="bearish">看空（冲高兑现 / 规避下行）</option>
+        <option value="watch">中性观察（等待催化剂）</option>
+      </select></label>
+      <label class="persona-field"><span>观察周期（日）</span><input id="eqJudgeHorizon" type="number" min="1" max="365" value="10" required></label>
+      <label class="persona-field"><span>当前参考价</span><input id="eqJudgeRefPrice" type="number" step="0.001" min="0.01" required></label>
+      <label class="persona-field"><span>失效止损价（选填）</span><input id="eqJudgeInvPrice" type="number" step="0.001" min="0.01" placeholder="触及则判为证伪"></label>
+      <label class="persona-field persona-field--wide"><span>目标验证价（选填）</span><input id="eqJudgeTargetPrice" type="number" step="0.001" min="0.01" placeholder="触及则判为印证"></label>
+      <label class="persona-field persona-field--wide"><span>核心逻辑与观察条件</span><textarea id="eqJudgeThesis" rows="3" maxlength="500" required placeholder="例如：回踩20日线缩量企稳，Q3经营现金流转正；若放量跌破前低则逻辑失效。"></textarea></label>
+    </div>
+    <div class="persona-form-footer">
+      <span class="persona-save-hint">自动关联实盘收盘价复盘</span>
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="market-secondary-btn" onclick="document.getElementById('equityJudgmentDialog').close()">取消</button>
+        <button type="submit" class="market-primary-btn">保存至复盘账本</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<div class="modal-overlay" id="trashModal" style="display:none" onclick="if(event.target===this)App.closeTrash()">
+  <div class="modal-card">
+    <div class="modal-hd"><h3>会话回收站</h3><button class="modal-close" onclick="App.closeTrash()">×</button></div>
+    <div class="modal-body" id="trashList"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="reportsModal" style="display:none" onclick="if(event.target===this)App.closeReports()">
+  <div class="modal-card reports-card">
+    <div class="modal-hd"><h3>会话报告</h3><button class="modal-close" onclick="App.closeReports()">×</button></div>
+    <div class="modal-body" id="reportsList"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="releaseModal" style="display:none" onclick="if(event.target===this)App.closeReleaseNotes()">
+  <div class="modal-card release-card">
+    <div class="modal-hd"><h3>更新日志</h3><button class="modal-close" onclick="App.closeReleaseNotes()">×</button></div>
+    <div class="modal-body" id="releaseList"></div>
+  </div>
+</div>
+
+<dialog id="workbenchDialog" class="workbench-dialog" aria-labelledby="workbenchDialogTitle">
+  <header><div><h2 id="workbenchDialogTitle">平台能力</h2></div><button onclick="App._closeWorkbenchPanel()" aria-label="关闭能力与记录">×</button></header>
+  <div class="workbench-dialog-tabs" role="tablist"><button role="tab" id="workbenchCapabilityTab" onclick="App._openWorkbenchPanel('capabilities')">平台能力</button><button role="tab" id="workbenchHistoryTab" onclick="App._openWorkbenchPanel('history')">调用记录</button></div>
+  <div id="workbenchDialogBody" class="workbench-dialog-body"></div>
+</dialog>
+<dialog id="capabilityResultDialog" class="workbench-dialog research-dialog" aria-labelledby="capabilityResultTitle">
+  <header><div><span class="workbench-kicker">RECORDED RESULT</span><h2 id="capabilityResultTitle">能力调用结果</h2></div><button onclick="document.getElementById('capabilityResultDialog').close()" aria-label="关闭原结果">×</button></header>
+  <div id="capabilityResultBody" class="workbench-dialog-body"></div>
+</dialog>
+<dialog id="researchDialog" class="workbench-dialog research-dialog" aria-labelledby="researchTitle">
+  <header><div><span class="workbench-kicker">RESEARCH & EVIDENCE</span><h2 id="researchTitle">研究记录</h2></div><button onclick="document.getElementById('researchDialog').close()" aria-label="关闭研究记录">×</button></header>
+  <nav id="researchTabs" class="workbench-dialog-tabs" role="tablist" aria-label="研究视图"><button role="tab" data-research-tab="overview">研究概览</button><button role="tab" data-research-tab="report">网页研报</button><button role="tab" data-research-tab="evidence">来源证据</button><button role="tab" data-research-tab="industry">产业关系</button></nav>
+  <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
+</dialog>
+<script src="/static/lib/marked.min.js?v=141"></script>
+<script src="/static/lib/echarts.min.js?v=141"></script>
+<script src="/static/js/app.util.js?v=141"></script>
+<script src="/static/js/app.chat-render.js?v=141"></script>
+<script src="/static/js/app.core.js?v=141"></script>
+<script src="/static/js/app.diagnostics.js?v=141"></script>
+<script src="/static/js/app.chat.js?v=141"></script>
+<script src="/static/js/app.market.js?v=141"></script>
+<script src="/static/js/app.reports.js?v=141"></script>
+<script src="/static/js/app.indicators.js?v=141"></script>
+<script src="/static/js/app.screener.js?v=141"></script>
+<script src="/static/js/app.indicator-chart.js?v=141"></script>
+<script src="/static/js/app.release.js?v=141"></script>
+<script src="/static/js/app.tour.js?v=141"></script>
+<script src="/static/js/app.workbench.js?v=141"></script>
+<script src="/static/js/app.research.js?v=141"></script>
+<script src="/static/js/app.hub.js?v=141"></script>
+<script src="/static/js/app.copilot.js?v=141"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+"""Reject mixed cached assets when independently verified UI fixes are integrated."""
+
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+def test_runtime_shell_login_and_diagnostics_share_asset_generation():
+    root = Path(__file__).resolve().parent.parent
+    shell = (root / "templates/app.html").read_text()
+    versions = re.findall(r'(?:src|href)="/static/[^"?]+\?v=([^"#]+)(?:#[^"]*)?"', shell)
+    assert versions and len(set(versions)) == 1, "Mixed UI generations can revive retired entry points"
+    version = versions[0]
+    core = (root / "static/js/app.core.js").read_text()
+    sw = (root / "static/sw.js").read_text()
+    login = (root / "templates/login.html").read_text()
+    assert re.search(r"_clientAssetVersion: '([^']+)'", core).group(1) == version
+    assert re.search(r"prism-workbench-v([^']+)'", sw).group(1) == version
+    assert f"path + '?v={version}'" in sw
+    assert f"app.css?v={version}" in login
+    for name in ("futures", "partials/futures-journal"):
+        markup = (root / f"templates/{name}.html").read_text()
+        assert set(re.findall(r'/static/[^"?]+\?v=([^"#]+)', markup)) == {version}, name
+
+
+def test_worker_upgrade_preserves_other_products_caches():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    subprocess.run([node, str(Path(__file__).with_name("service_worker_cache.cjs"))], check=True, timeout=15)

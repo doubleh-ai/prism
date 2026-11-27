@@ -1,0 +1,33 @@
+.journal-study { margin: 26px 0 0; }
+.journal-study-head, .journal-study-row, .journal-study-actions, .journal-study-presets { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.journal-study-head { justify-content:space-between; align-items:flex-start; }
+.journal-study-head h2 { margin:0 0 2px; font-size:1rem; }
+.journal-custom-lookup { margin-top:12px; padding-top:10px; border-top:1px dashed var(--line); }
+.journal-custom-lookup summary { color:var(--muted); font-size:.8125rem; cursor:pointer; }
+.journal-study label, .journal-study-meta { color:var(--muted); font-size:.875rem; }
+.journal-study form { margin-top:12px; }
+.journal-study input, .journal-study select, .journal-study button { font:inherit; color:var(--text); }
+.journal-study input, .journal-study select { padding:7px 10px; border:1px solid var(--line); border-radius:6px; background:var(--surface); min-width:0; max-width:100%; }
+.journal-study input { flex:1 1 190px; }
+.journal-study button { background:var(--soft); border:1px solid var(--line); padding:7px 12px; border-radius:6px; cursor:pointer; }
+.journal-study button:disabled { cursor:default; opacity:.6; }
+.journal-study #journal-submit, .journal-study .journal-study-primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+.journal-study-presets { margin-top:6px; }
+.journal-study-presets button { color:var(--accent); font-size:.82rem; background:var(--soft); border:1px solid var(--line); padding:4px 10px; border-radius:999px; }
+.journal-study-presets button:hover { border-color:var(--accent); }
+.journal-study p { margin:6px 0; overflow-wrap:anywhere; }
+.journal-study #journal-status:empty { display:none; }
+.journal-study #journal-analysis:not(:empty), .journal-record { margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
+.journal-study #journal-analysis h3, .journal-study h4 { margin:4px 0; }
+.journal-study-actions { margin-top:8px; }
+.journal-study .journal-evidence { margin:8px 0; padding-left:1.3rem; }
+.journal-evidence li+li { margin-top:6px; }
+.journal-evidence small { display:block; color:var(--muted); }
+.journal-study .journal-review { padding:10px 14px; border-inline-start:3px solid var(--accent); background:var(--soft); border-radius:0 8px 8px 0; margin-top:8px; }
+.journal-study .journal-review[data-status="supported"] { border-inline-start-color:var(--rise, #c9332b); }
+.journal-study .journal-review[data-status="contradicted"] { border-inline-start-color:var(--fall, #1c7d57); }
+.journal-review-head { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:4px; }
+.journal-review-badge { font-size:.78rem; font-weight:650; color:var(--accent); }
+.journal-review-badge[data-status="supported"] { color:var(--rise, #c9332b); }
+.journal-review-badge[data-status="contradicted"] { color:var(--fall, #1c7d57); }
+@media(max-width:550px) { .journal-study input,.journal-study select,.journal-study button { min-height:44px; } .journal-study input,.journal-study select { font-size:16px; } .journal-study input { flex-basis:100%; } }

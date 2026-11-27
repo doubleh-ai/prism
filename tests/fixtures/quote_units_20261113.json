@@ -1,0 +1,73 @@
+{
+  "source": "https://github.com/doubleh-ai/prism/pull/34",
+  "trading_date": "2026-11-13",
+  "note": "Observed raw values, not normalized. Tencent retains only the recorded fields; tests leave other fields blank. AKShare stock_zh_a_daily(adjust=qfq), version 1.18.64.",
+  "samples": [
+    {
+      "symbol": "sh600519",
+      "tencent_fields": {
+        "1": "贵州茅台",
+        "2": "600519",
+        "3": "1435.26",
+        "6": "41780",
+        "30": "20261113161455",
+        "37": "595483"
+      },
+      "akshare_row": {
+        "date": "2026-11-13T00:00:00.000",
+        "open": 1404.0,
+        "high": 1437.69,
+        "low": 1394.0,
+        "close": 1435.26,
+        "volume": 4177984.0,
+        "amount": 5954834070.0,
+        "outstanding_share": 1250081601.0,
+        "turnover": 0.003342169
+      }
+    },
+    {
+      "symbol": "sz000001",
+      "tencent_fields": {
+        "1": "平安银行",
+        "2": "000001",
+        "3": "12.07",
+        "6": "2189430",
+        "30": "20261113161500",
+        "37": "262448"
+      },
+      "akshare_row": {
+        "date": "2026-11-13T00:00:00.000",
+        "open": 11.76,
+        "high": 12.1,
+        "low": 11.7,
+        "close": 12.07,
+        "volume": 218942998.0,
+        "amount": 2624481927.0,
+        "outstanding_share": 19405684991.0,
+        "turnover": 0.0112824153
+      }
+    },
+    {
+      "symbol": "bj920047",
+      "tencent_fields": {
+        "1": "诺思兰德",
+        "2": "920047",
+        "3": "12.64",
+        "6": "23100",
+        "30": "20261113153204",
+        "37": "2951.10"
+      },
+      "akshare_row": {
+        "date": "2026-11-13T00:00:00.000",
+        "open": 13.19,
+        "high": 13.19,
+        "low": 12.54,
+        "close": 12.64,
+        "volume": 2309995.0,
+        "amount": 29511004.0,
+        "outstanding_share": 180106427.0,
+        "turnover": 0.0128257222
+      }
+    }
+  ]
+}

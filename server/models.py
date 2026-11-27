@@ -1,0 +1,158 @@
+"""Pydantic request/response schemas.
+
+Defense-in-depth: every endpoint that accepts JSON should validate the
+input shape and reject malformed/malicious payloads at the boundary
+rather than deep in business logic.
+"""
+
+import re
+from typing import Any
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+
+def validation_error_message(e: Exception) -> str:
+    """Return a brief, safe error message from a Pydantic ValidationError.
+
+    The raw exception's str() can include the full input value, which
+    can be very large (e.g. a 32 KB question). Echoing it back leaks
+    data and bloats the response. We only echo the field path and a
+    short reason.
+    """
+    if not isinstance(e, ValidationError):
+        # Not a Pydantic error — return a generic message
+        return "request payload invalid"
+    parts = []
+    for err in e.errors()[:5]:
+        loc = ".".join(str(x) for x in err.get("loc", []))
+        msg = err.get("msg", "invalid")
+        # Truncate the msg in case it embeds the input
+        if len(msg) > 80:
+            msg = msg[:80] + "…"
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) if parts else "request payload invalid"
+
+
+# ── Auth ──
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=512)
+
+
+class AdminUserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
+    password: str = Field(..., min_length=8, max_length=512)
+
+
+class AdminPasswordResetRequest(BaseModel):
+    password: str = Field(..., min_length=8, max_length=512)
+
+
+class AdminUserStatusRequest(BaseModel):
+    disabled: bool
+
+
+class ActivityTrackRequest(BaseModel):
+    feature: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_-]*$")
+    action: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-z][a-z0-9_-]*$")
+    target_type: str | None = Field(default="", max_length=32, pattern=r"^[a-z0-9_-]*$")
+    target_id: str | None = Field(default="", max_length=120)
+    target_label: str | None = Field(default="", max_length=120)
+
+
+class DiagnosticEventRequest(BaseModel):
+    kind: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-z][a-z0-9_-]*$")
+    severity: str = Field(default="error", pattern=r"^(info|warning|error|critical)$")
+    component: str | None = Field(default="", max_length=120)
+    page: str | None = Field(default="", max_length=240)
+    message: str = Field(..., min_length=1, max_length=2000)
+    stack: str | None = Field(default="", max_length=8000)
+    version: str | None = Field(default="", max_length=40)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("context")
+    @classmethod
+    def _validate_context(cls, value):
+        if len(value) > 12:
+            raise ValueError("too many context fields")
+        clean = {}
+        for key, item in value.items():
+            key = str(key)[:48]
+            if not re.match(r"^[A-Za-z0-9_-]+$", key):
+                raise ValueError("invalid context field")
+            if isinstance(item, (str, int, float, bool)) or item is None:
+                clean[key] = str(item)[:240] if isinstance(item, str) else item
+        return clean
+
+
+# ── Saved reports ──
+class SavedReportCreateRequest(BaseModel):
+    source: str = Field(default="manual", min_length=1, max_length=32)
+    source_id: str | None = Field(default=None, max_length=128)
+    conv_id: str | None = Field(default=None, max_length=128)
+    ticker: str | None = Field(default="", max_length=32)
+    name: str | None = Field(default="", max_length=80)
+    title: str | None = Field(default="", max_length=160)
+    signal: str | None = Field(default="", max_length=32)
+    summary: str | None = Field(default="", max_length=500)
+    report: dict[str, Any] = Field(default_factory=dict)
+
+
+class SavedReportSaveRequest(BaseModel):
+    title: str | None = Field(default="", max_length=160)
+    summary: str | None = Field(default="", max_length=500)
+
+
+# ── Conversations ──
+class CreateConvRequest(BaseModel):
+    skill: str | None = Field(default="prism-research", max_length=64)
+
+
+class UpdateSkillRequest(BaseModel):
+    skill: str = Field(..., min_length=1, max_length=64)
+
+
+class BatchDeleteRequest(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=200)
+
+    @field_validator("ids")
+    @classmethod
+    def _validate_ids(cls, v: list[str]) -> list[str]:
+        for cid in v:
+            if not isinstance(cid, str) or len(cid) == 0 or len(cid) > 128:
+                raise ValueError("invalid conversation id")
+        return v
+
+
+# ── Chat ──
+class ChatStreamRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=32000)
+    skill: str = Field(default="prism-research", max_length=64)
+    conv_id: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=64)
+    extra_skills: list[str] | None = Field(default=None, max_length=16)
+
+    @field_validator("extra_skills")
+    @classmethod
+    def _validate_extra(cls, v):
+        if v is None:
+            return v
+        for s in v:
+            if not isinstance(s, str) or len(s) == 0 or len(s) > 64:
+                raise ValueError("invalid skill id")
+        return v
+
+
+class ChatRespondRequest(BaseModel):
+    conv_id: str = Field(..., min_length=1, max_length=128)
+    answer: str = Field(..., min_length=1, max_length=4000)
+
+
+class ChatCancelRequest(BaseModel):
+    conv_id: str = Field(..., min_length=1, max_length=128)
+
+
+# ── Term explanation ──
+class ExplainTermRequest(BaseModel):
+    term: str = Field(..., min_length=1, max_length=80)
+    context: str | None = Field(default="", max_length=200)

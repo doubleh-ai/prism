@@ -1,0 +1,393 @@
+"""Industry chain graph API — query, search, geo-distribution.
+
+Phase 6: Each astock analysis can feed new nodes/edges into the graph,
+building a global industry knowledge map over time.
+"""
+
+import json
+import re
+
+from fastapi import APIRouter, HTTPException, Request
+
+from .auth import require_auth
+from .database import get_db
+from .industry_context import build_industry_context
+
+router = APIRouter(prefix="/api/industry")
+
+
+@router.get("/research")
+async def research_evidence(request: Request, q: str = "", before: int | None = None, limit: int = 20):
+    from .industry_research import evidence_graph
+
+    return evidence_graph(require_auth(request), query=q, before=before, limit=limit)
+
+
+def _slug(name: str) -> str:
+    """Normalise a name into a stable node ID."""
+    return re.sub(r"[^a-z0-9-]", "-", name.strip().lower())[:80]
+
+
+def _category_stats(db) -> list[dict]:
+    """Return enriched per-chain stats for navigation and overview cards."""
+    rows = [
+        dict(r)
+        for r in db.execute(
+            """
+        SELECT
+            category,
+            COUNT(*) AS node_count,
+            COUNT(DISTINCT country) AS country_count,
+            COUNT(DISTINCT NULLIF(source_ticker, '')) AS ticker_count,
+            ROUND(AVG(confidence), 3) AS avg_confidence,
+            SUM(CASE WHEN tier = 0 THEN 1 ELSE 0 END) AS upstream_count,
+            SUM(CASE WHEN tier = 1 THEN 1 ELSE 0 END) AS midstream_count,
+            SUM(CASE WHEN tier = 2 THEN 1 ELSE 0 END) AS downstream_count,
+            MAX(COALESCE(market_share, 0)) AS max_market_share
+        FROM industry_nodes
+        GROUP BY category
+        ORDER BY node_count DESC, category ASC
+        """
+        ).fetchall()
+    ]
+    edge_counts = {
+        r["category"]: r["edge_count"]
+        for r in db.execute(
+            """
+            SELECT s.category AS category, COUNT(*) AS edge_count
+            FROM industry_edges e
+            JOIN industry_nodes s ON e.source_node_id = s.id
+            GROUP BY s.category
+            """
+        ).fetchall()
+    }
+    from .futures_equity_bridge import INDUSTRY_TO_FUTURES
+
+    for row in rows:
+        cat = row["category"]
+        row["edge_count"] = edge_counts.get(cat, 0)
+        row["linked_futures"] = INDUSTRY_TO_FUTURES.get(cat, [])
+        row["top_nodes"] = [
+            dict(r)
+            for r in db.execute(
+                """
+            SELECT id, name, source_ticker, tier, country, description,
+                   market_share, confidence
+            FROM industry_nodes
+            WHERE category = ?
+            ORDER BY tier ASC, name ASC
+            LIMIT 4
+            """,
+                [cat],
+            ).fetchall()
+        ]
+    return rows
+
+
+def _research_view(value):
+    """Legacy seed confidence and links are background, not verified evidence."""
+    if isinstance(value, list):
+        return [_research_view(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = {key: _research_view(item) for key, item in value.items()}
+    if "avg_confidence" in out:
+        out["avg_confidence"] = None
+    if "max_market_share" in out:
+        out["max_market_share"] = None
+    if "confidence" in out:
+        out["confidence"] = None
+        out["evidence_status"] = "unverified_background" if out.get("source_date") == "seed" else "unverified"
+    if "market_share" in out:
+        # This legacy field lacks period, denominator and source references.
+        out["market_share"] = None
+    if out.get("evidence") == "seed" or out.get("source_date") == "seed":
+        out["evidence_status"] = "unverified_background"
+        if "relation" in out:
+            out["relation"] = "background_link"
+    return out
+
+
+@router.get("/graph")
+async def graph(
+    ticker: str = "",
+    category: str = "",
+    country: str = "",
+    q: str = "",
+    depth: int = 2,
+    min_confidence: float = 0.2,
+):
+    """Filter a graph and expand explicit roots without dangling edges."""
+    if not 0 <= depth <= 4 or not 0 <= min_confidence <= 1:
+        raise HTTPException(400, "invalid graph bounds")
+    wheres = ["1=1"]
+    params = []
+    if category:
+        wheres.append("category = ?")
+        params.append(category)
+    if country:
+        wheres.append("country = ?")
+        params.append(country.upper())
+    with get_db() as db:
+        pool = [
+            dict(row)
+            for row in db.execute(
+                "SELECT * FROM industry_nodes WHERE " + " AND ".join(wheres) + " ORDER BY tier, name", params
+            ).fetchall()
+        ]
+        all_edges = [
+            dict(row)
+            for row in db.execute(
+                "SELECT e.*, s.name AS source_name, t.name AS target_name FROM industry_edges e "
+                "JOIN industry_nodes s ON e.source_node_id=s.id "
+                "JOIN industry_nodes t ON e.target_node_id=t.id ORDER BY e.id"
+            ).fetchall()
+        ]
+    candidates = {node["id"]: node for node in pool}
+    roots = pool
+    if ticker:
+        roots = [node for node in roots if node.get("source_ticker") == ticker]
+    if q:
+        query = q.casefold()
+        roots = [
+            node
+            for node in roots
+            if any(
+                query in str(node.get(key) or "").casefold()
+                for key in ("name", "description", "category", "source_ticker")
+            )
+        ]
+    selected = {node["id"] for node in roots}
+    if ticker or q:
+        frontier = set(selected)
+        for _ in range(depth):
+            adjacent = set()
+            for edge in all_edges:
+                source, target = edge["source_node_id"], edge["target_node_id"]
+                if source in frontier and target in candidates:
+                    adjacent.add(target)
+                if target in frontier and source in candidates:
+                    adjacent.add(source)
+            frontier = adjacent - selected
+            selected.update(frontier)
+            if not frontier:
+                break
+    nodes = [node for node in pool if node["id"] in selected]
+    edges = [
+        edge
+        for edge in all_edges
+        if edge["source_node_id"] in selected and edge["target_node_id"] in selected
+    ]
+    return _research_view(
+        {
+            "nodes": nodes,
+            "edges": edges,
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "summary": {
+                "category": category,
+                "country": country,
+                "ticker": ticker,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "country_count": len({node.get("country") for node in nodes if node.get("country")}),
+                "ticker_count": len(
+                    {node.get("source_ticker") for node in nodes if node.get("source_ticker")}
+                ),
+            },
+            "evidence_status": "background_requires_verification",
+            "confidence_filter_applied": False,
+        }
+    )
+
+
+@router.get("/overview")
+async def overview():
+    """Aggregated industry-map overview for the research workbench."""
+    with get_db() as db:
+        totals = dict(
+            db.execute(
+                """
+            SELECT
+                COUNT(DISTINCT category) AS industry_count,
+                COUNT(*) AS node_count,
+                COUNT(DISTINCT country) AS country_count,
+                COUNT(DISTINCT NULLIF(source_ticker, '')) AS ticker_count,
+                ROUND(AVG(confidence), 3) AS avg_confidence
+            FROM industry_nodes
+            """
+            ).fetchone()
+        )
+        edge_total = db.execute("SELECT COUNT(*) AS cnt FROM industry_edges").fetchone()["cnt"]
+        totals["edge_count"] = edge_total
+        categories = _category_stats(db)
+        countries = [
+            dict(r)
+            for r in db.execute(
+                """
+            SELECT
+                country,
+                COUNT(*) AS node_count,
+                COUNT(DISTINCT category) AS industry_count,
+                COUNT(DISTINCT NULLIF(source_ticker, '')) AS ticker_count
+            FROM industry_nodes
+            WHERE country IS NOT NULL AND country != ''
+            GROUP BY country
+            ORDER BY node_count DESC, country ASC
+            """
+            ).fetchall()
+        ]
+        nodes = [
+            dict(r)
+            for r in db.execute(
+                """
+            WITH deg AS (
+                SELECT id, SUM(cnt) AS degree FROM (
+                    SELECT source_node_id AS id, COUNT(*) AS cnt
+                    FROM industry_edges GROUP BY source_node_id
+                    UNION ALL
+                    SELECT target_node_id AS id, COUNT(*) AS cnt
+                    FROM industry_edges GROUP BY target_node_id
+                )
+                GROUP BY id
+            )
+            SELECT n.*, COALESCE(deg.degree, 0) AS degree
+            FROM industry_nodes n
+            LEFT JOIN deg ON deg.id = n.id
+            ORDER BY COALESCE(deg.degree, 0) DESC, n.name ASC
+            LIMIT 18
+            """
+            ).fetchall()
+        ]
+    return _research_view(
+        {
+            "totals": totals,
+            "categories": categories,
+            "countries": countries,
+            "key_nodes": nodes,
+        }
+    )
+
+
+@router.get("/context")
+async def live_context(request: Request):
+    """Return the current user's live signals from other Prism features."""
+    username = require_auth(request)
+    return build_industry_context(username)
+
+
+@router.get("/geo")
+async def geo():
+    """Return geo-region data for world-map rendering."""
+    with get_db() as db:
+        regions = [
+            dict(r)
+            for r in db.execute("SELECT * FROM geo_regions ORDER BY continent, country_name").fetchall()
+        ]
+    # Attach node counts per country
+    with get_db() as db:
+        counts = {}
+        for r in db.execute(
+            "SELECT country, COUNT(*) AS cnt FROM industry_nodes WHERE country IS NOT NULL GROUP BY country"
+        ).fetchall():
+            counts[r["country"]] = r["cnt"]
+    for reg in regions:
+        reg["node_count"] = counts.get(reg["country_code"], 0)
+        try:
+            reg["key_industries"] = json.loads(reg["key_industries"])
+        except Exception:
+            reg["key_industries"] = []
+    return {"regions": regions}
+
+
+@router.get("/search")
+async def search(q: str = "", limit: int = 20):
+    """Full-text search on industry node names, tickers, categories and roles."""
+    if not q:
+        return {"results": []}
+    q = q.strip()
+    limit = max(1, min(100, limit))
+    if len(q) > 40:
+        q = q[:40]
+    with get_db() as db:
+        rows = [
+            dict(r)
+            for r in db.execute(
+                """
+            SELECT * FROM industry_nodes
+            WHERE name LIKE ?
+               OR description LIKE ?
+               OR category LIKE ?
+               OR source_ticker LIKE ?
+            ORDER BY
+                CASE
+                    WHEN source_ticker = ? THEN 0
+                    WHEN source_ticker LIKE ? THEN 1
+                    WHEN name LIKE ? THEN 2
+                    ELSE 3
+                END,
+                name ASC
+            LIMIT ?
+            """,
+                [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", q, f"{q}%", f"{q}%", limit],
+            ).fetchall()
+        ]
+    return _research_view({"results": rows})
+
+
+@router.get("/ticker/{ticker}/chain")
+async def ticker_chain(ticker: str, depth: int = 3):
+    """Return bounded background paths, without asserting commercial relations."""
+    result = await graph(ticker=ticker, depth=depth, min_confidence=0)
+    return {**result, "ticker": ticker, "depth": depth}
+
+
+@router.get("/categories")
+async def categories():
+    """Distinct industry chains with node counts — populates the sidebar list."""
+    with get_db() as db:
+        rows = _category_stats(db)
+    return _research_view({"categories": rows})
+
+
+@router.get("/node/{node_id}")
+async def node_detail(node_id: str):
+    """A node plus its upstream suppliers and downstream customers (detail drawer)."""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM industry_nodes WHERE id=?", [node_id]).fetchone()
+        if not row:
+            raise HTTPException(404, "节点不存在")
+        node = dict(row)
+        upstream = [
+            dict(r)
+            for r in db.execute(
+                "SELECT n.*, e.relation FROM industry_edges e "
+                "JOIN industry_nodes n ON e.source_node_id = n.id "
+                "WHERE e.target_node_id = ?",
+                [node_id],
+            ).fetchall()
+        ]
+        downstream = [
+            dict(r)
+            for r in db.execute(
+                "SELECT n.*, e.relation FROM industry_edges e "
+                "JOIN industry_nodes n ON e.target_node_id = n.id "
+                "WHERE e.source_node_id = ?",
+                [node_id],
+            ).fetchall()
+        ]
+    return _research_view({"node": node, "upstream": upstream, "downstream": downstream})
+
+
+@router.post("/seed")
+async def reseed(request: Request):
+    """Reload curated seed chains via the authenticated operations gateway only."""
+    from .auth import require_admin
+    from .industry_seed import seed_all
+
+    require_admin(request)
+    with get_db() as db:
+        db.execute("DELETE FROM industry_edges WHERE evidence = 'seed'")
+        db.execute("DELETE FROM industry_nodes WHERE source_date = 'seed'")
+        seed_all(db)
+    return {"ok": True}

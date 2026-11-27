@@ -1,0 +1,284 @@
+"""ProviderChain — try providers in order, fall back to stale cache.
+
+On a successful provider call the result is written to :class:`MarketCache`
+under a stable key. On a provider failure, the chain moves to the next
+provider. If every provider fails, the chain returns the most recent
+cached value (even if expired) and flags ``stale=True``. If no cache
+exists either, raises :class:`NoProviderAvailable`.
+"""
+
+import json
+import logging
+import math
+import time
+from typing import Any, Literal
+
+from ..work_adapters import async_work
+from ..work_lifecycle import WorkHandle, get_manager
+from .cache import MarketCache
+from .models import Fundamentals, KLine, KLineProvenance, PriceAdjustment, Quote, SearchHit
+from .provider import (
+    MarketDataProvider,
+    NoProviderAvailable,
+    ProviderNotFound,
+    ProviderUnavailable,
+)
+from .resample import resample_kline
+
+log = logging.getLogger("stock-app")
+
+
+class ProviderChain:
+    """Wraps an ordered list of providers with cache-backed failover."""
+
+    def __init__(
+        self,
+        providers: list[MarketDataProvider],
+        cache: MarketCache,
+        ttls: dict[str, int] | None = None,
+    ):
+        self.providers = providers
+        self.cache = cache
+        self.ttls = ttls or {}  # {"quote": 60, "kline": 300, "fundamentals": 86400}
+        # In-flight request coalescing: concurrent callers for the same
+        # coalescing_key share a single upstream task instead of all
+        # hitting the provider. Without this, N concurrent users for
+        # ticker 600519 would all burn provider quota in parallel.
+        self._inflight: dict[str, WorkHandle] = {}
+
+    def _cache_key(self, method: str, provider_name: str, *parts: str) -> str:
+        # Pre-normalization Tencent quotes used lots / 10k CNY, including stale cache.
+        if method == "quote" and provider_name == "tencent":
+            method = "quote-shares-cny"
+        # Old AKShare bars may have silently dropped dates with missing amount.
+        if method == "kline-v3" and provider_name == "akshare":
+            method = "kline-v4"
+        return f"{method}:{provider_name}:" + ":".join(parts)
+
+    async def _coalesce(self, key: str, runner):
+        """Run ``runner()``; if another caller is already running for ``key``,
+        await its result instead of starting a duplicate call."""
+        handle = self._inflight.get(key)
+        if handle is None or handle.done():
+
+            async def execute(_lease):
+                try:
+                    return await runner(), None
+                except Exception as exc:
+                    # A completed business failure can be retried after actual
+                    # resources finish. Cancellation/unknown BaseException still
+                    # fails the owned task and keeps it blocked for reconciliation.
+                    return None, exc
+
+            handle = get_manager().start("market", execute)
+            self._inflight[key] = handle
+
+            def completed(done):
+                if self._inflight.get(key) is done:
+                    self._inflight.pop(key, None)
+
+            handle.add_done_callback(completed)
+        value, error = await handle.wait_result()
+        if error is not None:
+            raise error
+        return value
+
+    async def _with_failover(
+        self,
+        method: str,
+        cache_parts: tuple,
+        invoke,  # async callable: (provider) -> result
+        ttl_attr: str,
+    ) -> tuple[Any, bool]:
+        """Run ``invoke(p)`` over each provider; cache success; fall back to stale.
+
+        ``invoke`` is called as ``await invoke(provider)``.
+        """
+        last_err: Exception | None = None
+
+        for p in self.providers:
+            try:
+                result = await invoke(p)
+            except Exception as e:
+                # Failover must survive ANY provider failure — a buggy or
+                # network-blocked provider raising ValidationError /
+                # ProviderNotFound / timeout must not abort the chain and
+                # starve the remaining (healthy) providers.
+                log.warning(f"market provider {p.name} failed: {type(e).__name__}: {e}")
+                last_err = e
+                continue
+            # Success — cache the JSON-shaped value
+            key = self._cache_key(method, p.name, *cache_parts)
+            ttl = self.ttls.get(ttl_attr, 60)
+            try:
+                payload = json.loads(result.model_dump_json())
+            except Exception:
+                payload = result
+            self.cache.set(key, payload, ttl=ttl)
+            # Pydantic re-validate so we return the typed model with stale=False
+            if isinstance(result, Quote):
+                return Quote(**{**payload, "stale": False, "source": p.name}), False
+            if isinstance(result, Fundamentals):
+                return Fundamentals(**{**payload, "stale": False, "source": p.name}), False
+            return result, False
+
+        # All providers failed — try stale cache (any provider that had a value)
+        for p in self.providers:
+            key = self._cache_key(method, p.name, *cache_parts)
+            val, _ = self.cache.get_stale(key)
+            if val is not None:
+                if method == "quote":
+                    return Quote(**{**val, "stale": True}), True
+                if method == "fundamentals":
+                    return Fundamentals(**{**val, "stale": True}), True
+                return val, True
+        raise NoProviderAvailable(f"all providers failed: {[p.name for p in self.providers]}") from last_err
+
+    @async_work("market")
+    async def get_quote(self, ticker: str) -> tuple[Quote, bool]:
+        # Fresh cache check before trying providers
+        for p in self.providers:
+            key = self._cache_key("quote", p.name, ticker)
+            val, _ = self.cache.get(key)
+            if val is not None:
+                return Quote(**{**val, "stale": False}), False
+        # Coalesce concurrent identical requests through one upstream call.
+        co_key = f"quote:{ticker}"
+        try:
+            return await self._coalesce(
+                co_key,
+                lambda: self._with_failover(
+                    "quote",
+                    (ticker,),
+                    lambda p: p.get_quote(ticker),
+                    "quote",
+                ),
+            )
+        except NoProviderAvailable:
+            # All providers failed — try stale cache, marking stale=True
+            for p in self.providers:
+                key = self._cache_key("quote", p.name, ticker)
+                val, _ = self.cache.get_stale(key)
+                if val is not None:
+                    return Quote(**{**val, "stale": True}), True
+            raise
+
+    @async_work("market")
+    async def get_kline(
+        self,
+        ticker: str,
+        period: str = "1d",
+        limit: int = 120,
+        *,
+        adjustment: PriceAdjustment = "none",
+        require_amount: bool | Literal["all"] = False,
+    ) -> tuple[list[KLine], bool]:
+        if adjustment not in {"none", "qfq", "hfq"}:
+            raise ValueError("unsupported price adjustment")
+
+        def checked(rows):
+            bars = [KLine(**row) for row in rows]
+            if any(bar.adjustment != adjustment for bar in bars):
+                raise ProviderUnavailable("K-line adjustment does not match request")
+            # Filters need the latest amount; amount formulas also need history.
+            # Apply the same requirement to providers, fresh cache and stale cache.
+            if require_amount and bars:
+                required = bars if require_amount == "all" else [max(bars, key=lambda bar: bar.timestamp)]
+                if any(bar.turnover is None or not math.isfinite(bar.turnover) for bar in required):
+                    raise ProviderUnavailable("required K-line traded amount is unavailable")
+            return bars
+
+        # Note: KLine is a list; cache the list of dicts, return as KLine list.
+        async def _invoke(p):
+            kls = await p.get_kline(ticker, period=period, limit=limit, adjustment=adjustment)
+            # Only a completed provider call establishes acquisition time. Cache
+            # reads below never stamp now or infer origin from a cache/provider key.
+            completed_at = int(time.time())
+            normalized = checked([k.model_dump() for k in kls])
+            for bar in normalized:
+                if bar.provenance is None:
+                    bar.provenance = KLineProvenance(adapter=p.name, retrieved_at=completed_at)
+            return checked([bar.model_dump() for bar in resample_kline(normalized, period, limit)])
+
+        # Custom path — bypass _with_failover's list handling
+        last_err = None
+
+        # Check cache first
+        for p in self.providers:
+            key = self._cache_key("kline-v3", p.name, ticker, period, str(limit), adjustment)
+            val, _ = self.cache.get(key)
+            if val is not None:
+                try:
+                    cached = checked(val)
+                    if cached:
+                        return cached, False
+                except (ValueError, ProviderUnavailable):
+                    pass
+
+        # Coalesce concurrent identical requests
+        co_key = f"kline-v3:{ticker}:{period}:{limit}:{adjustment}:amount={require_amount}"
+
+        async def _runner():
+            nonlocal last_err
+            for p in self.providers:
+                try:
+                    kls = await _invoke(p)
+                except Exception as e:
+                    last_err = e
+                    log.warning(f"market provider {p.name} kline failed: {type(e).__name__}: {e}")
+                    continue
+                if not kls:
+                    # An empty list is NOT a success — it means this provider
+                    # has no bars for the ticker. Fall through to the next
+                    # provider instead of caching/returning an empty chart.
+                    last_err = ProviderNotFound(f"{p.name}: no kline for {ticker}")
+                    continue
+                key = self._cache_key("kline-v3", p.name, ticker, period, str(limit), adjustment)
+                self.cache.set(key, [k.model_dump() for k in kls], ttl=self.ttls.get("kline", 300))
+                return kls, False
+            # All providers failed — fall back to stale
+            for p in self.providers:
+                key = self._cache_key("kline-v3", p.name, ticker, period, str(limit), adjustment)
+                val, _ = self.cache.get_stale(key)
+                if val is not None:
+                    try:
+                        cached = checked(val)
+                        if cached:
+                            return cached, True
+                    except (ValueError, ProviderUnavailable):
+                        pass
+            raise NoProviderAvailable(
+                f"all providers failed: {[p.name for p in self.providers]}"
+            ) from last_err
+
+        return await self._coalesce(co_key, _runner)
+
+    @async_work("market")
+    async def get_fundamentals(self, ticker: str) -> tuple[Fundamentals, bool]:
+        co_key = f"fundamentals:{ticker}"
+        return await self._coalesce(
+            co_key,
+            lambda: self._with_failover(
+                "fundamentals",
+                (ticker,),
+                lambda p: p.get_fundamentals(ticker),
+                "fundamentals",
+            ),
+        )
+
+    @async_work("market")
+    async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
+        """Search is best-effort across all providers; returns first non-empty list."""
+        for p in self.providers:
+            try:
+                hits = await p.search(query, limit=limit)
+                if hits:
+                    return hits
+            except ProviderUnavailable as e:
+                log.warning(f"search provider {p.name} failed: {e}")
+                continue
+        return []
+
+    @async_work("market")
+    async def health(self) -> dict[str, bool]:
+        return {p.name: await p.health() for p in self.providers}

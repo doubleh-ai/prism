@@ -1,0 +1,501 @@
+/* Prism - Saved report library */
+Object.assign(App, {
+  _savedReports: [],
+  _activeSavedReportId: '',
+  _researchLibraryTab: 'reports',
+
+  _initReports: function() {
+    var shell = document.getElementById('appShell');
+    if (shell) shell.classList.remove('collapsed');
+    this._setResearchLibraryTab(this._researchLibraryTab);
+  },
+
+  _setResearchLibraryTab: function(tab) {
+    this._researchLibraryTab = tab === 'journal' ? 'journal' : 'reports';
+    var isJournal = this._researchLibraryTab === 'journal';
+    var shell = document.getElementById('appShell');
+    if (shell) shell.setAttribute('data-library', this._researchLibraryTab);
+    var repTab = document.getElementById('researchReportsTab');
+    var jnlTab = document.getElementById('researchJournalTab');
+    if (repTab) repTab.setAttribute('aria-pressed', String(!isJournal));
+    if (jnlTab) jnlTab.setAttribute('aria-pressed', String(isJournal));
+    var repInner = document.getElementById('reportsPanelInner');
+    var jnlPanel = document.getElementById('journalVaultPanel');
+    var sideList = document.getElementById('reportsSidebarList');
+    var sideCnt = document.getElementById('reportsSidebarCount');
+    if (repInner) repInner.hidden = isJournal;
+    if (jnlPanel) jnlPanel.hidden = !isJournal;
+    if (sideList) sideList.hidden = isJournal;
+    if (sideCnt) sideCnt.hidden = isJournal;
+    if (this._refreshCopilotContextBar) this._refreshCopilotContextBar();
+    if (isJournal) {
+      if (this._trackUiEvent) this._trackUiEvent('journal', 'open');
+      this._loadDecisionJournal();
+    } else {
+      this._loadReportLibrary();
+    }
+  },
+
+  _loadDecisionJournal: async function() {
+    var panel = document.getElementById('journalVaultPanel');
+    if (!panel) return;
+    panel.innerHTML = '<div class="market-empty-state">正在同步跨市场判断与自动对账记录…</div>';
+    try {
+      var r = await this.api('/api/journal/overview?limit=80');
+      if (!r.ok) throw new Error('unavailable');
+      var data = await r.json();
+      this._renderDecisionJournal(data);
+    } catch (e) {
+      panel.innerHTML = '<div class="market-empty-state">全域判断账本加载失败，请重试。</div>';
+    }
+  },
+
+  _renderDecisionJournal: function(data) {
+    var panel = document.getElementById('journalVaultPanel');
+    if (!panel) return;
+    var s = (data && data.stats) || {total:0, supported:0, contradicted:0, pending:0, win_rate_pct:null, bias_hint:''};
+    var items = (data && data.items) || [];
+    var statusText = {supported:'✓ 已印证支持', contradicted:'✕ 触发失效证伪', observed:'◎ 区间观察中', pending:'⏳ 待对账'};
+    var winText = s.win_rate_pct != null ? (s.win_rate_pct + '%') : '待积累';
+
+    var listHtml = items.length
+      ? '<div class="journal-list">' + items.map(function(it) {
+          var rev = it.review || {};
+          var summary = rev.summary || it.rule_summary || '';
+          var isEq = it.asset_class === 'equity';
+          var tag = isEq ? 'A股个股' : '商品期货';
+          return '<article class="journal-card">' +
+            '<div class="journal-card__hd">' +
+              '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                '<span class="mi-source">' + tag + '</span>' +
+                '<a href="' + escAttr(it.href || '#') + '" style="font-weight:700;font-size:14px;color:inherit;text-decoration:none;">' + esc(it.name + ' (' + it.code + ')') + ' ↗</a>' +
+                '<span style="font-size:12.5px;color:var(--accent,#1f6f54);font-weight:600;">' + esc(it.choice_label || '') + '</span>' +
+              '</div>' +
+              '<span class="journal-badge ' + escAttr(it.status || 'pending') + '">' + esc(statusText[it.status] || '待对账') + '</span>' +
+            '</div>' +
+            '<div style="font-size:13px;line-height:1.55;">' + esc(it.headline || '') + '</div>' +
+            (summary ? '<div style="font-size:12px;color:var(--text-muted,#687076);background:rgba(127,127,127,0.06);padding:7px 10px;border-radius:8px;">对账回执：' + esc(summary) + '</div>' : '') +
+            '<div class="journal-card__ft">' +
+              '<span>记录于 ' + esc(String(it.saved_at || '').slice(0, 16).replace('T', ' ')) + '</span>' +
+              '<div style="display:flex;gap:8px;">' +
+                (isEq ? '<button type="button" class="market-qc-btn-secondary" onclick="App._reconcileEquityJudgment(\'' + escAttr(it.id) + '\')">按最新行情对账</button>' : '') +
+                '<button type="button" class="market-qc-btn-secondary" onclick="App._deleteJournalEntry(\'' + escAttr(it.asset_class) + '\',\'' + escAttr(it.code) + '\',\'' + escAttr(it.id) + '\')">移除</button>' +
+              '</div>' +
+            '</div>' +
+          '</article>';
+        }).join('') + '</div>'
+      : '<div class="market-empty-state">尚未登记多空判断。<br>你可以在个股看盘页点击「★ 记多空判断」，或在期货品种页从「可证伪情景路标」一键加入跟踪。</div>';
+
+    panel.innerHTML =
+      '<div class="journal-kpi-grid">' +
+        '<div class="journal-kpi-card"><span>累计记录判断</span><strong>' + Number(s.total || 0) + '</strong></div>' +
+        '<div class="journal-kpi-card"><span>已印证支持</span><strong style="color:#167c66;">' + Number(s.supported || 0) + '</strong></div>' +
+        '<div class="journal-kpi-card"><span>触发失效证伪</span><strong style="color:#c62828;">' + Number(s.contradicted || 0) + '</strong></div>' +
+        '<div class="journal-kpi-card"><span>已对账印证率</span><strong>' + esc(winText) + '</strong></div>' +
+      '</div>' +
+      '<div class="journal-bias-banner">' +
+        '<span><b>画像联动诊断：</b>' + esc(s.bias_hint || '') + '</span>' +
+        '<div style="display:flex;gap:8px;">' +
+          '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请结合我的全域判断对账统计与投研画像，深入复盘我近期多空判断的胜率分布与主要偏差来源，并给出改进建议。\',\'prism-research\')">✦ 让 Agent 深度复盘</button>' +
+          '<button type="button" class="market-qc-btn-secondary" onclick="App._loadDecisionJournal()">刷新账本</button>' +
+        '</div>' +
+      '</div>' +
+      listHtml;
+  },
+
+  _reconcileEquityJudgment: async function(id) {
+    if (!id) return;
+    try {
+      var r = await this.api('/api/journal/equity/' + encodeURIComponent(id) + '/reconcile', {method:'POST'});
+      if (!r.ok) {
+        var eb = await r.json().catch(function(){return {};});
+        if (this._toast) this._toast(eb.detail || '暂时无法获取最新报价对账');
+        return;
+      }
+      if (this._toast) this._toast('已完成实盘报价核验并更新状态');
+      this._loadDecisionJournal();
+      if (this.loadPersona) this.loadPersona();
+    } catch (e) {}
+  },
+
+  _deleteJournalEntry: async function(assetClass, code, id) {
+    if (!id || !confirm('确定从复盘账本中移除这条判断记录？')) return;
+    var url = assetClass === 'equity'
+      ? ('/api/journal/equity/' + encodeURIComponent(id))
+      : ('/api/futures/' + encodeURIComponent(code) + '/judgments/' + encodeURIComponent(id));
+    var r = await this.api(url, {method:'DELETE'});
+    if (r.ok || r.status === 204) {
+      this._loadDecisionJournal();
+      if (this.loadPersona) this.loadPersona();
+    }
+  },
+
+  _loadReportLibrary: async function() {
+    var sequence = this._reportLibrarySeq = (this._reportLibrarySeq || 0) + 1;
+    var selection = this._reportSelectionSeq || 0;
+    var side = document.getElementById('reportsSidebarList');
+    var inner = document.getElementById('reportsPanelInner');
+    if (side) side.innerHTML = '<div class="reports-lib-empty">加载中...</div>';
+    if (inner && !this._activeSavedReportId) {
+      inner.innerHTML = '<div class="market-empty-state">加载报告库中...</div>';
+    }
+    var r;
+    try { r = await this.api('/api/reports/library?limit=80'); }
+    catch (error) { r = {ok:false}; }
+    if (sequence !== this._reportLibrarySeq) return;
+    if (!r.ok) {
+      if (side) side.innerHTML = '<div class="reports-lib-empty">报告库加载失败</div>';
+      if (inner) inner.innerHTML = '<div class="market-empty-state">报告库加载失败</div>';
+      return;
+    }
+    var data = await r.json();
+    if (sequence !== this._reportLibrarySeq) return;
+    this._savedReports = data.reports || [];
+    this._renderReportSidebar();
+    if (selection !== (this._reportSelectionSeq || 0)) return;
+    if (this._activeSavedReportId) {
+      this._openSavedReport(this._activeSavedReportId);
+    } else {
+      this._renderReportLibraryHome();
+    }
+  },
+
+  _renderReportSidebar: function() {
+    var side = document.getElementById('reportsSidebarList');
+    if (!side) return;
+    var reports = this._savedReports || [];
+    var count = document.getElementById('reportsSidebarCount');
+    if (count) count.textContent = reports.length ? '(' + reports.length + ')' : '';
+    if (!reports.length) {
+      side.innerHTML = '<div class="reports-lib-empty">暂无保存报告</div>';
+      return;
+    }
+    var self = this;
+    side.innerHTML = reports.map(function(rep) {
+      var active = rep.id === self._activeSavedReportId ? ' active' : '';
+      var sub = [rep.ticker || '', self._reportText(rep.signal || ''), self._fmtDate(rep.updated_at || rep.created_at)].filter(Boolean).join(' · ');
+      return '<div class="reports-lib-side-item' + active + '" onclick="App._openSavedReport(\'' + escAttr(rep.id) + '\')">' +
+        '<b>' + esc(self._reportText(rep.title || rep.ticker || 'Untitled')) + '</b>' +
+        '<span>' + esc(sub || 'Saved report') + '</span>' +
+        '</div>';
+    }).join('');
+  },
+
+  _renderReportLibraryHome: function() {
+    this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
+    var inner = document.getElementById('reportsPanelInner');
+    if (!inner) return;
+    var reports = this._savedReports || [];
+    if (!reports.length) {
+      inner.innerHTML = '<div class="market-empty-state">还没有保存的研究记录。</div>';
+      return;
+    }
+    var self = this;
+    inner.innerHTML = '<div class="reports-lib">' +
+      '<div class="reports-lib-head"><div><h2>研究记录</h2></div>' +
+      '<button class="admin-secondary" onclick="App._loadReportLibrary()">刷新</button></div>' +
+      '<div class="reports-lib-grid">' + reports.map(function(rep) {
+        var sig = self._reportText(rep.signal || '') || '未评级';
+        var cls = /buy|买入/i.test(sig) ? ' up' : /sell|卖出/i.test(sig) ? ' down' : '';
+        return '<div class="reports-lib-card" onclick="App._openSavedReport(\'' + escAttr(rep.id) + '\')">' +
+          '<div class="reports-lib-card-hd"><span>' + esc(rep.ticker || 'REPORT') + '</span><em class="' + cls + '">' + esc(sig) + '</em></div>' +
+          '<h3>' + esc(self._reportText(rep.title || rep.name || rep.ticker || 'Untitled Report')) + '</h3>' +
+          '<p>' + esc(self._reportSummaryText(rep.summary || '暂无摘要')) + '</p>' +
+          '<div class="reports-lib-card-ft">' + esc(self._fmtDate(rep.updated_at || rep.created_at)) + '</div>' +
+          '</div>';
+      }).join('') + '</div></div>';
+  },
+
+  _openSavedReport: async function(id) {
+    if (!id) return;
+    if (this._researchLibraryTab !== 'reports') {
+      this._setResearchLibraryTab('reports');
+    }
+    var sequence = this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
+    this._activeSavedReportId = id;
+    this._closeMobileSidebar();
+    this._renderReportSidebar();
+    var inner = document.getElementById('reportsPanelInner');
+    if (inner) inner.innerHTML = '<div class="market-empty-state">加载报告...</div>';
+    var r;
+    try { r = await this.api('/api/reports/library/' + encodeURIComponent(id)); }
+    catch (error) { r = {ok:false,status:0}; }
+    if (sequence !== this._reportSelectionSeq || id !== this._activeSavedReportId) return;
+    if (!r.ok) {
+      if (inner) inner.innerHTML = '<div class="market-empty-state">'+(r.status === 403 || r.status === 404 ? '报告不存在或无权限访问' : '报告读取暂时失败，请重新选择该报告重试；保存内容未改变')+'</div>';
+      return;
+    }
+    var rep = await r.json();
+    if (sequence !== this._reportSelectionSeq || id !== this._activeSavedReportId) return;
+    this._renderSavedReportDetail(rep);
+  },
+
+  _renderSavedReportDetail: function(rep) {
+    var inner = document.getElementById('reportsPanelInner');
+    if (!inner) return;
+    var report = (rep.report && typeof rep.report === 'object') ? rep.report : {};
+    var structured = (report.structured && typeof report.structured === 'object') ? report.structured : {};
+    var sig = this._reportText(rep.signal || structured.signal || report.signal || '') || '未评级';
+    sig = sig.split('\n')[0].slice(0, 32);
+    var cls = /buy|买入/i.test(sig) ? ' up' : /sell|卖出/i.test(sig) ? ' down' : '';
+    var title = this._reportText(rep.title || report.title || report.question || report.name || rep.ticker || '') || 'Untitled Report';
+    var finalDecision = this._reportText(report.final_decision || report.decision || report.result || '');
+    var deliveredDecision = this._reportDeliveredText(finalDecision);
+    var incompleteChat = this._reportIsIncompleteChat(rep, report, finalDecision, deliveredDecision);
+    var summary = incompleteChat
+      ? '研究过程已保存，但任务在形成最终报告前中止。可返回原对话继续完成分析。'
+      : this._reportSummaryText(deliveredDecision || rep.summary || structured.thesis || structured.verdict_summary || report.summary || report.question || finalDecision || '');
+    var research = report.research || rep.research;
+    var provenance = '<section class="reports-lib-section report-provenance"><h4>版本与研究边界</h4>' +
+      '<p>保存版本：'+esc(String(rep.revision || report.revision || '历史记录'))+' · 保存于 '+esc(ChatRender.formatTime(rep.created_at))+'</p>' +
+      (research ? ChatRender.renderResearch(research) : '<p>历史报告未记录可靠的研究时点；数据截至未知。</p>') +
+      '<p>采集、引用匹配与事实核验是不同环节。原引擎结论保留，未提供证据的表述仍待核验。</p></section>';
+    var body = '';
+
+    var thesis = this._reportText(structured.thesis || structured.verdict_summary || report.thesis || report.summary || '');
+    if (thesis || structured.metrics) {
+      body += '<div class="reports-lib-section reports-lib-thesis">' +
+        '<h4>核心结论</h4>' +
+        (thesis ? '<div class="reports-lib-md">' + this._safeReportMarkdown(thesis) + '</div>' : '<p>暂无结构化结论。</p>') +
+        '</div>';
+      if (structured.metrics && typeof structured.metrics === 'object') {
+        var m = structured.metrics;
+        body += '<div class="reports-lib-metrics">' +
+          this._reportMetric('估值', m.valuation) +
+          this._reportMetric('增长', m.growth) +
+          this._reportMetric('风险', m.risk_score === undefined ? '' : m.risk_score) +
+          this._reportMetric('动量', m.momentum) +
+          '</div>';
+      }
+      if (structured.trade && typeof structured.trade === 'object') {
+        var tr = structured.trade;
+        body += '<div class="reports-lib-section"><h4>交易方案</h4>' +
+          '<div class="reports-lib-trade">' +
+          this._reportMetric('目标价', tr.target_price) +
+          this._reportMetric('止损', tr.stop_loss) +
+          this._reportMetric('仓位', tr.position) +
+          this._reportMetric('周期', tr.horizon) +
+          '</div><div class="reports-lib-md">' + this._safeReportMarkdown(tr.rationale || '') + '</div></div>';
+      }
+    }
+
+    if (incompleteChat) {
+      body += '<div class="reports-lib-section reports-lib-incomplete">' +
+        '<div><h4>研究未完成</h4><p>这次 Agent 任务在生成最终结论前结束，下面保存的是研究过程，不应作为投资结论使用。</p></div>' +
+        (rep.conv_id ? '<button class="admin-secondary" onclick="if(App.openCopilot)App.openCopilot(\'docked\',true);App.openConv(\'' + escAttr(rep.conv_id) + '\')">在随行 Agent 继续</button>' : '') +
+        '</div>';
+      if (finalDecision) {
+        body += '<details class="reports-lib-section reports-lib-process"><summary>查看已保存的研究过程</summary><div class="reports-lib-md">' +
+          this._safeReportMarkdown(finalDecision) + '</div></details>';
+      }
+    } else if (deliveredDecision || finalDecision) {
+      body += '<div class="reports-lib-section"><h4>研究观点</h4><div class="reports-lib-md">' +
+        this._safeReportMarkdown(deliveredDecision || finalDecision) + '</div></div>';
+    }
+    var traderPlan = this._reportText(report.trader_plan || report.trade_plan || report.plan || '');
+    if (traderPlan) {
+      body += '<div class="reports-lib-section"><h4>交易计划</h4><div class="reports-lib-md">' +
+        this._safeReportMarkdown(traderPlan) + '</div></div>';
+    }
+
+    var analysts = (report.analyst_reports && typeof report.analyst_reports === 'object') ? report.analyst_reports : {};
+    var keys = Object.keys(analysts);
+    if (keys.length) {
+      body += '<div class="reports-lib-section"><h4>分析师研报</h4>';
+      for (var i = 0; i < keys.length; i++) {
+        var analystText = this._reportText(analysts[keys[i]]);
+        if (!analystText) continue;
+        body += '<details class="reports-lib-fold"><summary>' + esc(keys[i]) + '</summary><div class="reports-lib-md">' +
+          this._safeReportMarkdown(analystText) + '</div></details>';
+      }
+      body += '</div>';
+    }
+
+    var references = Array.isArray(report.references) ? report.references : [];
+    if (references.length) {
+      var self = this;
+      body += '<div class="reports-lib-section"><h4>采集来源与线索</h4><div class="reports-lib-ref-list">' +
+        references.map(function(ref) {
+          if (!ref || typeof ref !== 'object') return '<div class="reports-lib-ref">'+esc(self._reportText(ref))+'</div>';
+          return ChatRender.renderChunk(Object.assign({}, ref, {t:'ref'}));
+        }).join('') + '</div></div>';
+    }
+
+    if (!body) {
+      var fallback = this._reportText(report.markdown || report.text || report.content || report);
+      body = '<div class="reports-lib-section"><h4>原始报告</h4>' +
+        (fallback ? '<div class="reports-lib-md">' + this._safeReportMarkdown(fallback) + '</div>' :
+          '<pre class="reports-lib-json">' + esc(JSON.stringify(report, null, 2)) + '</pre>') +
+        '</div>';
+    }
+
+    inner.innerHTML = '<div class="reports-lib reports-lib-detail">' +
+      '<div class="reports-lib-detail-head">' +
+        '<button class="admin-secondary" onclick="App._activeSavedReportId=\'\';App._renderReportLibraryHome();App._renderReportSidebar()">返回列表</button>' +
+        '<div class="reports-lib-detail-actions"><button class="admin-danger" onclick="App._deleteSavedReport(\'' + escAttr(rep.id) + '\')">删除</button></div>' +
+      '</div>' +
+      '<div class="reports-lib-hero reports-lib-hero-detail">' +
+        '<div class="reports-lib-hero-main"><span class="reports-lib-kicker">' + esc(rep.ticker || rep.source || 'REPORT') + '</span>' +
+        '<h2>' + esc(title) + '</h2>' +
+        (summary ? '<p>' + esc(summary) + '</p>' : '') + '</div>' +
+        '<div class="reports-lib-signal' + cls + '">' + esc(sig) + '</div>' +
+      '</div>' + provenance + body + '</div>';
+  },
+
+  _deleteSavedReport: async function(id) {
+    if (!confirm('删除这份保存的报告？')) return;
+    var r = await this.api('/api/reports/library/' + encodeURIComponent(id), {method: 'DELETE'});
+    if (!r.ok) { this._toast && this._toast('删除失败'); return; }
+    this._activeSavedReportId = '';
+    this._toast && this._toast('报告已删除');
+    this._loadReportLibrary();
+  },
+
+  _saveAnalysisReport: async function() {
+    if (!this._analysisId) { this._toast && this._toast('没有可保存的分析报告'); return; }
+    var title = '';
+    if (this._analysisTicker) title = this._analysisTicker + (this._analysisName ? ' ' + this._analysisName : '') + ' 分析报告';
+    var r = await this.api('/api/analysis/' + encodeURIComponent(this._analysisId) + '/save-report', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title: title})
+    });
+    if (!r.ok) {
+      var msg = '保存失败';
+      try { var e = await r.json(); msg = e.detail || e.error || msg; } catch(ex) {}
+      this._toast && this._toast(msg);
+      return;
+    }
+    var saved = (await r.json()).report;
+    this._toast && this._toast('已保存到报告库');
+    this._activeSavedReportId = saved.id;
+    this._loadReportLibrary();
+  },
+
+  _reportMetric: function(k, v) {
+    return '<div class="reports-lib-metric"><span>' + esc(k) + '</span><b>' + esc(this._reportText(v) || '-') + '</b></div>';
+  },
+
+  _reportText: function(value) {
+    function clean(t) {
+      return String(t || '')
+        .replace(/\[object Object\]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
+    function from(v) {
+      if (v === null || v === undefined) return '';
+      if (typeof v === 'string') return clean((window.ChatRender && ChatRender.clean) ? ChatRender.clean(v) : v);
+      if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+      if (Array.isArray(v)) return clean(v.map(from).filter(Boolean).join('\n'));
+      if (typeof v === 'object') {
+        if (v.type === 'text' && v.text !== undefined) return from(v.text);
+        if (v.type === 'thinking' && v.thinking !== undefined) return from(v.thinking);
+        if (v.type === 'tool_result' && v.content !== undefined) return from(v.content);
+        if (v.type === 'tool_use') return '';
+        if (v.message && v.message.content !== undefined) return from(v.message.content);
+        var preferred = ['markdown', 'text', 'content', 'summary', 'thesis', 'verdict_summary', 'final_decision', 'rationale', 'reason', 'decision', 'plan', 'value', 'description', 'output'];
+        for (var i = 0; i < preferred.length; i++) {
+          if (v[preferred[i]] !== undefined) {
+            var picked = from(v[preferred[i]]);
+            if (picked) return picked;
+          }
+        }
+        var parts = [];
+        Object.keys(v).forEach(function(key) {
+          if (/^(id|type|name|role|created_at|updated_at|source_id|conv_id)$/i.test(key)) return;
+          var text = from(v[key]);
+          if (text) parts.push(/^[\w\u4e00-\u9fa5 -]{1,24}$/.test(key) ? key + ': ' + text : text);
+        });
+        if (parts.length) return clean(parts.join('\n'));
+        return '';
+      }
+      return clean(String(v));
+    }
+    return clean(from(value));
+  },
+
+  _safeReportMarkdown: function(text) {
+    text = this._reportText(text);
+    if (!text) return '';
+    var html = '';
+    try {
+      // Saved documents use standard Markdown. The chat renderer deliberately
+      // escapes every > and balances unfinished streaming input; applying that
+      // policy here makes report quotations appear as stray Markdown markers.
+      // Pass a local renderer so this does not change chat/streaming behavior.
+      if (typeof marked !== 'undefined' && marked.Renderer && marked.parse) {
+        var renderer = new marked.Renderer();
+        var link = renderer.link.bind(renderer);
+        var image = renderer.image.bind(renderer);
+        var table = renderer.table.bind(renderer);
+        renderer.link = function(token) {
+          return link(Object.assign({}, token, {href: safeUrl(token.href) || '#'}));
+        };
+        renderer.image = function(token) {
+          return image(Object.assign({}, token, {href: safeUrl(token.href)}));
+        };
+        // Reports are Markdown documents, not executable HTML. Show embedded
+        // HTML as source text; the separate HTML-report viewer remains sandboxed.
+        renderer.html = function(token) { return esc(token.text || ''); };
+        renderer.table = function(token) {
+          return '<div class="reports-lib-table-scroll" role="region" aria-label="报告表格" tabindex="0">' + table(token) + '</div>';
+        };
+        html = marked.parse(text, {renderer: renderer, gfm: true, breaks: true, async: false});
+      }
+    } catch(e) {
+      html = '';
+    }
+    html = this._reportHtmlString(html);
+    return html || '<p>' + esc(text) + '</p>';
+  },
+
+  _reportHtmlString: function(value) {
+    if (value && typeof value === 'object' && typeof value.html === 'string') value = value.html;
+    if (typeof value !== 'string') return '';
+    value = value.replace(/\[object Object\]/g, '').trim();
+    return typeof sanitizeHtml === 'function' ? sanitizeHtml(value) : '';
+  },
+
+  _reportDeliveredText: function(value) {
+    var text = this._reportText(value);
+    if (!text) return '';
+    var marker = /^#{1,4}\s*(?:报告已交付|最终报告|最终结论|投资结论|分析结论|核心发现)(?:\s.*)?$/gim;
+    var hit = null, current;
+    while ((current = marker.exec(text)) !== null) hit = current;
+    return hit ? text.slice(hit.index).trim() : '';
+  },
+
+  _reportIsIncompleteChat: function(rep, report, finalDecision, deliveredDecision) {
+    if (!rep || rep.source !== 'chat') return false;
+    if (report.status === 'complete') return false;
+    if (report.status === 'incomplete') return true;
+    if (deliveredDecision) return false;
+    if (/API Error|operation timed out|timed out|超时|中止|失败\s*$/i.test(finalDecision || '')) return true;
+    return !!report.skill;
+  },
+
+  _reportSummaryText: function(value) {
+    var text = this._reportText(value);
+    if (!text) return '';
+    return text.replace(/```[\s\S]*?```/g, ' ')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/^\s{0,3}(?:>\s*)+/gm, '')
+      .replace(/^\s{0,3}(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+)/gm, '')
+      .replace(/[*_`~]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 240);
+  },
+
+  _fmtDate: function(ts) {
+    if (!ts) return '';
+    var d = new Date(ts * 1000);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' +
+      String(d.getMinutes()).padStart(2, '0');
+  }
+});

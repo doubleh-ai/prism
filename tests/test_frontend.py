@@ -1,0 +1,397 @@
+"""Static asset contracts. Behavior is tested by the shipped scripts in Node."""
+
+from pathlib import Path
+
+
+class TestCopilotAndPersonaStaticContract:
+    """Prism V3 3-state Omni-Agent Copilot, Persona dialog, and Futures Copilot contracts."""
+
+    def test_copilot_shell_and_persona_dialog_in_app_template(self):
+        html = Path("templates/app.html").read_text(encoding="utf-8")
+        copilot_js = Path("static/js/app.copilot.js").read_text(encoding="utf-8")
+        copilot_css = Path("static/css/copilot.css").read_text(encoding="utf-8")
+
+        assert 'id="copilotLauncher"' in html
+        assert 'id="copilotShell"' in html
+        assert 'id="copilotResizer"' in html
+        assert 'id="copilotReaderDialog"' in html
+        assert 'id="railCollapseBtn"' in html
+        assert 'id="personaDialog"' in html
+        assert 'id="equityJudgmentDialog"' in html
+        assert 'id="journalVaultPanel"' in html
+        assert 'id="adminEntry"' not in html
+        assert 'id="feedbackEntry"' not in html
+        assert 'id="feedbackDialog"' not in html
+        assert 'data-mode="analysis"' not in html
+        assert 'data-mode="industry"' not in html
+        assert "copilot.css?v=141" in html
+        assert "app.copilot.js?v=141" in html
+        assert "_currentPageContext" in copilot_js
+        assert "_autoAdaptCopilotWidth" in copilot_js
+        assert "openLatestInReader" in copilot_js
+        assert "decidePersonaProposal" in copilot_js
+        assert "savePersonaProfile" in copilot_js
+        assert ".copilot-shell" in copilot_css
+        assert ".copilot-resizer" in copilot_css
+        assert ".platform-call-fold" in copilot_css
+        assert ".app-shell.copilot-split" in copilot_css
+
+    def test_futures_template_mounts_unified_rail_and_copilot(self):
+        futures_html = Path("templates/futures.html").read_text(encoding="utf-8")
+        futures_copilot = Path("static/js/futures-copilot.js").read_text(encoding="utf-8")
+
+        assert 'class="icon-rail"' in futures_html
+        assert 'id="futuresRailCollapseBtn"' in futures_html
+        assert 'id="futuresTopPersonaBtn"' in futures_html
+        assert "futures-copilot.js?v=141" in futures_html
+        assert "PrismFuturesCopilot" in futures_copilot
+        assert "futuresPersonaDialog" in futures_copilot
+        assert "futuresReaderDialog" in futures_copilot
+        assert "/api/agent/chat/stream" in futures_copilot
+        assert "page_context" in futures_copilot
+
+
+class TestSmartScroll:
+    """Smart scroll behavior: don't force-scroll when user reads history."""
+
+    def test_user_scrolled_up_flag_in_js(self):
+        js_content = ""
+        for f in ("app.core.js", "app.chat.js"):
+            js_content += Path("static", "js", f).read_text(encoding="utf-8")
+        assert "_userScrolledUp" in js_content
+        assert "_scrollToBottom" in js_content
+        assert "dist > 80" in js_content
+
+    def test_stop_button_in_js(self):
+        js_content = Path("static/js/app.chat.js").read_text(encoding="utf-8")
+        assert "stopStream" in js_content
+        assert "AbortError" in js_content
+
+    def test_error_classification_in_js(self):
+        js_content = Path("static/js/app.chat.js").read_text(encoding="utf-8")
+        assert "AbortError" in js_content, "Must handle AbortError (stop generation)"
+        assert "网络连接失败" in js_content, "Must show network error message"
+
+
+class TestNoFlickerStable:
+    """Verify removal of stable/live split prevents flicker."""
+
+    def test_no_stable_key_in_js(self):
+        js_content = ""
+        for f in ("app.util.js", "app.core.js", "app.chat.js", "app.market.js"):
+            js_content += Path("static", "js", f).read_text(encoding="utf-8")
+        assert "_stableKey" not in js_content
+        assert "_stableHtml" not in js_content
+
+    def test_prism_byline_in_js(self):
+        js_content = ""
+        for f in ("app.util.js", "app.core.js", "app.chat.js", "app.market.js"):
+            js_content += Path("static", "js", f).read_text(encoding="utf-8")
+        assert "Prism" in js_content
+        assert "CapitalLens" not in js_content
+
+
+class TestReleaseMarkdownRendering:
+    """Release notes should render markdown instead of escaped source text."""
+
+    def test_release_notes_use_safe_inline_markdown_renderer(self):
+        js = Path("static/js/app.release.js").read_text(encoding="utf-8")
+        assert "_renderReleaseMarkdownInline" in js
+        assert "marked.parseInline" in js
+        assert "sanitizeHtml" in js
+        assert "_renderReleaseMarkdownInline(item)" in js
+
+
+class TestChatObjectArtifactGuard:
+    """Live chat rendering should strip Claude CLI object placeholders."""
+
+    def test_chat_renderer_exposes_clean_stringifier(self):
+        js = Path("static/js/app.chat-render.js").read_text(encoding="utf-8")
+        assert "v0.19.7" in js
+        assert "clean: _clean" in js
+        assert "typeof v === 'string') return _stripObjectArtifacts(v, false)" in js
+        assert "return _stripObjectArtifacts(_s(t), true)" in js
+
+    def test_streaming_path_uses_cleaned_chunks(self):
+        js = Path("static/js/app.chat.js").read_text(encoding="utf-8")
+        assert "ChatRender.clean(p.error)" in js
+        assert "var toolName = ChatRender.clean(p.tool || '')" in js
+        assert "var td = ChatRender.clean(p.d || '')" in js
+        assert "if (tc) chunks.push({t:'think',c:tc});" in js
+        assert "if (pt) {" in js
+
+    def test_streaming_path_has_stall_guard(self):
+        js = Path("static/js/app.chat.js").read_text(encoding="utf-8")
+        assert "lastStreamEventAt" in js
+        assert "streamTimedOut" in js
+        assert "超过 7 分钟没有收到新内容" in js
+        assert "reader.cancel()" in js
+
+    def test_cached_and_rendered_artifacts_are_sanitized(self):
+        core = Path("static/js/app.core.js").read_text(encoding="utf-8")
+        chat = Path("static/js/app.chat.js").read_text(encoding="utf-8")
+        assert "var DB_VERSION = 3" in core
+        assert "cacheKey(id)" in core
+        assert "String(App.user || '')" in core
+        assert "db.deleteObjectStore('convs')" in core
+        assert "_sanitizeConvPayload(req.result.data)" in core
+        assert "_sanitizeConvPayload(data)" in core
+        assert "_sanitizeRenderedArtifacts" in chat
+        assert "document.createTreeWalker" in chat
+        assert "ChatRender.clean(n.nodeValue)" in chat
+        assert "this._sanitizeRenderedArtifacts(el)" in chat
+        assert "this._sanitizeRenderedArtifacts(bubbles[idx])" in chat
+
+    def test_message_scroll_area_keeps_composer_clearance(self):
+        css = Path("static/css/app.css").read_text(encoding="utf-8")
+        assert ".msgs{height:100%;overflow-y:auto;padding:var(--sp-8) 0 36px" in css
+        assert "scroll-padding-bottom:36px" in css
+
+    def test_footer_icons_are_not_replaced_by_text(self):
+        core = Path("static/js/app.core.js").read_text(encoding="utf-8")
+        css = Path("static/css/app.css").read_text(encoding="utf-8")
+        assert "link.setAttribute('data-count', String(trash.length))" in core
+        assert "link.textContent = '回收站" not in core
+        assert ".footer-icon-link[data-count]:after" in css
+
+
+class TestServiceWorkerCachePolicy:
+    """Deploys should not get stuck behind an old cached app shell."""
+
+    def test_sw_uses_network_first_for_navigation(self):
+        sw = Path("static/sw.js").read_text(encoding="utf-8")
+        assert "prism-workbench-v141" in sw
+        assert "ev.request.mode === 'navigate'" in sw
+        assert "cache: 'no-store'" in sw
+        assert "client.navigate(client.url)" not in sw
+        assert "'/'" not in sw.split("const PRE_CACHE = [", 1)[1].split("];", 1)[0]
+
+    def test_app_registers_sw_without_update_cache(self):
+        js = Path("static/js/app.core.js").read_text(encoding="utf-8")
+        assert "updateViaCache: 'none'" in js
+        assert "window.location.reload()" not in js
+
+
+def test_indicator_overlay_reuses_current_chart_kline():
+    """Indicator overlay should not refetch K-line when the chart already has data."""
+    template = Path("templates/app.html").read_text(encoding="utf-8")
+    js = Path("static/js/app.indicators.js").read_text(encoding="utf-8")
+    chart_js = Path("static/js/app.indicator-chart.js").read_text(encoding="utf-8")
+    market_js = Path("static/js/app.market.js").read_text(encoding="utf-8")
+    sw = Path("static/sw.js").read_text(encoding="utf-8")
+
+    assert "app.indicator-chart.js?v=141" in template
+    assert "app.indicator-chart.js" in sw
+    assert "payload.kline" in js
+    assert "this._lastKline.slice(-200)" in js
+    assert 'period = this._currentPeriod || "1d"' in js
+    assert "params: params || {}" in js
+    assert "_indicatorTracks" in js
+    assert "_updateIndicatorParam" in js
+    assert "App.renderKlineChart = function(container, kline)" in chart_js
+    assert "tooltipFormatter" in chart_js
+    assert "MA60" in chart_js
+    assert "振幅" in chart_js
+    assert "markLine" in chart_js
+    assert "_toggleKlineFullscreen" in market_js
+    assert "_resetKlineZoom" in market_js
+    assert "markArea" in chart_js
+    assert "指标信号" in chart_js
+
+
+def test_stock_chain_anchor_folded_into_market_cockpit():
+    """Actionable industry & commodity-futures anchors live directly inside single-stock view."""
+    market = Path("static/js/app.market.js").read_text(encoding="utf-8")
+    assert "_renderStockIndustryAnchor" in market
+    assert "/api/industry/graph?ticker=" in market
+    assert "产业链与商品锚" in market
+    assert "_showMarketEmpty" in market
+
+
+def test_client_diagnostics_static_contract():
+    template = Path("templates/app.html").read_text(encoding="utf-8")
+    diagnostics = Path("static/js/app.diagnostics.js").read_text(encoding="utf-8")
+    sw = Path("static/sw.js").read_text(encoding="utf-8")
+
+    assert "app.diagnostics.js?v=141" in template
+    assert "render_object_artifact" in diagnostics
+    assert "chart_blank" in diagnostics
+    assert "/api/diagnostics/client" in diagnostics
+    assert "app.diagnostics.js" in sw
+
+
+def test_privacy_safe_ui_activity_tracking_contract():
+    activity = Path("server/activity.py").read_text(encoding="utf-8")
+    main = Path("server/main.py").read_text(encoding="utf-8")
+    core = Path("static/js/app.core.js").read_text(encoding="utf-8")
+    market = Path("static/js/app.market.js").read_text(encoding="utf-8")
+
+    assert '"/api/activity"' in activity
+    assert "_UI_ACTIVITY_RULES" in main
+    assert "ActivityTrackRequest" in main
+    assert "_trackUiEvent" in core
+    assert "watchlist_add" in market
+    assert "watchlist_remove" in market
+
+
+def test_login_and_app_share_release_cache_version():
+    login = Path("templates/login.html").read_text(encoding="utf-8")
+    app = Path("templates/app.html").read_text(encoding="utf-8")
+
+    assert "app.css?v=141" in login
+    assert "app.css?v=141" in app
+
+
+def test_market_sidebar_search_discards_stale_responses():
+    js = Path("static/js/app.market.js").read_text(encoding="utf-8")
+    assert "_marketSearchSeq" in js
+    assert "_marketSidebarRunSearch(q, seq)" in js
+    assert "seq && seq !== this._marketSearchSeq" in js
+    assert "document.getElementById('marketSidebarQ')" in js
+
+
+def test_watchlist_add_remove_static_contract():
+    market = Path("static/js/app.market.js").read_text(encoding="utf-8")
+    css = Path("static/css/app.css").read_text(encoding="utf-8")
+
+    assert "_normalizeTicker" in market
+    assert "SH|SZ|BJ" in market
+    assert "_normalizeWatchEntry" in market
+    assert "return true;" in market
+    assert "return false;" in market
+    assert "ev.target.closest('.market-hit__add')" in market
+    assert "addBtn.disabled = true" in market
+    assert "移除自选" in market
+    assert ".watchlist-item{display:grid;grid-template-columns:auto 1fr auto auto auto" in css
+    assert ".watchlist-item__del{width:22px;height:22px;display:flex" in css
+
+
+def test_full_market_screener_workbench_static_contract():
+    html = Path("templates/app.html").read_text(encoding="utf-8")
+    screener = Path("static/js/app.screener.js").read_text(encoding="utf-8")
+    indicators = Path("static/js/app.indicators.js").read_text(encoding="utf-8")
+    css = Path("static/css/app.css").read_text(encoding="utf-8")
+    sw = Path("static/sw.js").read_text(encoding="utf-8")
+
+    assert 'data-market-tab="quote"' in html
+    assert 'data-market-tab="screener"' in html
+    assert 'data-market-tab="library"' in html
+    assert 'id="marketScanIndicator"' in html
+    assert 'id="marketScanParams"' in html
+    assert 'id="marketScanResults"' in html
+    assert 'id="marketScanHistory"' in html
+    assert 'id="indicatorPreview"' in html
+    assert "app.screener.js?v=141" in html
+    assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
+    assert '"/api/indicators/universe/summary?markets="' in screener
+    assert "_scheduleScanPoll" in screener
+    assert "preferredDirection" in screener
+    assert "_planTurnover" in indicators
+    assert "_indicatorParamControl" in indicators
+    assert "_indicatorParamBlocks" in indicators
+    assert "_indicatorLogicText" in indicators
+    assert "data-param-preset" in indicators
+    assert "data-param-set" in indicators
+    assert "核心指标参数" in indicators
+    assert "扫描方案" in indicators
+    assert "_scannerLogicText" in screener
+    assert "_renderMarketScanResults" in screener
+    assert "_renderScannerParams" in screener
+    assert "_openIndicatorEditor" in indicators
+    assert 'method: editing ? "PUT" : "POST"' in indicators
+    assert ".market-screener-layout" in css
+    assert ".indicator-library-layout" in css
+    assert ".mi-param-choices" in css
+    assert ".mi-family-line" in css
+    assert ".mi-config-section" in css
+    assert ".market-scan-logic" in css
+    assert ".market-detail-layout" in css
+    assert ".market-scan-row-head{display:none}" in css
+    assert "app.screener.js" in sw
+
+
+def test_mobile_and_foldable_layout_static_contract():
+    html = Path("templates/app.html").read_text(encoding="utf-8")
+    css = Path("static/css/app.css").read_text(encoding="utf-8")
+    core = Path("static/js/app.core.js").read_text(encoding="utf-8")
+
+    assert "viewport-fit=cover" in html
+    assert "App.toggleSidebar()" in html
+    assert "@media(max-width:1180px)" in css
+    assert "@media(max-width:900px)" in css
+    assert ".icon-rail{position:fixed" in css
+    assert ".app-shell.mobile-sidebar-open .sidebar" in css
+    assert "env(safe-area-inset-bottom)" in css
+    assert ".reports-lib" in css
+    assert "_isCompactViewport" in core
+    assert "toggleSidebar: function(force)" in core
+    assert "mobile-sidebar-open" in core
+    assert "this._closeMobileSidebar();" in core
+
+
+def test_kline_periods_and_a_share_color_semantics_static_contract():
+    market = Path("static/js/app.market.js").read_text(encoding="utf-8")
+    chart = Path("static/js/app.indicator-chart.js").read_text(encoding="utf-8")
+    css = Path("static/css/app.css").read_text(encoding="utf-8")
+
+    assert "_klinePeriodLimits: {'1d':120, '1w':104, '1m':60}" in market
+    assert "'1d': [[60,'3月'],[120,'半年'],[250,'1年'],[500,'全部']]" in market
+    assert "'1w': [[26,'半年'],[52,'1年'],[104,'2年'],[260,'5年']]" in market
+    assert "'1m': [[12,'1年'],[24,'2年'],[60,'5年'],[120,'10年']]" in market
+    assert "rise:'#d6332f'" in market
+    assert "fall:'#1f9d83'" in market
+    assert "color: P.rise, color0: P.fall" in chart
+    assert "closes[i] >= +kline[i].open ? P.rise : P.fall" in chart
+    assert ".quote-chip--up .quote-chip__pct{color:#cf222e" in css
+    assert ".quote-chip--down .quote-chip__pct{color:#1a7f37" in css
+    assert ".watchlist-item__pct--up{color:#cf222e" in css
+    assert ".watchlist-item__pct--down{color:#1a7f37" in css
+
+
+def test_composite_indicator_builder_static_contract():
+    html = Path("templates/app.html").read_text(encoding="utf-8")
+    indicators = Path("static/js/app.indicators.js").read_text(encoding="utf-8")
+    css = Path("static/css/app.css").read_text(encoding="utf-8")
+    metadata = Path("server/indicators/metadata.py").read_text(encoding="utf-8")
+
+    assert "5日线上穿10日线，10日线上穿20日线" in html
+    assert "信号回溯" in html
+    assert "_indicatorConditionHtml" in indicators
+    assert "data-indicator-conditions" in indicators
+    assert "全部满足 AND" in indicators
+    assert '"ma_stack_volume"' in metadata
+    assert '"sync_window"' in metadata
+    assert '"baseline_window"' in metadata
+    assert ".mi-condition-list" in css
+    assert ".mi-condition-row" in css
+
+
+def test_chat_inline_report_reader_contract():
+    chat = Path("static/js/app.chat.js").read_text(encoding="utf-8")
+    renderer = Path("static/js/app.chat-render.js").read_text(encoding="utf-8")
+    css = Path("static/css/app.css").read_text(encoding="utf-8")
+    from server.agent.api import event_payload
+
+    assert "_reportFilesForMessage" in chat
+    assert "_compactDeliveredReportText" in chat
+    assert "_inlineReportCard" in chat
+    assert "_toggleInlineReport" in chat
+    assert 'sandbox="allow-scripts"' in chat
+    assert (
+        "allow-same-origin" not in chat[chat.index("_inlineReportCard") : chat.index("_toggleInlineReport")]
+    )
+    assert "分析过程" in renderer
+    assert ".chat-inline-report" in css
+    assert ".chat-inline-report-body" in css
+    payload = event_payload(
+        {
+            "type": "research_finalized",
+            "seq": 2,
+            "status": "completed",
+            "ui": {"report_files": [], "report_status": "unreviewed"},
+        },
+        {"run_id": "native-run", "conv_id": "native-conv", "workflow": "research"},
+    )
+    assert payload["report_files"] == []
+    assert payload["report_status"] == "unreviewed"
+    assert payload["agent"]["engine"] == "prism-native"
