@@ -49,7 +49,7 @@ jobs:
           package-manager-cache: false
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -103,7 +103,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
