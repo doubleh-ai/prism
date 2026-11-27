@@ -34,7 +34,7 @@ CFFEX `TS`、SHFE `AL/ZN/NI/AG/RU/BU`、INE `NR/LU`），来源、回溯起点�
 | 环境 | 位置与工具 | 网络出口 | 说明 |
 |---|---|---|---|
 | 本地开发环境 | macOS、curl 8.7.1、仓库 Python 3.12.13（httpx 0.25.2、requests 2.34.2） | 经代理网络出口访问 | 只读探测脚本只写 `/tmp` |
-| 云服务器环境 | Linux（国内云主机）、Python 3.12.3、curl 8.5.0 | 真实 IPv4 59.44.106.20 直连 | 只读探测；未修改运行代码、配置或数据 |
+| 云服务器环境 | Linux（国内云主机）、Python 3.12.3、curl 8.5.0 | 真实 IPv4 203.0.113.20 直连 | 只读探测；未修改运行代码、配置或数据 |
 
 数据日期为最近交易日 **2026-11-20**。所有状态码均为该次实测结果；`412` 响应正文和
 cookie 每次不同，不能把字节数当作稳定特征。
@@ -221,7 +221,7 @@ cookie 每次不同，不能把字节数当作稳定特征。
 | 15 首页 | `http://www.dce.com.cn/` | 412 / 2,599 B | 412 / 2,576 B | 整站挑战，不是单接口 |
 | 16 新闻页 | `/dalianshangpin/index.html` | 412 / 2,663 B | 412 / 2,664 B | 同上 |
 | 17 旧报表页 | `/publicweb/quotesdata/dayQuotesCh.html` | 412 / 2,768 B | 412 / 2,672 B | 同上 |
-| 18 真实 IPv4 直连 | `http://59.44.106.20/...` + `Host: www.dce.com.cn` | —（本地为代理伪 IP） | 412 / 3,201 B，正文含 `$_ts` | 源站行为，排除 DNS/CDN 干扰 |
+| 18 真实 IPv4 直连 | `http://203.0.113.20/...` + `Host: www.dce.com.cn` | —（本地为代理伪 IP） | 412 / 3,201 B，正文含 `$_ts` | 源站行为，排除 DNS/CDN 干扰 |
 | 19 旧门户 | `http://portal.dce.com.cn/...` | curl 失败（Empty reply from server） | curl 失败 | 该主机不可用 |
 
 补充观测：
