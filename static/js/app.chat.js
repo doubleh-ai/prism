@@ -1083,6 +1083,20 @@ Object.assign(App, {
               if (toolName==='AskUserQuestion'&&p.ask) chunks.push({t:'ask',c:toolName,q:p.ask,opts:p.opts||[]});
               else { var td = ChatRender.clean(p.d || ''); chunks.push({t:'tool',c:toolName,n:ChatRender.stringify(p.n||''),d:td}); }
             }
+            if (p.fold_to_think) {
+              var foldIdx = chunks.length - 1;
+              var foldedParts = [];
+              while (foldIdx >= 0 && chunks[foldIdx] && chunks[foldIdx].t === 'text') {
+                foldedParts.unshift(chunks[foldIdx].c || '');
+                chunks.pop();
+                foldIdx -= 1;
+              }
+              var foldedText = foldedParts.join('').trim();
+              if (foldedText) chunks.push({t:'think', c:foldedText});
+              full = chunks.filter(function(item){ return item && item.t === 'text'; }).map(function(item){ return item.c || ''; }).join('');
+              stream.msgs[msgIdx]._displayLen = full.length;
+              stream.msgs[msgIdx]._lastSig = null;
+            }
             if (p.think) { var tc = ChatRender.clean(p.think || ''); if (tc) chunks.push({t:'think',c:tc}); }
             if (p.text) {
               var pt = fixPunct(ChatRender.stringify(p.text || ''));
@@ -1401,6 +1415,9 @@ Object.assign(App, {
         App.msgs[curMsgIdx]._lastSig = null;
         App.renderOne(curMsgIdx);
       }
+    }
+    if (this._mode === 'market' && this._currentTicker && this._renderStockIndustryAnchor) {
+      this._renderStockIndustryAnchor(this._currentTicker);
     }
   },
 

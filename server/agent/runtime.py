@@ -320,10 +320,128 @@ def _error_message(code: str, limit_reason: str | None = None) -> str:
         "provider_auth_error": "模型认证失败，请管理员检查当前模型配置。已保存本轮进度。",
         "provider_rate_limited": "模型服务暂时限流，本轮没有自动重试。已保存进度。",
         "provider_timeout": "模型响应超时，已保存本轮进度。",
+        "provider_protocol_error": "模型返回流格式异常（常见于输出配额过紧导致推理链截断），已保存本轮已采集资料。",
+        "provider_http_error": "模型服务端返回异常响应，已保存本轮进度。",
         "provider_stream_truncated": "模型连接提前结束，已保存收到的内容，尚不能视为完整回答。",
         "budget_exceeded": "本轮已达到研究时间或用量上限，已保存结果与未完成事项。",
         "output_incomplete": "模型未完成回答，已保存已收到的内容。",
     }.get(code, "本轮研究未完成，已保存进度。请查看记录后决定是否继续研究。")
+
+
+_COMPACT_EXCLUDED_TOOLS = frozenset({"source_original", "research_record_claims"})
+_COMPACT_PREFETCH_TIMEOUT = 2.5
+
+
+async def _prefetch_page_context_brief(page_ctx: dict | None) -> str:
+    """Best-effort, bounded zero-turn market & industry context digest for Fast Copilot."""
+    if not isinstance(page_ctx, dict) or not page_ctx:
+        return ""
+    lines: list[str] = []
+    ticker = str(page_ctx.get("ticker") or "").strip()
+    symbol = str(page_ctx.get("symbol") or "").strip().upper()
+    period = str(page_ctx.get("period") or "1d").strip()
+    if period not in {"1d", "1w", "1m"}:
+        period = "1d"
+
+    if re.fullmatch(r"\d{6}", ticker):
+        from ..futures_equity_bridge import INDUSTRY_TO_FUTURES
+        from ..market.factory import get_chain
+
+        chain = get_chain()
+
+        async def _safe(coro):
+            try:
+                return await asyncio.wait_for(coro, timeout=_COMPACT_PREFETCH_TIMEOUT)
+            except Exception:
+                return None
+
+        quote_res, fund_res, kline_res = await asyncio.gather(
+            _safe(chain.get_quote(ticker)),
+            _safe(chain.get_fundamentals(ticker)),
+            _safe(chain.get_kline(ticker, period, 60)),
+        )
+        if quote_res:
+            quote, stale = quote_res
+            name = quote.name or page_ctx.get("name") or ticker
+            turnover_yi = round(quote.turnover / 1e8, 2) if quote.turnover else None
+            lines.append(
+                f"- 实时行情（{quote.source}{'·缓存' if stale else ''}）：{name}({ticker}) 现价 {quote.price:.2f} 元，"
+                f"涨跌幅 {quote.change_pct:+.2f}%，开 {quote.open or '-'} / 高 {quote.high or '-'} / 低 {quote.low or '-'}"
+                + (f"，成交额 {turnover_yi} 亿元" if turnover_yi is not None else "")
+            )
+        if fund_res:
+            fund, _ = fund_res
+            parts = []
+            if fund.pe_ttm is not None:
+                parts.append(f"PE(TTM) {fund.pe_ttm:.2f}")
+            if fund.pe_static is not None:
+                parts.append(f"PE(静) {fund.pe_static:.2f}")
+            if fund.pb is not None:
+                parts.append(f"PB {fund.pb:.2f}")
+            if fund.market_cap is not None:
+                parts.append(f"总市值 {fund.market_cap / 1e8:.2f} 亿元")
+            if parts:
+                lines.append(f"- 实时估值（{fund.source}）：" + "，".join(parts))
+        if kline_res:
+            bars, _ = kline_res
+            if bars:
+                closes = [b.close for b in bars]
+                hi = max(b.high for b in bars)
+                lo = min(b.low for b in bars)
+                ma5 = sum(closes[-5:]) / min(5, len(closes))
+                ma20 = sum(closes[-20:]) / min(20, len(closes))
+                pos_pct = (closes[-1] - lo) / (hi - lo) * 100 if hi > lo else 50.0
+                lines.append(
+                    f"- K线结构（{period} · 近{len(bars)}根）：最新收 {closes[-1]:.2f}，区间高 {hi:.2f} / 低 {lo:.2f} "
+                    f"（位于区间 {pos_pct:.0f}% 分位），MA5={ma5:.2f} / MA20={ma20:.2f}"
+                )
+        try:
+            with get_db() as db:
+                node = db.execute(
+                    "SELECT id, name, category, tier, description FROM industry_nodes WHERE source_ticker=? LIMIT 1",
+                    [ticker],
+                ).fetchone()
+                if node:
+                    tier_label = {0: "上游", 1: "中游", 2: "下游"}.get(node["tier"], "链内")
+                    peers = [
+                        f"{r['name']}({r['source_ticker']})" if r["source_ticker"] else r["name"]
+                        for r in db.execute(
+                            "SELECT name, source_ticker FROM industry_nodes WHERE category=? AND id!=? ORDER BY tier, name LIMIT 8",
+                            [node["category"], node["id"]],
+                        ).fetchall()
+                    ]
+                    futs = INDUSTRY_TO_FUTURES.get(node["category"], [])
+                    fut_text = "、".join(f"{f['name']}({f['symbol']}:{f['role']})" for f in futs[:4])
+                    lines.append(
+                        f"- 预置产业链节点：赛道【{node['category']}】· {tier_label}（{node['description'] or '核心节点'}）"
+                        + (f"；同链核心节点：{'、'.join(peers)}" if peers else "")
+                        + (f"；关联大宗商品锚：{fut_text}" if fut_text else "")
+                    )
+        except Exception:
+            pass
+
+    if re.fullmatch(r"[A-Z]{1,3}", symbol):
+        try:
+            from ..futures_auto_engine import build_futures_intelligence
+
+            intel = await asyncio.wait_for(
+                asyncio.to_thread(build_futures_intelligence, symbol),
+                timeout=_COMPACT_PREFETCH_TIMEOUT,
+            )
+            if isinstance(intel, dict) and intel.get("symbol"):
+                sig = intel.get("signal") or {}
+                lines.append(
+                    f"- 期货全景（{symbol}）：最新价 {sig.get('latest_price', '-')}，"
+                    f"近5年分位 {sig.get('hist_pct', '-')}%，同期季节性分位 {sig.get('seasonal_pct', '-')}%"
+                )
+        except Exception:
+            pass
+
+    if not lines:
+        return ""
+    return "\n【当前页面已预注的实时平台快照（可直接引用，无需重复调接口查行情/基本面）】\n" + "\n".join(
+        lines
+    )
 
 
 def _evidence_blocked_message(revision: dict) -> str:
@@ -695,14 +813,24 @@ class NativeAgent:
                 outcome.observer_only = True
                 return outcome
             profile = store.get_run(user, run_id).get("profile", {})
+            page_ctx = profile.get("page_context") if isinstance(profile, dict) else None
+            compact_mode = isinstance(page_ctx, dict) and page_ctx.get("response_mode") == "compact"
             anchor = ensure_dialogue(user, run)
             research = build_research_context(run_id=run_id, engine="prism-native")
             research["ledger_available"] = True
             research["profile"] = profile
+            research["response_mode"] = "compact" if compact_mode else "deep"
             create_research_run(user, run["conv_id"], run["question"], research)
             set_run_status(user, run_id, "discovering")
-            emit("research_started", {"research": research, "status": "整理问题与已有研究"})
+            emit(
+                "research_started",
+                {
+                    "research": research,
+                    "status": "加载实时上下文与检索" if compact_mode else "整理问题与已有研究",
+                },
+            )
             chunks.append({"t": "research", "research": research})
+            page_context_brief = await _prefetch_page_context_brief(page_ctx) if compact_mode else ""
             messages = _history(user, run["conv_id"], anchor["db_message_id"])
             messages.append({"role": "user", "content": run["question"]})
             evidence = EvidenceTracker(run_id)
@@ -714,6 +842,11 @@ class NativeAgent:
                 )
                 search_available = provider.supports_search(model_cfg)
                 definitions = tools.definitions()
+                if compact_mode:
+                    definitions = [
+                        spec for spec in definitions if spec.get("name") not in _COMPACT_EXCLUDED_TOOLS
+                    ]
+                loop_model_calls = min(limits.model_calls, 5) if compact_mode else limits.model_calls
                 finished = False
                 token_continuations = 0
                 wrap_up = wrap_up_announced = False
@@ -722,6 +855,7 @@ class NativeAgent:
                 claim_retry_pending = False
                 claim_retry_mode = None
                 review_prepared_after_upgrade = False
+                folded_notes: list[str] = []
 
                 async def review_round(batches, number):
                     """Run every bounded review batch in its own 30-second call.
@@ -1000,7 +1134,7 @@ class NativeAgent:
                         review_skip = "run_budget"
                     return review_pending
 
-                for index in range(limits.model_calls):
+                for index in range(loop_model_calls):
                     context_used = len(json.dumps(messages, ensure_ascii=False))
                     if context_used > limits.context_characters:
                         # A single turn can still jump past the ceiling. Drop the
@@ -1013,16 +1147,13 @@ class NativeAgent:
                     # Near the context ceiling, stop collecting evidence and make
                     # the next call write the report instead of failing the run.
                     # This is a soft threshold: 3/4 of the hard context budget.
-                    # The same wrap-up starts when only three model calls remain,
-                    # so the bounded claim pass, the excerpt review (when the run
-                    # registered claims) and the report each own one call. A
-                    # budget-only wrap-up on the last permitted call could never
-                    # offer the claim tool and left a truncated report to die on
-                    # model_calls; two remaining calls forced the review to be
-                    # skipped as run_budget (production run e671f546). The first
-                    # call never wraps up: no evidence yet.
+                    # In deep mode, wrap-up starts when 3 calls remain so claim
+                    # pass, excerpt review and final report each own one call.
+                    # In compact Fast Copilot mode, there is no claim/review
+                    # overhead so wrap-up waits until the final turn.
+                    wrap_up_window = 1 if compact_mode else 3
                     wrap_up = context_used > limits.context_characters * 3 // 4 or (
-                        index > 0 and limits.model_calls - index <= 3
+                        index > 0 and loop_model_calls - index <= wrap_up_window
                     )
                     if wrap_up and not wrap_up_announced:
                         wrap_up_announced = True
@@ -1045,7 +1176,7 @@ class NativeAgent:
                     concluding = wrap_up or (
                         not reviewing
                         and (
-                            index == limits.model_calls - 1
+                            index == loop_model_calls - 1
                             or usage["tool_calls"] >= max(1, limits.tool_calls - 2)
                             or (index > 0 and end - time.monotonic() <= 45)
                         )
@@ -1072,22 +1203,20 @@ class NativeAgent:
                             run["model_id"],
                             expected_route_version=route["version"],
                         )
-                    # One bounded claim-registration pass: the model may call the
-                    # claim tool once before the answer-only wrap-up, so the report
-                    # numbers exist in research_claims when reconciliation runs.
-                    # Only offer it when the claim call and the review/report calls
-                    # after it fit the model-call, tool-call and wall budgets; a
-                    # budget or history fallback, the last permitted call and a
-                    # nearly exhausted wall clock keep the existing tool-free
-                    # wrap-up and degrade nothing beyond the current behaviour.
+                    # One bounded claim-registration pass (deep research only):
+                    # the model may call the claim tool once before the answer-only
+                    # wrap-up, so the report numbers exist in research_claims when
+                    # reconciliation runs. Compact Fast Copilot skips this pass to
+                    # deliver structured Chinese answers in seconds.
                     claim_pass = (
-                        concluding
+                        not compact_mode
+                        and concluding
                         and not concluding_fallback
                         and not reviewing
                         and (not claim_pass_offered or claim_retry_pending)
                         and not upgrade_round
                         # Keep the last permitted call for the report itself.
-                        and index <= limits.model_calls - 2
+                        and index <= loop_model_calls - 2
                         and usage["tool_calls"] < limits.tool_calls
                         and end - time.monotonic() > _CLAIM_PASS_MIN_REMAINING_SECONDS
                     )
@@ -1142,9 +1271,18 @@ class NativeAgent:
                         )
                     observed_searches = 0
                     requested, completed = [], None
+                    turn_text_start = len(full_text)
+                    turn_chunks_start = len(chunks)
                     clock = build_research_context()
-                    system = system_prompt(research, run["workflow"], search_available=call_search_available)
+                    system = system_prompt(
+                        research,
+                        run["workflow"],
+                        search_available=call_search_available,
+                        compact=compact_mode,
+                    )
                     system += profile_prompt(profile)
+                    if page_context_brief:
+                        system += page_context_brief
                     system += f"\n当前服务器时间：{clock['as_of']}；‘今天’以此为准，研究启动观察时点仍保留。"
                     if upgrade_round:
                         system += (
@@ -1164,14 +1302,14 @@ class NativeAgent:
                         else:
                             system += (
                                 "\n本轮进入收尾阶段，不再调用工具或继续搜索。基于已经取得的资料，"
-                                "直接回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
+                                "直接用简体中文回答用户问题，区分证据、阶段性判断和未知；列出尚未查证的关键缺口。"
                                 "资料不足时明确说明，不编造完整结论，不再描述下一步准备做什么。"
                             )
                     if wrap_up and not upgrade_round:
                         # The prompt above is shared with the call/time budget
                         # wrap-up; this sentence explains the context ceiling too.
                         system += "\n" + _CONTEXT_WRAP_UP
-                        if not claim_pass:
+                        if not claim_pass and not compact_mode:
                             system += "\n" + _WRAP_UP_VERIFICATION_PROMPT
                     request_messages = messages
                     call_end = end
@@ -1287,7 +1425,7 @@ class NativeAgent:
                             finished = True
                             break
                         if not upgrade_round and concluding and not claim_pass:
-                            if index == limits.model_calls - 1 and (full_text + pending).strip():
+                            if index == loop_model_calls - 1 and (full_text + pending).strip():
                                 # This was the report's only remaining call and
                                 # the model answered with text plus a stray tool
                                 # call. The report text already streamed; keep it
@@ -1299,10 +1437,22 @@ class NativeAgent:
                                 finished = True
                                 break
                             raise BudgetExceeded(
-                                "model_calls" if index == limits.model_calls - 1 else "tool_calls"
+                                "model_calls" if index == loop_model_calls - 1 else "tool_calls"
                             )
                         if not requested:
                             raise provider.ProviderError("provider_protocol_error")
+                        # Fold intermediate transitional chatter from tool-calling
+                        # turns out of the main answer body into collapsed process
+                        # notes so only the final answer renders as main prose.
+                        turn_text = full_text[turn_text_start:].strip()
+                        if turn_text:
+                            folded_notes.append(turn_text)
+                            full_text = full_text[:turn_text_start]
+                            rebuilt_tail = [
+                                item for item in chunks[turn_chunks_start:] if item.get("t") != "text"
+                            ]
+                            chunks[turn_chunks_start:] = [{"t": "think", "c": turn_text}, *rebuilt_tail]
+                            emit("turn_folded", {"fold_to_think": True})
                         if claim_pass and any(
                             call.get("name") != "research_record_claims" for call in requested
                         ):
@@ -1426,15 +1576,16 @@ class NativeAgent:
                                     await review_round(review_packets, index + 1)
                             finished = True
                             break
-                        if not review_attempted and registered_here:
+                        if not compact_mode and not review_attempted and registered_here:
                             prepare_review(index)
                     elif completed["stop_reason"] in {"end_turn", "stop_sequence", "refusal"}:
                         rows = []
                         if (
-                            not upgrade_round
+                            not compact_mode
+                            and not upgrade_round
                             and run["workflow"] in _UPGRADE_PASS_WORKFLOWS
                             and full_text.strip()
-                            and index < limits.model_calls - 1
+                            and index < loop_model_calls - 1
                             and usage["tool_calls"] < limits.tool_calls
                             and end - time.monotonic() > model_review.MIN_REMAINING_SECONDS
                             and not cancel.is_set()
@@ -1472,14 +1623,24 @@ class NativeAgent:
         except RunStopped:
             outcome.status, outcome.error_code = "cancelled", "cancelled_by_user"
         except BudgetExceeded as error:
-            progressed = full_text or pending or usage["server_search_calls"] or usage["tool_calls"] or refs
+            progressed = (
+                full_text
+                or pending
+                or folded_notes
+                or usage["server_search_calls"]
+                or usage["tool_calls"]
+                or refs
+            )
             outcome.status, outcome.error_code = (
                 "partial" if progressed else "failed",
                 "budget_exceeded",
             )
             outcome.limit_reason = error.reason
         except provider.ProviderError as error:
-            outcome.status, outcome.error_code = "partial" if full_text or pending else "failed", error.code
+            outcome.status, outcome.error_code = (
+                "partial" if full_text or pending or folded_notes else "failed",
+                error.code,
+            )
             outcome.provider_diagnostic = error.diagnostic or None
         except HTTPException as error:
             if error.status_code in {401, 404}:
@@ -1551,6 +1712,7 @@ class NativeAgent:
                     full_text,
                     error=outcome.status in {"failed", "partial"},
                     cancelled=outcome.status == "cancelled",
+                    enforce_original_gate=not compact_mode,
                 )
                 reconciliation = revision.get("claim_reconciliation") or {}
                 research.update(

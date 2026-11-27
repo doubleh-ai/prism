@@ -159,3 +159,36 @@ async def test_quote_unit_conversion_keeps_missing_and_zero_values(network, raw)
     quote = await tencent_provider.TencentProvider().get_quote("002050")
     assert quote.volume == 0
     assert quote.turnover == 0
+
+
+async def test_tencent_fundamentals_parses_live_valuation_fields(network):
+    fields = [""] * 85
+    fields[0] = "1"
+    fields[1] = "工业富联"
+    fields[2] = "601138"
+    fields[3] = "44.74"
+    fields[30] = "20261127161442"
+    fields[39] = "16.70"
+    fields[45] = "8878.25"
+    fields[46] = "4.66"
+    fields[53] = "25.16"
+    fields[82] = "CNY"
+    payload = 'v_sh601138="' + "~".join(fields) + '";'
+    network["handler"] = lambda request: httpx.Response(200, content=payload.encode("gbk"))
+
+    fund = await tencent_provider.TencentProvider().get_fundamentals("601138")
+    assert fund.ticker == "601138"
+    assert fund.name == "工业富联"
+    assert fund.pe_ttm == 16.70
+    assert fund.pe_static == 25.16
+    assert fund.pb == 4.66
+    assert fund.market_cap == pytest.approx(8878.25 * 1e8)
+    assert fund.currency == "CNY"
+    assert fund.source == "tencent"
+
+
+async def test_tencent_fundamentals_unavailable_when_valuation_fields_blank(network):
+    payload = 'v_sz002050="51~三花智控~002050~45.74~45.50~45.80";'
+    network["handler"] = lambda request: httpx.Response(200, content=payload.encode("gbk"))
+    with pytest.raises(ProviderUnavailable):
+        await tencent_provider.TencentProvider().get_fundamentals("002050")

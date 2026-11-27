@@ -711,14 +711,18 @@ Object.assign(App, {
     if (!r.ok) { wrap.innerHTML = '<h4>基本面</h4><div class="market-fund-unavailable">基本面数据暂不可用</div>'; return; }
     var f = await r.json();
     if (sequence !== this._marketSelectionSeq || ticker !== this._currentTicker) return;
-    function cell(label, val) {
-      var v = (val == null || val === '') ? '—' : esc(Number(val).toFixed(2));
+    function cell(label, val, suffix) {
+      var v = (val == null || val === '') ? '—' : esc(Number(val).toFixed(2) + (suffix || ''));
       return '<div class="market-fund-cell"><span class="market-fund-cell__label">' + label + '</span><span class="market-fund-cell__val">' + v + '</span></div>';
     }
-    var hasAny = (f.pe_ttm != null || f.pb != null || f.pe_static != null || f.ps_ttm != null);
+    var mcapYi = (f.market_cap != null && f.market_cap > 0) ? (Number(f.market_cap) / 1e8) : null;
+    var hasAny = (f.pe_ttm != null || f.pb != null || f.pe_static != null || f.ps_ttm != null || mcapYi != null);
+    var fourthCell = f.ps_ttm != null
+      ? cell('PS(TTM)', f.ps_ttm)
+      : cell('总市值', mcapYi, '亿');
     wrap.innerHTML = '<h4>基本面</h4>' +
       (hasAny
-        ? '<div class="market-fund-grid">' + cell('PE(TTM)', f.pe_ttm) + cell('PE(静态)', f.pe_static) + cell('PB', f.pb) + cell('PS(TTM)', f.ps_ttm) + '</div>' +
+        ? '<div class="market-fund-grid">' + cell('PE(TTM)', f.pe_ttm) + cell('PE(静态)', f.pe_static) + cell('PB', f.pb) + fourthCell + '</div>' +
           '<div class="market-qc-src">数据来源: ' + esc(f.source || '—') +
           '<br>财报期间：'+esc(f.reporting_period || '未知')+' · 币种/单位：'+esc((f.currency || '未知')+' / '+(f.monetary_unit || '未知'))+
           '<br>口径：'+esc(f.accounting_scope || '未知')+' · 采集：'+esc(ChatRender.formatTime(f.retrieved_at || f.timestamp))+'</div>'
@@ -739,7 +743,27 @@ Object.assign(App, {
       var d = await r.json();
       var nodes = d.nodes || [];
       if (!nodes.length) {
-        box.innerHTML = '<h4>产业链与商品锚</h4><div style="font-size:12px;color:var(--text-muted,#687076);">未命中预置种子节点 · <button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请检索最新公开披露，梳理 ' + escAttr((this._currentName || '') + '（' + cleanCode + '）') + ' 的真实上下游客户供应商与原材料价格敏感度。\',\'bottleneck-hunter\')">✦ 让 Agent 查上下游</button></div>';
+        var discoveredHtml = '';
+        try {
+          var rr = await this.api('/api/industry/research?q=' + encodeURIComponent(cleanCode) + '&limit=6');
+          if (sequence !== this._marketSelectionSeq || ticker !== this._currentTicker) return;
+          if (rr.ok) {
+            var rd = await rr.json();
+            var rels = Array.isArray(rd.edges) ? rd.edges : (Array.isArray(rd.relations) ? rd.relations : []);
+            if (rels.length) {
+              discoveredHtml = '<div style="font-size:12px;color:var(--text-muted,#687076);margin-bottom:6px;">已沉淀研究关系（' + rels.length + ' 条）：</div>' +
+                '<div class="market-chain-mini__chips">' + rels.slice(0, 5).map(function(rel) {
+                  var src = rel.source_name || rel.from_entity || rel.source || '';
+                  var dst = rel.target_name || rel.to_entity || rel.target || '';
+                  var label = (src && dst) ? (src + ' → ' + dst) : (rel.product || rel.mechanism || '产业链关系');
+                  return '<span class="chain-jump-chip">' + esc(label) + '</span>';
+                }).join('') + '</div>';
+            }
+          }
+        } catch (e) {}
+        box.innerHTML = '<h4>产业链与商品锚</h4>' + discoveredHtml +
+          '<div style="font-size:12px;color:var(--text-muted,#687076);">' + (discoveredHtml ? '继续补全 · ' : '未命中预置种子节点 · ') +
+          '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请检索最新公开披露，梳理 ' + escAttr((this._currentName || '') + '（' + cleanCode + '）') + ' 的真实上下游客户供应商与原材料价格敏感度。\',\'bottleneck-hunter\',\'compact\')">✦ 让 Agent 查上下游</button></div>';
         return;
       }
       var selfNode = nodes.find(function(n) { return n.source_ticker === cleanCode; }) || nodes[0];

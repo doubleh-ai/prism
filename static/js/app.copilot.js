@@ -80,6 +80,13 @@
       });
 
       this._bindCopilotResizer();
+      try {
+        var savedMode = localStorage.getItem('prism-copilot-mode');
+        this._copilotResponseMode = savedMode === 'deep' ? 'deep' : 'compact';
+      } catch (e) {
+        this._copilotResponseMode = 'compact';
+      }
+      this._syncCopilotSpeedToggle();
       this.loadPersona();
       this._refreshCopilotContextBar();
       try {
@@ -429,9 +436,34 @@
       });
     },
 
+    setCopilotResponseMode: function (mode) {
+      var next = mode === 'deep' ? 'deep' : 'compact';
+      this._copilotResponseMode = next;
+      try { localStorage.setItem('prism-copilot-mode', next); } catch (e) {}
+      this._syncCopilotSpeedToggle();
+      if (this._toast) {
+        this._toast(next === 'deep'
+          ? '已切换「深度研报模式」：拉取巨潮原文PDF并执行逐条核验'
+          : '已切换「敏捷随行模式」：预注实时上下文，快速直出中文结论');
+      }
+    },
+
+    _syncCopilotSpeedToggle: function () {
+      var wrap = document.getElementById('copilotSpeedToggle');
+      if (!wrap) return;
+      var cur = this._copilotResponseMode === 'deep' ? 'deep' : 'compact';
+      wrap.querySelectorAll('.speed-opt').forEach(function (btn) {
+        var active = btn.getAttribute('data-speed') === cur;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    },
+
     intervene: async function (promptText, preferredSkill, responseMode) {
       if (!promptText) return;
+      var prevMode = this._copilotResponseMode === 'deep' ? 'deep' : 'compact';
       this._copilotResponseMode = responseMode === 'deep' ? 'deep' : 'compact';
+      this._syncCopilotSpeedToggle();
       this.openCopilot('docked', true);
       if (preferredSkill) {
         this.setSkill(preferredSkill);
@@ -439,6 +471,8 @@
       }
       var stream = this.convId ? Streams[this.convId] : null;
       if (stream && stream.active) {
+        this._copilotResponseMode = prevMode;
+        this._syncCopilotSpeedToggle();
         if (this._toast) this._toast('当前会话正在推演中，请稍候或点击停止后再发起新介入');
         return;
       }
@@ -450,7 +484,8 @@
       inp.value = promptText;
       inp.dispatchEvent(new Event('input'));
       await this.send();
-      this._copilotResponseMode = 'compact';
+      this._copilotResponseMode = prevMode;
+      this._syncCopilotSpeedToggle();
     },
 
     /* ═══ Persona Engine & Human-Confirmed Trait UI ═══ */

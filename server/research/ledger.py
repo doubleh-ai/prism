@@ -1665,7 +1665,15 @@ def _apply_auto_locators(db, claims, documents, passages) -> None:
         )
 
 
-def finalize_research_run(username: str, run_id: str, text: str, *, error=False, cancelled=False) -> dict:
+def finalize_research_run(
+    username: str,
+    run_id: str,
+    text: str,
+    *,
+    error=False,
+    cancelled=False,
+    enforce_original_gate: bool = True,
+) -> dict:
     """Freeze one report per run. Retrying returns the identical saved revision."""
     from .model_review import present as present_model_review
 
@@ -1716,7 +1724,8 @@ def finalize_research_run(username: str, run_id: str, text: str, *, error=False,
             # trading numbers is withheld until this run obtained original text.
             # A run that failed without any draft has no report body to withhold.
             if (
-                not cancelled
+                enforce_original_gate
+                and not cancelled
                 and not (error and not text.strip())
                 and original_evidence_missing(claims, documents, text)
             ):

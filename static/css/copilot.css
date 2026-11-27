@@ -1600,3 +1600,37 @@ details.ref-fold[open] .ref-fold__hint {
   font-size: 11.5px;
   color: var(--text3, #76866d);
 }
+
+/* ── Copilot Dual-Speed Mode Toggle (Agile vs Deep) ── */
+.copilot-speed-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--bg2, #f0f3ed);
+  border: 1px solid var(--border, #dfe5da);
+  gap: 2px;
+  flex-shrink: 0;
+}
+.copilot-speed-toggle .speed-opt {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text2, #586d5b);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 5px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+.copilot-speed-toggle .speed-opt:hover {
+  color: var(--text, #26382e);
+}
+.copilot-speed-toggle .speed-opt.active {
+  background: var(--accent, #2d6b58);
+  color: #ffffff;
+  font-weight: 600;
+}

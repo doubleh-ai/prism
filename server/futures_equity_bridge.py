@@ -230,6 +230,22 @@ INDUSTRY_TO_FUTURES: dict[str, list[dict[str, str]]] = {
         {"symbol": "EC", "name": "集运欧线", "role": "亚欧集装箱运价指数"},
         {"symbol": "SC", "name": "原油", "role": "船燃能源成本参考"},
     ],
+    "AI算力与服务器": [
+        {"symbol": "CU", "name": "沪铜", "role": "高速铜缆/覆铜板与散热核心金属"},
+        {"symbol": "SN", "name": "沪锡", "role": "服务器主板与芯片封测焊料锚"},
+        {"symbol": "AL", "name": "沪铝", "role": "服务器机箱与液冷散热片原料"},
+        {"symbol": "AG", "name": "沪银", "role": "高频连接器与电子浆料金属"},
+    ],
+    "人形机器人与精密制造": [
+        {"symbol": "CU", "name": "沪铜", "role": "电机绕组与线束铜材锚"},
+        {"symbol": "AL", "name": "沪铝", "role": "轻量化机身与压铸结构件"},
+        {"symbol": "HC", "name": "热卷", "role": "精密结构钢与轴承毛坯"},
+    ],
+    "电网设备与算力电力": [
+        {"symbol": "CU", "name": "沪铜", "role": "变压器绕组与高压电缆核心成本"},
+        {"symbol": "AL", "name": "沪铝", "role": "架空导线与开关壳体用铝"},
+        {"symbol": "SI", "name": "工业硅", "role": "硅钢片与功率器件上游材料"},
+    ],
 }
 
 

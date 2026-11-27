@@ -4,17 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
   <title>Prism · 投研工作台</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=142">
-  <link rel="stylesheet" href="/static/css/research-library.css?v=142">
-  <link rel="stylesheet" href="/static/css/research-preferences.css?v=142">
-  <link rel="stylesheet" href="/static/css/copilot.css?v=142">
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=142">
+  <link rel="stylesheet" href="/static/css/app.css?v=143">
+  <link rel="stylesheet" href="/static/css/research-library.css?v=143">
+  <link rel="stylesheet" href="/static/css/research-preferences.css?v=143">
+  <link rel="stylesheet" href="/static/css/copilot.css?v=143">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/prism-mark.svg?v=143">
 </head>
 <body>
 <div class="app-shell" id="appShell" data-mode="market">
   <nav class="icon-rail" id="iconRail" aria-label="研究空间导航">
     <div class="icon-rail-brand" title="Prism 投研工作台">
-      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=142#mark"/></svg>
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=143#mark"/></svg>
       <span class="rail-brand-word">Prism<small>投研工作台</small></span>
     </div>
 
@@ -239,6 +239,10 @@
       <textarea id="input" rows="1" placeholder="结合当前标的或投研画像提问，Agent 将自主调用行情/期货/公告原文核验…"></textarea>
       <div class="composer-bar">
         <button id="cmpTools" class="cmp-btn" onclick="App._toggleSkillDrawer()" title="切换研究方式">研究方式</button>
+        <div class="copilot-speed-toggle" id="copilotSpeedToggle" role="group" aria-label="响应速度模式">
+          <button type="button" class="speed-opt active" data-speed="compact" onclick="App.setCopilotResponseMode('compact')" title="敏捷随行：预注当前标的快照，快速输出中文核心结论">⚡ 敏捷</button>
+          <button type="button" class="speed-opt" data-speed="deep" onclick="App.setCopilotResponseMode('deep')" title="深度研报：拉取巨潮原文PDF并执行逐条证据核验">📑 深度</button>
+        </div>
         <select id="modelSelect" onchange="App.setModel(this.value)"></select>
         <button id="reportsBtn" class="cmp-btn" onclick="App.openReports()" title="查看本会话报告" style="display:none">报告</button>
         <button id="sendBtn" class="cmp-send" onclick="App.send()" title="发送 (Enter)">
@@ -353,23 +357,23 @@
   <nav id="researchTabs" class="workbench-dialog-tabs" role="tablist" aria-label="研究视图"><button role="tab" data-research-tab="overview">研究概览</button><button role="tab" data-research-tab="report">网页研报</button><button role="tab" data-research-tab="evidence">来源证据</button><button role="tab" data-research-tab="industry">产业关系</button></nav>
   <div class="research-layout"><main id="researchBody" class="workbench-dialog-body"></main><aside id="researchEvidence" class="research-evidence-drawer" aria-label="证据详情" hidden></aside></div>
 </dialog>
-<script src="/static/lib/marked.min.js?v=142"></script>
-<script src="/static/lib/echarts.min.js?v=142"></script>
-<script src="/static/js/app.util.js?v=142"></script>
-<script src="/static/js/app.chat-render.js?v=142"></script>
-<script src="/static/js/app.core.js?v=142"></script>
-<script src="/static/js/app.diagnostics.js?v=142"></script>
-<script src="/static/js/app.chat.js?v=142"></script>
-<script src="/static/js/app.market.js?v=142"></script>
-<script src="/static/js/app.reports.js?v=142"></script>
-<script src="/static/js/app.indicators.js?v=142"></script>
-<script src="/static/js/app.screener.js?v=142"></script>
-<script src="/static/js/app.indicator-chart.js?v=142"></script>
-<script src="/static/js/app.release.js?v=142"></script>
-<script src="/static/js/app.tour.js?v=142"></script>
-<script src="/static/js/app.workbench.js?v=142"></script>
-<script src="/static/js/app.research.js?v=142"></script>
-<script src="/static/js/app.hub.js?v=142"></script>
-<script src="/static/js/app.copilot.js?v=142"></script>
+<script src="/static/lib/marked.min.js?v=143"></script>
+<script src="/static/lib/echarts.min.js?v=143"></script>
+<script src="/static/js/app.util.js?v=143"></script>
+<script src="/static/js/app.chat-render.js?v=143"></script>
+<script src="/static/js/app.core.js?v=143"></script>
+<script src="/static/js/app.diagnostics.js?v=143"></script>
+<script src="/static/js/app.chat.js?v=143"></script>
+<script src="/static/js/app.market.js?v=143"></script>
+<script src="/static/js/app.reports.js?v=143"></script>
+<script src="/static/js/app.indicators.js?v=143"></script>
+<script src="/static/js/app.screener.js?v=143"></script>
+<script src="/static/js/app.indicator-chart.js?v=143"></script>
+<script src="/static/js/app.release.js?v=143"></script>
+<script src="/static/js/app.tour.js?v=143"></script>
+<script src="/static/js/app.workbench.js?v=143"></script>
+<script src="/static/js/app.research.js?v=143"></script>
+<script src="/static/js/app.hub.js?v=143"></script>
+<script src="/static/js/app.copilot.js?v=143"></script>
 </body>
 </html>

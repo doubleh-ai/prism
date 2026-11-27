@@ -318,6 +318,51 @@ async def test_output_budget_cut_after_unparsable_tool_json_still_closes_the_tur
     assert wire.closed
 
 
+async def test_output_budget_cut_after_valid_tool_use_closes_as_tool_turn():
+    data = tool_stream(terminal=False, arguments='{"company":"工业富联"}') + stop("max_tokens")
+    provider, wire, _ = source([data])
+    events = await collect(provider)
+
+    calls = [e for e in events if e["type"] == "tool_call"]
+    assert len(calls) == 1 and calls[0]["arguments"] == {"company": "工业富联"}
+    assert events[-1]["type"] == "done" and events[-1]["stop_reason"] == "tool_use"
+    assert wire.closed
+
+
+async def test_output_budget_cut_while_block_still_open_recovers_cleanly():
+    # Provider truncates mid-thinking or mid-tool_use and jumps straight to message_delta(max_tokens)
+    data = (
+        start()
+        + frame("content_block_start", index=0, content_block={"type": "thinking", "thinking": ""})
+        + frame("content_block_delta", index=0, delta={"type": "thinking_delta", "thinking": "截断思考"})
+        + stop("max_tokens")
+    )
+    provider, wire, _ = source([data])
+    events = await collect(provider)
+    assert events[-1]["type"] == "done" and events[-1]["stop_reason"] == "max_tokens"
+    assert events[-1]["content"].continuation()[0]["thinking"] == "截断思考"
+    assert wire.closed
+
+    tool_open = (
+        start()
+        + frame(
+            "content_block_start",
+            index=0,
+            content_block={"type": "tool_use", "id": "call_cut", "name": "source_find", "input": {}},
+        )
+        + frame(
+            "content_block_delta", index=0, delta={"type": "input_json_delta", "partial_json": '{"q":"cut'}
+        )
+        + stop("max_tokens")
+    )
+    provider2, wire2, _ = source([tool_open])
+    events2 = await collect(provider2)
+    calls2 = [e for e in events2 if e["type"] == "tool_call"]
+    assert len(calls2) == 1 and calls2[0]["arguments_invalid"] is True
+    assert events2[-1]["type"] == "done" and events2[-1]["stop_reason"] == "tool_use"
+    assert wire2.closed
+
+
 async def test_server_web_search_blocks_preserve_actual_urls_and_tool_configuration():
     use = {
         "type": "server_tool_use",
@@ -573,9 +618,9 @@ async def test_minimax_error_diagnostic_cannot_wait_past_the_original_call_deadl
             + stop("tool_use"),
             "provider_protocol_error",
         ),
-        # A complete tool call cut by the output budget stays a protocol error;
-        # only the unparsable call above is answered with an is_error result.
-        (tool_stream(terminal=False) + stop("max_tokens"), "provider_protocol_error"),
+        # A complete tool call closed with end_turn (not tool_use or max_tokens
+        # truncation) stays a protocol error.
+        (tool_stream(terminal=False) + stop("end_turn"), "provider_protocol_error"),
     ],
 )
 async def test_malformed_or_upstream_errors_have_only_sanitized_codes(data, code):
