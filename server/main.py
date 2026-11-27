@@ -35,6 +35,8 @@ from .auth import (
 )
 from .auth import login as auth_login
 from .auth import logout as auth_logout
+from .billing_ops import router as billing_ops_router
+from .billing_ops import sync_ops_provider_credentials
 from .capabilities import router as capabilities_router
 from .config import (
     CORS_ALLOW_CREDENTIALS,
@@ -74,6 +76,9 @@ from .database import (
     user_exists,
 )
 from .diagnostics import router as diagnostics_router
+from .event_radar import init_event_radar_db, run_radar_collector_loop
+from .event_radar_router import admin_router as event_radar_admin_router
+from .event_radar_router import router as event_radar_router
 from .feedback import init_feedback_db, is_worker_update_path
 from .feedback import router as feedback_router
 from .futures import router as futures_router
@@ -131,6 +136,8 @@ init_preferences_db()
 init_portfolio_db()
 init_journal_hub_db()
 init_model_routes_db()
+init_event_radar_db()
+sync_ops_provider_credentials()
 if os.environ.get("PRISM_SINGLE_WORKER") == "1":
     from .capabilities import recover_interrupted_calls
 
@@ -168,6 +175,7 @@ async def lifespan(application):
     runtime = await open_runtime(producers=dict.fromkeys(KINDS, True))
     diagnostic_delivery = DiagnosticDelivery(runtime.manager)
     futures_overview = None
+    radar_collector = None
     try:
         bind_manager(application, runtime.manager)
         application.state.work_runtime = runtime
@@ -180,6 +188,7 @@ async def lifespan(application):
             recover_native_runs(exclusive_startup=True)
         diagnostic_delivery.start()
         futures_overview = asyncio.create_task(refresh_overview_periodically(runtime.manager))
+        radar_collector = asyncio.create_task(run_radar_collector_loop(runtime.manager))
         yield
     finally:
         # Stop idle producers before the first shutdown await.
@@ -188,6 +197,9 @@ async def lifespan(application):
         if futures_overview is not None:
             futures_overview.cancel()
             await asyncio.gather(futures_overview, return_exceptions=True)
+        if radar_collector is not None:
+            radar_collector.cancel()
+            await asyncio.gather(radar_collector, return_exceptions=True)
         await diagnostic_delivery.close()
         await runtime.aclose()
 
@@ -355,7 +367,7 @@ async def index(request: Request):
     query = [
         (key, value)
         for key, value in request.query_params.multi_items()
-        if key in {"conv", "mode", "run_id", "futures", "ticker", "copilot", "tab"}
+        if key in {"conv", "mode", "run_id", "futures", "ticker", "copilot", "tab", "radar"}
     ]
     location = "/prism?" + urlencode(query) if query else "/prism"
     return RedirectResponse(location, headers={"Cache-Control": "no-store"})
@@ -468,6 +480,7 @@ _UI_ACTIVITY_RULES = {
     "journal": {"open"},
     "analysis": {"open"},
     "report": {"open"},
+    "radar": {"open"},
     "industry": {"open"},
 }
 
@@ -831,6 +844,9 @@ app.include_router(preferences_router)
 app.include_router(portfolio_router)
 app.include_router(journal_hub_router)
 app.include_router(model_routes_router)
+app.include_router(event_radar_router)
+app.include_router(event_radar_admin_router)
+app.include_router(billing_ops_router)
 app.include_router(operations_router)
 
 

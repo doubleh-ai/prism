@@ -57,6 +57,7 @@ _cards: dict[str, tuple[float, dict]] = {}
 _locks = {symbol: asyncio.Lock() for symbol in UNIVERSE}
 _overview: dict[str, dict] = {}
 _overview_fundamentals: dict[str, dict] | None = None
+_overview_fund_signals: dict[str, dict] = {}
 _benchmarks: dict[str, dict] = {}
 BENCHMARK_SYMBOLS = frozenset({"AP", "B", "CS", "EC", "JD", "LH"})
 _refreshing = False
@@ -315,6 +316,68 @@ def _dimensions(symbol, now, card=None):
     }
 
 
+def _pick_tile_signal(
+    symbol: str,
+    bars: list[dict],
+    pct_map: dict,
+    observed: dict | None,
+) -> tuple[str | None, str | None]:
+    """Derive a concise O(1) fundamental or positioning badge for overview cards without guessing."""
+    c_prev = bars[-2].get("close")
+    o_now = bars[-1].get("open")
+    if (
+        isinstance(c_prev, (int, float))
+        and isinstance(o_now, (int, float))
+        and c_prev > 0
+        and o_now > 0
+        and abs(o_now / c_prev - 1.0) >= 0.045
+    ):
+        return ("换月跳空", "warn")
+
+    basis_rate: float | None = None
+    inv_chg: float | None = None
+    inv_qty: float | None = None
+    if observed:
+        b_vals = (observed.get("basis") or {}).get("values") or {}
+        if isinstance(b_vals.get("basis_rate_pct"), (int, float)):
+            basis_rate = float(b_vals["basis_rate_pct"])
+        i_vals = (observed.get("inventory") or {}).get("values") or {}
+        if isinstance(i_vals.get("change"), (int, float)):
+            inv_chg = float(i_vals["change"])
+        if isinstance(i_vals.get("quantity"), (int, float)):
+            inv_qty = float(i_vals["quantity"])
+    elif _overview_fundamentals is not None and symbol in _overview_fund_signals:
+        fs = _overview_fund_signals[symbol]
+        basis_rate = fs.get("basis_rate_pct")
+        inv_chg = fs.get("inv_chg")
+        inv_qty = fs.get("inv_qty")
+
+    if basis_rate is not None and abs(basis_rate) >= 2.5:
+        return (f"升水+{basis_rate:.1f}%", "bull") if basis_rate > 0 else (f"贴水{basis_rate:.1f}%", "bear")
+    if inv_chg is not None and inv_chg != 0:
+        base_qty = max(1.0, (inv_qty - inv_chg) if (inv_qty is not None and inv_qty > inv_chg) else 1000.0)
+        if abs(inv_chg) / base_qty >= 0.015 or abs(inv_chg) >= 200:
+            return ("仓单去库", "bull") if inv_chg < 0 else ("仓单累库", "bear")
+    if basis_rate is not None and abs(basis_rate) >= 0.5:
+        return (f"升水+{basis_rate:.1f}%", "bull") if basis_rate > 0 else (f"贴水{basis_rate:.1f}%", "bear")
+    if inv_chg is not None and inv_chg != 0:
+        return ("仓单去库", "bull") if inv_chg < 0 else ("仓单累库", "bear")
+
+    p5 = pct_map.get("close_pct_5y")
+    if isinstance(p5, (int, float)):
+        if p5 >= 85.0:
+            return ("五年高位", "bull")
+        if p5 <= 15.0:
+            return ("五年低位", "bear")
+    oi_p = pct_map.get("open_interest_pct_rank")
+    if isinstance(oi_p, (int, float)):
+        if oi_p >= 85.0:
+            return ("持仓拥挤", "warn")
+        if oi_p <= 15.0:
+            return ("缩量低仓", "neutral")
+    return (None, None)
+
+
 def universe():
     now = _now()
     products = []
@@ -335,10 +398,16 @@ def universe():
             pct = pct_map.get("close_pct_5y")
             prev_c = bars[-2].get("close")
             chg = round((bars[-1]["close"] / prev_c - 1.0) * 100.0, 2) if prev_c else None
+            sig_tag, sig_tone = _pick_tile_signal(symbol, bars, pct_map, observed)
             preview = {
                 "close": bars[-1]["close"],
                 "change_pct": chg,
                 "pct_5y": pct,
+                "pct_1y": pct_map.get("close_pct_1y"),
+                "seasonal_pct": pct_map.get("close_seasonal_pct"),
+                "oi_pct": pct_map.get("open_interest_pct_rank"),
+                "signal_tag": sig_tag,
+                "signal_tone": sig_tone,
                 "data_as_of": bars[-1]["date"],
             }
         products.append({**prod, "dimensions": _dimensions(symbol, now, observed), "quote_preview": preview})
@@ -379,7 +448,7 @@ async def _refresh_overview():
                     await asyncio.sleep(0.25)
 
         async def scan_fundamentals():
-            global _benchmarks, _overview_fundamentals
+            global _benchmarks, _overview_fundamentals, _overview_fund_signals
             async with asyncio.TaskGroup() as sources:
                 basis = sources.create_task(futures_basis.latest_table(UNIVERSE, now.date()))
                 warrants = sources.create_task(futures_inventory.latest_exchange_tables(UNIVERSE, now.date()))
@@ -400,11 +469,13 @@ async def _refresh_overview():
                     },
                 )
             _benchmarks = benchmarks
+            basis_map = basis.result()
             inputs = {
-                "现货基差": basis.result(),
+                "现货基差": basis_map,
                 "交易所仓单": warehouses,
             }
             result = {}
+            sig_map = {}
             for symbol in UNIVERSE:
                 observed = [
                     (label, items[symbol]["data_as_of"])
@@ -421,6 +492,19 @@ async def _refresh_overview():
                         "已核验" + "、".join(label for label, _ in observed) + "。",
                         max(day for _, day in observed),
                     )
+                b_row = basis_map.get(symbol, {})
+                w_row = warehouses.get(symbol, {})
+                b_rate = None
+                if b_row.get("status") == "collected":
+                    sp = _l1_number(b_row.get("spot_price"))
+                    bv = _l1_number(b_row.get("basis"))
+                    if sp and sp > 0 and bv is not None:
+                        b_rate = round(100.0 * bv / sp, 1)
+                inv_qty = _l1_number(w_row.get("quantity")) if w_row.get("status") == "collected" else None
+                inv_chg = _l1_number(w_row.get("change")) if w_row.get("status") == "collected" else None
+                if b_rate is not None or inv_chg is not None:
+                    sig_map[symbol] = {"basis_rate_pct": b_rate, "inv_qty": inv_qty, "inv_chg": inv_chg}
+            _overview_fund_signals = sig_map
             _overview_fundamentals = result
 
         async with asyncio.TaskGroup() as scans:

@@ -334,6 +334,10 @@ async def test_futures_overview_inlines_bootstrap_and_serves_warm_universe_in_mi
 
     assert cold["count"] == warm["count"] == 46
     assert warm["radar"]["observed_products"] == 46
+    sc_preview = next(p["quote_preview"] for p in warm["products"] if p["symbol"] == "SC")
+    assert sc_preview["seasonal_pct"] is not None
+    assert sc_preview["oi_pct"] is not None
+    assert sc_preview["signal_tag"] in {"五年高位", "五年低位", "持仓拥挤", "缩量低仓", None}
     assert warm == cold
     assert warm_ms < 50.0
     assert warm_ms < cold_ms * 0.25

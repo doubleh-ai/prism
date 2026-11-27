@@ -52,12 +52,24 @@ MODELS = {
         "api_key": DEEPSEEK_API_KEY,
         "model": "deepseek-v4-flash",
     },
+    "deepseek-flash": {
+        "name": "DeepSeek V4.1 Flash（极速低耗）",
+        "base_url": "https://api.deepseek.com/anthropic",
+        "api_key": DEEPSEEK_API_KEY,
+        "model": "deepseek-flash",
+    },
     # ── MiniMax (Anthropic 兼容端点) ──
     "minimax-m3": {
         "name": "MiniMax M3",
         "base_url": "https://api.minimax.io/anthropic/v1/",
         "api_key": MINIMAX_API_KEY,
         "model": "MiniMax-M3",
+    },
+    "minimax-m3.1-flash": {
+        "name": "MiniMax M3.1 Flash",
+        "base_url": "https://api.minimax.io/anthropic/v1/",
+        "api_key": MINIMAX_API_KEY,
+        "model": "MiniMax-M3.1-Flash",
     },
     "minimax-m2.7": {
         "name": "MiniMax M2.7",
@@ -101,6 +113,12 @@ MODELS = {
             "wall_seconds": 600,
             "wrap_up_output_tokens": 16384,
         },
+    },
+    "minimax-cn-m3.1-flash": {
+        "name": "MiniMax M3.1 Flash（国内极速）",
+        "base_url": "https://api.minimax.cn/anthropic/v1/",
+        "api_key": MINIMAX_CN_API_KEY,
+        "model": "MiniMax-M3.1-Flash",
     },
     "openai": {
         "name": "OpenAI GPT",

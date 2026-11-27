@@ -1,7 +1,7 @@
 /* Prism research workspace. Navigation never starts a second research job. */
 (function() {
   'use strict';
-  var viewLabels = {chat:'随行 Agent',market:'行情工作区',futures:'期货研究',preferences:'投研画像',reports:'研究与复盘',indicators:'指标实验室',screener:'全市场选股'};
+  var viewLabels = {chat:'随行 Agent',market:'行情工作区',futures:'期货研究',radar:'风向雷达',preferences:'投研画像',reports:'研究与复盘',indicators:'指标实验室',screener:'全市场选股'};
   var capabilityViews = ['market','futures','reports','indicators','screener'];
   var originalSwitchMode = App.switchMode;
   var originalMarketWorkspace = App._showMarketWorkspace;

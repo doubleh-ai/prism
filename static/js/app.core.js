@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '143',
+  _clientAssetVersion: '153',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -112,10 +112,18 @@ var App = {
     this.user = me.user;
     this.isAdmin = false;
     if (this._initDiagnostics) this._initDiagnostics();
-    document.getElementById('userBadge').textContent = this.user;
-    var savedTheme = localStorage.getItem('cl-theme');
-    if (savedTheme === 'dark') document.documentElement.className = 'dark';
-    else document.documentElement.className = 'light';
+    var ub = document.getElementById('userBadge');
+    if (ub) ub.textContent = this.user;
+    var av = document.getElementById('userAvatarLetter');
+    if (av && this.user) av.textContent = String(this.user).slice(0, 1).toUpperCase();
+    var mn = document.getElementById('accountMenuName');
+    if (mn) mn.textContent = this.user;
+    document.addEventListener('click', function(ev) {
+      if (!ev.target.closest || !ev.target.closest('#accountMenuWrap')) App._closeAccountMenu();
+    });
+    var savedTheme = localStorage.getItem('cl-theme') === 'dark' ? 'dark' : 'light';
+    document.documentElement.className = savedTheme;
+    document.documentElement.setAttribute('data-theme', savedTheme);
     localStorage.removeItem('cl-wide');
     this._restoreShellChromeState();
     this.loadSkills(); this.loadModels(); this.loadConvs(); this.showWelcome();
@@ -123,7 +131,6 @@ var App = {
     if (this._initReleaseNotes) this._initReleaseNotes();
     this._bindScroll();
     this._bindGlossClicks();
-    this._loadWatchlist();
     this._bindMarketPanel();
     if (this._initWorkbench) this._initWorkbench();
     if (this._initCopilot) this._initCopilot();
@@ -137,27 +144,34 @@ var App = {
     var linkedTicker = params.get('ticker') || '';
     var savedPillar = '';
     try { savedPillar = localStorage.getItem('prism-last-pillar:' + this.user) || ''; } catch(e) {}
-    if (reqMode === 'reports' || params.has('claim')) {
+    if (reqMode === 'radar' || params.get('radar')) {
+      this._mode = '';
+      this.switchMode('radar');
+    } else if (reqMode === 'reports' || params.has('claim')) {
       this._researchLibraryTab = params.get('tab') === 'journal' ? 'journal' : 'reports';
       this._mode = '';
       this.switchMode('reports');
     } else if (reqMode === 'screener') {
+      this._marketWorkspaceTab = 'screener';
       this._mode = '';
       this.switchMode('market');
-      if (this._showMarketWorkspace) this._showMarketWorkspace('screener');
     } else if (reqMode === 'indicators') {
+      this._marketWorkspaceTab = 'library';
       this._mode = '';
       this.switchMode('market');
-      if (this._showMarketWorkspace) this._showMarketWorkspace('library');
     } else if (reqMode === 'market' || linkedTicker) {
+      this._marketWorkspaceTab = 'quote';
       this._mode = '';
       this.switchMode('market');
-      if (this._showMarketWorkspace) this._showMarketWorkspace('quote');
       if (linkedTicker && this._selectStock) this._selectStock(linkedTicker, params.get('name') || '');
+    } else if (savedPillar === 'radar') {
+      this._mode = '';
+      this.switchMode('radar');
     } else if (savedPillar === 'reports') {
       this._mode = '';
       this.switchMode('reports');
     } else {
+      this._marketWorkspaceTab = 'quote';
       this._mode = '';
       this.switchMode('market');
     }
@@ -170,6 +184,21 @@ var App = {
     if (params.get('run_id') && this._openResearchRun) {
       this._openResearchRun(params.get('run_id'));
     }
+  },
+
+  _toggleAccountMenu: function() {
+    var pop = document.getElementById('accountMenuPopover');
+    var btn = document.getElementById('accountMenuBtn');
+    if (!pop) return;
+    var opening = pop.hidden;
+    pop.hidden = !opening;
+    if (btn) btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  },
+  _closeAccountMenu: function() {
+    var pop = document.getElementById('accountMenuPopover');
+    var btn = document.getElementById('accountMenuBtn');
+    if (pop) pop.hidden = true;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
   },
 
   api: async function(url, opts) {
@@ -243,6 +272,7 @@ var App = {
   toggleTheme: function() {
     var n = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
     document.documentElement.className = n;
+    document.documentElement.setAttribute('data-theme', n);
     localStorage.setItem('cl-theme', n);
     if (this._mode === 'market' && this._currentTicker) {
       this._renderKline(this._currentTicker, this._currentPeriod || '1d');
@@ -312,6 +342,7 @@ var App = {
     if (this._mode !== 'market') {
       this._marketWorkspaceTab = target;
       this.switchMode('market');
+      return;
     }
     if (this._showMarketWorkspace) {
       this._showMarketWorkspace(target);
