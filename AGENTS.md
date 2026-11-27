@@ -62,7 +62,7 @@ python -m ruff format --check server/ tests/ scripts/release_candidate.py script
 for f in tests/*.cjs; do [ "$f" = "tests/source_urls_runtime.cjs" ] && continue; node "$f"; done
 
 # 5. Python regression tests (run targeted suites while iterating; full suite before PR/release)
-python -m pytest -q tests/test_asset_coherence.py tests/test_frontend.py tests/test_security.py
+python -m pytest -q tests/test_asset_coherence.py tests/test_public_source_boundary.py tests/test_frontend.py tests/test_security.py
 ```
 
 Enable the repository Git pre-commit hook once per clone so hygiene checks run automatically on every `git commit`:

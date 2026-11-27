@@ -61,7 +61,7 @@ check: ## Run mandatory pre-submit gate (hygiene, key isolation, lint, format, J
 	$(PYTHON) -m ruff check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py scripts/check_oss_hygiene.py
 	$(PYTHON) -m ruff format --check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py scripts/check_oss_hygiene.py
 	for f in tests/*.cjs; do [ "$$f" = "tests/source_urls_runtime.cjs" ] && continue; node "$$f"; done
-	$(PYTHON) -m pytest -q tests/test_asset_coherence.py tests/test_frontend.py tests/test_security.py
+	$(PYTHON) -m pytest -q tests/test_asset_coherence.py tests/test_public_source_boundary.py tests/test_frontend.py tests/test_security.py
 
 # ── Run ──
 run: ## Run the production server (no reload).
