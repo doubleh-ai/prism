@@ -33,10 +33,10 @@ class RouteUpdate(ClosedModel):
     expected_version: int = Field(ge=0)
     model_id: str = Field(min_length=1, max_length=100)
     enabled: bool = True
-    output_tokens_max: int = Field(default=1024, ge=128, le=2048)
-    model_calls_max: int = Field(default=1, ge=1, le=6)
-    wall_seconds_max: int = Field(default=60, ge=5, le=180)
-    daily_calls_max: int = Field(default=50, ge=1, le=1000)
+    output_tokens_max: int = Field(default=8192, ge=128, le=16384)
+    model_calls_max: int = Field(default=12, ge=1, le=20)
+    wall_seconds_max: int = Field(default=480, ge=5, le=600)
+    daily_calls_max: int = Field(default=200, ge=1, le=5000)
 
     @model_validator(mode="before")
     @classmethod

@@ -567,11 +567,46 @@ class _Message:
                 return [{"type": "server_tool_result", "block": _public_block(block)}]
             return []
         if kind == "message_delta":
-            _need(self.open_index is None and type(event.get("delta")) is dict)
-            reason = event["delta"].get("stop_reason")
+            delta = event.get("delta")
+            _need(type(delta) is dict)
+            reason = delta.get("stop_reason")
             if reason is not None:
                 _need(type(reason) is str and reason in _STOP_REASONS)
                 self.stop_reason = reason
+            if self.open_index is not None:
+                # Some Anthropic-compatible reasoning providers cut off the stream
+                # at max_tokens without emitting a trailing content_block_stop.
+                # Close the truncated block cleanly instead of failing the whole run.
+                _need(self.stop_reason == "max_tokens")
+                block = self.blocks[self.open_index]
+                invalid_input = False
+                for field, pieces in self.pieces.items():
+                    if field == "input":
+                        joined = "".join(pieces)
+                        try:
+                            value = _loads(joined) if joined else block["input"]
+                        except ProviderError:
+                            value = None
+                        if type(value) is not dict:
+                            if block["type"] != "tool_use":
+                                raise ProviderError("provider_protocol_error") from None
+                            invalid_input = True
+                            value = {}
+                        block["input"] = value
+                    else:
+                        block[field] = block.get(field, "") + "".join(pieces)
+                if block["type"] == "tool_use":
+                    call = {
+                        "type": "tool_call",
+                        "id": block["id"],
+                        "name": block["name"],
+                        "arguments": None if invalid_input else copy.deepcopy(block["input"]),
+                    }
+                    if invalid_input:
+                        call["arguments_invalid"] = True
+                    self.pending_calls.append(call)
+                self.open_index = None
+                self.pieces = {}
             usage = event.get("usage", {})
             result = self._usage(usage)
             if "output_tokens" in usage:
@@ -579,14 +614,12 @@ class _Message:
             return result
         if kind == "message_stop":
             _need(self.open_index is None and self.stop_reason is not None)
-            if self.stop_reason == "max_tokens" and any(
-                call.get("arguments_invalid") for call in self.pending_calls
-            ):
-                # The output budget cut the turn after a tool_use block had already
-                # closed but its argument JSON could not be parsed. The block still
-                # belongs to this turn, so close it as the tool turn it was: the
-                # runtime records one is_error result for the truncated call and
-                # continues with the report instead of ending the run.
+            if self.stop_reason == "max_tokens" and self.pending_calls:
+                # The output budget cut the turn after one or more tool_use blocks
+                # were emitted (whether valid or truncated). Because the assistant
+                # continuation now contains tool_use blocks, close the turn as
+                # tool_use so the runtime answers every tool_use_id instead of
+                # failing with provider_protocol_error.
                 self.stop_reason = "tool_use"
             _need(not self.pending_calls or self.stop_reason == "tool_use")
             self.stopped = True

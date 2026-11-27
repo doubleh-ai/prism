@@ -275,7 +275,54 @@ class TencentProvider:
         return resample_kline(out, period, limit)
 
     async def get_fundamentals(self, ticker: str) -> Fundamentals:
-        raise ProviderUnavailable("tencent: fundamentals not available via Sina")
+        if is_futures_continuous_ticker(ticker):
+            raise ProviderUnavailable("tencent: fundamentals not applicable to futures")
+        try:
+            quotes = await get_manager().run_blocking("market", _fetch_tencent_quotes, [ticker], 8)
+        except ProviderUnavailable:
+            raise
+        if ticker not in quotes:
+            raise ProviderNotFound(f"tencent: no fundamentals quote for {ticker}")
+        f = quotes[ticker]
+
+        def _opt_float(idx: int) -> float | None:
+            if len(f) <= idx:
+                return None
+            raw = f[idx].strip()
+            if not raw:
+                return None
+            try:
+                val = float(raw)
+                return val if val == val else None
+            except ValueError:
+                return None
+
+        pe_ttm = _opt_float(39)
+        pe_static = _opt_float(53)
+        pb = _opt_float(46)
+        market_cap_yi = _opt_float(45)
+        market_cap = market_cap_yi * 1e8 if market_cap_yi is not None and market_cap_yi > 0 else None
+        if pe_ttm is None and pe_static is None and pb is None and market_cap is None:
+            raise ProviderUnavailable("tencent: fundamentals fields unavailable in quote payload")
+        retrieved_at = int(time.time())
+        data_timestamp = market_timestamp(f[30], "%Y%m%d%H%M%S") if len(f) > 30 else None
+        currency = f[82].strip() if len(f) > 82 and f[82].strip() else "CNY"
+        return Fundamentals(
+            ticker=ticker,
+            name=f[1] if len(f) > 1 and f[1] else ticker,
+            pe_ttm=pe_ttm,
+            pe_static=pe_static,
+            pb=pb,
+            market_cap=market_cap,
+            timestamp=data_timestamp or retrieved_at,
+            data_timestamp=data_timestamp,
+            retrieved_at=retrieved_at,
+            reporting_period="实时滚动估值",
+            currency=currency,
+            monetary_unit="元",
+            accounting_scope="腾讯实时行情估值快照",
+            source=self.name,
+        )
 
     async def search(self, query: str, limit: int = 10) -> list[SearchHit]:
         return []  # fall through to akshare for search
