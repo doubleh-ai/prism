@@ -3,7 +3,73 @@
 from datetime import date
 from itertools import pairwise
 from math import isfinite, log, sqrt
-from statistics import median, stdev
+from statistics import median
+
+_DAYS_COMMON = (0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+_DAYS_LEAP = (0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+_YDAY_COMMON = (0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+_YDAY_LEAP = (0, 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335)
+_PERCENTILES_CACHE: dict[tuple, dict] = {}
+_PERCENTILES_CACHE_MAX = 256
+
+
+def _sample_stdev(values: list[float]) -> float:
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    var = sum((x - mean) * (x - mean) for x in values) / (n - 1)
+    return sqrt(var)
+
+
+def _parse_iso_year_yday(raw: str) -> tuple[int, int]:
+    if (
+        len(raw) == 10
+        and raw[4] == "-"
+        and raw[7] == "-"
+        and raw[0:4].isdigit()
+        and raw[5:7].isdigit()
+        and raw[8:10].isdigit()
+        and raw.isascii()
+    ):
+        y = int(raw[0:4])
+        m = int(raw[5:7])
+        d = int(raw[8:10])
+        leap = (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
+        days = _DAYS_LEAP if leap else _DAYS_COMMON
+        if 1 <= m <= 12 and 1 <= d <= days[m]:
+            offsets = _YDAY_LEAP if leap else _YDAY_COMMON
+            return y, offsets[m] + d
+    parsed = date.fromisoformat(raw)
+    return parsed.year, (parsed - date(parsed.year, 1, 1)).days + 1
+
+
+def _bars_cache_key(bars: list[dict]) -> tuple | None:
+    if not isinstance(bars, list) or len(bars) < 20:
+        return None
+    first, mid, prev, last = bars[0], bars[len(bars) // 2], bars[-2], bars[-1]
+    if not (
+        isinstance(first, dict)
+        and isinstance(mid, dict)
+        and isinstance(prev, dict)
+        and isinstance(last, dict)
+    ):
+        return None
+    return (
+        id(bars),
+        len(bars),
+        first.get("date"),
+        first.get("close"),
+        mid.get("date"),
+        mid.get("close"),
+        prev.get("date"),
+        prev.get("close"),
+        prev.get("open_interest"),
+        last.get("date"),
+        last.get("open"),
+        last.get("close"),
+        last.get("open_interest"),
+    )
 
 
 def _smooth(values, period, weight):
@@ -45,7 +111,7 @@ def technicals(bars):
         if len(closes) > period:
             window = closes[-period - 1 :]
             returns = [log(current) - log(previous) for previous, current in pairwise(window)]
-            volatility = stdev(returns) * sqrt(252) * 100
+            volatility = _sample_stdev(returns) * sqrt(252) * 100
         values[f"volatility{period}_pct"] = volatility
     for period in (20, 60, 250):
         position = None
@@ -71,21 +137,34 @@ def positioning(bars):
     }
 
 
+def _empirical_percentile_clean(clean: list[float], current: float) -> float | None:
+    n = len(clean)
+    if n < 20:
+        return None
+    low = high = clean[0]
+    below = equal = 0
+    for v in clean:
+        if v < low:
+            low = v
+        elif v > high:
+            high = v
+        if v < current:
+            below += 1
+        elif v == current:
+            equal += 1
+    if high <= low:
+        return None
+    return round(100.0 * (below + 0.5 * max(0, equal - 1)) / max(1, n - 1), 1)
+
+
 def empirical_percentile(samples: list[float], current: float) -> float | None:
     """Empirical rank in [0, 100] when ``samples`` has dispersion; ``None`` on flat/short series."""
+    if not (isinstance(current, (int, float)) and not isinstance(current, bool) and isfinite(current)):
+        return None
     clean = [
         float(v) for v in samples if isinstance(v, (int, float)) and not isinstance(v, bool) and isfinite(v)
     ]
-    if len(clean) < 20 or not (
-        isinstance(current, (int, float)) and not isinstance(current, bool) and isfinite(current)
-    ):
-        return None
-    low, high = min(clean), max(clean)
-    if high <= low:
-        return None
-    below = sum(1 for v in clean if v < current)
-    equal = sum(1 for v in clean if v == current)
-    return round(100.0 * (below + 0.5 * max(0, equal - 1)) / max(1, len(clean) - 1), 1)
+    return _empirical_percentile_clean(clean, float(current))
 
 
 def _day_distance(d1: date, d2: date) -> int:
@@ -97,6 +176,12 @@ def _day_distance(d1: date, d2: date) -> int:
 
 def percentiles(bars: list[dict]) -> dict:
     """Compute up to 5-year (~1250 trading days) historical & seasonal percentiles without guessing."""
+    cache_key = _bars_cache_key(bars)
+    if cache_key is not None:
+        cached = _PERCENTILES_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
     valid = [
         b
         for b in (bars or [])
@@ -112,32 +197,36 @@ def percentiles(bars: list[dict]) -> dict:
     window = valid[-1250:]
     closes = [float(b["close"]) for b in window]
     latest_close = closes[-1]
-    latest_day = date.fromisoformat(window[-1]["date"])
+    _, latest_yday = _parse_iso_year_yday(window[-1]["date"])
 
-    close_pct_5y = empirical_percentile(closes, latest_close)
-    close_pct_1y = empirical_percentile(closes[-250:], latest_close)
+    close_pct_5y = _empirical_percentile_clean(closes, latest_close)
+    close_pct_1y = _empirical_percentile_clean(closes[-250:], latest_close)
 
-    seasonal_closes = []
-    seasonal_years = set()
-    for b in window:
-        d = date.fromisoformat(b["date"])
-        if _day_distance(d, latest_day) <= 20:
-            seasonal_closes.append(float(b["close"]))
-            seasonal_years.add(d.year)
+    seasonal_closes: list[float] = []
+    seasonal_years: set[int] = set()
+    for b, close_val in zip(window, closes, strict=True):
+        yr, yday = _parse_iso_year_yday(b["date"])
+        diff = abs(yday - latest_yday)
+        if min(diff, 365 - diff) <= 20:
+            seasonal_closes.append(close_val)
+            seasonal_years.add(yr)
     seasonal_pct = (
-        empirical_percentile(seasonal_closes, latest_close)
+        _empirical_percentile_clean(seasonal_closes, latest_close)
         if len(seasonal_years) >= 3 and len(seasonal_closes) >= 30
         else None
     )
     seasonal_med = round(median(seasonal_closes), 4) if seasonal_pct is not None else None
 
-    vol_series = []
+    vol_series: list[float] = []
     if len(closes) >= 40:
         log_rets = [log(curr) - log(prev) for prev, curr in pairwise(closes)]
+        vol_scale = sqrt(252.0 / 19.0) * 100.0
         for idx in range(20, len(log_rets) + 1):
             seg = log_rets[idx - 20 : idx]
-            vol_series.append(stdev(seg) * sqrt(252) * 100)
-    vol_pct_rank = empirical_percentile(vol_series, vol_series[-1]) if len(vol_series) >= 20 else None
+            mean_ret = sum(seg) * 0.05
+            sum_sq = sum((r - mean_ret) * (r - mean_ret) for r in seg)
+            vol_series.append(sqrt(sum_sq) * vol_scale)
+    vol_pct_rank = _empirical_percentile_clean(vol_series, vol_series[-1]) if len(vol_series) >= 20 else None
 
     oi_series = [
         float(b["open_interest"])
@@ -149,12 +238,16 @@ def percentiles(bars: list[dict]) -> dict:
     ]
     latest_oi = window[-1].get("open_interest")
     oi_pct_rank = (
-        empirical_percentile(oi_series, float(latest_oi))
-        if isinstance(latest_oi, (int, float)) and latest_oi > 0 and len(oi_series) >= 20
+        _empirical_percentile_clean(oi_series, float(latest_oi))
+        if isinstance(latest_oi, (int, float))
+        and not isinstance(latest_oi, bool)
+        and isfinite(latest_oi)
+        and latest_oi > 0
+        and len(oi_series) >= 20
         else None
     )
 
-    return {
+    result = {
         "data_as_of": window[-1]["date"],
         "sample_days": len(window),
         "since_date": window[0]["date"],
@@ -168,6 +261,11 @@ def percentiles(bars: list[dict]) -> dict:
         "volatility20_pct_rank": vol_pct_rank,
         "open_interest_pct_rank": oi_pct_rank,
     }
+    if cache_key is not None:
+        if len(_PERCENTILES_CACHE) >= _PERCENTILES_CACHE_MAX:
+            _PERCENTILES_CACHE.pop(next(iter(_PERCENTILES_CACHE)))
+        _PERCENTILES_CACHE[cache_key] = result
+    return dict(result)
 
 
 def roll_diagnostics(bars: list[dict], exchange_daily: dict | None = None) -> dict:

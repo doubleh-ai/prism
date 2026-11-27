@@ -801,18 +801,33 @@ async function load(background = false) {
     retry.hidden = true;
   }
   try {
-    const path = symbol ? '/api/futures/' + encodeURIComponent(symbol) + '/card' : '/api/futures/universe';
-    const response = await fetch(path, {cache: 'no-store'});
-    if (response.status === 401 || response.status === 403) {
-      location.assign('/login');
-      return;
+    let data = null;
+    if (!background && !symbol) {
+      const boot = $('futures-bootstrap');
+      if (boot && typeof boot.textContent === 'string' && boot.textContent.trim()) {
+        try {
+          data = JSON.parse(boot.textContent);
+        } catch (_) {
+          data = null;
+        }
+        boot.textContent = '';
+        if (typeof boot.remove === 'function') boot.remove();
+      }
     }
-    if (response.status === 404) {
-      status.textContent = '该品种不在期货分析目录中。';
-      return;
+    if (!data) {
+      const path = symbol ? '/api/futures/' + encodeURIComponent(symbol) + '/card' : '/api/futures/universe';
+      const response = await fetch(path, {cache: 'no-store'});
+      if (response.status === 401 || response.status === 403) {
+        location.assign('/login');
+        return;
+      }
+      if (response.status === 404) {
+        status.textContent = '该品种不在期货分析目录中。';
+        return;
+      }
+      if (!response.ok) throw new Error(response.status === 429 ? '查询较频繁，请稍后重试。' : '资料暂时无法读取。');
+      data = await response.json();
     }
-    if (!response.ok) throw new Error(response.status === 429 ? '查询较频繁，请稍后重试。' : '资料暂时无法读取。');
-    const data = await response.json();
     status.textContent = '';
     if (symbol) {
       renderCard(data);

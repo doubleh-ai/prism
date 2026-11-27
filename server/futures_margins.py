@@ -369,8 +369,8 @@ def compute_margin(
     change_1d = round(current - previous, 2) if previous is not None else None
     change_5d = round(current - nums[-6], 2) if len(nums) >= 6 else None
     change_20d = round(current - nums[-21], 2) if len(nums) >= 21 else None
-    pct_5y = futures_signals.empirical_percentile(nums, current)
-    pct_1y = futures_signals.empirical_percentile(nums[-250:], current)
+    pct_5y = futures_signals._empirical_percentile_clean(nums, current)
+    pct_1y = futures_signals._empirical_percentile_clean(nums[-250:], current)
     leg_quotes = {leg: leg_maps[leg][latest_day] for leg in spec.legs}
 
     return {
@@ -398,6 +398,39 @@ def compute_margin(
     }
 
 
+_ALL_MARGIN_LEGS: tuple[str, ...] = tuple(sorted({leg for spec in SPECS for leg in spec.legs}))
+_ALL_MARGINS_CACHE: dict[tuple, list[dict]] = {}
+_ALL_MARGINS_CACHE_MAX = 16
+
+
+def _leg_cache_sig(bars: list[dict] | None) -> tuple | None:
+    if not isinstance(bars, list) or not bars:
+        return None
+    first = bars[0]
+    last = bars[-1]
+    prev = bars[-2] if len(bars) >= 2 else None
+    if not (isinstance(first, dict) and isinstance(last, dict)):
+        return None
+    return (
+        id(bars),
+        len(bars),
+        first.get("date"),
+        first.get("close"),
+        prev.get("close") if isinstance(prev, dict) else None,
+        last.get("date"),
+        last.get("close"),
+    )
+
+
+def _clone_margins(items: list[dict]) -> list[dict]:
+    return [
+        {**m, "values": {**m["values"], "leg_closes": dict(m["values"]["leg_closes"])}}
+        if m.get("values")
+        else dict(m)
+        for m in items
+    ]
+
+
 def margins_for_symbol(
     symbol: str,
     histories: dict[str, list[dict] | None],
@@ -417,4 +450,16 @@ def all_margins(
     today: date | None = None,
     fresh_days: int = 4,
 ) -> list[dict]:
-    return [compute_margin(spec, histories, today=today, fresh_days=fresh_days) for spec in SPECS]
+    cache_key = (
+        today,
+        fresh_days,
+        tuple((leg, _leg_cache_sig(histories.get(leg))) for leg in _ALL_MARGIN_LEGS),
+    )
+    cached = _ALL_MARGINS_CACHE.get(cache_key)
+    if cached is not None:
+        return _clone_margins(cached)
+    computed = [compute_margin(spec, histories, today=today, fresh_days=fresh_days) for spec in SPECS]
+    if len(_ALL_MARGINS_CACHE) >= _ALL_MARGINS_CACHE_MAX:
+        _ALL_MARGINS_CACHE.pop(next(iter(_ALL_MARGINS_CACHE)))
+    _ALL_MARGINS_CACHE[cache_key] = computed
+    return _clone_margins(computed)

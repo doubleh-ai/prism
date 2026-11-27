@@ -320,15 +320,19 @@ def universe():
     products = []
     histories = {symbol: futures.series_history(symbol) for symbol in UNIVERSE}
     names = {}
+    percentiles_by_symbol: dict[str, dict] = {}
+    mono_now = time.monotonic()
     for symbol in UNIVERSE:
         timestamp, value = _cards.get(symbol, (0, None))
-        observed = value if time.monotonic() - timestamp < OVERVIEW_SECONDS else None
+        observed = value if mono_now - timestamp < OVERVIEW_SECONDS else None
         prod = _product(symbol)
         names[symbol] = prod["name"]
         bars = histories.get(symbol)
         preview = None
         if bars and len(bars) >= 2:
-            pct = futures_signals.percentiles(bars).get("close_pct_5y")
+            pct_map = futures_signals.percentiles(bars)
+            percentiles_by_symbol[symbol] = pct_map
+            pct = pct_map.get("close_pct_5y")
             prev_c = bars[-2].get("close")
             chg = round((bars[-1]["close"] / prev_c - 1.0) * 100.0, 2) if prev_c else None
             preview = {
@@ -343,7 +347,9 @@ def universe():
         "dimensions": [{"key": key, "label": label} for key, label in DIMENSIONS.items()],
         "archetypes": [{"key": k, "label": v} for k, v in futures_ontology.ARCHETYPE_LABELS.items()],
         "products": products,
-        "radar": futures_auto_engine.build_market_radar(histories, names, now, fresh_days=FRESH_DAYS),
+        "radar": futures_auto_engine.build_market_radar(
+            histories, names, now, fresh_days=FRESH_DAYS, percentiles_by_symbol=percentiles_by_symbol
+        ),
         "quant_provider": futures_quant_provider.provider_metadata(),
         "generated_at": now.isoformat(timespec="seconds"),
         "freshness_calendar_days": FRESH_DAYS,

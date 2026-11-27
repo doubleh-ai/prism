@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from . import futures_margins, futures_ontology, futures_signals, model_routes
@@ -217,6 +217,7 @@ def build_market_radar(
     now: datetime,
     *,
     fresh_days: int = 4,
+    percentiles_by_symbol: dict[str, dict] | None = None,
 ) -> dict:
     """Compute zero-network market-wide anomaly radar across all cached histories and margins."""
     today = now.date()
@@ -228,9 +229,13 @@ def build_market_radar(
         if not bars or len(bars) < 20:
             continue
         last_day = bars[-1].get("date")
-        if not last_day or (today - datetime.strptime(last_day, "%Y-%m-%d").date()).days > fresh_days:
+        if not last_day or (today - date.fromisoformat(last_day)).days > fresh_days:
             continue
-        pct = futures_signals.percentiles(bars)
+        pct = (
+            percentiles_by_symbol[symbol]
+            if percentiles_by_symbol is not None and symbol in percentiles_by_symbol
+            else futures_signals.percentiles(bars)
+        )
         p5 = pct.get("close_pct_5y")
         chg_pct = (
             round((bars[-1]["close"] / bars[-2]["close"] - 1.0) * 100.0, 2)

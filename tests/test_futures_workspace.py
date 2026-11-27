@@ -292,3 +292,57 @@ async def test_journal_not_offered_on_overview_or_unimplemented_instruments(clie
         assert page.text.count('id="journal-study"') == 1
         assert "历史回放" not in page.text
         assert "__JOURNAL_" not in page.text
+        assert "__FUTURES_BOOTSTRAP__" not in page.text
+
+
+async def test_futures_overview_inlines_bootstrap_and_serves_warm_universe_in_milliseconds(
+    client, auth_cookies
+):
+    import time
+
+    from server import futures_margins, futures_signals
+
+    futures_signals._PERCENTILES_CACHE.clear()
+    futures_margins._ALL_MARGINS_CACHE.clear()
+    base_day = futures_workspace._now().date()
+    stamp = time.monotonic()
+    for idx, sym in enumerate(futures_workspace.UNIVERSE):
+        bars = []
+        for offset in range(1250):
+            day = (base_day - timedelta(days=1249 - offset)).isoformat()
+            close = 1000.0 + idx * 17.0 + (offset % 37) * 3.5 + offset * 0.12
+            bars.append(
+                {
+                    "date": day,
+                    "open": close - 2.0,
+                    "high": close + 5.0,
+                    "low": close - 5.0,
+                    "close": close,
+                    "volume": 50000 + offset * 10,
+                    "open_interest": 120000 + (offset % 19) * 300,
+                }
+            )
+        futures._SERIES_HISTORY[sym] = (stamp, bars)
+
+    t0 = time.perf_counter()
+    cold = futures_workspace.universe()
+    cold_ms = (time.perf_counter() - t0) * 1000.0
+
+    t1 = time.perf_counter()
+    warm = futures_workspace.universe()
+    warm_ms = (time.perf_counter() - t1) * 1000.0
+
+    assert cold["count"] == warm["count"] == 46
+    assert warm["radar"]["observed_products"] == 46
+    assert cold_ms < 250.0
+    assert warm_ms < 25.0
+
+    overview_page = await client.get("/futures", cookies=auth_cookies)
+    assert overview_page.status_code == 200
+    assert 'id="futures-bootstrap" type="application/json">' in overview_page.text
+    assert "__FUTURES_BOOTSTRAP__" not in overview_page.text
+
+    detail_page = await client.get("/futures?symbol=RB", cookies=auth_cookies)
+    assert detail_page.status_code == 200
+    assert 'id="futures-bootstrap"' not in detail_page.text
+    assert "__FUTURES_BOOTSTRAP__" not in detail_page.text
