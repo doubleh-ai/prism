@@ -701,6 +701,14 @@
     if (topPersonaBtn) {
       topPersonaBtn.onclick = openFuturesPersonaDialog;
     }
+    var menuPersonaBtn = document.getElementById('futuresMenuPersonaBtn');
+    if (menuPersonaBtn) {
+      menuPersonaBtn.addEventListener('click', function () {
+        var menu = document.getElementById('futuresAccountMenu');
+        if (menu) menu.hidden = true;
+        openFuturesPersonaDialog();
+      });
+    }
   }
 
   function bindFuturesResizer(handle) {

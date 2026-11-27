@@ -133,9 +133,6 @@ function renderMarketRadar(radar, quantProvider) {
 
 function renderUniverse(data) {
   const overview = node('div', null, 'futures-overview');
-  const abbreviatedDimensions = {
-    market: '行情', technicals: '技术', positioning: '资金', fundamentals: '基本', freshness: '时效',
-  };
   let activeArchetype = 'all';
 
   const radarEl = renderMarketRadar(data.radar, data.quant_provider);
@@ -163,17 +160,12 @@ function renderUniverse(data) {
   }
 
   const stateKey = node('div', null, 'futures-state-key');
-  for (const [statusName, label] of [
-    ['collected', '有数据 / 近期'], ['partial', '部分可用 / 较早'], ['unknown', '待核验'],
-    ['unavailable', '不可用'],
-  ]) {
-    const item = node('span', null, 'futures-key-item');
-    const mark = node('span', null, 'futures-state');
-    mark.setAttribute('data-status', statusName);
-    mark.setAttribute('aria-hidden', 'true');
-    item.append(mark, node('span', label));
-    stateKey.append(item);
-  }
+  stateKey.append(
+    node('span', '分位条：近5年收盘分位', 'futures-key-item'),
+    node('span', '同期：历年同月日季节性分位（新品种显示年内）', 'futures-key-item'),
+    node('span', '持仓：近5年总持仓拥挤分位', 'futures-key-item'),
+    node('span', '右侧短签：基差升贴水 / 仓单去累库 / 历史极值触发时亮起', 'futures-key-item')
+  );
   const groups = node('div', null, 'futures-groups');
   overview.append(stateKey, groups);
 
@@ -208,6 +200,7 @@ function renderUniverse(data) {
         identity.append(name, arrow);
         link.append(identity);
 
+        const ariaParts = [product.name, product.symbol];
         if (product.quote_preview && product.quote_preview.close != null) {
           const qp = product.quote_preview;
           const quoteRow = node('div', null, 'futures-tile-quote');
@@ -217,6 +210,7 @@ function renderUniverse(data) {
             const chg = node('span', chgTxt, 'futures-tile-chg');
             chg.setAttribute('data-dir', qp.change_pct > 0 ? 'up' : qp.change_pct < 0 ? 'down' : 'flat');
             quoteRow.append(chg);
+            ariaParts.push('最新 ' + qp.close + ' (' + chgTxt + ')');
           }
           link.append(quoteRow);
           if (typeof qp.pct_5y === 'number' && Number.isFinite(qp.pct_5y)) {
@@ -229,24 +223,35 @@ function renderUniverse(data) {
             mini.append(barTrack, node('em', Math.round(qp.pct_5y) + '%分位'));
             link.append(mini);
           }
+
+          const foot = node('div', null, 'futures-tile-foot');
+          const metricParts = [];
+          if (typeof qp.seasonal_pct === 'number' && Number.isFinite(qp.seasonal_pct)) {
+            metricParts.push('同期 ' + Math.round(qp.seasonal_pct) + '%');
+          } else if (typeof qp.pct_1y === 'number' && Number.isFinite(qp.pct_1y)) {
+            metricParts.push('年内 ' + Math.round(qp.pct_1y) + '%');
+          }
+          if (typeof qp.oi_pct === 'number' && Number.isFinite(qp.oi_pct)) {
+            metricParts.push('持仓 ' + Math.round(qp.oi_pct) + '%');
+          }
+          const metricTxt = metricParts.length ? metricParts.join(' · ') : (qp.data_as_of || '已同步');
+          foot.append(node('span', metricTxt, 'futures-tile-metrics'));
+          ariaParts.push(metricTxt);
+
+          if (qp.signal_tag) {
+            const badge = node('span', qp.signal_tag, 'futures-tile-tag');
+            badge.setAttribute('data-tone', qp.signal_tone || 'neutral');
+            foot.append(badge);
+            ariaParts.push(qp.signal_tag);
+          }
+          link.append(foot);
+        } else {
+          const foot = node('div', null, 'futures-tile-foot');
+          foot.append(node('span', '连续日线同步中…', 'futures-tile-metrics'));
+          link.append(foot);
         }
 
-        const states = node('div', null, 'futures-states');
-        const descriptions = [];
-        for (const {key, label} of data.dimensions) {
-          const observation = product.dimensions[key];
-          const detail = [observation.data_as_of, observation.reason].filter(Boolean).join(' · ');
-          const description = label + '：' + (stateLabels[observation.status] || observation.status) +
-            (detail ? '（' + detail + '）' : '');
-          descriptions.push(description);
-          const state = node('span', abbreviatedDimensions[key] || label, 'futures-state');
-          state.setAttribute('data-status', observation.status);
-          state.title = description;
-          state.setAttribute('aria-hidden', 'true');
-          states.append(state);
-        }
-        link.setAttribute('aria-label', product.name + '，' + product.symbol + '。' + descriptions.join('；'));
-        link.append(states);
+        link.setAttribute('aria-label', ariaParts.join('，'));
         grid.append(link);
       }
       section.append(heading, grid);
@@ -880,8 +885,8 @@ const OVERVIEW_TOUR_STEPS = [
   },
   {
     sel: '.futures-tile',
-    title: '品种卡片：5 年分位条与五维核验',
-    text: '卡片直观展示最新收盘、涨跌幅与 5 年历史分位位置；底部五格色块实事求是标明行情、技术、资金、基本面与时效状态，点进任意卡片即可打开深度因果画布。',
+    title: '品种卡片：5 年分位、同期季节性与基差/仓单信号',
+    text: '卡片直观展示最新收盘、涨跌幅与 5 年历史分位条；底部直接标出历年同期分位与持仓拥挤分位，并在触发基差升贴水、仓单去累库或历史极值时高亮短标签，点进即可查看全产业链因果画布。',
     note: null,
   },
   {

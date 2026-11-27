@@ -1,8 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="#2e6b56">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="#16382b">
   <style>
     @media (prefers-color-scheme: dark) {
-      :root { fill: #9dd6c7; }
+      :root { fill: #eaefe9; }
     }
   </style>
-  <path id="mark" fill-rule="evenodd" d="M16 1 31 16 16 31 1 16Z M16 5 5 16 16 27 27 16Z M16 9 23 16 16 23 9 16Z"/>
+  <g id="mark">
+    <path d="M16 3.8L21.2 12.8L13.2 26.6H4.4L16 3.8Z"/>
+    <path d="M21.2 12.8L27.6 26.6H15.8L18.9 21.2H21.6L18.4 15.5L21.2 12.8Z" fill-opacity="0.65"/>
+    <path d="M10.8 26.6L16 17.6L21.2 26.6H10.8Z" fill-opacity="0.28"/>
+  </g>
 </svg>

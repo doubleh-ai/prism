@@ -13,7 +13,7 @@ async def test_page_version_and_latest_published_release(client, auth_cookies, m
     )
     monkeypatch.setattr(release, "CHANGELOG_PATH", notes)
     login = await client.get("/login")
-    assert "<title>DoubleH · 登录</title>" in login.text
+    assert "<title>Prism · 登录</title>" in login.text
     prism = await client.get("/prism", cookies=auth_cookies)
     assert release.APP_VERSION + "</span>" in prism.text
     observed = await client.get("/api/releases", cookies=auth_cookies)

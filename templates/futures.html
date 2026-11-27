@@ -8,29 +8,29 @@
   <script>
     (function () {
       try {
-        var t = localStorage.getItem('cl-theme');
-        var dark = t ? t === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        var dark = localStorage.getItem('cl-theme') === 'dark';
         document.documentElement.className = dark ? 'dark' : 'light';
         document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
       } catch (e) {}
     })();
   </script>
-  <link rel="icon" type="image/svg+xml" href="/static/prism-mark.svg?v=143">
-  <link rel="stylesheet" href="/static/css/portal.css?v=143">
-  <link rel="stylesheet" href="/static/css/futures.css?v=143">
-  <link rel="stylesheet" href="/static/css/copilot.css?v=143">
-  <script src="/static/js/futures-brief.js?v=143" defer></script>
-  <script src="/static/js/futures.js?v=143" defer></script>
-  <script src="/static/js/futures-copilot.js?v=143" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=153">
+  <link rel="stylesheet" href="/static/css/portal.css?v=153">
+  <link rel="stylesheet" href="/static/css/futures.css?v=153">
+  <link rel="stylesheet" href="/static/css/copilot.css?v=153">
+  <script src="/static/js/futures-brief.js?v=153" defer></script>
+  <script src="/static/js/futures.js?v=153" defer></script>
+  <script src="/static/js/futures-copilot.js?v=153" defer></script>
+  <script src="/static/js/app.radar.js?v=153" defer></script>
 </head>
 <body class="futures-with-rail">
   <a class="skip-link" href="#main">跳至主要内容</a>
 
   <div class="futures-shell" id="futuresShell">
     <nav class="icon-rail" id="iconRail" aria-label="研究空间导航">
-      <a class="icon-rail-brand" href="/prism" title="Prism 投研工作台">
-        <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=143#mark"/></svg>
-        <span class="rail-brand-word">Prism<small>投研工作台</small></span>
+      <a class="icon-rail-brand" href="/prism" title="Prism">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=153#mark"/></svg>
+        <span class="rail-brand-word">Prism<small>RESEARCH</small></span>
       </a>
 
       <span class="rail-section-label">研究空间</span>
@@ -42,6 +42,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17L17 7M9.5 7H17v7.5" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="rail-label">期货研究</span>
       </a>
+      <a class="icon-rail-btn" href="/prism?mode=radar" title="风向雷达与作战剧本">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.55"/><circle cx="12" cy="12" r="4.5" stroke="currentColor" stroke-width="1.4" opacity=".65"/><path d="M12 12l5.2-5.2" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
+        <span class="rail-label">风向雷达</span>
+      </a>
       <a class="icon-rail-btn" href="/prism?mode=reports&tab=journal" title="研究与复盘">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 3.5h8l4 4V20H6V3.5z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4M9 12h6M9 15.5h4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         <span class="rail-label">研究与复盘</span>
@@ -52,7 +56,7 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h9m4 0h3M13 5v4M4 12h4m4 0h8M8 10v4M4 17h11m4 0h1M15 15v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         <span class="rail-label">全市场选股</span>
       </a>
-      <a class="icon-rail-btn" href="/prism?mode=indicators" title="指标实验室">
+      <a class="icon-rail-btn mobile-rail-hide" href="/prism?mode=indicators" title="指标实验室">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15.5 4.5c-2.1 0-3 1.3-3.4 3.6l-1.2 7.8c-.4 2.3-1.3 3.6-3.4 3.6M8.5 10.5h6.5" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="rail-label">指标实验室</span>
       </a>
@@ -72,14 +76,31 @@
           <a id="all-futures" class="futures-back-pill" href="/futures" hidden>全部品种</a>
         </div>
         <div class="futures-topbar-actions">
-          <button type="button" class="copilot-pill-btn" id="futuresTopPersonaBtn" title="管理我的独立投研画像与风控纪律">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19.5c1.4-3 3.8-4.5 6.5-4.5s5.1 1.5 6.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            <span>投研画像</span>
+          <button type="button" class="radar-topbar-pill" id="radarTopbarPill" onclick="window.PrismRadar && window.PrismRadar.openDrawer()" title="风向哨兵 · 点击速览或进入战情室">
+            <span class="radar-dot" aria-hidden="true"></span>
+            <span class="radar-pill-text" id="radarTopbarText">风向 · 巡检中</span>
           </button>
           <button type="button" class="tb" id="futuresThemeBtn" title="切换明暗主题" aria-label="切换明暗主题">
             <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M7.5 2a5.5 5.5 0 000 11V2z" fill="currentColor" opacity=".35"/></svg>
           </button>
           <button type="button" id="futures-help-btn" class="tb" aria-label="功能与能力指引" title="功能与能力指引">?</button>
+          <span class="topbar-divider" aria-hidden="true"></span>
+          <span class="topbar-ver-pill" id="versionTag" title="当前版本">__APP_VERSION__</span>
+          <div class="topbar-account-wrap" id="accountMenuWrap">
+            <button type="button" class="topbar-account-btn" id="futuresAccountBtn" aria-haspopup="menu" aria-expanded="false" title="账号与偏好设置">
+              <span class="topbar-account-avatar" id="futuresAvatarLetter">P</span>
+              <span class="topbar-account-name" id="futuresUserBadge">__FUTURES_ACCOUNT__</span>
+              <span class="topbar-account-caret" aria-hidden="true">▾</span>
+            </button>
+            <div class="topbar-account-menu" id="futuresAccountMenu" role="menu" hidden>
+              <div class="topbar-account-menu__hd">
+                <strong id="futuresMenuAccountName">__FUTURES_ACCOUNT__</strong>
+                <span>__APP_VERSION__</span>
+              </div>
+              <button type="button" role="menuitem" id="futuresMenuPersonaBtn">投研画像</button>
+              <button type="button" role="menuitem" id="futuresMenuLogoutBtn" class="danger">退出登录</button>
+            </div>
+          </div>
         </div>
       </header>
 

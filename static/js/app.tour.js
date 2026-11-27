@@ -10,7 +10,7 @@ Object.assign(App, {
       {sel:"#marketSidebarQ",title:"快速检索与自选池",text:"输入股票代码或简称秒搜，一键加入个人自选池；也可点顶栏左侧按钮（⌘B）随时收起列表侧栏。"},
       {sel:"a.icon-rail-btn[href='/futures']",title:"期货研究",text:"直达 46 品种期货本体工作台：查看近 5 年分位温度计、产业链盘面利润与期股联动。"},
       {sel:".icon-rail-btn[data-workbench-view='screener']",title:"全市场选股与指标实验室",text:"直接从左栏切换至沪深京全市场量化扫描或自然语言参数化指标实验室。"},
-      {sel:"#topbarPersonaBtn",title:"独立投研画像",text:"配置你的主导投资流派（价值/周期/趋势/套利）、仓位回撤红线与个体化研究准则。"},
+      {sel:"#accountMenuBtn",title:"账号与投研画像",text:"打开账号菜单即可配置你的独立投研画像与风控纪律、iOS Bark 手机推送，以及退出登录。"},
       {sel:"#copilotLauncher",title:"自适应随行 Agent (⌘K)",text:"按 ⌘K 呼出伴随助手：结论先行，长文与表格自动拓宽，并支持拖拽边缘与一键 ⤢ 居中沉浸精读。"},
     ],
     reports: [

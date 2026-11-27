@@ -31,7 +31,6 @@ Object.assign(App, {
       }
     }
     this._showMarketWorkspace(this._marketWorkspaceTab || "quote");
-    this._loadRecentScans();
   },
 
   _showMarketWorkspace: function(tab) {

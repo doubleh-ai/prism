@@ -5,6 +5,7 @@ Every endpoint requires a session before any provider call. The endpoints
 are GET-only, so no CSRF header is required.
 """
 
+import asyncio
 import logging
 import re
 
@@ -74,21 +75,21 @@ async def api_quote(ticker: str, request: Request):
 
 @router.get("/quotes")
 async def api_quotes_batch(request: Request, tickers: str = ""):
-    """Batch quote — multiple tickers in one request (comma-separated).
-    Returns {ticker: quote} for all successfully fetched tickers.
-    Much faster than N individual requests for chat [[quote:XXX]] chips."""
+    """Batch quote — multiple tickers in one parallel fan-out request (comma-separated)."""
     ticker_list = [t.strip() for t in tickers.split(",") if t.strip()][:20]
     if not ticker_list:
         return JSONResponse(status_code=400, content={"error": "no tickers"})
     chain = get_chain()
-    results = {}
-    for t in ticker_list:
+
+    async def _one(sym: str):
         try:
-            quote, _ = await chain.get_quote(t)
-            results[t] = quote.model_dump()
+            quote, _ = await chain.get_quote(sym)
+            return sym, quote.model_dump()
         except Exception:
-            results[t] = {"error": "unavailable"}
-    return {"quotes": results}
+            return sym, {"error": "unavailable"}
+
+    pairs = await asyncio.gather(*(_one(t) for t in ticker_list))
+    return {"quotes": dict(pairs)}
 
 
 @router.get("/quote/{ticker}/kline")

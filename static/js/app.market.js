@@ -22,7 +22,7 @@ Object.assign(App, {
   _tickerNames: {},   // ticker → name cache, populated from search results
 
   switchMode: function(mode) {
-    if (mode !== 'reports') mode = 'market';
+    if (mode !== 'reports' && mode !== 'radar') mode = 'market';
     if (mode === this._mode) return;
     this._mode = mode;
     try { if (this.user) localStorage.setItem('prism-last-pillar:' + this.user, mode); } catch(e) {}
@@ -34,12 +34,16 @@ Object.assign(App, {
     if (shell) shell.setAttribute('data-mode', mode);
     var sideMarket = document.getElementById('sidebarMarket');
     var sideReports = document.getElementById('sidebarReports');
+    var sideRadar = document.getElementById('sidebarRadar');
     var panelMarket = document.getElementById('marketPanel');
     var panelReports = document.getElementById('reportsPanel');
+    var panelRadar = document.getElementById('radarPanel');
     if (sideMarket) sideMarket.style.display = mode === 'market' ? '' : 'none';
     if (sideReports) sideReports.style.display = mode === 'reports' ? '' : 'none';
+    if (sideRadar) sideRadar.style.display = mode === 'radar' ? '' : 'none';
     if (panelMarket) panelMarket.style.display = mode === 'market' ? '' : 'none';
     if (panelReports) panelReports.style.display = mode === 'reports' ? '' : 'none';
+    if (panelRadar) panelRadar.style.display = mode === 'radar' ? '' : 'none';
 
     var compact = this._isCompactViewport && this._isCompactViewport();
     var btns = document.querySelectorAll('.icon-rail-btn[data-mode]');
@@ -48,12 +52,23 @@ Object.assign(App, {
     }
     if (mode === 'market') {
       if (this._initMarketWorkbench) this._initMarketWorkbench();
-      this._loadWatchlist();
-      this._renderWatchlist();
-      this._startWatchlistRefresh();
-      this._loadIndicators();
       if (!this._currentTicker) this._showMarketEmpty();
+      this._renderWatchlist();
+      this._loadWatchlist();
+      this._startWatchlistRefresh(true);
+      var selfMkt = this;
+      setTimeout(function() {
+        if (selfMkt._mode === 'market' && !selfMkt._indicatorsLoadedOnce) {
+          selfMkt._indicatorsLoadedOnce = true;
+          selfMkt._loadIndicators();
+        }
+      }, 600);
       this._warmupSearch();
+    } else if (mode === 'radar') {
+      this._stopWatchlistRefresh();
+      if (window.PrismRadar && typeof window.PrismRadar.renderWorkspace === 'function') {
+        window.PrismRadar.renderWorkspace();
+      }
     } else if (mode === 'reports') {
       this._stopWatchlistRefresh();
       this._initReports();
@@ -266,9 +281,9 @@ Object.assign(App, {
       })(this._watchlist[i]);
     }
   },
-  _startWatchlistRefresh: function() {
+  _startWatchlistRefresh: function(skipImmediate) {
     this._stopWatchlistRefresh();
-    this._refreshWatchlist();
+    if (!skipImmediate) this._refreshWatchlist();
     var self = this;
     // Adaptive refresh: 30s when visible, 120s when hidden
     var _schedule = function() {
@@ -603,7 +618,13 @@ Object.assign(App, {
       : {rise:'#d6332f', fall:'#1f9d83', up:'#d6332f', dn:'#1f9d83', ma1:'#cf8a3a', ma2:'#7c5fd0', grid:'#d2cec3', axl:'#c8c2b4', txt:'#8a8478', cross:'#9d9890', tipBg:'#ffffff', tipBd:'#e2e0da', tipTxt:'#1c1a16', zoomBd:'#d5d2cb', zoomFill:'#ebe9e4'};
   },
   renderKlineChart: function(container, kline) {
-    if (typeof echarts === 'undefined') { container.innerHTML = '图表库未加载'; return; }
+    if (typeof echarts === 'undefined') {
+      var retrySelf = this;
+      setTimeout(function() {
+        if (retrySelf._currentTicker === ticker) retrySelf._renderKline(ticker, period);
+      }, 100);
+      return;
+    }
     if (this._klineChart) { try { this._klineChart.dispose(); } catch (e) {} this._klineChart = null; }
     var chart = echarts.init(container, null, {renderer: 'canvas'});
     this._klineChart = chart;
@@ -827,7 +848,7 @@ Object.assign(App, {
     if (this._warmed) return;
     this._warmed = true;
     setTimeout(function() {
-      self.api('/api/search?q=a&limit=1').catch(function(){});
-    }, 100);
+      self.api('/api/search?q=600519&limit=1').catch(function(){});
+    }, 1500);
   }
 });
