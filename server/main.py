@@ -1,6 +1,7 @@
 """Prism — FastAPI 主入口"""
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from html import escape
@@ -82,6 +83,7 @@ from .futures_panel import router as futures_panel_router
 from .futures_workspace import normalize_symbol as futures_symbol
 from .futures_workspace import refresh_overview_periodically
 from .futures_workspace import router as futures_workspace_router
+from .futures_workspace import universe as futures_universe
 from .health import admin_health_payload, readiness_payload
 from .indicators.router import router as indicators_router
 from .industry_router import router as industry_router
@@ -391,8 +393,10 @@ async def futures_page(request: Request):
     if not owner:
         return RedirectResponse("/login")
     page = render_template("futures.html")
-    symbol = futures_symbol(request.query_params.get("symbol") or "")
+    raw_symbol = (request.query_params.get("symbol") or "").strip()
+    symbol = futures_symbol(raw_symbol)
     journal = ""
+    bootstrap = ""
     if symbol:
         replay_option = ""
         if symbol in REPLAY_WINDOWS:
@@ -404,8 +408,18 @@ async def futures_page(request: Request):
             .replace("__JOURNAL_SYMBOL__", symbol)
             .replace("__JOURNAL_REPLAY_OPTION__", replay_option)
         )
-    page = page.replace("__FUTURES_JOURNAL__", journal).replace(
-        "__FUTURES_ACCOUNT__", escape(owner, quote=True) if symbol else ""
+    elif not raw_symbol:
+        raw_json = (
+            json.dumps(futures_universe(), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+        bootstrap = f'<script id="futures-bootstrap" type="application/json">{raw_json}</script>'
+    page = (
+        page.replace("__FUTURES_BOOTSTRAP__", bootstrap)
+        .replace("__FUTURES_JOURNAL__", journal)
+        .replace("__FUTURES_ACCOUNT__", escape(owner, quote=True) if symbol else "")
     )
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 

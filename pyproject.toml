@@ -5,7 +5,7 @@
 
 [project]
 name = "prism"
-version = "0.26.1"
+version = "0.26.2"
 description = "Open-source AI-powered investment research workbench for A-shares and domestic commodity futures."
 readme = "README.md"
 license = { text = "Apache-2.0" }
