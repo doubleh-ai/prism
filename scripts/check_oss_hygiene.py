@@ -69,10 +69,15 @@ def _is_semver_context(line: str, match_start: int) -> bool:
     return bool(re.search(r"(?:v|version\s*[=:]?\s*|python\s*|chrome/|safari/|mozilla/|oid\s*)$", prefix))
 
 
-def check_branch(errors: list[str]) -> None:
+def check_branch(errors: list[str], *, pre_commit: bool = False) -> None:
     branch = _current_branch()
     if branch == "master":
-        errors.append("Branch 'master' is retired; use 'main' or a topic branch (feat/*, fix/*, etc.).")
+        errors.append("Branch 'master' is retired; commit on 'dev' and open a PR into 'main'.")
+    elif pre_commit and branch == "main":
+        errors.append(
+            "Direct commits on 'main' are blocked; switch to persistent branch 'dev' "
+            "(`git checkout -B dev origin/main`), commit there, and merge via PR."
+        )
 
 
 def check_files_and_leaks(files: list[str], errors: list[str]) -> None:
@@ -154,7 +159,7 @@ def check_asset_coherence(errors: list[str]) -> None:
 def main() -> int:
     errors: list[str] = []
     files = _tracked_files()
-    check_branch(errors)
+    check_branch(errors, pre_commit="--pre-commit" in sys.argv[1:])
     check_files_and_leaks(files, errors)
     check_markdown_links(files, errors)
     check_asset_coherence(errors)
