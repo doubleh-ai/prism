@@ -1,7 +1,7 @@
 """Daily technical, positioning, 5-year percentile and roll diagnostics for continuous bars."""
 
 from datetime import date
-from itertools import pairwise
+from itertools import accumulate, pairwise
 from math import isfinite, log, sqrt
 from statistics import median
 
@@ -220,12 +220,15 @@ def percentiles(bars: list[dict]) -> dict:
     vol_series: list[float] = []
     if len(closes) >= 40:
         log_rets = [log(curr) - log(prev) for prev, curr in pairwise(closes)]
+        mu0 = sum(log_rets) / len(log_rets)
+        centered = [r - mu0 for r in log_rets]
+        ps1 = list(accumulate(centered, initial=0.0))
+        ps2 = list(accumulate((x * x for x in centered), initial=0.0))
         vol_scale = sqrt(252.0 / 19.0) * 100.0
-        for idx in range(20, len(log_rets) + 1):
-            seg = log_rets[idx - 20 : idx]
-            mean_ret = sum(seg) * 0.05
-            sum_sq = sum((r - mean_ret) * (r - mean_ret) for r in seg)
-            vol_series.append(sqrt(sum_sq) * vol_scale)
+        vol_series = [
+            sqrt(max(0.0, (ps2[idx] - ps2[idx - 20]) - 0.05 * (ps1[idx] - ps1[idx - 20]) ** 2)) * vol_scale
+            for idx in range(20, len(log_rets) + 1)
+        ]
     vol_pct_rank = _empirical_percentile_clean(vol_series, vol_series[-1]) if len(vol_series) >= 20 else None
 
     oi_series = [

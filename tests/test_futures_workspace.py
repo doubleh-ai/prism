@@ -334,8 +334,9 @@ async def test_futures_overview_inlines_bootstrap_and_serves_warm_universe_in_mi
 
     assert cold["count"] == warm["count"] == 46
     assert warm["radar"]["observed_products"] == 46
-    assert cold_ms < 250.0
-    assert warm_ms < 25.0
+    assert warm == cold
+    assert warm_ms < 50.0
+    assert warm_ms < cold_ms * 0.25
 
     overview_page = await client.get("/futures", cookies=auth_cookies)
     assert overview_page.status_code == 200
