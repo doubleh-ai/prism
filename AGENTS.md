@@ -4,13 +4,16 @@ These rules apply to all coding agents (Antigravity, Codex, Claude Code, Cursor,
 
 ---
 
-## 1. Branching, Commits & Pull Request Workflow
+## 1. Fixed Two-Branch (`dev` → PR → `main`) Workflow
 
-1. **`main` Is the Only Trunk**: Always branch off up-to-date `origin/main` using a descriptive prefix (`feat/<topic>`, `fix/<topic>`, `perf/<topic>`, `docs/<topic>`, `chore/<topic>`).
-2. **No `master` Branch & No Force-Push to `main`**: Never create or push a `master` branch, and never rewrite `main` history (`git push --force`).
-3. **Focused Atomic Commits**: Keep each PR scoped to one cohesive goal. Write imperative commit titles explaining *what* changed and *why*.
-4. **Changelog Discipline**: Record user-visible additions, fixes, or removals under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Bump [server/release.py](server/release.py) (`APP_VERSION`) only when cutting an explicit release.
-5. **Merge via Green PR**: Open a pull request against `main` using [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) and merge only after all CI checks (`test` and `security-scan`) pass.
+1. **Two Persistent Branches Only (`main` & `dev`)**:
+   - **`main`**: Protected release/production trunk. **Never commit or push directly to `main`** (enforced by `.githooks/pre-commit`), and never rewrite `main` history (`git push --force`).
+   - **`dev`**: Single reusable integration branch for ongoing development (`git checkout dev && git merge --ff-only origin/main`). **Do not create a new branch name for every routine change** — commit on `dev`, push `origin dev`, and merge into `main` via Pull Request.
+   - **External Contributors**: External contributors submit PRs from their own forks against `main`. Never create or push a `master` branch.
+2. **Merge Strategy (`--merge`, Keep `dev` Alive)**:
+   - Open a PR from `dev` into `main` using [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
+   - After CI checks (`test` and `security-scan`) pass, merge with a standard merge commit (`gh pr merge --merge`, **without** `--squash` and **without** `--delete-branch`) so `dev` and `main` share exact commit ancestry and `dev` remains ready for the next task (`git checkout dev && git merge --ff-only origin/main`).
+3. **Atomic Commits & Changelog**: Write clear imperative commit messages (`feat: ...`, `fix: ...`, `perf: ...`, `docs: ...`). Record user-visible changes under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Bump [server/release.py](server/release.py) (`APP_VERSION`) only when cutting an explicit release.
 
 ---
 
