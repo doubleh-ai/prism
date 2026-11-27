@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+
+python3 -I -S -B scripts/check_oss_hygiene.py
+python3 -I -S -B scripts/check_provider_key_isolation.py

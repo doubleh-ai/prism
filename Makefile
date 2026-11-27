@@ -7,8 +7,8 @@ PIP ?= $(PYTHON) -m pip
 HOST ?= 127.0.0.1
 PORT ?= 8088
 
-.PHONY: help install install-dev test test-cov test-fast lint format type-check \
-        run run-dev clean db-reset coverage coverage-open pre-commit
+.PHONY: help install install-dev test test-cov test-fast lint format type-check check \
+        run run-dev clean db-reset coverage coverage-open pre-commit hooks
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -51,6 +51,17 @@ type-check: ## Run mypy on the server package.
 
 pre-commit: ## Run pre-commit hooks on staged files.
 	$(PYTHON) -m pre_commit run --all-files || true
+
+hooks: ## Enable repository Git pre-commit hooks (.githooks).
+	git config core.hooksPath .githooks
+
+check: ## Run mandatory pre-submit gate (hygiene, key isolation, lint, format, JS runtime, core pytest).
+	$(PYTHON) -I -S -B scripts/check_oss_hygiene.py
+	$(PYTHON) -I -S -B scripts/check_provider_key_isolation.py
+	$(PYTHON) -m ruff check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py scripts/check_oss_hygiene.py
+	$(PYTHON) -m ruff format --check server/ tests/ scripts/release_candidate.py scripts/build_jsonpath_wheel.py scripts/check_provider_key_isolation.py scripts/check_oss_hygiene.py
+	for f in tests/*.cjs; do [ "$$f" = "tests/source_urls_runtime.cjs" ] && continue; node "$$f"; done
+	$(PYTHON) -m pytest -q tests/test_asset_coherence.py tests/test_frontend.py tests/test_security.py
 
 # ── Run ──
 run: ## Run the production server (no reload).
