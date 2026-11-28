@@ -777,9 +777,14 @@ def reconcile_intel_item(intel_id: str, viewer: str) -> dict[str, Any]:
     return _serialize_intel_row(updated, viewer, cred_map, now_ts)
 
 
+def _has_table(db, name: str) -> bool:
+    return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [name]).fetchone())
+
+
 def build_agent_intel_digest_in_tx(db, viewer: str, page_context: dict | None = None) -> list[dict[str, Any]]:
     """Select up to 5 fresh, relevant Circle + Personal Intel items for Agent run snapshot."""
-    init_private_agent_db(db)
+    if not _has_table(db, "circle_intel_items"):
+        return []
     now_ts = int(time.time())
     rows = db.execute(
         """
@@ -853,8 +858,11 @@ class PositionStateUpdate(BaseModel):
 
 
 def get_position_state_in_tx(db, owner: str) -> dict[str, Any]:
-    init_private_agent_db(db)
-    row = db.execute("SELECT * FROM user_position_state WHERE username=?", [owner]).fetchone()
+    row = (
+        db.execute("SELECT * FROM user_position_state WHERE username=?", [owner]).fetchone()
+        if _has_table(db, "user_position_state")
+        else None
+    )
     if not row:
         return {
             "configured": False,
