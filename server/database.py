@@ -783,7 +783,59 @@ def admin_usage_stats() -> dict:
             """,
             [now],
         ).fetchall()
-    return {"totals": dict(totals), "users": [dict(row) for row in by_user]}
+        private_agent_ops = {
+            "circle_intel_active": 0,
+            "circle_intel_total": 0,
+            "circle_intel_reconciled": 0,
+            "watchman_active_rules": 0,
+            "watchman_triggered_total": 0,
+            "persona_configured_users": 0,
+            "persona_traits_total": 0,
+            "position_configured_users": 0,
+        }
+        with suppress(Exception):
+            row = db.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN visibility='circle' AND expires_at > ? THEN 1 ELSE 0 END) AS active_cnt,
+                    SUM(CASE WHEN visibility='circle' THEN 1 ELSE 0 END) AS total_cnt,
+                    SUM(CASE WHEN visibility='circle' AND reconcile_status != 'pending' THEN 1 ELSE 0 END) AS rec_cnt
+                FROM circle_intel_items
+                """,
+                [now],
+            ).fetchone()
+            if row is not None:
+                private_agent_ops["circle_intel_active"] = int(row["active_cnt"] or 0)
+                private_agent_ops["circle_intel_total"] = int(row["total_cnt"] or 0)
+                private_agent_ops["circle_intel_reconciled"] = int(row["rec_cnt"] or 0)
+        with suppress(Exception):
+            wrow = db.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN enabled = 1 AND triggered_at IS NULL THEN 1 ELSE 0 END) AS active_cnt,
+                    SUM(CASE WHEN triggered_at IS NOT NULL THEN 1 ELSE 0 END) AS trig_cnt
+                FROM user_watchman_rules
+                """
+            ).fetchone()
+            if wrow is not None:
+                private_agent_ops["watchman_active_rules"] = int(wrow["active_cnt"] or 0)
+                private_agent_ops["watchman_triggered_total"] = int(wrow["trig_cnt"] or 0)
+        with suppress(Exception):
+            private_agent_ops["position_configured_users"] = int(
+                db.execute("SELECT COUNT(*) FROM user_position_state").fetchone()[0] or 0
+            )
+        with suppress(Exception):
+            private_agent_ops["persona_configured_users"] = int(
+                db.execute("SELECT COUNT(*) FROM research_profiles").fetchone()[0] or 0
+            )
+            private_agent_ops["persona_traits_total"] = int(
+                db.execute("SELECT COUNT(*) FROM user_persona_traits").fetchone()[0] or 0
+            )
+    return {
+        "totals": dict(totals),
+        "users": [dict(row) for row in by_user],
+        "private_agent_ops": private_agent_ops,
+    }
 
 
 def _clean_activity_text(value: object, limit: int = 160) -> str:

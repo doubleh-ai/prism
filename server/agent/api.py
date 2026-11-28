@@ -153,10 +153,22 @@ async def chat_stream(request: Request):
         return JSONResponse({"error": "请求太频繁，请稍后再试"}, status_code=429)
     if req.model is not None and req.model not in config.MODELS:
         return JSONResponse({"error": "所选模型不存在，请重新选择"}, status_code=422)
+    from ..billing_ops import get_user_quota_config
     from ..model_routes import resolve
+    from .provider import configuration_status
+
+    effective_model = req.model
+    if not effective_model:
+        pref_model = get_user_quota_config(user).get("preferred_model") or ""
+        if (
+            pref_model
+            and pref_model in config.MODELS
+            and configuration_status(config.MODELS[pref_model])["configured"]
+        ):
+            effective_model = pref_model
 
     try:
-        model_id, model_cfg, route = resolve("research", explicit_model=req.model)
+        model_id, model_cfg, route = resolve("research", explicit_model=effective_model)
     except HTTPException as failure:
         return JSONResponse({"error": failure.detail}, status_code=failure.status_code)
     model_cfg["_purpose_route"] = route

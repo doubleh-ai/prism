@@ -330,6 +330,17 @@ def snapshot_run(db, owner: str, run_id: str, *, page_context: dict | None = Non
     clean_ctx = _sanitize_page_context(page_context)
     if clean_ctx:
         value = {**value, "page_context": clean_ctx}
+    try:
+        from .private_agent import build_agent_intel_digest_in_tx, get_position_state_in_tx
+
+        pos_state = get_position_state_in_tx(db, owner)
+        if pos_state.get("configured"):
+            value = {**value, "position_state": pos_state}
+        intel_digest = build_agent_intel_digest_in_tx(db, owner, clean_ctx)
+        if intel_digest:
+            value = {**value, "circle_intel_digest": intel_digest}
+    except Exception:
+        pass
     if _table_exists(db, "portfolio_snapshots"):
         row = db.execute("SELECT payload FROM portfolio_snapshots WHERE owner=?", [owner]).fetchone()
         portfolio = json.loads(row[0]) if row else None
@@ -356,7 +367,14 @@ def profile_prompt(value: dict) -> str:
         core_view = {
             k: v
             for k, v in value.items()
-            if k not in {"persona_traits", "journal_track_record", "page_context"}
+            if k
+            not in {
+                "persona_traits",
+                "journal_track_record",
+                "page_context",
+                "position_state",
+                "circle_intel_digest",
+            }
         }
         parts.append(
             "\n以下是用户主动保存、本轮固定的投研画像与风险约束（不是账户资金或持仓证明）："
@@ -394,6 +412,37 @@ def profile_prompt(value: dict) -> str:
             f"触发证伪 {track.get('contradicted', 0)} 笔（{track.get('bias_hint', '')}）。在给出策略与失效条件时针对性协助其规避过往偏差。"
         )
 
+    pos_state = value.get("position_state")
+    if isinstance(pos_state, dict) and pos_state.get("configured"):
+        holdings_txt = "、".join(
+            f"{h.get('name') or h.get('code')}({h.get('code')})"
+            + (f"成本{h.get('cost_price')}" if h.get("cost_price") else "")
+            + (f"[{h.get('weight_note')}]" if h.get("weight_note") else "")
+            for h in (pos_state.get("holdings") or [])
+            if isinstance(h, dict)
+        )
+        parts.append(
+            f"【私人底牌记忆（仅限本人可见，严禁外泄）】用户当前总仓位：{pos_state.get('position_pct')}%（{pos_state.get('tier_label')}），"
+            f"单笔最大容忍止损：{pos_state.get('max_single_loss_pct')}%，"
+            + (f"核心持仓：{holdings_txt}，" if holdings_txt else "暂未填具体持仓代码，")
+            + (f"资金备注：{pos_state.get('cash_note')}。" if pos_state.get("cash_note") else "")
+            + "当用户询问操作策略或解读多分支圈内应对剧本时，必须直接对号入座其当前真实仓位档位给出贴身行动建议，不要笼统把空仓/半仓/满仓所有话术抄一遍。"
+        )
+
+    intel_digest = value.get("circle_intel_digest")
+    if isinstance(intel_digest, list) and intel_digest:
+        parts.append(
+            "【圈内鲜活情报池摘要（仅保留有效期内条目）】"
+            + json.dumps(intel_digest, ensure_ascii=False)
+            + "。【信源分层铁律】上述圈内情报属于熟人圈经验策略或未证实产业线索，绝不可冒充官方公告事实；"
+            "若与当前问题相关，请单独以『【圈内情报交叉】』小节引用（注明剩余有效期及盘口体检提示），并与客观行情/财报数据交叉比对。"
+        )
+
+    parts.append(
+        "【反回音室与红蓝军风控铁律】每当用户表现出追涨加仓冲动、重仓押注单一方向，或圈内情报一边倒看多时，"
+        "必须在回答末尾或风险节独立列出简明的『【反方证伪视角】』：指出当前涨幅/分位是否已透支、潜在反证，以及明确的认错止损观察位。"
+    )
+
     page_ctx = value.get("page_context")
     if isinstance(page_ctx, dict) and page_ctx:
         parts.append(
@@ -406,7 +455,8 @@ def profile_prompt(value: dict) -> str:
         "【随行阅读与双速输出规范】用户在看盘工作台右侧伴随栏阅读，请优化信息密度与可读性："
         "1) 结论先行：回答第一段固定以 **【核心结论】** 开头，在 3~4 行内给出明确倾向、关键实证数字与失效条件，让用户在窄栏一眼抓住重点；"
         "2) 按需分流篇幅：若本轮为日常盘面快问、单点查证或简短异动扫描，采用紧凑要点列表（直奔主题，不写空泛宏观铺垫，控制在 400 字以内）；"
-        "仅当用户明确要求全面深度拆解、诊股或生成报告时，才在核心结论下方展开分节论述与精炼对比表（单表列数尽量不超过 5 列，避免横向挤压）。"
+        "仅当用户明确要求全面深度拆解、诊股或生成报告时，才在核心结论下方展开分节论述与精炼对比表（单表列数尽量不超过 5 列，避免横向挤压）；"
+        "3) 排版克制：严禁在标题、列表或正文中堆砌彩色表情符号（Emoji），全程保持干净、专业、去 AI 腔的机构投研行文风格。"
     )
 
     parts.append(

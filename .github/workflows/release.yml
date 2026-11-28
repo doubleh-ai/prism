@@ -1,0 +1,63 @@
+# Automated GitHub Release publisher on annotated SemVer tags (vX.Y.Z).
+# Extracts the matching section from CHANGELOG.md and publishes/updates the
+# official GitHub Release so README badges and Release history stay in sync.
+name: Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    name: Create GitHub Release from CHANGELOG
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Extract release notes and verify APP_VERSION
+        id: notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          rel_py = Path("server/release.py").read_text(encoding="utf-8")
+          m_ver = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', rel_py)
+          if not m_ver or m_ver.group(1) != tag:
+              raise SystemExit(f"server/release.py APP_VERSION ({m_ver.group(1) if m_ver else 'missing'}) != tag {tag}")
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(
+              rf"^## \[{re.escape(tag)}\][^\n]*\n([\s\S]*?)(?=^## \[|\Z)",
+              re.MULTILINE,
+          )
+          m_sec = pattern.search(changelog)
+          body = m_sec.group(1).strip() if m_sec else f"Release {tag}. See [CHANGELOG.md](CHANGELOG.md) for details."
+          notes_path = Path(os.environ["RUNNER_TEMP"]) / "release-notes.md"
+          notes_path.write_text(body + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"notes_file={notes_path}\n")
+          PY
+
+      - name: Publish or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "Prism $RELEASE_TAG" --notes-file "$NOTES_FILE"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --title "Prism $RELEASE_TAG" --notes-file "$NOTES_FILE"
+          fi

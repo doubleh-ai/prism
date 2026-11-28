@@ -22,7 +22,7 @@ Object.assign(App, {
   _tickerNames: {},   // ticker → name cache, populated from search results
 
   switchMode: function(mode) {
-    if (mode !== 'reports' && mode !== 'radar') mode = 'market';
+    if (mode !== 'reports' && mode !== 'radar' && mode !== 'intel') mode = 'market';
     if (mode === this._mode) return;
     this._mode = mode;
     try { if (this.user) localStorage.setItem('prism-last-pillar:' + this.user, mode); } catch(e) {}
@@ -38,12 +38,23 @@ Object.assign(App, {
     var panelMarket = document.getElementById('marketPanel');
     var panelReports = document.getElementById('reportsPanel');
     var panelRadar = document.getElementById('radarPanel');
+    var panelIntel = document.getElementById('intelPanel');
     if (sideMarket) sideMarket.style.display = mode === 'market' ? '' : 'none';
     if (sideReports) sideReports.style.display = mode === 'reports' ? '' : 'none';
     if (sideRadar) sideRadar.style.display = mode === 'radar' ? '' : 'none';
-    if (panelMarket) panelMarket.style.display = mode === 'market' ? '' : 'none';
-    if (panelReports) panelReports.style.display = mode === 'reports' ? '' : 'none';
-    if (panelRadar) panelRadar.style.display = mode === 'radar' ? '' : 'none';
+    if (panelMarket) panelMarket.style.display = mode === 'market' ? 'flex' : 'none';
+    if (panelReports) panelReports.style.display = mode === 'reports' ? 'flex' : 'none';
+    if (panelRadar) panelRadar.style.display = mode === 'radar' ? 'flex' : 'none';
+    if (panelIntel) panelIntel.style.display = mode === 'intel' ? 'flex' : 'none';
+    try {
+      if (typeof window !== 'undefined' && window.history && typeof window.history.replaceState === 'function' && window.location && window.location.pathname === '/prism') {
+        var u = new URL(window.location.href);
+        if (mode === 'market') u.searchParams.delete('mode');
+        else u.searchParams.set('mode', mode);
+        if (mode !== 'radar') u.searchParams.delete('radar');
+        window.history.replaceState(null, '', u.pathname + (u.search ? u.search : ''));
+      }
+    } catch (e) {}
 
     var compact = this._isCompactViewport && this._isCompactViewport();
     var btns = document.querySelectorAll('.icon-rail-btn[data-mode]');
@@ -68,6 +79,11 @@ Object.assign(App, {
       this._stopWatchlistRefresh();
       if (window.PrismRadar && typeof window.PrismRadar.renderWorkspace === 'function') {
         window.PrismRadar.renderWorkspace();
+      }
+    } else if (mode === 'intel') {
+      this._stopWatchlistRefresh();
+      if (window.PrismIntel && typeof window.PrismIntel.renderWorkspace === 'function') {
+        window.PrismIntel.renderWorkspace();
       }
     } else if (mode === 'reports') {
       this._stopWatchlistRefresh();
@@ -131,7 +147,7 @@ Object.assign(App, {
         '<div class="market-watch-head">' +
           '<div><h3 style="margin:0;font-size:16px;font-weight:600;">我的自选股 (' + watch.length + ')</h3><span style="font-size:12px;color:var(--text3);">点击任意标的进入 K 线、财务估值与上下游商品联动复盘</span></div>' +
           '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
-            '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请调用 watchlist_get 读取我的自选股池，先给 3 行核心异动结论，再简明列出今日值得重点关注的标的与潜在风险点。\',\'prism-research\',\'compact\')">✦ Agent 扫描自选异动</button>' +
+            '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请读取我的自选股池最新行情，先给 3 行核心异动结论，再简明列出今日值得重点关注的标的与潜在风险点。\',\'prism-research\',\'compact\')">Agent 扫描自选异动</button>' +
             '<a href="/futures" class="market-futures-jump">期货 46 品种极值 ↗</a>' +
           '</div>' +
         '</div>' +
@@ -472,8 +488,8 @@ Object.assign(App, {
         '<span class="market-qc-code">' + esc(ticker) + '</span>' +
         '<span class="market-qc-name">' + esc(officialName || name || '') + '</span>' +
         '<div class="market-qc-actions">' +
-          '<button type="button" class="market-qc-btn-secondary" onclick="App.openEquityJudgmentModal()">★ 记多空判断</button>' +
-          '<button type="button" class="market-qc-ask" onclick="App._askAboutStock()">✦ Agent 诊股</button>' +
+          '<button type="button" class="market-qc-btn-secondary" onclick="App.openEquityJudgmentModal()">＋ 记多空判断</button>' +
+          '<button type="button" class="market-qc-ask" onclick="App._askAboutStock()">Agent 诊股</button>' +
         '</div>' +
       '</div>' +
       '<div class="market-qc-price-row">' +
@@ -784,7 +800,7 @@ Object.assign(App, {
         } catch (e) {}
         box.innerHTML = '<h4>产业链与商品锚</h4>' + discoveredHtml +
           '<div style="font-size:12px;color:var(--text-muted,#687076);">' + (discoveredHtml ? '继续补全 · ' : '未命中预置种子节点 · ') +
-          '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请检索最新公开披露，梳理 ' + escAttr((this._currentName || '') + '（' + cleanCode + '）') + ' 的真实上下游客户供应商与原材料价格敏感度。\',\'bottleneck-hunter\',\'compact\')">✦ 让 Agent 查上下游</button></div>';
+          '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请检索最新公开披露，梳理 ' + escAttr((this._currentName || '') + '（' + cleanCode + '）') + ' 的真实上下游客户供应商与原材料价格敏感度。\',\'bottleneck-hunter\',\'compact\')">让 Agent 查上下游</button></div>';
         return;
       }
       var selfNode = nodes.find(function(n) { return n.source_ticker === cleanCode; }) || nodes[0];

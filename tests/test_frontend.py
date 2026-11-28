@@ -24,8 +24,8 @@ class TestCopilotAndPersonaStaticContract:
         assert 'id="feedbackDialog"' not in html
         assert 'data-mode="analysis"' not in html
         assert 'data-mode="industry"' not in html
-        assert "copilot.css?v=153" in html
-        assert "app.copilot.js?v=153" in html
+        assert "copilot.css?v=170" in html
+        assert "app.copilot.js?v=170" in html
         assert "_currentPageContext" in copilot_js
         assert "_autoAdaptCopilotWidth" in copilot_js
         assert "openLatestInReader" in copilot_js
@@ -44,7 +44,7 @@ class TestCopilotAndPersonaStaticContract:
         assert 'id="futuresRailCollapseBtn"' in futures_html
         assert 'id="futuresMenuPersonaBtn"' in futures_html
         assert 'href="/prism?mode=radar"' in futures_html
-        assert "futures-copilot.js?v=153" in futures_html
+        assert "futures-copilot.js?v=170" in futures_html
         assert "PrismFuturesCopilot" in futures_copilot
         assert "futuresPersonaDialog" in futures_copilot
         assert "futuresReaderDialog" in futures_copilot
@@ -161,7 +161,7 @@ class TestServiceWorkerCachePolicy:
 
     def test_sw_uses_network_first_for_navigation(self):
         sw = Path("static/sw.js").read_text(encoding="utf-8")
-        assert "prism-workbench-v153" in sw
+        assert "prism-workbench-v170" in sw
         assert "ev.request.mode === 'navigate'" in sw
         assert "cache: 'no-store'" in sw
         assert "client.navigate(client.url)" not in sw
@@ -181,7 +181,7 @@ def test_indicator_overlay_reuses_current_chart_kline():
     market_js = Path("static/js/app.market.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.indicator-chart.js?v=153" in template
+    assert "app.indicator-chart.js?v=170" in template
     assert "app.indicator-chart.js" in sw
     assert "payload.kline" in js
     assert "this._lastKline.slice(-200)" in js
@@ -214,7 +214,7 @@ def test_client_diagnostics_static_contract():
     diagnostics = Path("static/js/app.diagnostics.js").read_text(encoding="utf-8")
     sw = Path("static/sw.js").read_text(encoding="utf-8")
 
-    assert "app.diagnostics.js?v=153" in template
+    assert "app.diagnostics.js?v=170" in template
     assert "render_object_artifact" in diagnostics
     assert "chart_blank" in diagnostics
     assert "/api/diagnostics/client" in diagnostics
@@ -239,8 +239,8 @@ def test_login_and_app_share_release_cache_version():
     login = Path("templates/login.html").read_text(encoding="utf-8")
     app = Path("templates/app.html").read_text(encoding="utf-8")
 
-    assert "app.css?v=153" in login
-    assert "app.css?v=153" in app
+    assert "app.css?v=170" in login
+    assert "app.css?v=170" in app
 
 
 def test_market_sidebar_search_discards_stale_responses():
@@ -282,7 +282,7 @@ def test_full_market_screener_workbench_static_contract():
     assert 'id="marketScanResults"' in html
     assert 'id="marketScanHistory"' in html
     assert 'id="indicatorPreview"' in html
-    assert "app.screener.js?v=153" in html
+    assert "app.screener.js?v=170" in html
     assert '"/api/indicators/" + encodeURIComponent(id) + "/scan-jobs"' in screener
     assert '"/api/indicators/universe/summary?markets="' in screener
     assert "_scheduleScanPoll" in screener

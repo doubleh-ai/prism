@@ -11,8 +11,9 @@ Read [AGENTS.md](../../../AGENTS.md) first. Treat the checked-out source code an
 
 Prism is an open-source investment research workbench covering:
 - **Stocks & Quantitative Workbench (`/prism`)**: Quotes, K-lines, technical indicators, screener, watchlist, industry supply-chain graph, and saved research/reports.
-- **Futures Research Workbench (`/futures`)**: 46 domestic commodity futures contracts, 5-year and seasonal percentiles, cross-variety spreads/margins, 4-stage industry causal canvas, warehouse receipts, basis, and institutional views.
-- **Omni-Agent Copilot & Journal**: Cross-module Native Agent sidecar, user investment persona & risk profile, and stock/futures judgment journal with automated reconciliation.
+- **Futures Research Workbench (`/futures`)**: 46 domestic commodity futures contracts, 5-year and seasonal percentiles, 14 cross-variety spreads/margins, 4-stage industry causal canvas, warehouse receipts, basis, and institutional views.
+- **Global Event Radar & Circle Intelligence (`/prism?mode=radar` & `?mode=intel`)**: 6-source bilingual macro/market radar with Cross-Asset Tape, optional Gemini Search grounding, 8-channel push notifications, structured circle intel pool with post-expiry reconciliation, and 0-token personal watchman rules.
+- **Personal Native Agent Copilot & Journal**: Dual-speed Native Agent sidecar across 8 isolated LLM providers, 5 base persona templates, owner-only position vault, and verifiable multi-asset judgment journal.
 
 See [Architecture](../../../docs/ARCHITECTURE.md) and [Capability Status](../../../docs/CAPABILITY_STATUS.md).
 

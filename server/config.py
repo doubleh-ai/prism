@@ -32,6 +32,10 @@ _LEGACY_KEY = os.environ.get("LLM_API_KEY", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", _LEGACY_KEY)
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 MINIMAX_CN_API_KEY = os.environ.get("MINIMAX_CN_API_KEY", "")
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
+GLM_API_KEY = os.environ.get("GLM_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # ── 模型列表 ──
@@ -120,6 +124,74 @@ MODELS = {
         "api_key": MINIMAX_CN_API_KEY,
         "model": "MiniMax-M3.1-Flash",
     },
+    # ── Moonshot Kimi (Anthropic 兼容端点) ──
+    "kimi-k2.5": {
+        "name": "Kimi K2.5",
+        "base_url": "https://api.moonshot.cn/anthropic",
+        "api_key": KIMI_API_KEY,
+        "model": "kimi-k2.5",
+    },
+    "kimi-k3": {
+        "name": "Kimi K3 旗舰",
+        "base_url": "https://api.moonshot.cn/anthropic",
+        "api_key": KIMI_API_KEY,
+        "model": "kimi-k3",
+    },
+    # ── 智谱 BigModel GLM (Anthropic 兼容端点) ──
+    "glm-5": {
+        "name": "智谱 GLM-5 旗舰",
+        "base_url": "https://open.bigmodel.cn/api/anthropic",
+        "api_key": GLM_API_KEY,
+        "model": "glm-5",
+    },
+    "glm-4.7": {
+        "name": "智谱 GLM-4.7",
+        "base_url": "https://open.bigmodel.cn/api/anthropic",
+        "api_key": GLM_API_KEY,
+        "model": "glm-4.7",
+    },
+    # ── Anthropic Claude 官方 ──
+    "claude-sonnet-5-5": {
+        "name": "Claude Sonnet 5.5",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key": ANTHROPIC_API_KEY,
+        "model": "claude-sonnet-5-5",
+    },
+    "claude-opus-5-5": {
+        "name": "Claude Opus 5.5",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key": ANTHROPIC_API_KEY,
+        "model": "claude-opus-5-5",
+    },
+    "claude-haiku-5-5": {
+        "name": "Claude Haiku 5.5",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key": ANTHROPIC_API_KEY,
+        "model": "claude-haiku-5-5",
+    },
+    # ── Google Gemini 官方 (兼容 AI Studio / Ultra 赠金 Key) ──
+    "gemini-3.8-flash": {
+        "name": "Gemini 3.8 Flash",
+        "protocol": "gemini_generate_content",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": GEMINI_API_KEY,
+        "model": "gemini-3.8-flash",
+    },
+    "gemini-3.5-pro": {
+        "name": "Gemini 3.5 Pro",
+        "protocol": "gemini_generate_content",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": GEMINI_API_KEY,
+        "model": "gemini-3.5-pro",
+    },
+    "gemini-3.5-flash-lite": {
+        "name": "Gemini 3.5 Flash-Lite",
+        "protocol": "gemini_generate_content",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": GEMINI_API_KEY,
+        "model": "gemini-3.5-flash-lite",
+    },
+    # ── OpenAI 官方 ──
     "openai": {
         "name": "OpenAI GPT",
         "protocol": "openai_responses",

@@ -68,7 +68,7 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
                         id=nid,
                         conv_id=conv_id,
                         node_type="tool_call",
-                        label=f"🔧 {tool_name}",
+                        label=f"[工具] {tool_name}",
                         content=detail,
                         skill=skill,
                     )
@@ -84,7 +84,7 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
                         id=nid,
                         conv_id=conv_id,
                         node_type="think",
-                        label=f"💭 思考: {label}",
+                        label=f"[思考] {label}",
                         content=c.get("c", "")[:4000],
                         skill=skill,
                     )
@@ -100,7 +100,7 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
                         id=nid,
                         conv_id=conv_id,
                         node_type="analysis",
-                        label=f"📝 {label}",
+                        label=label,
                         content=c.get("c", "")[:4000],
                         skill=skill,
                     )
@@ -117,7 +117,7 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
                         id=nid,
                         conv_id=conv_id,
                         node_type="reference",
-                        label=f"📎 {title}",
+                        label=f"[引用] {title}",
                         content=url,
                         skill=skill,
                     )
@@ -133,7 +133,7 @@ def extract_graph(conv_id: str, messages_json: list, skill: str = ""):
                         id=nid,
                         conv_id=conv_id,
                         node_type="question",
-                        label=f"❓ {q}",
+                        label=f"[追问] {q}",
                         content=json.dumps(c.get("opts", [])),
                         skill=skill,
                     )

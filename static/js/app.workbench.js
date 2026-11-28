@@ -1,7 +1,7 @@
 /* Prism research workspace. Navigation never starts a second research job. */
 (function() {
   'use strict';
-  var viewLabels = {chat:'随行 Agent',market:'行情工作区',futures:'期货研究',radar:'风向雷达',preferences:'投研画像',reports:'研究与复盘',indicators:'指标实验室',screener:'全市场选股'};
+  var viewLabels = {chat:'随行 Agent',market:'行情工作区',futures:'期货研究',radar:'风向雷达',intel:'圈内情报',preferences:'投研画像',reports:'研究与复盘',indicators:'指标实验室',screener:'全市场选股'};
   var capabilityViews = ['market','futures','reports','indicators','screener'];
   var originalSwitchMode = App.switchMode;
   var originalMarketWorkspace = App._showMarketWorkspace;
@@ -20,7 +20,7 @@
       return this._mode || 'chat';
     },
     _initWorkbench: function() {
-      this._syncWorkbenchHeading(); this._loadCapabilities(); this._loadWorkbenchHistory();
+      this._syncWorkbenchHeading();
       var self = this;
       document.addEventListener('click', function(event) {
         var target = event.target.closest('[data-platform-call], [data-call-conversation], [data-capability-view], [data-draft-question], [data-workbench-retry]');
@@ -45,6 +45,7 @@
         button.classList.toggle('active', target === view);
         if (target === view) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
       });
+      if (this._refreshCopilotContextBar) this._refreshCopilotContextBar();
     },
     _loadCapabilities: async function() {
       this._capabilityError = '';
@@ -66,7 +67,7 @@
     showWelcome: function() {
       var list = document.getElementById('msgList'); if (!list) return;
       var error = this._capabilityError ? '<p role="status">'+esc(this._capabilityError)+' <button class="workbench-inline-retry" data-workbench-retry="capabilities">重试</button></p>' : '';
-      list.innerHTML = '<div class="workbench-welcome"><h2>✦ 随行投研助手</h2><p>自动感知左侧正在查看的股票、期货或选股列表，并结合你的独立画像自主调取平台工具与公告原文核验。</p>'+error+'</div>';
+      list.innerHTML = '<div class="workbench-welcome"><h2>随行投研助手</h2><p>自动感知左侧正在查看的股票、期货或选股列表，并结合你的独立画像自主调取平台工具与公告原文核验。</p>'+error+'</div>';
     },
     _draftResearchQuestion: function(text) {
       if (this.openCopilot) this.openCopilot('docked', true);
@@ -95,9 +96,16 @@
       return '<article class="platform-call-card" data-call-id="'+escAttr(call.call_id)+'"><header><span class="platform-call-status '+escAttr(['running','completed','failed','interrupted'].indexOf(call.status)>=0?call.status:'unknown')+'">'+status+'</span><strong>'+esc(label)+'</strong></header><p>'+esc(ChatRender.stringify(call.result_summary || call.input_summary || '等待能力返回结果'))+'</p><div class="platform-call-meta">'+esc(ChatRender.formatTime(call.created_at))+' · 平台调用记录，非原始核验证据</div><footer>'+ (capabilityViews.indexOf(view) >= 0 ? '<button data-platform-call="'+escAttr(call.call_id)+'">查看'+esc(viewLabels[view])+' ↗</button>' : '') + (call.conv_id ? '<button data-call-conversation="'+escAttr(call.conv_id)+'">返回原会话</button>' : '')+'</footer></article>';
     },
     _loadConversationCalls: function(id) { if (this.convId === id) this._loadWorkbenchHistory(); },
-    _loadWorkbenchHistory: async function() {
-      var sequence = this._workbenchHistorySeq = (this._workbenchHistorySeq || 0) + 1;
+    _loadWorkbenchHistory: async function(force) {
       var view = this._workbenchView(), convId = this.convId;
+      var fetchKey = view === 'chat' ? ('chat:' + (convId || '')) : ('view:' + view);
+      var nowTs = Date.now();
+      if (!force && this._workbenchHistoryKey === fetchKey && (nowTs - (this._workbenchHistoryAt || 0)) < 1200) {
+        return;
+      }
+      this._workbenchHistoryKey = fetchKey;
+      this._workbenchHistoryAt = nowTs;
+      var sequence = this._workbenchHistorySeq = (this._workbenchHistorySeq || 0) + 1;
       this._workbenchHistoryError = '';
       this._workbenchHistoryLoading = view === 'chat' ? !!convId : capabilityViews.indexOf(view) >= 0;
       this._workbenchCalls = []; this._updateWorkbenchCount(); this._renderWorkbenchPanel();
@@ -200,7 +208,6 @@
       this._closeWorkbenchPanel();
       if (this.openCopilot) this.openCopilot('docked', true);
       await this.openConv(id);
-      this._loadConversationCalls(id);
     },
     _navigateTarget: async function(target) {
       if (!target || capabilityViews.indexOf(target.view) < 0) return;
@@ -232,8 +239,8 @@
           else if (view==='analysis' && target.id && this._openAnalysisRecord) await this._openAnalysisRecord(target.id, target.ticker);
           else if (view==='analysis' && target.ticker) { this._analysisTicker = target.ticker; document.getElementById('analysisQ').value = target.ticker; }
         }
-        this._closeMobileSidebar(); this._syncWorkbenchHeading(); this._loadWorkbenchHistory();
-      } catch(error) { if(this._toast)this._toast('记录暂时无法打开，请刷新调用历史后重试'); }
+        this._closeMobileSidebar(); this._syncWorkbenchHeading();
+      } catch(error) { if(this._toast)this._toast('记录暂时无法打开，请稍后重试'); }
     }
   });
   App.switchMode = function(mode, symbol) {
@@ -250,7 +257,9 @@
       if (this._mode === 'market') { clearTimeout(this._scanPollTimer); this._scanSelectionSeq = (this._scanSelectionSeq || 0) + 1; }
     }
     originalSwitchMode.call(this, mode);
-    this._syncWorkbenchHeading(); this._loadWorkbenchHistory();
+    this._syncWorkbenchHeading();
+    var wbDlg = document.getElementById('workbenchDialog');
+    if (this._workbenchHistoryLoading || (wbDlg && wbDlg.open)) this._loadWorkbenchHistory();
     if (this._isCompactViewport()) this._closeMobileSidebar();
   };
   App._showMarketWorkspace = function(tab) {
@@ -259,6 +268,8 @@
     }
     originalMarketWorkspace.call(this, tab);
     if (tab === 'screener' && this._scanJobId) this._scheduleScanPoll(100);
-    this._syncWorkbenchHeading(); this._loadWorkbenchHistory();
+    this._syncWorkbenchHeading();
+    var wbDlg = document.getElementById('workbenchDialog');
+    if (this._workbenchHistoryLoading || (wbDlg && wbDlg.open)) this._loadWorkbenchHistory();
   };
 })();

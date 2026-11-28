@@ -3,8 +3,8 @@
   'use strict';
   var kinds = {fact:'事实候选',calculation:'计算',inference:'推断',hypothesis:'假设'};
   var states = {queued:'等待开始',discovering:'发现线索',collecting:'采集资料',extracting:'提取内容',checking:'检查引用',synthesizing:'整理报告',completed:'已完成',partial:'部分完成',failed:'未完成',cancelled:'已取消',interrupted:'研究已中断',blocked:'证据不足'};
-  var levels = {verified_source:{label:'✅ 原文已核验',cls:'verified'},secondhand:{label:'◐ 二手来源',cls:'secondhand'},inferred:{label:'≈ 推算',cls:'inferred'},unverified:{label:'【待核验】',cls:'unverified'}};
-  var levelMarks = {'✅':'verified_source','◐':'secondhand','≈':'inferred'};
+  var levels = {verified_source:{label:'◉ 原文已核验',cls:'verified'},secondhand:{label:'◐ 二手来源',cls:'secondhand'},inferred:{label:'≈ 推算',cls:'inferred'},unverified:{label:'【待核验】',cls:'unverified'}};
+  var levelMarks = {'◉':'verified_source','◐':'secondhand','≈':'inferred'};
   function levelOf(claim) { var value = claim && claim.verification; return levels[value] ? value : 'unverified'; }
   function cell(value) { return value ? esc(String(value)) : '<span class="research-missing">未提供</span>'; }
   function text(value) { return esc(ChatRender.stringify(value)); }
@@ -89,7 +89,7 @@
     _researchMarked:function(html) {
       return String(html || '').replace(/【待核验：([^】]{1,300})】/g, function(match, raw) {
         return '<span class="research-level research-level-unverified" title="待核验">【待核验：'+raw+'】</span>';
-      }).replace(/[✅◐≈]/g, function(mark) {
+      }).replace(/[◉◐≈]/g, function(mark) {
         var spec = levels[levelMarks[mark]];
         return '<span class="research-level research-level-'+spec.cls+'" title="'+escAttr(spec.label)+'">'+mark+'</span>';
       });
@@ -112,7 +112,7 @@
       if (!evidence || evidence.status !== 'ok') return '<section class="research-section research-evidence-section"><h3>证据清单</h3><p class="research-note">证据清单暂不可用；报告正文保持原样显示。</p></section>';
       var rows = list(evidence.rows), counts = evidence.counts || {}, coverage = evidence.coverage || {};
       var missing = evidence.missing || {}, self = this, ratio = coverage.verified_claim_ratio;
-      var summary = '共 '+Number(evidence.total || 0)+' 条已登记 claim · ✅ 原文已核验 '+(counts.verified_source || 0)+' · ◐ 二手来源 '+(counts.secondhand || 0)+' · ≈ 推算 '+(counts.inferred || 0)+' · 【待核验】 '+(counts.unverified || 0);
+      var summary = '共 '+Number(evidence.total || 0)+' 条已登记 claim · ◉ 原文已核验 '+(counts.verified_source || 0)+' · ◐ 二手来源 '+(counts.secondhand || 0)+' · ≈ 推算 '+(counts.inferred || 0)+' · 【待核验】 '+(counts.unverified || 0);
       var coverageText = ratio == null
         ? '核验覆盖率：暂无可计算 claim'
         : '核验覆盖率 '+(Number(ratio)*100).toFixed(1)+'%（发布线 '+String(coverage.release_line || '≥90%')+'，'+(coverage.reached ? '已达到' : '未达到')+'）';

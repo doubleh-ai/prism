@@ -33,7 +33,7 @@ SCHEMA = "prism.report-render.v1"
 RENDER_VERSION = 1
 VERIFICATION_LEVELS = ("verified_source", "secondhand", "inferred", "unverified")
 DEFAULT_VERIFICATION = "unverified"
-LEVEL_MARKS = {"verified_source": "✅", "secondhand": "◐", "inferred": "≈"}
+LEVEL_MARKS = {"verified_source": "◉", "secondhand": "◐", "inferred": "≈"}
 LEVEL_LABELS = {
     "verified_source": "原文已核验",
     "secondhand": "二手来源",

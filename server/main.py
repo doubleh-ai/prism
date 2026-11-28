@@ -35,8 +35,16 @@ from .auth import (
 )
 from .auth import login as auth_login
 from .auth import logout as auth_logout
+from .billing_ops import (
+    AdminBatchUserQuotaUpdateRequest,
+    AdminUserQuotaUpdateRequest,
+    all_users_quota_and_spend_map,
+    save_admin_batch_user_quota,
+    save_admin_user_quota,
+    sync_ops_provider_credentials,
+)
 from .billing_ops import router as billing_ops_router
-from .billing_ops import sync_ops_provider_credentials
+from .billing_ops import user_router as user_model_router
 from .capabilities import router as capabilities_router
 from .config import (
     CORS_ALLOW_CREDENTIALS,
@@ -103,6 +111,12 @@ from .portfolio import init_portfolio_db
 from .portfolio import router as portfolio_router
 from .preferences import init_preferences_db
 from .preferences import router as preferences_router
+from .private_agent import (
+    init_private_agent_db,
+    intel_router,
+    private_router,
+    run_personal_watchman_loop,
+)
 from .release import APP_VERSION, release_payload
 from .report_files import REPORT_CSP, list_report_files, read_report_file
 from .reports import list_saved_reports_for_conv
@@ -135,6 +149,7 @@ feedback_progress.init_progress_db()
 init_preferences_db()
 init_portfolio_db()
 init_journal_hub_db()
+init_private_agent_db()
 init_model_routes_db()
 init_event_radar_db()
 sync_ops_provider_credentials()
@@ -176,6 +191,7 @@ async def lifespan(application):
     diagnostic_delivery = DiagnosticDelivery(runtime.manager)
     futures_overview = None
     radar_collector = None
+    personal_watchman = None
     try:
         bind_manager(application, runtime.manager)
         application.state.work_runtime = runtime
@@ -189,6 +205,7 @@ async def lifespan(application):
         diagnostic_delivery.start()
         futures_overview = asyncio.create_task(refresh_overview_periodically(runtime.manager))
         radar_collector = asyncio.create_task(run_radar_collector_loop(runtime.manager))
+        personal_watchman = asyncio.create_task(run_personal_watchman_loop(runtime.manager))
         yield
     finally:
         # Stop idle producers before the first shutdown await.
@@ -200,6 +217,9 @@ async def lifespan(application):
         if radar_collector is not None:
             radar_collector.cancel()
             await asyncio.gather(radar_collector, return_exceptions=True)
+        if personal_watchman is not None:
+            personal_watchman.cancel()
+            await asyncio.gather(personal_watchman, return_exceptions=True)
         await diagnostic_delivery.close()
         await runtime.aclose()
 
@@ -481,6 +501,8 @@ _UI_ACTIVITY_RULES = {
     "analysis": {"open"},
     "report": {"open"},
     "radar": {"open"},
+    "intel": {"open"},
+    "private_agent": {"open"},
     "industry": {"open"},
 }
 
@@ -654,20 +676,74 @@ async def api_admin_analytics_users(request: Request, range: str = "7d"):
 @app.get("/api/admin/users")
 async def api_admin_list_users(request: Request):
     current = require_admin(request)
+    quota_map = all_users_quota_and_spend_map()
     users = []
     for row in list_users():
+        uname = row["username"]
+        q = quota_map.get(uname) or {}
         users.append(
             {
-                "username": row["username"],
+                "username": uname,
                 "created_at": row["created_at"],
                 "disabled_at": row["disabled_at"],
                 "active_sessions": row["active_sessions"],
                 "conversation_count": row["conversation_count"],
-                "is_admin": is_admin_user(row["username"]),
-                "is_current": row["username"] == current,
+                "is_admin": is_admin_user(uname),
+                "is_current": uname == current,
+                "preferred_model": q.get("preferred_model", ""),
+                "unlimited_quota": bool(q.get("unlimited_quota", False)),
+                "daily_calls_limit": q.get("daily_calls_limit"),
+                "monthly_budget_usd": q.get("monthly_budget_usd"),
+                "today_calls": int(q.get("today_calls", 0)),
+                "month_calls": int(q.get("month_calls", 0)),
+                "month_cost_usd": float(q.get("month_cost_usd", 0.0)),
             }
         )
     return {"users": users, "current_user": current}
+
+
+@app.put("/api/admin/users/{username}/quota")
+async def api_admin_set_user_quota(username: str, body: AdminUserQuotaUpdateRequest, request: Request):
+    require_admin(request)
+    verify_csrf(request)
+    if not user_exists(username):
+        raise HTTPException(status_code=404, detail="user not found")
+    try:
+        quota = save_admin_user_quota(
+            username,
+            unlimited_quota=body.unlimited_quota,
+            daily_calls_limit=body.daily_calls_limit,
+            monthly_budget_usd=body.monthly_budget_usd,
+            preferred_model=body.preferred_model,
+        )
+    except ValueError as exc:
+        if str(exc) == "model_not_available":
+            raise HTTPException(status_code=422, detail="所选模型尚未配置凭证或不可用") from None
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"ok": True, "username": username, "quota": quota}
+
+
+@app.put("/api/admin/users-batch/quota")
+async def api_admin_batch_set_user_quota(body: AdminBatchUserQuotaUpdateRequest, request: Request):
+    require_admin(request)
+    verify_csrf(request)
+    try:
+        res = save_admin_batch_user_quota(
+            body.usernames,
+            unlimited_quota=body.unlimited_quota,
+            daily_calls_limit=body.daily_calls_limit,
+            monthly_budget_usd=body.monthly_budget_usd,
+            preferred_model_mode=body.preferred_model_mode,
+            preferred_model=body.preferred_model,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        if code == "model_not_available":
+            raise HTTPException(status_code=422, detail="所选模型尚未配置凭证或不可用") from None
+        if code in {"no_users_selected", "no_valid_users"}:
+            raise HTTPException(status_code=404, detail="未匹配到有效账号") from None
+        raise HTTPException(status_code=422, detail=code) from None
+    return {"ok": True, **res}
 
 
 @app.post("/api/admin/users")
@@ -781,16 +857,28 @@ async def api_batch_delete_convs(request: Request):
 
 
 @app.get("/api/models")
-async def api_models():
+async def api_models(request: Request):
     from . import config
     from .agent.provider import configuration_status
+    from .billing_ops import get_user_quota_config, sync_ops_provider_credentials
+
+    sync_ops_provider_credentials()
+    default_mid = config.DEFAULT_MODEL
+    try:
+        user = require_auth(request, optional=True)
+    except Exception:
+        user = None
+    if user:
+        pref = get_user_quota_config(user).get("preferred_model") or ""
+        if pref and pref in config.MODELS and configuration_status(config.MODELS[pref])["configured"]:
+            default_mid = pref
 
     return [
         {
             "id": key,
             "name": model["name"],
             "configured": configuration_status(model)["configured"],
-            "default": key == config.DEFAULT_MODEL,
+            "default": key == default_mid,
         }
         for key, model in config.MODELS.items()
     ]
@@ -822,6 +910,8 @@ async def api_chat_cancel(request: Request):
 # ── Market data (v0.6) ──
 
 app.include_router(market_router)
+app.include_router(intel_router)
+app.include_router(private_router)
 app.include_router(native_agent_router)
 app.include_router(capabilities_router)
 app.include_router(feedback_monitor.router)
@@ -847,6 +937,7 @@ app.include_router(model_routes_router)
 app.include_router(event_radar_router)
 app.include_router(event_radar_admin_router)
 app.include_router(billing_ops_router)
+app.include_router(user_model_router)
 app.include_router(operations_router)
 
 

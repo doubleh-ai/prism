@@ -2,16 +2,16 @@
 Object.assign(App, {
   _savedReports: [],
   _activeSavedReportId: '',
-  _researchLibraryTab: 'reports',
+  _researchLibraryTab: 'journal',
 
   _initReports: function() {
     var shell = document.getElementById('appShell');
-    if (shell) shell.classList.remove('collapsed');
-    this._setResearchLibraryTab(this._researchLibraryTab);
+    if (shell) shell.classList.add('collapsed');
+    this._setResearchLibraryTab('journal');
   },
 
   _setResearchLibraryTab: function(tab) {
-    this._researchLibraryTab = tab === 'journal' ? 'journal' : 'reports';
+    this._researchLibraryTab = tab === 'reports' ? 'reports' : 'journal';
     var isJournal = this._researchLibraryTab === 'journal';
     var shell = document.getElementById('appShell');
     if (shell) shell.setAttribute('data-library', this._researchLibraryTab);
@@ -36,17 +36,26 @@ Object.assign(App, {
     }
   },
 
-  _loadDecisionJournal: async function() {
+  _loadDecisionJournal: async function(forceRefresh) {
     var panel = document.getElementById('journalVaultPanel');
     if (!panel) return;
-    panel.innerHTML = '<div class="market-empty-state">正在同步跨市场判断与自动对账记录…</div>';
+    if (this._journalOverviewCache && !forceRefresh) {
+      this._renderDecisionJournal(this._journalOverviewCache);
+    } else if (!this._journalOverviewCache) {
+      panel.innerHTML = '<div class="market-empty-state">正在同步跨市场判断与自动对账记录…</div>';
+    }
+    var seq = this._journalLoadSeq = (this._journalLoadSeq || 0) + 1;
     try {
       var r = await this.api('/api/journal/overview?limit=80');
       if (!r.ok) throw new Error('unavailable');
       var data = await r.json();
+      if (seq !== this._journalLoadSeq) return;
+      this._journalOverviewCache = data;
       this._renderDecisionJournal(data);
     } catch (e) {
-      panel.innerHTML = '<div class="market-empty-state">全域判断账本加载失败，请重试。</div>';
+      if (seq === this._journalLoadSeq && !this._journalOverviewCache) {
+        panel.innerHTML = '<div class="market-empty-state">全域判断账本加载失败，请重试。</div>';
+      }
     }
   },
 
@@ -55,7 +64,7 @@ Object.assign(App, {
     if (!panel) return;
     var s = (data && data.stats) || {total:0, supported:0, contradicted:0, pending:0, win_rate_pct:null, bias_hint:''};
     var items = (data && data.items) || [];
-    var statusText = {supported:'✓ 已印证支持', contradicted:'✕ 触发失效证伪', observed:'◎ 区间观察中', pending:'⏳ 待对账'};
+    var statusText = {supported:'✓ 已印证支持', contradicted:'✕ 触发失效证伪', observed:'◎ 区间观察中', pending:'○ 待对账'};
     var winText = s.win_rate_pct != null ? (s.win_rate_pct + '%') : '待积累';
 
     var listHtml = items.length
@@ -84,7 +93,7 @@ Object.assign(App, {
             '</div>' +
           '</article>';
         }).join('') + '</div>'
-      : '<div class="market-empty-state">尚未登记多空判断。<br>你可以在个股看盘页点击「★ 记多空判断」，或在期货品种页从「可证伪情景路标」一键加入跟踪。</div>';
+      : '<div class="market-empty-state">尚未登记多空判断。<br>你可以在个股看盘页点击「＋ 记多空判断」，或在期货品种页从「可证伪情景路标」一键加入跟踪。</div>';
 
     panel.innerHTML =
       '<div class="journal-kpi-grid">' +
@@ -96,8 +105,8 @@ Object.assign(App, {
       '<div class="journal-bias-banner">' +
         '<span><b>画像联动诊断：</b>' + esc(s.bias_hint || '') + '</span>' +
         '<div style="display:flex;gap:8px;">' +
-          '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请结合我的全域判断对账统计与投研画像，深入复盘我近期多空判断的胜率分布与主要偏差来源，并给出改进建议。\',\'prism-research\')">✦ 让 Agent 深度复盘</button>' +
-          '<button type="button" class="market-qc-btn-secondary" onclick="App._loadDecisionJournal()">刷新账本</button>' +
+          '<button type="button" class="copilot-trigger-chip" onclick="App.intervene(\'请结合我的全域判断对账统计与投研画像，深入复盘我近期多空判断的胜率分布与主要偏差来源，并给出改进建议。\',\'prism-research\')">让 Agent 深度复盘</button>' +
+          '<button type="button" class="market-qc-btn-secondary" onclick="App._loadDecisionJournal(true)">刷新账本</button>' +
         '</div>' +
       '</div>' +
       listHtml;
@@ -209,7 +218,11 @@ Object.assign(App, {
   _openSavedReport: async function(id) {
     if (!id) return;
     if (this._researchLibraryTab !== 'reports') {
-      this._setResearchLibraryTab('reports');
+      this._researchLibraryTab = 'reports';
+      var repInnerEl = document.getElementById('reportsPanelInner');
+      var jnlPanelEl = document.getElementById('journalVaultPanel');
+      if (repInnerEl) repInnerEl.hidden = false;
+      if (jnlPanelEl) jnlPanelEl.hidden = true;
     }
     var sequence = this._reportSelectionSeq = (this._reportSelectionSeq || 0) + 1;
     this._activeSavedReportId = id;

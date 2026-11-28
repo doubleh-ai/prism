@@ -141,6 +141,38 @@ def _require_purpose(purpose):
         raise HTTPException(422, "模型用途无效")
 
 
+def _read_user_quota_in_tx(db, actor: str) -> dict:
+    try:
+        row = db.execute(
+            "SELECT unlimited_quota, daily_calls_limit, monthly_budget_usd FROM user_model_settings WHERE username=?",
+            [actor],
+        ).fetchone()
+    except Exception:
+        return {"unlimited_quota": False, "daily_calls_limit": None, "monthly_budget_usd": None}
+    if not row:
+        return {"unlimited_quota": False, "daily_calls_limit": None, "monthly_budget_usd": None}
+    return {
+        "unlimited_quota": bool(row[0]),
+        "daily_calls_limit": int(row[1]) if row[1] is not None else None,
+        "monthly_budget_usd": float(row[2]) if row[2] is not None else None,
+    }
+
+
+def _actor_month_cost_in_tx(db, actor: str, month_prefix: str) -> float:
+    from .billing_ops import _estimate_cost_usd
+
+    rows = db.execute(
+        """
+        SELECT model_id, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+        FROM model_request_reservations
+        WHERE actor=? AND day LIKE ?
+        GROUP BY model_id
+        """,
+        [actor, f"{month_prefix}%"],
+    ).fetchall()
+    return round(sum(_estimate_cost_usd(str(r[0] or ""), int(r[1] or 0), int(r[2] or 0)) for r in rows), 6)
+
+
 def resolve(purpose, *, explicit_model=None):
     _require_purpose(purpose)
     init_model_routes_db()
@@ -179,8 +211,27 @@ def reserve(purpose, actor, request_id, model_id, *, expected_route_version, min
             count = db.execute(
                 "SELECT COUNT(*) FROM model_request_reservations WHERE purpose=? AND day=?", [purpose, day]
             ).fetchone()[0]
-            if count + minimum_available > route.get("daily_calls_max", 1000):
-                raise HTTPException(429, "该用途已达到每日模型请求上限")
+            user_quota = _read_user_quota_in_tx(db, actor)
+            if not user_quota["unlimited_quota"]:
+                if count + minimum_available > route.get("daily_calls_max", 1000):
+                    raise HTTPException(429, "该用途已达到每日模型请求上限")
+                u_daily = user_quota["daily_calls_limit"]
+                if u_daily is not None:
+                    u_count = db.execute(
+                        "SELECT COUNT(*) FROM model_request_reservations WHERE actor=? AND day=?",
+                        [actor, day],
+                    ).fetchone()[0]
+                    if u_count + minimum_available > u_daily:
+                        raise HTTPException(
+                            429, f"您今日模型调用已达专属上限（{u_daily} 次），请联系管理员调整"
+                        )
+                u_budget = user_quota["monthly_budget_usd"]
+                if u_budget is not None:
+                    m_cost = _actor_month_cost_in_tx(db, actor, day[:7])
+                    if m_cost >= u_budget:
+                        raise HTTPException(
+                            429, f"您本月模型开销已达预算上限（${u_budget:.2f}），请联系管理员调整"
+                        )
             db.execute(
                 "INSERT INTO model_request_reservations VALUES(?,?,?,?,?,?,'unknown',NULL,NULL,?)",
                 [request_id, purpose, actor, expected_route_version, model_id, day, int(time.time())],

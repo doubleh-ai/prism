@@ -256,7 +256,7 @@ def test_top_level_shell_chrome_and_option_c_brand_contract():
 
     assert 'class="sidebar-foot"' not in app_html
     for html in (app_html, futures_html):
-        assert "favicon.svg?v=153" in html
+        assert "favicon.svg?v=170" in html
         assert "radarTopbarPill" in html
         assert "topbar-account-btn" in html
         assert 'id="versionTag"' in html
@@ -458,6 +458,10 @@ async def test_gemini_grounding_ops_only_header_auth_key_masking_and_daily_circu
         "deepseek",
         "minimax_cn",
         "minimax",
+        "kimi",
+        "glm",
+        "gemini",
+        "claude",
         "openai",
     }
 
@@ -497,3 +501,94 @@ async def test_gemini_grounding_ops_only_header_auth_key_masking_and_daily_circu
     assert cn_slot["configured"] is True
     assert cn_slot["source"] == "ops"
     assert cn_slot["masked_key"].endswith("7766")
+
+    # Verify per-user global model selection + unlimited & capped quota enforcement
+    um_get = await client.get("/api/user/model-settings", cookies=auth_cookies)
+    assert um_get.status_code == 200, um_get.text
+    um_data = um_get.json()
+    assert any(m["id"] == "minimax-cn-m3" for m in um_data["available_models"])
+    assert um_data["quota"]["unlimited"] is False
+
+    um_put = await client.put(
+        "/api/user/model-settings",
+        cookies=auth_cookies,
+        headers={"X-Requested-With": "XMLHttpRequest"},
+        json={"preferred_model": "minimax-cn-m3"},
+    )
+    assert um_put.status_code == 200, um_put.text
+    assert um_put.json()["preferred_model"] == "minimax-cn-m3"
+    assert um_put.json()["effective_model"] == "minimax-cn-m3"
+
+    # Admin grants unlimited quota -> user sees unlimited=True and bypasses tight daily cap
+    from fastapi import HTTPException as FastAPIHTTPException
+
+    from server import model_routes
+
+    uname = um_data["username"]
+    q_cap = await client.put(
+        f"/api/admin/users/{uname}/quota",
+        headers=ops_hdrs,
+        json={"unlimited_quota": False, "daily_calls_limit": 1, "monthly_budget_usd": 5.0},
+    )
+    assert q_cap.status_code == 200, q_cap.text
+    model_routes.reserve("research", uname, "quota_req_1", "minimax-cn-m3", expected_route_version=0)
+    with pytest.raises(FastAPIHTTPException) as cap_exc:
+        model_routes.reserve("research", uname, "quota_req_2", "minimax-cn-m3", expected_route_version=0)
+    assert cap_exc.value.status_code == 429
+
+    q_unl = await client.put(
+        f"/api/admin/users/{uname}/quota",
+        headers=ops_hdrs,
+        json={"unlimited_quota": True, "daily_calls_limit": None, "monthly_budget_usd": None},
+    )
+    assert q_unl.status_code == 200, q_unl.text
+    model_routes.reserve("research", uname, "quota_req_2", "minimax-cn-m3", expected_route_version=0)
+
+    um_after = (await client.get("/api/user/model-settings", cookies=auth_cookies)).json()
+    assert um_after["quota"]["unlimited"] is True
+    assert um_after["quota"]["daily_calls_used"] >= 2
+
+    admin_users = (await client.get("/api/admin/users", headers=ops_hdrs)).json()["users"]
+    u_rec = next(u for u in admin_users if u["username"] == uname)
+    assert u_rec["unlimited_quota"] is True
+    assert u_rec["preferred_model"] == "minimax-cn-m3"
+    assert u_rec["month_calls"] >= 2
+
+
+def test_contextual_tape_combines_macro_and_radar_hotspots(monkeypatch):
+    from server import event_radar
+
+    monkeypatch.setattr(
+        event_radar,
+        "fetch_cross_market_tape",
+        lambda force=False: [
+            {"symbol": "sh000300", "name": "沪深300", "group": "CN", "price": 4060.0, "change_pct": 1.25},
+            {"symbol": "hkHSTECH", "name": "恒生科指", "group": "HK", "price": 3620.0, "change_pct": 2.1},
+            {"symbol": "usIXIC", "name": "纳斯达克", "group": "US", "price": 24100.0, "change_pct": 0.9},
+            {"symbol": "AU0", "name": "沪金主力", "group": "CMD", "price": 581.5, "change_pct": 0.6},
+            {"symbol": "CU0", "name": "沪铜主力", "group": "CMD", "price": 78500.0, "change_pct": -0.4},
+        ],
+    )
+    monkeypatch.setattr(
+        event_radar,
+        "_fetch_dynamic_stock_quotes",
+        lambda codes: (
+            {"601138": {"name": "工业富联", "price": 25.6, "change_pct": 4.2}} if "601138" in codes else {}
+        ),
+    )
+    fake_events = [
+        {
+            "tier": "T1",
+            "theme": "AI算力与服务器",
+            "playbook": {"targets": [{"ticker": "601138", "name": "工业富联"}]},
+            "futures": ["CU"],
+        }
+    ]
+    tape = event_radar.build_contextual_tape(fake_events, watch_set={"601138"}, username="preview")
+    macros = [x for x in tape if x["source_kind"] == "macro"]
+    hot = [x for x in tape if x["source_kind"] != "macro"]
+    assert len(macros) == 4
+    assert any(
+        x["symbol"] == "601138" and x["source_kind"] == "watch" and x["jump_kind"] == "stock" for x in hot
+    )
+    assert any(x["symbol"] == "CU0" and x["jump_kind"] == "futures" and x["jump_code"] == "CU" for x in hot)

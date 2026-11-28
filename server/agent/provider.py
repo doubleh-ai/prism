@@ -29,8 +29,15 @@ _ENDPOINTS = {
     "https://api.minimax.io/anthropic/v1": "https://api.minimax.io/anthropic/v1/messages",
     "https://api.minimax.cn/anthropic/v1": "https://api.minimax.cn/anthropic/v1/messages",
     "https://api.minimaxi.com/anthropic/v1": "https://api.minimaxi.com/anthropic/v1/messages",
+    "https://api.moonshot.cn/anthropic": "https://api.moonshot.cn/anthropic/v1/messages",
+    "https://api.moonshot.cn/anthropic/v1": "https://api.moonshot.cn/anthropic/v1/messages",
+    "https://open.bigmodel.cn/api/anthropic": "https://open.bigmodel.cn/api/anthropic/v1/messages",
+    "https://open.bigmodel.cn/api/anthropic/v1": "https://open.bigmodel.cn/api/anthropic/v1/messages",
+    "https://api.anthropic.com": "https://api.anthropic.com/v1/messages",
+    "https://api.anthropic.com/v1": "https://api.anthropic.com/v1/messages",
 }
 _OPENAI_ENDPOINTS = {"https://api.openai.com", "https://api.openai.com/v1"}
+_GEMINI_ENDPOINTS = {"https://generativelanguage.googleapis.com/v1beta"}
 
 
 def configuration_status(model_cfg: dict) -> dict:
@@ -45,6 +52,8 @@ def configuration_status(model_cfg: dict) -> dict:
         if protocol == "anthropic_messages"
         else _OPENAI_ENDPOINTS
         if protocol == "openai_responses"
+        else _GEMINI_ENDPOINTS
+        if protocol == "gemini_generate_content"
         else ()
     )
     endpoint_supported = base in endpoints
@@ -55,10 +64,18 @@ def configuration_status(model_cfg: dict) -> dict:
     vendor = (
         "openai"
         if base in _OPENAI_ENDPOINTS
+        else "gemini"
+        if base in _GEMINI_ENDPOINTS
         else "minimax"
         if base == "https://api.minimax.io/anthropic/v1"
         else "minimax-cn"
         if base in {"https://api.minimax.cn/anthropic/v1", "https://api.minimaxi.com/anthropic/v1"}
+        else "kimi"
+        if base in {"https://api.moonshot.cn/anthropic", "https://api.moonshot.cn/anthropic/v1"}
+        else "glm"
+        if base in {"https://open.bigmodel.cn/api/anthropic", "https://open.bigmodel.cn/api/anthropic/v1"}
+        else "anthropic"
+        if base in {"https://api.anthropic.com", "https://api.anthropic.com/v1"}
         else "deepseek"
         if base in _ENDPOINTS
         else "unknown"
@@ -68,7 +85,11 @@ def configuration_status(model_cfg: dict) -> dict:
         "credential_configured": credential_configured,
         "endpoint_supported": endpoint_supported,
         "model_configured": model_configured,
-        "protocol": protocol if protocol in ("anthropic_messages", "openai_responses") else "unsupported",
+        "protocol": (
+            protocol
+            if protocol in ("anthropic_messages", "openai_responses", "gemini_generate_content")
+            else "unsupported"
+        ),
         "endpoint_host": vendor,
     }
 
@@ -722,6 +743,7 @@ class AnthropicMessagesProvider:
                     "https://api.minimax.io/anthropic/v1/messages",
                     "https://api.minimax.cn/anthropic/v1/messages",
                     "https://api.minimaxi.com/anthropic/v1/messages",
+                    "https://api.moonshot.cn/anthropic/v1/messages",
                 }
                 else {"x-api-key": key}
             )
@@ -817,6 +839,10 @@ async def stream(
         from .provider_openai import OpenAIResponsesProvider
 
         selected = OpenAIResponsesProvider()
+    elif protocol == "gemini_generate_content":
+        from .provider_gemini import GeminiGenerateContentProvider
+
+        selected = GeminiGenerateContentProvider()
     else:
         raise ProviderError("provider_configuration_error")
     iterator = selected.stream(

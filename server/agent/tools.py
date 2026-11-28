@@ -60,6 +60,9 @@ _CUSTOM = {
     "portfolio_risk": ("核对我的持仓风险", "portfolio_snapshot"),
     "futures_intelligence": ("读取期货V2分位与产业利润", "platform_data"),
     "persona_propose_trait": ("提议写入投研画像", "historical_research"),
+    "circle_intel_search": ("检索圈内鲜活情报池", "platform_data"),
+    "circle_intel_submit": ("收录圈内情报或私密笔记", "historical_research"),
+    "watchman_create": ("创建私人盯盘守望规则", "platform_data"),
     "knowledge_search": ("检索我的历史研究", "historical_research"),
     "knowledge_get": ("读取我的历史研究", "historical_research"),
     "source_read": ("读取公开资料节选", "external_web"),
@@ -204,6 +207,57 @@ def _custom_definitions():
                     },
                 },
                 "required": ["trait_text"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "circle_intel_search",
+            "description": "检索平台『圈内情报池』中尚未过期的圈友共享情报与本人私密笔记（含策略应对剧本、产业传闻、宏观预期、盘口交叉体检与信源历史印证率）。注意：返回内容为圈内主观策略或未证实线索，引用时须严格与官方公告事实分层说明。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "maxLength": 80,
+                        "description": "可选关键词、股票代码、板块名或期货品种（留空则返回最新鲜活情报）。",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["", "strategy", "rumor", "macro", "channel"],
+                        "default": "",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "circle_intel_submit",
+            "description": "当用户在对话中明确要求『把这段小道消息/策略记下来』时调用，自动完成分支拆解、盘口温度计核验与保鲜期设置。为严防隐私外泄，Agent 代记条目强制存入当前用户本人的『私密笔记（仅自己可见）』；若用户希望公开共享给全圈友，请提示其在『圈内情报』页面手动发布。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "raw_text": {"type": "string", "minLength": 4, "maxLength": 4000},
+                    "visibility": {"type": "string", "enum": ["circle", "private"], "default": "private"},
+                    "anonymous": {"type": "boolean", "default": False},
+                },
+                "required": ["raw_text"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "watchman_create",
+            "description": "当用户在对话中明确要求『帮我盯着某个价格/涨跌幅/关键词并在触发时提醒我』时，创建一条后台 0-Token 自动轮询的私人盯盘守望规则（如‘600519 跌破 1480 提醒我’或‘风向命中 光模块 提醒我’）。",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "instruction": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 240,
+                        "description": "简明中文盯盘指令，如‘沪深300 跌破 4000 提醒我’或‘601138 涨幅超过 5% 提醒我’。",
+                    }
+                },
+                "required": ["instruction"],
                 "additionalProperties": False,
             },
         },
@@ -628,6 +682,35 @@ class NativeTools:
                     "reason" in arguments
                     and (type(arguments["reason"]) is not str or len(arguments["reason"]) > 240)
                 )
+            ):
+                raise NativeToolError("invalid_arguments")
+        elif name == "circle_intel_search":
+            if (
+                not set(arguments) <= {"query", "category"}
+                or (
+                    "query" in arguments
+                    and (type(arguments["query"]) is not str or len(arguments["query"]) > 80)
+                )
+                or (
+                    "category" in arguments
+                    and arguments["category"] not in {"", "strategy", "rumor", "macro", "channel"}
+                )
+            ):
+                raise NativeToolError("invalid_arguments")
+        elif name == "circle_intel_submit":
+            if (
+                not {"raw_text"} <= set(arguments) <= {"raw_text", "visibility", "anonymous"}
+                or type(arguments["raw_text"]) is not str
+                or not 4 <= len(arguments["raw_text"].strip()) <= 4000
+                or ("visibility" in arguments and arguments["visibility"] not in {"circle", "private"})
+                or ("anonymous" in arguments and type(arguments["anonymous"]) is not bool)
+            ):
+                raise NativeToolError("invalid_arguments")
+        elif name == "watchman_create":
+            if (
+                set(arguments) != {"instruction"}
+                or type(arguments["instruction"]) is not str
+                or not 3 <= len(arguments["instruction"].strip()) <= 240
             ):
                 raise NativeToolError("invalid_arguments")
         elif name == "knowledge_search":
@@ -1231,6 +1314,76 @@ class NativeTools:
                 "data": self._safe(proposal),
                 "refs": [],
                 "source_kind": "historical_research",
+            }
+        if name == "circle_intel_search":
+            from ..private_agent import list_visible_intel
+
+            feed = await self.lease.manager.run_blocking(
+                "auxiliary",
+                lambda: list_visible_intel(
+                    self.context["username"],
+                    scope="active",
+                    query=str(arguments.get("query") or ""),
+                    category=str(arguments.get("category") or ""),
+                    limit=12,
+                ),
+                parent=self.lease,
+            )
+            return {
+                "ok": True,
+                "data": self._safe(
+                    {
+                        "items": feed["items"],
+                        "counts": feed["counts"],
+                        "epistemic_notice": "圈内情报属于圈友主观研判或未证实线索，非交易所原始公告；引用时须单独标明信源与剩余有效期。",
+                    }
+                ),
+                "refs": [],
+                "source_kind": "platform_data",
+            }
+        if name == "circle_intel_submit":
+            from ..private_agent import submit_circle_intel
+
+            # Hard anti-exfiltration boundary: Agent tool writes strictly to the owner's
+            # private vault (`visibility='private'`), never broadcasting to other users!
+            saved_intel = await self.lease.manager.run_blocking(
+                "auxiliary",
+                lambda: submit_circle_intel(
+                    self.context["username"],
+                    raw_text=arguments["raw_text"],
+                    visibility="private",
+                    anonymous=False,
+                ),
+                parent=self.lease,
+            )
+            saved_intel = dict(saved_intel)
+            saved_intel["privacy_guard"] = (
+                "已安全存入本人私密笔记（仅自己可见）；如需向圈内公开共享，请在『圈内情报』工作台手动发布。"
+            )
+            return {
+                "ok": True,
+                "data": self._safe(saved_intel),
+                "refs": [],
+                "source_kind": "historical_research",
+            }
+        if name == "watchman_create":
+            from ..private_agent import create_watchman_rule
+
+            try:
+                rule = await self.lease.manager.run_blocking(
+                    "auxiliary",
+                    create_watchman_rule,
+                    self.context["username"],
+                    arguments["instruction"],
+                    parent=self.lease,
+                )
+            except ValueError:
+                raise NativeToolError("invalid_arguments") from None
+            return {
+                "ok": True,
+                "data": self._safe(rule),
+                "refs": [],
+                "source_kind": "platform_data",
             }
         if name == "source_read":
             return await self._read_source(arguments, call_id)
