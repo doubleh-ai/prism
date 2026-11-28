@@ -121,7 +121,7 @@ def test_verified_source_number_gets_marker_and_sentence_source_note():
     assert view["schema"] == SCHEMA
     assert view["narrative"]["status"] == "rendered"
     assert view["narrative"]["changed"] is True
-    assert "120 万吨✅" in rendered
+    assert "120 万吨◉" in rendered
     assert "（来源：示例公告，2026-03-18）" in rendered
 
 
@@ -184,7 +184,7 @@ def test_unmatched_report_number_is_marked_pending():
     )
 
     rendered = view["narrative"]["text"]
-    assert "120 万吨✅" in rendered
+    assert "120 万吨◉" in rendered
     assert "【待核验：30.2%】" in rendered
 
 
@@ -214,7 +214,7 @@ def test_table_number_gets_marker_without_a_sentence_annotation():
     )
 
     rendered = view["narrative"]["text"]
-    assert "120✅ 万吨" in rendered
+    assert "120◉ 万吨" in rendered
     assert "（来源" not in rendered
 
 
@@ -396,7 +396,7 @@ def test_finalize_adds_verification_render_without_rewriting_the_report():
     assert view["schema"] == SCHEMA
     assert view["status"] == "ok"
     assert view["narrative"]["text"] != text
-    assert "120 万吨✅" in view["narrative"]["text"]
+    assert "120 万吨◉" in view["narrative"]["text"]
     assert view["evidence"]["total"] == 2
     assert view["evidence"]["counts"]["verified_source"] == 1
 

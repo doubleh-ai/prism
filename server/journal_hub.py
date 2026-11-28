@@ -11,15 +11,19 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import futures, futures_panel
+from . import database, futures, futures_panel
 from .auth import require_account_context, require_auth
 from .database import check_rate_limit, get_db
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+_INITIALIZED_JOURNAL_DBS: set[str] = set()
 
 
 def init_journal_hub_db(db=None) -> None:
+    db_key = str(database.DB_PATH)
+    if db is None and db_key in _INITIALIZED_JOURNAL_DBS:
+        return
     sql = """
     CREATE TABLE IF NOT EXISTS equity_research_journal (
         id TEXT PRIMARY KEY,
@@ -47,6 +51,7 @@ def init_journal_hub_db(db=None) -> None:
         return
     with get_db() as conn:
         conn.executescript(sql)
+    _INITIALIZED_JOURNAL_DBS.add(db_key)
 
 
 def _table_exists(db, table_name: str) -> bool:

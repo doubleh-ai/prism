@@ -9,24 +9,36 @@ from pathlib import Path
 
 CONFIG = Path(__file__).resolve().parents[1] / "server/config.py"
 CASES = [
-    ({"LLM_API_KEY": "synthetic-legacy"}, ["synthetic-legacy", "", "", ""]),
+    ({"LLM_API_KEY": "synthetic-legacy"}, ["synthetic-legacy", "", "", "", "", "", "", ""]),
     (
         {"LLM_API_KEY": "synthetic-legacy", "DEEPSEEK_API_KEY": "synthetic-deepseek"},
-        ["synthetic-deepseek", "", "", ""],
+        ["synthetic-deepseek", "", "", "", "", "", "", ""],
     ),
     (
         {"LLM_API_KEY": "synthetic-legacy", "MINIMAX_API_KEY": "synthetic-minimax"},
-        ["synthetic-legacy", "synthetic-minimax", "", ""],
+        ["synthetic-legacy", "synthetic-minimax", "", "", "", "", "", ""],
     ),
-    ({"LLM_API_KEY": "synthetic-legacy", "MINIMAX_API_KEY": ""}, ["synthetic-legacy", "", "", ""]),
+    (
+        {"LLM_API_KEY": "synthetic-legacy", "MINIMAX_API_KEY": ""},
+        ["synthetic-legacy", "", "", "", "", "", "", ""],
+    ),
     (
         {"DEEPSEEK_API_KEY": "synthetic-deepseek", "OPENAI_API_KEY": "synthetic-openai"},
-        ["synthetic-deepseek", "", "synthetic-openai", ""],
+        ["synthetic-deepseek", "", "synthetic-openai", "", "", "", "", ""],
     ),
-    ({"MINIMAX_CN_API_KEY": "synthetic-domestic"}, ["", "", "", "synthetic-domestic"]),
+    ({"MINIMAX_CN_API_KEY": "synthetic-domestic"}, ["", "", "", "synthetic-domestic", "", "", "", ""]),
+    (
+        {
+            "KIMI_API_KEY": "synthetic-kimi",
+            "GLM_API_KEY": "synthetic-glm",
+            "ANTHROPIC_API_KEY": "synthetic-claude",
+            "GEMINI_API_KEY": "synthetic-gemini",
+        },
+        ["", "", "", "", "synthetic-kimi", "synthetic-glm", "synthetic-claude", "synthetic-gemini"],
+    ),
     (
         {"MINIMAX_CN_API_KEY": "synthetic-domestic", "MINIMAX_API_KEY": "synthetic-global"},
-        ["", "synthetic-global", "", "synthetic-domestic"],
+        ["", "synthetic-global", "", "synthetic-domestic", "", "", "", ""],
     ),
 ]
 PROGRAM = """
@@ -37,10 +49,21 @@ socket.create_connection=forbidden
 spec=importlib.util.spec_from_file_location('isolated_provider_config',sys.argv[1])
 config=importlib.util.module_from_spec(spec);spec.loader.exec_module(config)
 expected=json.loads(sys.argv[2])
-actual=[config.DEEPSEEK_API_KEY,config.MINIMAX_API_KEY,config.OPENAI_API_KEY,config.MINIMAX_CN_API_KEY]
+actual=[
+ config.DEEPSEEK_API_KEY,config.MINIMAX_API_KEY,config.OPENAI_API_KEY,config.MINIMAX_CN_API_KEY,
+ config.KIMI_API_KEY,config.GLM_API_KEY,config.ANTHROPIC_API_KEY,config.GEMINI_API_KEY
+]
 assert actual==expected
-endpoints={'https://api.deepseek.com/anthropic':0,'https://api.minimax.io/anthropic/v1':1,
- 'https://api.openai.com/v1':2,'https://api.minimax.cn/anthropic/v1':3}
+endpoints={
+ 'https://api.deepseek.com/anthropic':0,
+ 'https://api.minimax.io/anthropic/v1':1,
+ 'https://api.openai.com/v1':2,
+ 'https://api.minimax.cn/anthropic/v1':3,
+ 'https://api.moonshot.cn/anthropic':4,
+ 'https://open.bigmodel.cn/api/anthropic':5,
+ 'https://api.anthropic.com/v1':6,
+ 'https://generativelanguage.googleapis.com/v1beta':7,
+}
 for model in config.MODELS.values():
  assert model['api_key']==expected[endpoints[model['base_url'].rstrip('/')]]
 print(json.dumps({'provider_key_isolation':True,'network_requests':0}))

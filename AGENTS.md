@@ -13,7 +13,7 @@ These rules apply to all coding agents (Antigravity, Codex, Claude Code, Cursor,
 2. **Merge Strategy (`--merge`, Keep `dev` Alive)**:
    - Open a PR from `dev` into `main` using [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
    - After CI checks (`test` and `security-scan`) pass, merge with a standard merge commit (`gh pr merge --merge`, **without** `--squash` and **without** `--delete-branch`) so `dev` and `main` share exact commit ancestry and `dev` remains ready for the next task (`git checkout dev && git merge --ff-only origin/main`).
-3. **Atomic Commits & Changelog**: Write clear imperative commit messages (`feat: ...`, `fix: ...`, `perf: ...`, `docs: ...`). Record user-visible changes under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Bump [server/release.py](server/release.py) (`APP_VERSION`) only when cutting an explicit release.
+3. **Atomic Commits, Changelog & Release Tagging**: Write clear imperative commit messages (`feat: ...`, `fix: ...`, `perf: ...`, `docs: ...`). Record user-visible changes under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). When cutting an explicit release (`vX.Y.Z`), bump `APP_VERSION` in [server/release.py](server/release.py), move `[Unreleased]` notes under `## [vX.Y.Z] - YYYY-MM-DD`, merge `dev` → `main` via GitHub PR, and tag the resulting `main` merge commit with an annotated Git tag (`git tag -a vX.Y.Z -m "Prism vX.Y.Z" && git push origin vX.Y.Z`) plus a GitHub Release (`gh release create vX.Y.Z`).
 
 ---
 

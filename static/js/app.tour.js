@@ -6,16 +6,27 @@ Object.assign(App, {
 
   _tourSteps: {
     market: [
-      {sel:".icon-rail-btn[data-workbench-view='market']",title:"行情工作区",text:"全站核心看盘工作台：查看自选股实时涨跌、个股日周月 K 线、财务估值与上下游大宗商品锚。"},
-      {sel:"#marketSidebarQ",title:"快速检索与自选池",text:"输入股票代码或简称秒搜，一键加入个人自选池；也可点顶栏左侧按钮（⌘B）随时收起列表侧栏。"},
-      {sel:"a.icon-rail-btn[href='/futures']",title:"期货研究",text:"直达 46 品种期货本体工作台：查看近 5 年分位温度计、产业链盘面利润与期股联动。"},
-      {sel:".icon-rail-btn[data-workbench-view='screener']",title:"全市场选股与指标实验室",text:"直接从左栏切换至沪深京全市场量化扫描或自然语言参数化指标实验室。"},
-      {sel:"#accountMenuBtn",title:"账号与投研画像",text:"打开账号菜单即可配置你的独立投研画像与风控纪律、iOS Bark 手机推送，以及退出登录。"},
-      {sel:"#copilotLauncher",title:"自适应随行 Agent (⌘K)",text:"按 ⌘K 呼出伴随助手：结论先行，长文与表格自动拓宽，并支持拖拽边缘与一键 ⤢ 居中沉浸精读。"},
+      {sel:".icon-rail-btn[data-workbench-view='market']",title:"行情与跨市场看盘",text:"查看自选股实时涨跌、个股日周月 K 线、财务估值与上下游大宗商品价格锚；也可点顶栏左侧按钮（⌘B）收起列表侧栏。"},
+      {sel:".icon-rail-btn[data-workbench-view='radar']",title:"全球风向雷达",text:"90 秒轮询财联社、新浪、东财及美联储/SEC 8-K 全球一手源，自动划分 T0/T1/T2 级别并联动跨市场实时价格印证。"},
+      {sel:".icon-rail-btn[data-workbench-view='intel']",title:"圈内情报与盘口体检",text:"零门槛粘贴熟人圈策略观点或产业线索，系统自动提炼条件分支、核验实时盘口涨跌并设置保鲜期（支持匿名分享或仅自己可见）。"},
+      {sel:".icon-rail-btn[data-workbench-view='screener']",title:"全市场选股与指标实验室",text:"直接扫描沪深京全市场量化信号，或用大白话生成参数化技术指标。"},
+      {sel:"#accountMenuBtn",title:"私人助理 · 模型偏好 · 画像模板",text:"打开右上角个人菜单，即可管理「私人仓位底牌与 0-Token 盯盘推送」、自选默认 AI 模型，或一键套用成熟投研画像模板。"},
+      {sel:"#copilotLauncher",title:"私人投研 Agent (⌘K)",text:"按 ⌘K 呼出伴随助理：严格按账号物理隔离，自动结合你的私人仓位底牌与圈内鲜活情报对号入座，并附反方证伪视角。"},
+    ],
+    radar: [
+      {sel:"#radarTopbarPill",title:"顶栏实时风向哨兵",text:"无论在哪个模块看盘，一旦出现 T0 顶层重磅或 T1 产业强催化，顶栏胶囊会第一时间变色提醒。"},
+      {sel:"#radarSidebarInner",title:"重要性分级与全球一手源筛选",text:"按 T0 顶层重磅、T1 强催化、GLOBAL 全球一手源或命中自选池一键过滤噪音。"},
+      {sel:".radar-warroom__top",title:"全球价格锚与早午报",text:"顶部实时展示离岸人民币、沪深300、恒科、纳指及核心大宗商品涨跌，每个交易日 08:45 与 12:45 自动汇总作战早午报。"},
+      {sel:"#copilotLauncher",title:"一键交由私人 Agent 推演",text:"在任意事件剧本底部点击「交给随行 Agent 结合画像推演」，即可结合你当前的真实仓位给出应对纪律。"},
+    ],
+    intel: [
+      {sel:".intel-composer-card",title:"零门槛投喂圈内情报",text:"原封不动粘贴群聊策略或调研线索，系统自动拆解空仓/底仓/重仓应对分支并核验当前盘口是否已透支；可自由选「圈内共享（含匿名）」或「仅自己可见」。"},
+      {sel:"#intelFilterTabs",title:"保鲜期自动淘汰与行情对账",text:"每条情报均带智能保鲜期，过期自动归档不污染 Agent 判断；随时可点击卡片上的「按最新行情对账」检验历史准度。"},
+      {sel:"#copilotLauncher",title:"结合本人底牌对号入座",text:"点击任意情报卡片上的「结合我的仓位底牌推演」，私人 Agent 会按你保密的真实仓位成数直接给出贴身建议。"},
     ],
     reports: [
-      {sel:"#researchReportsTab",title:"精选研报归档",text:"收纳所有经过工具核验的深度研究报告与原文引用。"},
-      {sel:"#researchJournalTab",title:"全域判断与复盘账本",text:"跨股票与期货统一管理你的多空观点，按真实收盘行情自动核对印证与证伪，并反哺个人画像。"},
+      {sel:".journal-kpi-grid",title:"跨资产判断胜率统计",text:"统一汇总你在 A 股个股与商品期货中登记的多空观点，按最新真实行情客观统计印证率。"},
+      {sel:".journal-bias-banner",title:"画像联动诊断与深度复盘",text:"系统自动识别你的多空偏差倾向，可一键交由随行 Agent 生成阶段性复盘改进建议。"},
     ],
   },
 
@@ -24,7 +35,7 @@ Object.assign(App, {
 
   _startTour: function(mode) {
     var steps = (this._tourSteps[mode || this._mode] || []).concat(
-      [{sel:null, title:"就这样！", text:"点任意位置关闭指引。随时点顶栏 ❔ 重看。"}]
+      [{sel:null, title:"导览完成", text:"点任意位置关闭指引。随时可在右上角账号菜单中点击「功能导览」重看。"}]
     );
     if (steps.length <= 1) return;
     this._tourIdx = 0;
@@ -157,12 +168,13 @@ Object.assign(App, {
     for (var i=0;i<spots.length;i++) spots[i].classList.remove("tour-spot");
   },
 
-  /* ── Replaces old _toggleGuide; wired to the ❔ button ── */
+  /* ── Contextual Guided Tour wired to topbar ? and account menu ── */
   _toggleTour: function() {
     var p = this._loadPrefs();
     p.seenTour = {};
     this._savePrefs();
-    this._startTour(this._mode === "reports" ? "reports" : "market");
+    var targetMode = this._tourSteps[this._mode] ? this._mode : "market";
+    this._startTour(targetMode);
   },
 
 });

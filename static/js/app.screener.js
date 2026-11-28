@@ -197,6 +197,7 @@ Object.assign(App, {
   },
 
   _refreshUniverseSummary: async function() {
+    if (this._mode !== "market" || this._marketWorkspaceTab !== "screener") return;
     var meta = document.getElementById("marketUniverseMeta");
     if (!meta) return;
     var scope = (document.getElementById("marketScanScope") || {}).value || "market";

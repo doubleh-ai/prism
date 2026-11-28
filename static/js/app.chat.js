@@ -28,7 +28,7 @@ Object.assign(App, {
     var self = this;
     var selected = ['prism-research','bottleneck-hunter','serenity','futures-research'].indexOf(self.skill) >= 0 ? self.skill : 'prism-research';
     box.innerHTML = this.skills.filter(function(s){ return s.id === selected; })
-      .map(function(s){ return '<button type="button" class="cmp-chip" onclick="App._toggleSkillDrawer()" aria-label="切换研究方式">'+esc(s.name)+'</button>'; }).join('');
+      .map(function(s){ return '<button type="button" class="cmp-chip" onclick="App._toggleSkillDrawer()" aria-label="切换研究方式" title="切换专业研究视角">'+esc(s.name)+' ▾</button>'; }).join('');
   },
   _toggleSkillDrawer: function() {
     var d = document.getElementById('skillDrawer');
@@ -81,6 +81,7 @@ Object.assign(App, {
   /* ═══ Models ═══ */
   loadModels: async function() {
     var s = document.getElementById('modelSelect');
+    var sendBtn = document.getElementById('sendBtn');
     try {
       var r = await this.api('/api/models'); if (!r.ok) throw new Error('unavailable');
       var data = await r.json(), models = Array.isArray(data) ? data : data.models || [];
@@ -91,13 +92,15 @@ Object.assign(App, {
       var selected = available.find(function(m){return m.id === saved;}) || preferred;
       this.model = selected ? selected.id : '';
       s.innerHTML = models.length ? models.map(function(m){return '<option value="'+escAttr(m.id)+'"'+(m.id===App.model?' selected':'')+(m.configured===true?'':' disabled')+'>'+esc(m.name || m.id)+(m.configured===true?'':' · 未配置')+'</option>';}).join('') : '<option value="">尚未配置模型</option>';
-      s.value = this.model; s.disabled = !selected;
+      s.value = this.model; s.disabled = !selected; s.hidden = !selected;
       s.title = selected ? '配置已提供；真实调用是否可用以执行结果为准' : '没有已配置的研究模型，请由管理员完成配置';
+      if (sendBtn) sendBtn.classList.toggle('is-unconfigured', !selected);
       var notice = document.getElementById('modelConfigurationNotice');
-      if (notice) { notice.hidden = !!selected; notice.textContent = selected ? '' : '尚未配置研究模型。可以继续查看历史、行情和报告；新研究暂不可用。'; }
+      if (notice) { notice.hidden = !!selected; notice.textContent = selected ? '' : '当前未激活可用模型 · 请在运维控制台配置服务商密钥后再发起提问'; }
     } catch(error) {
-      s.innerHTML = '<option value="">模型配置读取失败</option>'; s.disabled = true;
+      s.innerHTML = '<option value="">模型配置读取失败</option>'; s.disabled = true; s.hidden = true;
       this.model = ''; this._modelsLoaded = true;
+      if (sendBtn) sendBtn.classList.add('is-unconfigured');
       var notice = document.getElementById('modelConfigurationNotice');
       if (notice) { notice.hidden = false; notice.textContent = '模型配置暂时无法读取，请刷新后重试。'; }
     }
@@ -448,6 +451,7 @@ Object.assign(App, {
     if (this.renderSkillsBar) this.renderSkillsBar();
     var el = document.getElementById('msgList');
     if (!this.msgs.length) { this.showWelcome(); return; }
+    if (this._refreshCopilotContextBar) this._refreshCopilotContextBar();
     var self = this;
     // Snapshot which message is currently being streamed on this conv.
     // During streaming, m.content is plain text (not JSON) and m._chunks holds
@@ -1070,7 +1074,7 @@ Object.assign(App, {
     var self = this, msgIdx = stream.msgIdx, sid = stream.convId;
     var full = stream.full || '', chunks = stream.chunks || [];
             if (p.error) {
-              var streamError = '⚠ ' + ChatRender.clean(p.error);
+              var streamError = '[异常] ' + ChatRender.clean(p.error);
               full += (full ? '\n\n' : '') + streamError;
               chunks.push({t:'text', c:(full && chunks.length ? '\n\n' : '') + streamError});
               stream.error = streamError;

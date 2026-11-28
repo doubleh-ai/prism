@@ -14,14 +14,15 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=153">
-  <link rel="stylesheet" href="/static/css/portal.css?v=153">
-  <link rel="stylesheet" href="/static/css/futures.css?v=153">
-  <link rel="stylesheet" href="/static/css/copilot.css?v=153">
-  <script src="/static/js/futures-brief.js?v=153" defer></script>
-  <script src="/static/js/futures.js?v=153" defer></script>
-  <script src="/static/js/futures-copilot.js?v=153" defer></script>
-  <script src="/static/js/app.radar.js?v=153" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=170">
+  <link rel="stylesheet" href="/static/css/portal.css?v=170">
+  <link rel="stylesheet" href="/static/css/futures.css?v=170">
+  <link rel="stylesheet" href="/static/css/copilot.css?v=170">
+  <script src="/static/js/futures-brief.js?v=170" defer></script>
+  <script src="/static/js/futures.js?v=170" defer></script>
+  <script src="/static/js/futures-copilot.js?v=170" defer></script>
+  <script src="/static/js/app.radar.js?v=170" defer></script>
+  <script src="/static/js/app.intel.js?v=170" defer></script>
 </head>
 <body class="futures-with-rail">
   <a class="skip-link" href="#main">跳至主要内容</a>
@@ -29,7 +30,7 @@
   <div class="futures-shell" id="futuresShell">
     <nav class="icon-rail" id="iconRail" aria-label="研究空间导航">
       <a class="icon-rail-brand" href="/prism" title="Prism">
-        <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=153#mark"/></svg>
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><use href="/static/prism-mark.svg?v=170#mark"/></svg>
         <span class="rail-brand-word">Prism<small>RESEARCH</small></span>
       </a>
 
@@ -45,6 +46,10 @@
       <a class="icon-rail-btn" href="/prism?mode=radar" title="风向雷达与作战剧本">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.55"/><circle cx="12" cy="12" r="4.5" stroke="currentColor" stroke-width="1.4" opacity=".65"/><path d="M12 12l5.2-5.2" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
         <span class="rail-label">风向雷达</span>
+      </a>
+      <a class="icon-rail-btn" href="/prism?mode=intel" title="圈内情报与盘口体检">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="6.5" cy="12" r="2.3" stroke="currentColor" stroke-width="1.6"/><circle cx="17.5" cy="6.5" r="2.3" stroke="currentColor" stroke-width="1.6"/><circle cx="17.5" cy="17.5" r="2.3" stroke="currentColor" stroke-width="1.6"/><path d="M8.6 10.9l6.8-3.3M8.6 13.1l6.8 3.3" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/></svg>
+        <span class="rail-label">圈内情报</span>
       </a>
       <a class="icon-rail-btn" href="/prism?mode=reports&tab=journal" title="研究与复盘">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 3.5h8l4 4V20H6V3.5z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4M9 12h6M9 15.5h4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -97,6 +102,8 @@
                 <strong id="futuresMenuAccountName">__FUTURES_ACCOUNT__</strong>
                 <span>__APP_VERSION__</span>
               </div>
+              <button type="button" role="menuitem" onclick="document.getElementById('futuresAccountMenu').hidden=true; window.PrismPrivateAgent && window.PrismPrivateAgent.open('position')">私人助理与盯盘守望</button>
+              <button type="button" role="menuitem" id="futuresMenuModelBtn" onclick="window.PrismUserModel && window.PrismUserModel.open()">模型偏好与配额</button>
               <button type="button" role="menuitem" id="futuresMenuPersonaBtn">投研画像</button>
               <button type="button" role="menuitem" id="futuresMenuLogoutBtn" class="danger">退出登录</button>
             </div>

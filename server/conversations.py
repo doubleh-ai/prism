@@ -244,7 +244,7 @@ def get_conv(cid: str, request: Request) -> dict:
                     if item.get("platform_call"):
                         chunks.append({"t": "platform_call", "call": item["platform_call"]})
                     if item.get("error"):
-                        error_text = ("\n\n" if text else "") + "⚠ " + item["error"]
+                        error_text = ("\n\n" if text else "") + "[异常] " + item["error"]
                         text += error_text
                         chunks.append({"t": "text", "c": error_text})
                 payload = {

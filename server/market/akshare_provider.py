@@ -10,12 +10,14 @@ FastAPI workers indefinitely.
 """
 
 import asyncio
+import json
 import logging
 import math
 import re
+import threading
 import time
 
-from ..config import AKSHARE_TIMEOUT
+from ..config import AKSHARE_TIMEOUT, DATA_DIR
 from ..work_lifecycle import get_manager
 from .clock import market_timestamp
 from .models import Fundamentals, KLine, PriceAdjustment, Quote, SearchHit
@@ -158,29 +160,85 @@ def _search_rank(code: str, name: str, query: str) -> tuple[int, int, str]:
     return (99, 9999, code_text)
 
 
+_STOCK_LIST_LOCK = threading.Lock()
+_STOCK_LIST_DISK_TTL = 24 * 3600
+
+
+def _stock_list_cache_path():
+    return DATA_DIR / "stock_list_cache.json"
+
+
+def _load_stock_list_disk(now: float):
+    """Load persisted stock list DataFrame from disk when fresh (< 24h)."""
+    path = _stock_list_cache_path()
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = float(payload.get("ts") or 0.0)
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows or (now - saved_at) >= _STOCK_LIST_DISK_TTL:
+            return None
+        import pandas as pd
+
+        return pd.DataFrame(rows)
+    except Exception:
+        return None
+
+
+def _save_stock_list_disk(frame, now: float) -> None:
+    """Persist compact code/name list to disk so cold starts skip 18-page scraping."""
+    if frame is None or getattr(frame, "empty", True):
+        return
+    try:
+        cols = [c for c in ("code", "name") if c in frame.columns]
+        if len(cols) < 2:
+            return
+        rows = frame[cols].to_dict(orient="records")
+        if not rows:
+            return
+        path = _stock_list_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"ts": now, "rows": rows}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
 def _stock_list_cache():
-    """Return the cached stock list DataFrame, refreshing if stale."""
+    """Return the cached stock list DataFrame, refreshing if stale (singleflight + disk cache)."""
     global _stock_list_cache_data, _stock_list_cache_ts
     now = time.time()
     if _stock_list_cache_data is not None and (now - _stock_list_cache_ts) < _STOCK_LIST_CACHE_TTL:
         return _stock_list_cache_data
-    try:
-        base = ak.stock_info_a_code_name()
+    with _STOCK_LIST_LOCK:
+        now = time.time()
+        if _stock_list_cache_data is not None and (now - _stock_list_cache_ts) < _STOCK_LIST_CACHE_TTL:
+            return _stock_list_cache_data
+        disk_df = _load_stock_list_disk(now)
+        if disk_df is not None and not getattr(disk_df, "empty", True):
+            _stock_list_cache_data = disk_df
+            _stock_list_cache_ts = now
+            return _stock_list_cache_data
         try:
-            import pandas as pd
+            base = ak.stock_info_a_code_name()
+            try:
+                import pandas as pd
 
-            bj = ak.stock_info_bj_name_code().rename(columns={"证券代码": "code", "证券简称": "name"})
-            bj = bj[["code", "name"]]
-            base = pd.concat([base, bj], ignore_index=True).drop_duplicates(subset=["code"], keep="last")
-        except Exception as exc:
-            log.warning("Beijing stock list unavailable: %s", exc)
-        _stock_list_cache_data = base
-        _stock_list_cache_ts = now
-    except Exception:
-        # If the upstream call fails, return whatever we had (even if stale).
-        # Better to show slightly outdated results than none at all.
-        pass
-    return _stock_list_cache_data
+                bj = ak.stock_info_bj_name_code().rename(columns={"证券代码": "code", "证券简称": "name"})
+                bj = bj[["code", "name"]]
+                base = pd.concat([base, bj], ignore_index=True).drop_duplicates(subset=["code"], keep="last")
+            except Exception as exc:
+                log.warning("Beijing stock list unavailable: %s", exc)
+            _stock_list_cache_data = base
+            _stock_list_cache_ts = now
+            _save_stock_list_disk(base, now)
+        except Exception:
+            # If the upstream call fails, return whatever we had (even if stale).
+            # Better to show slightly outdated results than none at all.
+            pass
+        return _stock_list_cache_data
 
 
 def _sina_symbol(ticker: str) -> str:

@@ -18,6 +18,10 @@ ENDPOINTS = frozenset(
         "https://api.minimax.io/anthropic/v1/messages",
         "https://api.minimax.cn/anthropic/v1/messages",
         "https://api.minimaxi.com/anthropic/v1/messages",
+        "https://api.moonshot.cn/anthropic/v1/messages",
+        "https://open.bigmodel.cn/api/anthropic/v1/messages",
+        "https://api.anthropic.com/v1/messages",
+        "https://generativelanguage.googleapis.com/v1beta",
         "https://api.openai.com/v1/responses",
     }
 )

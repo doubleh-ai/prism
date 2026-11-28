@@ -23,6 +23,125 @@
     '触及预设止损失效位无条件离场，不逆势补仓'
   ];
 
+  var PERSONA_TEMPLATES = [
+    {
+      id: 'steady_core',
+      name: '稳健底仓 · 龙头白马',
+      fit: '适合日常稳健配置（新手推荐）',
+      archetype: 'value',
+      style: 'conservative',
+      horizon: 'long',
+      max_position_pct: 20,
+      max_drawdown_pct: 10,
+      allow_leverage: false,
+      negative_rules: [
+        '排除 ST 与退市整理风险标的',
+        '回避近5年 >85% 分位的单边追高',
+        '回避缺少现金流兑现的纯概念题材'
+      ],
+      note: '结论先行，优先核查扣非净利与经营现金流匹配度；估值高于历史 70% 分位时主动提示回调风险。',
+      traits: [
+        '财报分析必查经营现金流净额是否持续覆盖净利润',
+        '政策预期快速拉升时不重仓追涨，优先等缩量回调机会'
+      ]
+    },
+    {
+      id: 'growth_trend',
+      name: '主线景气 · 右侧趋势',
+      fit: '适合跟踪 AI 算力 / 科技成长主线波段',
+      archetype: 'trend',
+      style: 'balanced',
+      horizon: 'medium',
+      max_position_pct: 25,
+      max_drawdown_pct: 12,
+      allow_leverage: false,
+      negative_rules: [
+        '排除 ST 与退市整理风险标的',
+        '日成交额低于 2 亿元不参与',
+        '触及预设止损失效位无条件离场，不逆势补仓'
+      ],
+      note: '聚焦订单排产与行业景气边际加速，每次推演必须给出明确的均线支撑位与破位止损线。',
+      traits: [
+        '优先选择有真实订单与业绩兑现的主线龙头或核心 ETF',
+        '高位放量滞涨或有效跌破 20 日均线时果断减仓保护利润'
+      ]
+    },
+    {
+      id: 'cycle_cross',
+      name: '产业供需 · 股期联动',
+      fit: '适合大宗商品周期与上下游顺价研究',
+      archetype: 'cycle',
+      style: 'balanced',
+      horizon: 'medium',
+      max_position_pct: 25,
+      max_drawdown_pct: 15,
+      allow_leverage: true,
+      negative_rules: [
+        '排除 ST 与退市整理风险标的',
+        '回避近5年 >85% 分位的单边追高',
+        '触及预设止损失效位无条件离场，不逆势补仓'
+      ],
+      note: '必查近 5 年价格分位、期现基差与交易所仓单库存，严格区分供给收缩与终端需求真实回暖。',
+      traits: [
+        '看多周期品前先核对下游利润与开工率能否承接顺价',
+        '商品价格处于近 5 年 85% 以上极高分位时重点防范利好兑现'
+      ]
+    },
+    {
+      id: 'catalyst_agile',
+      name: '催化快反 · 小仓试错',
+      fit: '适合结合风向与圈内情报捕捉短线预期差',
+      archetype: 'trend',
+      style: 'aggressive',
+      horizon: 'short',
+      max_position_pct: 15,
+      max_drawdown_pct: 8,
+      allow_leverage: false,
+      negative_rules: [
+        '排除 ST 与退市整理风险标的',
+        '回避近5年 >85% 分位的单边追高',
+        '日成交额低于 2 亿元不参与',
+        '触及预设止损失效位无条件离场，不逆势补仓'
+      ],
+      note: '直奔核心催化增量与市场预期差；若盘口已提前抢跑大涨，必须第一时间警示冲高分化风险。',
+      traits: [
+        '圈内传闻必须交叉比对当日成交量能与前排龙头承接力度',
+        '短线试错单笔亏损触及止损线立即离场，绝不拖成被动长线'
+      ]
+    },
+    {
+      id: 'defensive_yield',
+      name: '低波红利 · 绝对收益',
+      fit: '适合大资金防守底仓与期现套保对冲',
+      archetype: 'defensive',
+      style: 'conservative',
+      horizon: 'long',
+      max_position_pct: 20,
+      max_drawdown_pct: 6,
+      allow_leverage: true,
+      negative_rules: [
+        '排除 ST 与退市整理风险标的',
+        '回避近5年 >85% 分位的单边追高',
+        '日成交额低于 2 亿元不参与',
+        '回避缺少现金流兑现的纯概念题材'
+      ],
+      note: '以本金安全与赔率确定性为第一优先级，重点评估股息率安全垫、自由现金流与极端情景压力测试。',
+      traits: [
+        '仅将连续三年分红稳定且自由现金流充沛的标的纳入底仓',
+        '市场一致预期过热时主动分批降仓锁定确定性收益'
+      ]
+    }
+  ];
+
+  var PRESET_PERSONA_TRAITS = [
+    '财报分析必查经营现金流净额是否持续覆盖净利润',
+    '政策预期快速拉升时不重仓追涨，等量能企稳与回调机会',
+    '优先选择有业绩兑现的主线龙头或 ETF，回避纯概念后排跟风',
+    '圈内传闻必须与客观盘口涨跌、成交量及官方公告交叉核验',
+    '单笔亏损触及止损红线无条件认错离场，绝不逆势向下摊平',
+    '商品或个股处于近 5 年 85% 以上分位时主动提示冲高分化风险'
+  ];
+
   function setCssVar(name, val) {
     var root = document.documentElement;
     if (root && root.style && typeof root.style.setProperty === 'function') {
@@ -41,6 +160,8 @@
     _personaData: null,
     _selectedArchetype: 'cycle',
     _selectedNegativeRules: [],
+    _selectedTemplateId: '',
+    _pendingTemplateTraits: [],
 
     _initCopilot: function () {
       var self = this;
@@ -380,60 +501,238 @@
           surface: rtab === 'journal' ? 'decision_journal' : 'research_vault',
           workspace_tab: rtab,
           response_mode: rmode,
-          summary: rtab === 'journal' ? '全域多空判断与自动行情对账账本' : '精选投研报告归档库'
+          summary: rtab === 'journal' ? '全域多空判断与复盘账本' : '精选投研报告归档库'
+        };
+      }
+      if (mode === 'radar') {
+        return {
+          surface: 'event_radar',
+          response_mode: rmode,
+          summary: '风向雷达 · 全球与国内实时催化'
+        };
+      }
+      if (mode === 'intel') {
+        return {
+          surface: 'circle_intel',
+          response_mode: rmode,
+          summary: '圈内情报与策略共享池'
         };
       }
       return { surface: mode, response_mode: rmode, summary: 'Prism 投研工作台' };
+    },
+
+    _buildContextualStarters: function (ctx) {
+      if (ctx.surface === 'stock_quote' && ctx.ticker) {
+        var labelName = (ctx.name ? ctx.name + '（' + ctx.ticker + '）' : ctx.ticker);
+        return [
+          {
+            title: '全面拆解 ' + labelName,
+            sub: '结合估值分位、财报现金流质量与趋势结构给出明确倾向与失效位',
+            prompt: '请结合我的投研画像、私人仓位底牌与风控纪律，全面拆解 ' + labelName + '：先给核心结论，再核对估值水平、财报现金流成色、日周线结构以及明确的风险失效条件。',
+            skill: 'serenity',
+            mode: 'deep'
+          },
+          {
+            title: '核查近期公告与潜在排雷点',
+            sub: '检索官方财报与重大公告，排查经营兑现度、解禁减持与商誉风险',
+            prompt: '请检索 ' + labelName + ' 近期官方财报与重要公告原文，用精炼要点排查营收利润真实成色、经营现金流匹配度及潜在减持或解禁风险。',
+            skill: 'serenity',
+            mode: 'compact'
+          },
+          {
+            title: '上下游成本与商品景气传导',
+            sub: '对比关联大宗商品与行业景气度，评估对毛利率的边际影响',
+            prompt: '请结合产业链上下游与关联大宗商品表现，简明分析近期原材料或产品价格变化对 ' + labelName + ' 毛利率与景气度的影响。',
+            skill: 'bottleneck-hunter',
+            mode: 'compact'
+          }
+        ];
+      }
+      if (ctx.surface === 'stock_screener') {
+        return [
+          {
+            title: '按我的画像与底牌优中选优',
+            sub: '结合负面回避清单，从当前量化命中结果中筛出 2–3 只核心观察标的',
+            prompt: '请结合当前量化选股命中结果与我的投研画像（含负面回避清单），先给筛选结论，再挑出最契合我风格的 2–3 只观察标的并指出各自风险点。',
+            skill: 'prism-research',
+            mode: 'compact'
+          },
+          {
+            title: '评估当前选股信号的适用环境',
+            sub: '分析该技术指标在震荡市与趋势市中的胜率特征与假信号陷阱',
+            prompt: '请简明评估当前量化选股指标的适用行情阶段、常见假信号特征，以及建议搭配的基本面过滤条件。',
+            skill: 'prism-research',
+            mode: 'compact'
+          }
+        ];
+      }
+      if (ctx.surface === 'indicator_lab') {
+        return [
+          {
+            title: '审视当前指标逻辑与参数盲区',
+            sub: '指出震荡市磨损风险与可补充的量价过滤条件',
+            prompt: '请简明审视当前正在编辑的量化指标逻辑，指出它在震荡市与单边市中的优缺点及改进建议。',
+            skill: 'prism-research',
+            mode: 'compact'
+          }
+        ];
+      }
+      if (ctx.surface === 'decision_journal') {
+        return [
+          {
+            title: '复盘我的历史判断胜率与偏差',
+            sub: '对照已印证与已证伪记录，提炼 2 条可落地的操作改进纪律',
+            prompt: '请结合我的历史多空判断对账统计与投研画像，先给核心诊断结论，再给出 2 条针对性的操作纪律改进建议。',
+            skill: 'prism-research',
+            mode: 'compact'
+          }
+        ];
+      }
+      if (ctx.surface === 'event_radar') {
+        return [
+          {
+            title: '提炼今日高优先级风向与应对纪律',
+            sub: '结合跨市场价格印证与我的仓位底牌，区分真催化与脉冲噪音',
+            prompt: '请梳理当前风向雷达中的高优先级催化事件，结合跨市场实时价格反应与我的仓位底牌，指出哪些值得跟踪、哪些需防冲高兑现。',
+            skill: 'prism-research',
+            mode: 'compact'
+          },
+          {
+            title: '排查风向事件对自选股池的影响',
+            sub: '交叉比对最新政策/产业快讯与我当前关注标的的利好利空敞口',
+            prompt: '请将最新风向快讯与我的自选股池及持仓底牌做交叉比对，简明列出直接受益或需要警惕冲击的标的。',
+            skill: 'prism-research',
+            mode: 'compact'
+          }
+        ];
+      }
+      if (ctx.surface === 'circle_intel') {
+        return [
+          {
+            title: '交叉核验圈内鲜活情报与实盘盘口',
+            sub: '对照当前总仓位底牌对号入座，并给出反方证伪观察位',
+            prompt: '请读取当前有效期内的圈内情报，与客观盘口涨跌和我的私人仓位底牌交叉比对，直接给出适合我当前仓位的操作节奏与反方观察位。',
+            skill: 'prism-research',
+            mode: 'compact'
+          }
+        ];
+      }
+      return [
+        {
+          title: '扫描自选股池异动与排雷点',
+          sub: '汇总今日涨跌、量能变化与潜在风险，直出核心结论',
+          prompt: '请读取我的自选股池最新行情，先给 3 行核心异动结论，再简明列出今日值得重点关注的标的与潜在风险点。',
+          skill: 'prism-research',
+          mode: 'compact'
+        },
+        {
+          title: '结合仓位底牌与圈内情报给应对建议',
+          sub: '按我当前真实仓位成数对号入座，附反方证伪与止损观察位',
+          prompt: '请结合我当前的私人仓位底牌、投研画像与最新圈内情报，给出今日盘面应对节奏（含加减仓条件与反方证伪观察位）。',
+          skill: 'prism-research',
+          mode: 'compact'
+        },
+        {
+          title: '股期跨市场极值与顺价机会扫描',
+          sub: '对比大宗商品期货分位极值与 A 股上下游龙头传导节奏',
+          prompt: '请结合我的投研画像，对比当前处于历史分位极值的大宗商品期货品种与对应 A 股产业链龙头的顺价或背离机会。',
+          skill: 'futures-research',
+          mode: 'compact'
+        }
+      ];
+    },
+
+    showWelcome: function () {
+      var list = document.getElementById('msgList');
+      if (!list) return;
+      var ctxBar = document.getElementById('copilotContextBar');
+      if (ctxBar) ctxBar.hidden = true;
+
+      var ctx = this._currentPageContext ? (this._currentPageContext() || {}) : {};
+      var desc = ctx.summary || '行情工作区';
+      var starters = this._buildContextualStarters ? this._buildContextualStarters(ctx) : [];
+      this._welcomeStarters = starters;
+
+      var prof = (this._personaData && this._personaData.profile) || {};
+      var archText = prof.configured ? (ARCHETYPE_LABELS[prof.archetype] || '已定制') : '未定制';
+      var hub = window._prismPrivateHubSnapshot || null;
+      var pos = (hub && hub.position_state) || {};
+      var posText = pos.configured ? ('仓位 ' + pos.position_pct + '%') : '仓位未设';
+      var watchCnt = hub && Array.isArray(hub.watchman_rules)
+        ? hub.watchman_rules.filter(function (r) { return r.enabled; }).length
+        : 0;
+      var capErr = this._capabilityError
+        ? '<div class="cp-welcome__err" role="status">' + esc(this._capabilityError) + ' <button type="button" class="workbench-inline-retry" data-workbench-retry="capabilities">重试</button></div>'
+        : '';
+
+      list.innerHTML =
+        '<div class="cp-welcome">' +
+          '<div class="cp-welcome__ctx">' +
+            '<i class="status-dot live"></i>' +
+            '<span>已感知视口 · ' + esc(desc) + '</span>' +
+          '</div>' +
+          '<div class="cp-welcome__mem">' +
+            '<div class="cp-welcome__mem-info">' +
+              '<span class="cp-mem-kicker">私人记忆</span>' +
+              '<span>' + esc(posText) + '</span>' +
+              '<span class="cp-mem-sep">·</span>' +
+              '<span>画像：' + esc(archText) + '</span>' +
+              (watchCnt > 0 ? '<span class="cp-mem-sep">·</span><span>盯盘 ' + watchCnt + ' 条</span>' : '') +
+            '</div>' +
+            '<div class="cp-welcome__mem-acts">' +
+              '<button type="button" onclick="window.PrismPrivateAgent && window.PrismPrivateAgent.open(\'position\')">校准底牌</button>' +
+              '<button type="button" onclick="App.openPersonaDialog()">定制画像</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="cp-welcome__sec-lbl">针对当前画面的快捷提问</div>' +
+          '<div class="cp-starter-list">' +
+            starters.map(function (st, idx) {
+              return (
+                '<button type="button" class="cp-starter-card" data-cp-starter="' + idx + '">' +
+                  '<div class="cp-starter-card__body">' +
+                    '<strong>' + esc(st.title) + '</strong>' +
+                    '<span>' + esc(st.sub) + '</span>' +
+                  '</div>' +
+                  '<i class="cp-starter-card__arr" aria-hidden="true">→</i>' +
+                '</button>'
+              );
+            }).join('') +
+          '</div>' +
+          capErr +
+        '</div>';
+
+      var self = this;
+      if (typeof list.querySelectorAll === 'function') {
+        list.querySelectorAll('[data-cp-starter]').forEach(function (btn, idx) {
+          btn.onclick = function () {
+            var item = starters[idx];
+            if (!item) return;
+            if (!self.model) {
+              var inp = document.getElementById('input');
+              if (inp) { inp.value = item.prompt; inp.focus(); }
+              if (self._toast) self._toast('已填入提问草稿 · 请先在运维控制台激活可用模型后再发送');
+              return;
+            }
+            self.intervene(item.prompt, item.skill, item.mode);
+          };
+        });
+      }
     },
 
     _refreshCopilotContextBar: function () {
       var ctx = this._currentPageContext() || {};
       var subEl = document.getElementById('copilotLauncherSub');
       var labelEl = document.getElementById('copilotCtxLabel');
-      var actionsEl = document.getElementById('copilotCtxActions');
-      var desc = ctx.summary || '跨板块随行投研助手';
+      var ctxBar = document.getElementById('copilotContextBar');
+      var desc = ctx.summary || '投研工作台';
       if (subEl) subEl.textContent = '已感知：' + desc;
-      if (labelEl) labelEl.textContent = '✦ ' + desc;
-      if (!actionsEl) return;
+      if (labelEl) labelEl.textContent = '当前关联：' + desc;
 
-      var triggers = [];
-      if (ctx.surface === 'stock_quote' && ctx.ticker) {
-        var labelName = (ctx.name ? ctx.name + '（' + ctx.ticker + '）' : ctx.ticker);
-        triggers = [
-          ['按画像深度诊股', '请结合我的投研画像与风控纪律，全面拆解 ' + labelName + '：先给 3 行核心结论，再核对最新估值、财报现金流、日周线趋势结构、上下游传导与风险失效条件。', 'serenity', 'deep'],
-          ['快查公告与财报排雷', '请检索并读取 ' + labelName + ' 近期巨潮官方财报/核心公告原文，用精炼要点排查营收利润成色、经营现金流匹配度及潜在减持/解禁/商誉风险。', 'serenity', 'compact'],
-          ['产业链与商品传导', '请结合产业链上下游与关联大宗商品期货表现，简明分析成本或产品价格波动对 ' + labelName + ' 毛利率与景气度的影响。', 'bottleneck-hunter', 'compact']
-        ];
-      } else if (ctx.surface === 'stock_screener') {
-        triggers = [
-          ['按画像优中选优', '请读取当前量化选股任务命中标的与我的投研画像（含负面回避清单），先给筛选结论，再筛出最契合我风格的 2-3 只核心观察标的并指出各自风险点。', 'prism-research', 'compact'],
-          ['评估信号适用阶段', '请简明评估该技术指标扫描结果的适用行情阶段与常见假信号陷阱。', 'prism-research', 'compact']
-        ];
-      } else if (ctx.surface === 'indicator_lab') {
-        triggers = [
-          ['审视指标参数盲区', '请简明审视当前正在配置的量化指标逻辑，指出它在震荡市与单边市中的优缺点及建议过滤条件。', 'prism-research', 'compact']
-        ];
-      } else if (ctx.surface === 'decision_journal') {
-        triggers = [
-          ['复盘我的胜率与偏差', '请结合我的历史多空判断对账统计与投研画像，先给核心诊断，再给出 2 条具体的改进纪律建议。', 'prism-research', 'compact']
-        ];
-      } else {
-        triggers = [
-          ['扫描自选异动与排雷', '请调用 watchlist_get 读取我的自选股池，先给 3 行核心结论，再简明列出今日值得重点关注的异动标的与潜在风险。', 'prism-research', 'compact'],
-          ['股期跨市场机会扫描', '请结合我的投研画像，对比当前大宗商品期货极值品种与对应 A 股产业链龙头的顺价或背离机会。', 'futures-research', 'compact']
-        ];
+      var hasMsgs = !!(this.msgs && this.msgs.length > 0);
+      if (ctxBar) ctxBar.hidden = !hasMsgs;
+      if (!hasMsgs && this.showWelcome) {
+        this.showWelcome();
       }
-
-      var self = this;
-      actionsEl.innerHTML = triggers.map(function (t, i) {
-        return '<button type="button" class="copilot-trigger-chip" data-cp-trig="' + i + '">✦ ' + esc(t[0]) + '</button>';
-      }).join('');
-      actionsEl.querySelectorAll('[data-cp-trig]').forEach(function (btn, idx) {
-        btn.onclick = function () {
-          var item = triggers[idx];
-          self.intervene(item[1], item[2], item[3]);
-        };
-      });
     },
 
     setCopilotResponseMode: function (mode) {
@@ -510,11 +809,14 @@
       var topBtn = document.getElementById('topbarPersonaBtn');
       var prof = (this._personaData && this._personaData.profile) || {};
       var archText = ARCHETYPE_LABELS[prof.archetype] || '已启用';
-      var label = prof.configured ? ('画像 · ' + archText + ' ▾') : '画像 · 待设置 ▾';
+      var label = prof.configured ? (archText + ' ▾') : '画像 ▾';
       if (btn) btn.textContent = label;
       if (topBtn) {
         var span = topBtn.querySelector ? topBtn.querySelector('span') : null;
         if (span) span.textContent = prof.configured ? ('画像 · ' + archText) : '投研画像';
+      }
+      if (!this.msgs || !this.msgs.length) {
+        if (this.showWelcome) this.showWelcome();
       }
     },
 
@@ -531,7 +833,7 @@
       bar.hidden = false;
       bar.innerHTML =
         '<div class="copilot-proposal-row">' +
-          '<span>✦ 提议记入你的专属画像：<b>' + esc(p.trait_text) + '</b></span>' +
+          '<span>提议记入你的专属画像：<b>' + esc(p.trait_text) + '</b></span>' +
           '<span class="copilot-proposal-btns">' +
             '<button type="button" class="primary" onclick="App.decidePersonaProposal(\'' + escAttr(p.id) + '\',\'accept\')">✓ 记入画像</button>' +
             '<button type="button" onclick="App.decidePersonaProposal(\'' + escAttr(p.id) + '\',\'dismiss\')">忽略</button>' +
@@ -622,6 +924,63 @@
       });
     },
 
+    applyPersonaTemplate: function (tplId) {
+      var tpl = PERSONA_TEMPLATES.find(function (t) { return t.id === tplId; });
+      if (!tpl) return;
+      this._selectedTemplateId = tpl.id;
+      this._selectedArchetype = tpl.archetype;
+      this._selectedNegativeRules = tpl.negative_rules.slice();
+      this._pendingTemplateTraits = (tpl.traits || []).slice();
+
+      var form = document.getElementById('personaProfileForm');
+      if (form) {
+        form.elements.style.value = tpl.style;
+        form.elements.horizon.value = tpl.horizon;
+        form.elements.max_position_pct.value = tpl.max_position_pct;
+        form.elements.max_drawdown_pct.value = tpl.max_drawdown_pct;
+        form.elements.allow_leverage.checked = !!tpl.allow_leverage;
+        form.elements.decision_style_note.value = tpl.note || '';
+      }
+      document.querySelectorAll('.persona-arch-card').forEach(function (c) {
+        c.classList.toggle('active', c.getAttribute('data-arch') === tpl.archetype);
+      });
+      document.querySelectorAll('.persona-tpl-card').forEach(function (c) {
+        c.classList.toggle('active', c.getAttribute('data-tpl-id') === tpl.id);
+      });
+      this._renderNegativeRuleChips();
+      var hint = document.getElementById('personaSaveHint');
+      if (hint) {
+        hint.textContent = '已套用「' + tpl.name + '」参数与 ' + this._pendingTemplateTraits.length + ' 条配套准则 · 点击右侧保存立即生效';
+      }
+      if (this._toast) {
+        this._toast('已填入「' + tpl.name + '」模板，可微调任意项后点击保存');
+      }
+    },
+
+    quickAddPresetTrait: async function (traitText) {
+      var text = String(traitText || '').trim();
+      if (!text) return;
+      var existing = ((this._personaData && this._personaData.traits) || []).some(function (t) {
+        return t.trait_text === text;
+      });
+      if (existing) {
+        if (this._toast) this._toast('该条准则已在你的记忆卡中');
+        return;
+      }
+      try {
+        var r = await this.api('/api/preferences/traits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trait_text: text, category: 'discipline' })
+        });
+        if (r.ok) {
+          if (this._toast) this._toast('✓ 已加入投研记忆卡');
+          await this.loadPersona();
+          this._renderPersonaDialogBody();
+        }
+      } catch (e) {}
+    },
+
     _renderPersonaDialogBody: function () {
       var mount = document.getElementById('personaCoreMount');
       if (!mount) return;
@@ -634,6 +993,7 @@
         { id: 'defensive', name: '稳健绝对收益 / 套利派', tagline: '回避高分位追涨，偏好低分位安全垫与期现套利' }
       ];
       var traits = data.traits || [];
+      var existingTraitTexts = traits.map(function (t) { return t.trait_text; });
       var jstats = data.journal_stats || { total: 0, bias_hint: '' };
       var curArch = this._selectedArchetype || prof.archetype || 'cycle';
       var curStyle = prof.configured ? prof.style : 'balanced';
@@ -642,9 +1002,28 @@
       var curDd = prof.configured ? prof.max_drawdown_pct : 12;
       var curLev = prof.configured ? !!prof.allow_leverage : false;
       var curNote = prof.decision_style_note || '';
+      var curTpl = this._selectedTemplateId || '';
 
       mount.innerHTML =
-        '<form id="personaProfileForm" class="persona-sections" onsubmit="App.savePersonaProfile(event)">' +
+        '<section class="persona-section persona-tpl-section">' +
+          '<div class="persona-section__hd">' +
+            '<div><span class="persona-step-num">模板</span><h3>一键套用成熟画像模板（新手免手填）</h3></div>' +
+            '<span class="persona-section__sub">点选即自动填好流派、仓位回撤红线、排雷项与推荐记忆准则，支持二次微调</span>' +
+          '</div>' +
+          '<div class="persona-tpl-grid">' +
+            PERSONA_TEMPLATES.map(function (tp) {
+              var on = tp.id === curTpl ? ' active' : '';
+              return (
+                '<button type="button" class="persona-tpl-card' + on + '" data-tpl-id="' + escAttr(tp.id) + '" onclick="App.applyPersonaTemplate(\'' + escAttr(tp.id) + '\')">' +
+                  '<strong>' + esc(tp.name) + '</strong>' +
+                  '<span>' + esc(tp.fit) + '</span>' +
+                '</button>'
+              );
+            }).join('') +
+          '</div>' +
+        '</section>' +
+
+        '<form id="personaProfileForm" class="persona-sections" style="margin-top:14px;" onsubmit="App.savePersonaProfile(event)">' +
           '<section class="persona-section">' +
             '<div class="persona-section__hd">' +
               '<div><span class="persona-step-num">01</span><h3>主导投资流派</h3></div>' +
@@ -693,7 +1072,7 @@
               '<input name="decision_style_note" maxlength="300" value="' + escAttr(curNote) + '" placeholder="例如：先给明确多空倾向与失效价格线，再列核心证据，不写空泛宏观套话">' +
             '</label>' +
             '<div class="persona-form-footer">' +
-              '<span class="persona-save-hint" id="personaSaveHint">' + (prof.configured ? ('当前生效版本 v' + prof.version + ' · 保存后下轮立即采用') : '尚未保存，点击右侧启用专属画像') + '</span>' +
+              '<span class="persona-save-hint" id="personaSaveHint">' + (prof.configured ? ('当前生效版本 v' + prof.version + ' · 保存后下轮立即采用') : '可点上方「基础模板」一键填好，再点右侧保存启用') + '</span>' +
               '<button type="submit" class="market-primary-btn">保存画像与风控设置</button>' +
             '</div>' +
           '</section>' +
@@ -707,6 +1086,18 @@
           (jstats.total > 0
             ? '<div class="journal-bias-banner" style="margin-bottom:10px;"><span>复盘账本联动：已登记 <b>' + jstats.total + '</b> 笔判断（印证 ' + jstats.supported + ' / 证伪 ' + jstats.contradicted + '）· ' + esc(jstats.bias_hint) + '</span></div>'
             : '') +
+          '<div class="persona-subblock" style="margin-bottom:10px;">' +
+            '<span class="persona-sublabel">常用实战纪律模板（点击即可一键加入记忆卡）</span>' +
+            '<div class="persona-neg-chips">' +
+              PRESET_PERSONA_TRAITS.map(function (pt) {
+                var added = existingTraitTexts.indexOf(pt) >= 0;
+                return '<button type="button" class="persona-neg-chip' + (added ? ' active' : '') + '" ' +
+                  (added ? 'disabled ' : '') +
+                  'onclick="App.quickAddPresetTrait(\'' + escAttr(pt) + '\')">' +
+                  '<i aria-hidden="true">' + (added ? '✓' : '＋') + '</i>' + esc(pt) + '</button>';
+              }).join('') +
+            '</div>' +
+          '</div>' +
           '<div class="persona-trait-list" id="personaTraitList">' +
             (traits.length
               ? traits.map(function (t) {
@@ -715,10 +1106,10 @@
                     '<button type="button" class="copilot-icon-btn" title="移除此准则" onclick="App.deletePersonaTrait(\'' + escAttr(t.id) + '\')">×</button>' +
                   '</div>';
                 }).join('')
-              : '<div class="persona-trait-empty">暂无个体化记忆条目。可在下方手动添加，或在对话中确认 Agent 提议的研究习惯。</div>') +
+              : '<div class="persona-trait-empty">暂无个体化记忆条目。可点击上方「常用实战纪律模板」一键添加，或在下方自定义输入。</div>') +
           '</div>' +
           '<form class="persona-trait-add" onsubmit="App.addPersonaTrait(event)">' +
-            '<input id="newPersonaTraitInput" maxlength="200" autocomplete="off" placeholder="添加长期研究准则，如：看消费股必查经营现金流与合同负债">' +
+            '<input id="newPersonaTraitInput" maxlength="200" autocomplete="off" placeholder="自定义长期研究准则，如：看消费股必查经营现金流与合同负债">' +
             '<button type="submit" class="market-secondary-btn">＋ 添加准则</button>' +
           '</form>' +
         '</section>';
@@ -754,8 +1145,24 @@
           if (this._toast) this._toast(err.detail || '画像保存未完成，请重新打开核对');
           return;
         }
-        if (this._toast) this._toast('投研画像已保存生效，下一轮 Agent 推演将立即采用');
+        var pendingTraits = (this._pendingTemplateTraits || []).slice();
+        this._pendingTemplateTraits = [];
+        if (pendingTraits.length) {
+          var existing = ((this._personaData && this._personaData.traits) || []).map(function (t) { return t.trait_text; });
+          for (var i = 0; i < pendingTraits.length; i++) {
+            if (existing.indexOf(pendingTraits[i]) < 0) {
+              await this.api('/api/preferences/traits', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trait_text: pendingTraits[i], category: 'discipline' })
+              }).catch(function () {});
+            }
+          }
+        }
+        if (this._toast) this._toast('✓ 投研画像已保存生效，下一轮 Agent 推演将立即采用');
         await this.loadPersona();
+        var dlg = document.getElementById('personaDialog');
+        if (dlg && dlg.open) this._renderPersonaDialogBody();
       } catch (e) {
         if (this._toast) this._toast('网络异常，画像保存未确认');
       }

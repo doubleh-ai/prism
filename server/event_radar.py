@@ -552,17 +552,22 @@ def detect_trading_window(now: datetime | None = None) -> dict[str, object]:
 
 
 def fetch_cross_market_tape(*, force: bool = False) -> list[dict[str, object]]:
-    """Fetch sub-150ms live cross-market benchmarks via public_network with 20s TTL cache."""
+    """Fetch cross-market benchmarks via public_network with 120s cache (kept warm by collector)."""
     now = time.monotonic()
     cached = _tape_cache.get("items")
-    if not force and isinstance(cached, list) and cached and now - float(_tape_cache.get("ts") or 0.0) < 20.0:
+    if (
+        not force
+        and isinstance(cached, list)
+        and cached
+        and now - float(_tape_cache.get("ts") or 0.0) < 120.0
+    ):
         return cached
 
     label_map = {
-        "whUSDCNH": ("离岸人民币", "FX"),
+        "whUSDCNH": ("离岸汇率", "FX"),
         "sh000300": ("沪深300", "CN"),
         "hkHSTECH": ("恒生科指", "HK"),
-        "usIXIC": ("纳斯达克", "US"),
+        "usIXIC": ("纳指", "US"),
         "usNVDA": ("英伟达", "AI"),
     }
     items: list[dict[str, object]] = []
@@ -603,9 +608,9 @@ def fetch_cross_market_tape(*, force: bool = False) -> list[dict[str, object]]:
         pass
 
     futures_map = {
-        "AU0": ("沪金主力", "CMD"),
-        "CU0": ("沪铜主力", "CMD"),
-        "SC0": ("原油主力", "CMD"),
+        "AU0": ("沪金", "CMD"),
+        "CU0": ("沪铜", "CMD"),
+        "SC0": ("原油", "CMD"),
     }
     try:
         with public_network.sync_client(timeout=3.5) as client:
@@ -652,6 +657,312 @@ def fetch_cross_market_tape(*, force: bool = False) -> list[dict[str, object]]:
     return items if items else (cached if isinstance(cached, list) else [])
 
 
+_dyn_stock_quote_cache: dict[str, tuple[float, dict[str, object]]] = {}
+_FUTURES_CN_NAMES: dict[str, str] = {
+    "AU": "沪金",
+    "AG": "沪银",
+    "CU": "沪铜",
+    "AL": "沪铝",
+    "ZN": "沪锌",
+    "NI": "沪镍",
+    "SN": "沪锡",
+    "RB": "螺纹",
+    "HC": "热卷",
+    "I": "铁矿",
+    "JM": "焦煤",
+    "J": "焦炭",
+    "SC": "原油",
+    "FU": "燃油",
+    "TA": "PTA",
+    "MA": "甲醇",
+    "FG": "玻璃",
+    "SA": "纯碱",
+    "LC": "碳酸锂",
+    "SI": "工业硅",
+    "PS": "多晶硅",
+    "M": "豆粕",
+    "RM": "菜粕",
+    "Y": "豆油",
+    "P": "棕榈油",
+    "C": "玉米",
+    "LH": "生猪",
+    "SR": "白糖",
+    "CF": "棉花",
+    "EC": "欧线",
+}
+
+
+def _fetch_dynamic_stock_quotes(codes: list[str]) -> dict[str, dict[str, object]]:
+    """Fetch live quotes for Radar-mentioned A-share codes with 120s cache & MarketCache fallback."""
+    now = time.monotonic()
+    out: dict[str, dict[str, object]] = {}
+    missing: list[str] = []
+    for raw in codes:
+        tk = str(raw).strip()
+        if not re.fullmatch(r"\d{6}", tk):
+            continue
+        hit = _dyn_stock_quote_cache.get(tk)
+        if hit and now - hit[0] < 120.0:
+            out[tk] = dict(hit[1])
+        else:
+            missing.append(tk)
+
+    if missing:
+        q_codes: list[str] = []
+        rev_map: dict[str, str] = {}
+        for tk in missing[:6]:
+            pref = "sh" if tk.startswith(("6", "5", "9")) else ("bj" if tk.startswith(("4", "8")) else "sz")
+            qc = f"{pref}{tk}"
+            q_codes.append(qc)
+            rev_map[qc] = tk
+        try:
+            url = "https://qt.gtimg.cn/q=" + ",".join(q_codes)
+            with public_network.sync_client(timeout=2.5) as client:
+                resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code == 200:
+                    text = resp.content[:32768].decode("gbk", errors="replace")
+                    for line in text.splitlines():
+                        if "=" not in line or "~" not in line:
+                            continue
+                        lhs, rhs = line.split("=", 1)
+                        qc = lhs.strip().removeprefix("v_")
+                        tk = rev_map.get(qc)
+                        if not tk:
+                            continue
+                        parts = rhs.strip().strip('";').split("~")
+                        if len(parts) < 5:
+                            continue
+                        try:
+                            price = float(parts[3])
+                            prev = float(parts[4])
+                            if price <= 0 or prev <= 0:
+                                continue
+                            snap = {
+                                "name": parts[1].strip() or tk,
+                                "price": round(price, 2),
+                                "change_pct": round((price - prev) / prev * 100.0, 2),
+                            }
+                            _dyn_stock_quote_cache[tk] = (now, snap)
+                            out[tk] = dict(snap)
+                        except (ValueError, ZeroDivisionError):
+                            continue
+        except Exception:
+            pass
+
+        for tk in missing:
+            if tk not in out:
+                cached = _lookup_cached_quote_and_fund(tk)
+                if cached.get("price") is not None and cached.get("change_pct") is not None:
+                    out[tk] = {
+                        "name": "",
+                        "price": round(float(cached["price"]), 2),
+                        "change_pct": round(float(cached["change_pct"]), 2),
+                    }
+    return out
+
+
+def _lookup_futures_bar_quote(
+    sym: str, base_by_sym: dict[str, dict[str, object]]
+) -> dict[str, object] | None:
+    """Resolve latest futures price & change_pct from base tape or local SQLite daily bars."""
+    s0 = f"{sym}0"
+    if s0 in base_by_sym:
+        b = base_by_sym[s0]
+        return {"price": b["price"], "change_pct": b["change_pct"]}
+    try:
+        with get_db() as db:
+            rows = db.execute(
+                "SELECT close, settle FROM futures_daily_bars WHERE symbol=? ORDER BY date DESC LIMIT 2",
+                [sym],
+            ).fetchall()
+        if len(rows) >= 2:
+            cur_c = float(rows[0]["close"] or 0)
+            prev_ref = float(rows[1]["settle"] or rows[1]["close"] or 0)
+            if cur_c > 0 and prev_ref > 0:
+                return {
+                    "price": round(cur_c, 2),
+                    "change_pct": round((cur_c - prev_ref) / prev_ref * 100.0, 2),
+                }
+    except Exception:
+        pass
+    return None
+
+
+def build_contextual_tape(
+    events: list[dict[str, object]],
+    *,
+    watch_set: set[str],
+    username: str,
+) -> list[dict[str, object]]:
+    """Combine 4-5 core macro barometers with up to 4 live Radar/Watchlist hotspot anchors."""
+    base_raw = fetch_cross_market_tape()
+    base_by_sym = {str(it["symbol"]): dict(it) for it in base_raw}
+
+    macro_order = ("whUSDCNH", "sh000300", "hkHSTECH", "usIXIC", "AU0")
+    macro_items: list[dict[str, object]] = []
+    for sym in macro_order:
+        if sym in base_by_sym:
+            entry = dict(base_by_sym[sym])
+            entry["source_kind"] = "macro"
+            entry["reason"] = "跨市场常驻宏观温度计"
+            entry["jump_kind"] = "futures" if sym == "AU0" else ""
+            entry["jump_code"] = "AU" if sym == "AU0" else ""
+            macro_items.append(entry)
+
+    personal_codes: set[str] = {str(x).strip().upper() for x in watch_set if x}
+    try:
+        with get_db() as db:
+            pos_row = db.execute(
+                "SELECT holdings_json FROM user_position_state WHERE username=?",
+                [username],
+            ).fetchone()
+        if pos_row and pos_row["holdings_json"]:
+            for h in json.loads(pos_row["holdings_json"]):
+                c = str(h.get("code") or "").strip().upper()
+                if c:
+                    personal_codes.add(c)
+    except Exception:
+        pass
+
+    stock_cands: dict[str, dict[str, object]] = {}
+    fut_cands: dict[str, dict[str, object]] = {}
+    ai_hot = False
+
+    for idx, ev in enumerate(events[:30]):
+        tier = str(ev.get("tier") or "T2")
+        weight = 6 if tier == "T0" else (3 if tier == "T1" else 1)
+        recency_bonus = max(0, 10 - idx) * 0.15
+        theme = str(ev.get("theme") or "市场风向")
+        if "AI" in theme or "算力" in theme or "科技" in theme:
+            ai_hot = True
+
+        pb = ev.get("playbook") if isinstance(ev.get("playbook"), dict) else {}
+        pb_targets = pb.get("targets") if isinstance(pb.get("targets"), list) else []
+        seen_ev_tk: set[str] = set()
+        for t in pb_targets:
+            if not isinstance(t, dict):
+                continue
+            tk = str(t.get("ticker") or "").strip()
+            if not re.fullmatch(r"\d{6}", tk) or tk in seen_ev_tk:
+                continue
+            seen_ev_tk.add(tk)
+            is_pers = tk in personal_codes
+            rec = stock_cands.setdefault(
+                tk,
+                {
+                    "code": tk,
+                    "name": str(t.get("name") or tk),
+                    "score": 0.0,
+                    "mentions": 0,
+                    "theme": theme,
+                    "personal": is_pers,
+                },
+            )
+            rec["score"] = float(rec["score"]) + weight + recency_bonus + (12.0 if is_pers else 0.0)
+            rec["mentions"] = int(rec["mentions"]) + 1
+            if is_pers:
+                rec["personal"] = True
+
+        for raw_f in ev.get("futures") or []:
+            fsym = str(raw_f).strip().upper()
+            if not fsym or fsym == "AU":
+                continue
+            is_pers = fsym in personal_codes
+            frec = fut_cands.setdefault(
+                fsym,
+                {
+                    "code": fsym,
+                    "name": _FUTURES_CN_NAMES.get(fsym, f"{fsym}主力"),
+                    "score": 0.0,
+                    "mentions": 0,
+                    "theme": theme,
+                    "personal": is_pers,
+                },
+            )
+            frec["score"] = float(frec["score"]) + weight + recency_bonus + (12.0 if is_pers else 0.0)
+            frec["mentions"] = int(frec["mentions"]) + 1
+            if is_pers:
+                frec["personal"] = True
+
+    ranked_stocks = sorted(stock_cands.values(), key=lambda x: -float(x["score"]))[:4]
+    ranked_futs = sorted(fut_cands.values(), key=lambda x: -float(x["score"]))[:3]
+    stock_quotes = _fetch_dynamic_stock_quotes([str(x["code"]) for x in ranked_stocks])
+
+    dynamic_pool: list[tuple[float, dict[str, object]]] = []
+    for sc in ranked_stocks:
+        tk = str(sc["code"])
+        q = stock_quotes.get(tk)
+        if not q:
+            continue
+        disp_name = str(q.get("name") or sc["name"] or tk)
+        kind = "watch" if sc["personal"] else "hotspot"
+        prefix = "命中自选/持仓" if sc["personal"] else "风向热点联动"
+        dynamic_pool.append(
+            (
+                float(sc["score"]),
+                {
+                    "symbol": tk,
+                    "name": disp_name,
+                    "group": "HOT",
+                    "price": q["price"],
+                    "change_pct": q["change_pct"],
+                    "source_kind": kind,
+                    "reason": f"{prefix} · {sc['theme']}（近端快讯提及 {sc['mentions']} 次，点击看 K 线）",
+                    "jump_kind": "stock",
+                    "jump_code": tk,
+                },
+            )
+        )
+
+    for fc in ranked_futs:
+        fsym = str(fc["code"])
+        fq = _lookup_futures_bar_quote(fsym, base_by_sym)
+        if not fq:
+            continue
+        kind = "watch" if fc["personal"] else "hotspot"
+        prefix = "命中自选/持仓" if fc["personal"] else "风向商品联动"
+        dynamic_pool.append(
+            (
+                float(fc["score"]),
+                {
+                    "symbol": f"{fsym}0",
+                    "name": str(fc["name"]),
+                    "group": "CMD",
+                    "price": fq["price"],
+                    "change_pct": fq["change_pct"],
+                    "source_kind": kind,
+                    "reason": f"{prefix} · {fc['theme']}（近端快讯提及 {fc['mentions']} 次，点击看期货因果）",
+                    "jump_kind": "futures",
+                    "jump_code": fsym,
+                },
+            )
+        )
+
+    if ai_hot and "usNVDA" in base_by_sym:
+        nv = dict(base_by_sym["usNVDA"])
+        nv["source_kind"] = "hotspot"
+        nv["reason"] = "风向热点联动 · AI算力全球总锚"
+        nv["jump_kind"] = ""
+        nv["jump_code"] = ""
+        dynamic_pool.append((7.5, nv))
+
+    dynamic_pool.sort(key=lambda pair: -pair[0])
+    chosen_dynamic = [item for _, item in dynamic_pool[:4]]
+
+    if not chosen_dynamic:
+        for fallback_sym in ("usNVDA", "CU0", "SC0"):
+            if fallback_sym in base_by_sym:
+                fb = dict(base_by_sym[fallback_sym])
+                fb["source_kind"] = "macro"
+                fb["reason"] = "跨市场常驻宏观温度计"
+                fb["jump_kind"] = "futures" if fallback_sym in {"CU0", "SC0"} else ""
+                fb["jump_code"] = fallback_sym[:-1] if fallback_sym in {"CU0", "SC0"} else ""
+                macro_items.append(fb)
+        return macro_items
+
+    return macro_items + chosen_dynamic
+
+
 def build_tape_verdict(theme: str, tape: list[dict[str, object]]) -> str:
     """Summarize whether live cross-asset prices confirm the catalyst theme."""
     if not tape:
@@ -678,7 +989,7 @@ def build_tape_verdict(theme: str, tape: list[dict[str, object]]) -> str:
         f"{p['name']} {p['price']} ({'+' if float(p['change_pct']) >= 0 else ''}{p['change_pct']}%)"
         for p in picks[:3]
     )
-    prefix = "✅ 跨市场活跃印证：" if strong else "⚖️ 跨市场实时锚："
+    prefix = "跨市场活跃印证：" if strong else "跨市场实时锚："
     return f"{prefix}{snap}"
 
 
@@ -2147,7 +2458,7 @@ def dispatch_briefing_to_channels(brief: dict[str, object]) -> int:
         ok, _ = send_push_notification(
             ep["provider"],
             ep["endpoint_secret"],
-            title=f"🌐 Prism · {brief['title']}",
+            title=f"[全球简报] Prism · {brief['title']}",
             subtitle=str(brief.get("engine") or "Prism 全球风向雷达"),
             body=f"{brief.get('overview', '')}\n纪律：{brief.get('action_plan', '')}",
             bark_level=ep["bark_level"],
@@ -2762,7 +3073,7 @@ def send_push_notification(
 
 def format_event_push_copy(event: dict[str, object]) -> tuple[str, str, str]:
     tier = str(event.get("tier") or "T1")
-    badge = "🔴 T0" if tier == "T0" else "🟠 T1"
+    badge = "[T0]" if tier == "T0" else "[T1]"
     pb = event.get("playbook") if isinstance(event.get("playbook"), dict) else {}
     ai = pb.get("ai_enrichment") if isinstance(pb.get("ai_enrichment"), dict) else {}
     display_title = str(ai.get("cn_title") or event.get("title") or "")[:64]
@@ -3054,7 +3365,7 @@ def list_radar_feed(username: str, *, limit: int = 50, tier: str = "all") -> dic
             "global": sum(1 for ev in events if ev["region"] == "GLOBAL"),
             "total": len(events),
         },
-        "tape": fetch_cross_market_tape(),
+        "tape": build_contextual_tape(events, watch_set=watch_set, username=username),
         "briefing": get_latest_briefing(),
         "window": win,
         "collector": dict(_last_poll_meta),

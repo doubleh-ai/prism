@@ -23,6 +23,44 @@
     '触及预设止损失效位无条件离场，不逆势补仓'
   ];
 
+  var PERSONA_TEMPLATES = [
+    {
+      id: 'steady_core', name: '稳健底仓 · 龙头白马', fit: '适合稳健配置（新手推荐）',
+      archetype: 'value', style: 'conservative', horizon: 'long', max_position_pct: 20, max_drawdown_pct: 10, allow_leverage: false,
+      negative_rules: ['排除 ST 与退市整理风险标的', '回避近5年 >85% 分位的单边追高', '回避缺少现金流兑现的纯概念题材'],
+      note: '结论先行，优先核查扣非净利与经营现金流匹配度；估值高于历史 70% 分位时主动提示回调风险。',
+      traits: ['财报分析必查经营现金流净额是否持续覆盖净利润', '政策预期快速拉升时不重仓追涨，优先等缩量回调机会']
+    },
+    {
+      id: 'growth_trend', name: '主线景气 · 右侧趋势', fit: '适合科技成长主线波段',
+      archetype: 'trend', style: 'balanced', horizon: 'medium', max_position_pct: 25, max_drawdown_pct: 12, allow_leverage: false,
+      negative_rules: ['排除 ST 与退市整理风险标的', '日成交额低于 2 亿元不参与', '触及预设止损失效位无条件离场，不逆势补仓'],
+      note: '聚焦订单排产与行业景气边际加速，每次推演必须给出明确的均线支撑位与破位止损线。',
+      traits: ['优先选择有真实订单与业绩兑现的主线龙头或核心 ETF', '高位放量滞涨或有效跌破 20 日均线时果断减仓保护利润']
+    },
+    {
+      id: 'cycle_cross', name: '产业供需 · 股期联动', fit: '适合大宗周期与期现联动',
+      archetype: 'cycle', style: 'balanced', horizon: 'medium', max_position_pct: 25, max_drawdown_pct: 15, allow_leverage: true,
+      negative_rules: ['排除 ST 与退市整理风险标的', '回避近5年 >85% 分位的单边追高', '触及预设止损失效位无条件离场，不逆势补仓'],
+      note: '必查近 5 年价格分位、期现基差与交易所仓单库存，严格区分供给收缩与终端需求真实回暖。',
+      traits: ['看多周期品前先核对下游利润与开工率能否承接顺价', '商品价格处于近 5 年 85% 以上极高分位时重点防范利好兑现']
+    },
+    {
+      id: 'catalyst_agile', name: '催化快反 · 小仓试错', fit: '适合风向与圈内情报短线应对',
+      archetype: 'trend', style: 'aggressive', horizon: 'short', max_position_pct: 15, max_drawdown_pct: 8, allow_leverage: false,
+      negative_rules: ['排除 ST 与退市整理风险标的', '回避近5年 >85% 分位的单边追高', '日成交额低于 2 亿元不参与', '触及预设止损失效位无条件离场，不逆势补仓'],
+      note: '直奔核心催化增量与市场预期差；若盘口已提前抢跑大涨，必须第一时间警示冲高分化风险。',
+      traits: ['圈内传闻必须交叉比对当日成交量能与前排龙头承接力度', '短线试错单笔亏损触及止损线立即离场，绝不拖成被动长线']
+    },
+    {
+      id: 'defensive_yield', name: '低波红利 · 绝对收益', fit: '适合防守底仓与期现套保对冲',
+      archetype: 'defensive', style: 'conservative', horizon: 'long', max_position_pct: 20, max_drawdown_pct: 6, allow_leverage: true,
+      negative_rules: ['排除 ST 与退市整理风险标的', '回避近5年 >85% 分位的单边追高', '日成交额低于 2 亿元不参与', '回避缺少现金流兑现的纯概念题材'],
+      note: '以本金安全与赔率确定性为第一优先级，重点评估股息率安全垫、自由现金流与极端情景压力测试。',
+      traits: ['仅将连续三年分红稳定且自由现金流充沛的标的纳入底仓', '市场一致预期过热时主动分批降仓锁定确定性收益']
+    }
+  ];
+
   var state = {
     account: '',
     openState: 'closed',
@@ -168,37 +206,127 @@
     }
   }
 
+  function buildFuturesStarters(ctx) {
+    if (ctx.symbol) {
+      var nm = (ctx.name ? ctx.name + '（' + ctx.symbol + '）' : ctx.symbol);
+      return [
+        {
+          title: '推演 ' + nm + ' 多空情景与失效位',
+          sub: '结合近 5 年分位、期现基差、社会库存与我的风控纪律给出倾向',
+          prompt: '请结合我的投研画像、私人仓位底牌与风控上限，核查 ' + nm + ' 当前分位、基差结构与库存变化，先给核心结论，再列出多空情景与明确失效条件。',
+          mode: 'deep'
+        },
+        {
+          title: '反方挑刺与压力测试',
+          sub: '排查最容易忽视的基差背离、仓单异动或换月挤压风险',
+          prompt: '请对 ' + nm + ' 做反方压力测试：找出当前逻辑下最容易被忽视的库存、基差或换月反证与证伪观察位。',
+          mode: 'compact'
+        },
+        {
+          title: '期股产业链利润传导',
+          sub: '评估当前商品价格与盘面利润向 A 股上下游龙头的传导节奏',
+          prompt: '请简明分析 ' + nm + ' 当前价格分位与盘面利润向 A 股上下游龙头的顺价或挤压影响。',
+          mode: 'compact'
+        }
+      ];
+    }
+    return [
+      {
+        title: '扫描今日分位与利润极值品种',
+        sub: '结合我的投研画像筛出处于历史高位或低位极值的核心观察方向',
+        prompt: '请结合我的投研画像与风险约束，扫描当前处于历史分位极值或盘面利润极值的重点期货品种，先给核心结论再列出 2–3 个观察方向。',
+        mode: 'compact'
+      },
+      {
+        title: '复盘我的跨市场判断胜率',
+        sub: '对照历史多空判断对账统计，总结优势环节与偏差来源',
+        prompt: '请结合我的历史多空判断对账记录与投研画像，简明总结我近期的判断优势与可改进的纪律点。',
+        mode: 'compact'
+      }
+    ];
+  }
+
+  function renderFuturesWelcome() {
+    var list = document.getElementById('futuresCopilotMsgs');
+    if (!list) return;
+    if (list.querySelector('.msg')) return;
+    var ctxBar = document.getElementById('futuresCopilotCtxBar');
+    if (ctxBar) ctxBar.hidden = true;
+
+    var ctx = state.pageContext || {};
+    var desc = ctx.symbol
+      ? ((ctx.name || '') + ' ' + ctx.symbol + (ctx.summary ? ' · ' + ctx.summary : '')).trim()
+      : '全市场期货极值与对账雷达';
+    var starters = buildFuturesStarters(ctx);
+    var p = (state.persona && state.persona.profile) || {};
+    var arch = p.configured ? (ARCHETYPE_NAMES[p.archetype] || '已定制') : '未定制';
+    var hub = window._prismPrivateHubSnapshot || null;
+    var pos = (hub && hub.position_state) || {};
+    var posText = pos.configured ? ('仓位 ' + pos.position_pct + '%') : '仓位未设';
+
+    list.innerHTML =
+      '<div class="fcp-empty cp-welcome">' +
+        '<div class="cp-welcome__ctx"><i class="status-dot live"></i><span>已感知视口 · ' + esc(desc) + '</span></div>' +
+        '<div class="cp-welcome__mem">' +
+          '<div class="cp-welcome__mem-info">' +
+            '<span class="cp-mem-kicker">私人记忆</span>' +
+            '<span>' + esc(posText) + '</span>' +
+            '<span class="cp-mem-sep">·</span>' +
+            '<span>画像：' + esc(arch) + '</span>' +
+          '</div>' +
+          '<div class="cp-welcome__mem-acts">' +
+            '<button type="button" id="fcpMemPosBtn">校准底牌</button>' +
+            '<button type="button" id="fcpMemPersonaBtn">定制画像</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="cp-welcome__sec-lbl">针对当前品种的快捷提问</div>' +
+        '<div class="cp-starter-list">' +
+          starters.map(function (st, idx) {
+            return (
+              '<button type="button" class="cp-starter-card" data-fcp-starter="' + idx + '">' +
+                '<div class="cp-starter-card__body"><strong>' + esc(st.title) + '</strong><span>' + esc(st.sub) + '</span></div>' +
+                '<i class="cp-starter-card__arr" aria-hidden="true">→</i>' +
+              '</button>'
+            );
+          }).join('') +
+        '</div>' +
+      '</div>';
+
+    var posBtn = list.querySelector('#fcpMemPosBtn');
+    if (posBtn) posBtn.onclick = function () { if (window.PrismPrivateAgent) window.PrismPrivateAgent.open('position'); };
+    var perBtn = list.querySelector('#fcpMemPersonaBtn');
+    if (perBtn) perBtn.onclick = openFuturesPersonaDialog;
+
+    list.querySelectorAll('[data-fcp-starter]').forEach(function (btn, idx) {
+      btn.onclick = function () {
+        var st = starters[idx];
+        if (!st) return;
+        state.pageContext.response_mode = st.mode || 'compact';
+        if (!state.model) {
+          var inp = document.getElementById('futuresCopilotInput');
+          if (inp) { inp.value = st.prompt; inp.focus(); }
+          return;
+        }
+        openCopilot('docked');
+        sendPrompt(st.prompt);
+      };
+    });
+  }
+
   function renderContextBar() {
     var ctx = state.pageContext || {};
     var sub = document.getElementById('futuresCopilotLauncherSub');
     var label = document.getElementById('futuresCopilotCtxLabel');
-    var actions = document.getElementById('futuresCopilotTriggers');
+    var ctxBar = document.getElementById('futuresCopilotCtxBar');
+    var list = document.getElementById('futuresCopilotMsgs');
     var text = ctx.symbol
       ? ('已感知：' + (ctx.name || '') + ' ' + ctx.symbol + (ctx.summary ? ' · ' + ctx.summary : ''))
       : '已感知：全市场期货极值与对账雷达';
     if (sub) sub.textContent = text;
-    if (label) label.textContent = '✦ ' + text;
-    if (!actions) return;
-    var chips = ctx.symbol
-      ? [
-          ['按画像推演多空情景', '请结合我的投研画像与风控上限，调用 futures_intelligence、futures_basis 与 futures_inventory，先给 3 行核心结论，再推演 ' + (ctx.name || '') + '（' + ctx.symbol + '）当前多空情景与明确失效条件。', 'deep'],
-          ['挑刺找反证', '请对 ' + (ctx.name || '') + '（' + ctx.symbol + '）做精炼反方压力测试：找出最容易被忽视的库存、基差或换月反证与证伪信号。', 'compact'],
-          ['期股联动传导', '请简明分析 ' + (ctx.name || '') + '（' + ctx.symbol + '）当前商品分位与盘面利润向 A 股上下游龙头的利润传导节奏。', 'compact']
-        ]
-      : [
-          ['按画像筛今日极值品种', '请结合我的投研画像与风险约束，扫描当前处于历史极值分位或利润极值的重点期货品种，先给核心结论再列出 2-3 个重点观察方向。', 'compact'],
-          ['复盘我的判断胜率', '请结合我的历史多空判断对账记录与投研画像，简明总结我近期的判断优势与薄弱环节。', 'compact']
-        ];
-    actions.innerHTML = chips.map(function (pair, idx) {
-      return '<button type="button" class="copilot-trigger-chip" data-fcp-idx="' + idx + '">✦ ' + esc(pair[0]) + '</button>';
-    }).join('');
-    actions.querySelectorAll('[data-fcp-idx]').forEach(function (btn, idx) {
-      btn.onclick = function () {
-        state.pageContext.response_mode = chips[idx][2] || 'compact';
-        openCopilot('docked');
-        sendPrompt(chips[idx][1]);
-      };
-    });
+    if (label) label.textContent = text.replace(/^已感知：/, '当前关联：');
+    var hasMsgs = !!(list && list.querySelector('.msg'));
+    if (ctxBar) ctxBar.hidden = !hasMsgs;
+    if (!hasMsgs) renderFuturesWelcome();
   }
 
   function updatePersonaBadge() {
@@ -206,11 +334,12 @@
     var topBtn = document.getElementById('futuresTopPersonaBtn');
     var p = (state.persona && state.persona.profile) || {};
     var arch = ARCHETYPE_NAMES[p.archetype] || '已启用';
-    if (btn) btn.textContent = p.configured ? ('画像 · ' + arch + ' ▾') : '画像 · 待设置 ▾';
+    if (btn) btn.textContent = p.configured ? (arch + ' ▾') : '画像 ▾';
     if (topBtn) {
       var sp = topBtn.querySelector('span');
       if (sp) sp.textContent = p.configured ? ('画像 · ' + arch) : '投研画像';
     }
+    renderFuturesWelcome();
   }
 
   function renderProposalBar() {
@@ -226,7 +355,7 @@
     bar.hidden = false;
     bar.innerHTML =
       '<div class="copilot-proposal-row">' +
-        '<span>✦ 画像提议：<b>' + esc(item.trait_text) + '</b></span>' +
+        '<span>画像提议：<b>' + esc(item.trait_text) + '</b></span>' +
         '<span class="copilot-proposal-btns">' +
           '<button type="button" class="primary" data-prop-act="accept">✓ 记入画像</button>' +
           '<button type="button" data-prop-act="dismiss">忽略</button>' +
@@ -290,6 +419,14 @@
     state.selectedNegativeRules.forEach(function (r) { if (allRules.indexOf(r) < 0) allRules.push(r); });
 
     mount.innerHTML =
+      '<section class="persona-section persona-tpl-section" style="margin-bottom:14px;">' +
+        '<div class="persona-section__hd"><div><span class="persona-step-num">模板</span><h3>一键套用成熟画像模板（新手免手填）</h3></div><span class="persona-section__sub">点选自动填充全套参数与推荐纪律，支持二次微调</span></div>' +
+        '<div class="persona-tpl-grid">' +
+          PERSONA_TEMPLATES.map(function (tp) {
+            return '<button type="button" class="persona-tpl-card' + (state.selectedTemplateId === tp.id ? ' active' : '') + '" data-f-tpl="' + esc(tp.id) + '"><strong>' + esc(tp.name) + '</strong><span>' + esc(tp.fit) + '</span></button>';
+          }).join('') +
+        '</div>' +
+      '</section>' +
       '<form id="futuresPersonaForm" class="persona-sections">' +
         '<section class="persona-section">' +
           '<div class="persona-section__hd"><div><span class="persona-step-num">01</span><h3>主导投资流派</h3></div><span class="persona-section__sub">跨股票与期货全局同步生效</span></div>' +
@@ -348,6 +485,30 @@
         '</div>' +
         '<form class="persona-trait-add" id="futuresTraitForm"><input id="futuresTraitInp" maxlength="200" autocomplete="off" placeholder="添加长期研究准则，如：做空高贴水品种前必查仓单变化"><button type="submit" class="market-secondary-btn">＋ 添加准则</button></form>' +
       '</section>';
+
+    mount.querySelectorAll('[data-f-tpl]').forEach(function (btn) {
+      btn.onclick = function () {
+        var tid = btn.getAttribute('data-f-tpl');
+        var tp = PERSONA_TEMPLATES.find(function (x) { return x.id === tid; });
+        if (!tp) return;
+        state.selectedTemplateId = tp.id;
+        state.selectedArchetype = tp.archetype;
+        state.selectedNegativeRules = tp.negative_rules.slice();
+        state.pendingTemplateTraits = (tp.traits || []).slice();
+        renderFuturesPersonaBody();
+        var f = document.getElementById('futuresPersonaForm');
+        if (f) {
+          f.elements.style.value = tp.style;
+          f.elements.horizon.value = tp.horizon;
+          f.elements.max_position_pct.value = tp.max_position_pct;
+          f.elements.max_drawdown_pct.value = tp.max_drawdown_pct;
+          f.elements.allow_leverage.checked = !!tp.allow_leverage;
+          f.elements.decision_style_note.value = tp.note || '';
+        }
+        var h = document.getElementById('futuresPersonaHint');
+        if (h) h.textContent = '已套用「' + tp.name + '」全套参数 · 点击右侧保存立即生效';
+      };
+    });
 
     mount.querySelectorAll('[data-f-arch]').forEach(function (btn) {
       btn.onclick = function () {
@@ -408,6 +569,18 @@
           })
         });
         if (res.ok) {
+          var pTraits = (state.pendingTemplateTraits || []).slice();
+          state.pendingTemplateTraits = [];
+          var existT = ((state.persona && state.persona.traits) || []).map(function (t) { return t.trait_text; });
+          for (var ti = 0; ti < pTraits.length; ti++) {
+            if (existT.indexOf(pTraits[ti]) < 0) {
+              await api('/api/preferences/traits', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trait_text: pTraits[ti], category: 'discipline' })
+              }).catch(function () {});
+            }
+          }
           await loadPersona();
           var h2 = document.getElementById('futuresPersonaHint');
           if (h2) h2.textContent = '✓ 已保存并全局生效';
@@ -442,13 +615,21 @@
       var def = configured.find(function (m) { return m.default; }) || configured[0];
       state.model = def ? def.id : '';
       var sel = document.getElementById('futuresCopilotModel');
+      var sendBtn = document.getElementById('futuresCopilotSend');
+      var notice = document.getElementById('futuresModelNotice');
       if (sel) {
         sel.innerHTML = configured.length
           ? configured.map(function (m) {
               return '<option value="' + esc(m.id) + '"' + (m.id === state.model ? ' selected' : '') + '>' + esc(m.name) + '</option>';
             }).join('')
           : '<option value="">未配置模型</option>';
+        sel.hidden = !configured.length;
         sel.onchange = function () { state.model = sel.value; };
+      }
+      if (sendBtn) sendBtn.classList.toggle('is-unconfigured', !configured.length);
+      if (notice) {
+        notice.hidden = !!configured.length;
+        notice.textContent = configured.length ? '' : '当前未激活可用模型 · 请在运维控制台配置服务商密钥后再发起提问';
       }
     } catch (e) {}
   }
@@ -458,6 +639,8 @@
     if (!list) return;
     var empty = list.querySelector('.fcp-empty');
     if (empty) empty.remove();
+    var ctxBar = document.getElementById('futuresCopilotCtxBar');
+    if (ctxBar) ctxBar.hidden = false;
     var row = document.createElement('div');
     row.className = 'msg user';
     row.innerHTML = '<div class="msg-inner"><div class="bubble">' + esc(text) + '</div></div>';
@@ -546,7 +729,7 @@
     var sendBtn = document.getElementById('futuresCopilotSend');
     var launcher = document.getElementById('futuresCopilotLauncher');
     state.streaming = true;
-    if (sendBtn) sendBtn.textContent = '■';
+    if (sendBtn) sendBtn.classList.add('stop-mode');
     if (launcher) launcher.classList.add('is-running');
 
     try {
@@ -643,7 +826,7 @@
       state.streaming = false;
       state.abortCtrl = null;
       state.pageContext.response_mode = 'compact';
-      if (sendBtn) sendBtn.textContent = '→';
+      if (sendBtn) sendBtn.classList.remove('stop-mode');
       if (launcher) launcher.classList.remove('is-running');
     }
   }
@@ -760,12 +943,16 @@
     var content = document.getElementById('futures-content');
     state.account = (content && content.getAttribute('data-account')) || '';
 
+    var cssLink = document.querySelector('link[href*="copilot.css?v="]');
+    var vMatch = cssLink && cssLink.getAttribute('href') ? cssLink.getAttribute('href').match(/\?v=([^&#]+)/) : null;
+    var agentMarkSrc = '/static/agent-mark.svg' + (vMatch ? '?v=' + vMatch[1] : '');
+
     var launcher = document.createElement('button');
     launcher.type = 'button';
     launcher.id = 'futuresCopilotLauncher';
     launcher.className = 'copilot-launcher';
     launcher.innerHTML =
-      '<span class="copilot-launcher__spark">✦</span>' +
+      '<span class="copilot-launcher__spark"><img src="' + agentMarkSrc + '" width="30" height="30" alt="" aria-hidden="true"></span>' +
       '<span class="copilot-launcher__meta">' +
         '<span>随行投研 Agent</span>' +
         '<span class="copilot-launcher__sub" id="futuresCopilotLauncherSub">感知当前期货盘面…</span>' +
@@ -782,36 +969,40 @@
       '<div class="copilot-resizer" id="futuresCopilotResizer" role="separator" aria-orientation="vertical" title="左右拖拽调整 Agent 窗口宽度 · 双击恢复默认"></div>' +
       '<div class="copilot-hd">' +
         '<div class="copilot-hd__left">' +
-          '<span class="copilot-brand"><i>✦</i> Prism Agent</span>' +
-          '<button type="button" class="copilot-pill-btn" id="futuresPersonaBtn" title="配置我的投研画像与风控约束">画像 · 待设置 ▾</button>' +
+          '<span class="copilot-brand"><img src="' + agentMarkSrc + '" class="copilot-brand__mark" width="19" height="19" alt="" aria-hidden="true">Prism Agent</span>' +
+          '<button type="button" class="copilot-pill-btn" id="futuresPrivateBtn" title="管理私人仓位底牌与盯盘守望">底牌</button>' +
+          '<button type="button" class="copilot-pill-btn" id="futuresPersonaBtn" title="配置我的投研画像与风控约束">画像 ▾</button>' +
         '</div>' +
         '<div class="copilot-hd__right">' +
-          '<button type="button" class="copilot-icon-btn" id="futuresNewConvBtn" title="新建随行会话">＋</button>' +
-          '<button type="button" class="copilot-icon-btn" id="futuresReaderBtn" title="居中宽屏沉浸阅读">⤢</button>' +
+          '<button type="button" class="copilot-icon-btn" id="futuresNewConvBtn" title="新建会话">＋</button>' +
           '<button type="button" class="copilot-icon-btn" id="futuresWideBtn" title="宽屏/标准切换">⇔</button>' +
-          '<button type="button" class="copilot-icon-btn" id="futuresCloseCopilot" title="收起为悬浮胶囊 (⌘K)">✕</button>' +
+          '<button type="button" class="copilot-icon-btn" id="futuresCloseCopilot" title="收起 (⌘K)">✕</button>' +
         '</div>' +
       '</div>' +
-      '<div class="copilot-ctx-bar">' +
-        '<div class="copilot-ctx-top"><span class="copilot-ctx-label" id="futuresCopilotCtxLabel">✦ 期货研究</span></div>' +
-        '<div class="copilot-ctx-actions" id="futuresCopilotTriggers"></div>' +
+      '<div class="copilot-ctx-bar" id="futuresCopilotCtxBar" hidden>' +
+        '<div class="copilot-ctx-top">' +
+          '<span class="copilot-ctx-label" id="futuresCopilotCtxLabel">当前关联：期货研究</span>' +
+          '<button type="button" class="cp-ctx-reset" id="futuresCtxResetBtn">新话题</button>' +
+        '</div>' +
       '</div>' +
       '<div class="copilot-proposal-bar" id="futuresProposalBar" hidden></div>' +
-      '<div class="msgs-wrap"><div id="futuresCopilotMsgs" class="msgs">' +
-        '<div class="fcp-empty workbench-welcome" style="padding:56px 18px 28px;">' +
-          '<h2>✦ 随行投研助手</h2>' +
-          '<p>自动关联你的独立投研画像与当前品种分位/基差/利润上下文。结论先行，遇到长文或表格自动拓宽。</p>' +
-        '</div>' +
-      '</div></div>' +
+      '<div class="msgs-wrap"><div id="futuresCopilotMsgs" class="msgs"></div></div>' +
       '<div class="input-zone">' +
+        '<div id="futuresModelNotice" class="research-status-notice cp-model-notice" role="status" hidden></div>' +
         '<div class="composer">' +
-          '<textarea id="futuresCopilotInput" rows="2" placeholder="结合当前期货品种提问，例如：目前基差结构适合正套还是单边？"></textarea>' +
+          '<textarea id="futuresCopilotInput" rows="2" placeholder="输入当前品种问题，如：目前基差结构适合正套还是单边？"></textarea>' +
           '<div class="composer-bar">' +
-            '<select id="futuresCopilotModel"></select>' +
-            '<button type="button" id="futuresCopilotSend" class="cmp-send" title="发送 (Enter)">→</button>' +
+            '<div class="composer-bar__left">' +
+              '<select id="futuresCopilotModel" hidden></select>' +
+            '</div>' +
+            '<div class="composer-bar__right">' +
+              '<button type="button" id="futuresCopilotSend" class="cmp-send" title="发送 (Enter)">' +
+                '<span>发送</span>' +
+                '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+              '</button>' +
+            '</div>' +
           '</div>' +
         '</div>' +
-        '<div class="input-hint">Enter 发送 · 拖拽左缘调宽 · ⤢ 居中精读 · ⌘K 收起</div>' +
       '</div>';
 
     var personaDlg = document.createElement('dialog');
@@ -848,6 +1039,12 @@
     document.getElementById('futuresPersonaClose').onclick = function () { personaDlg.close(); };
     document.getElementById('futuresReaderClose').onclick = function () { readerDlg.close(); };
     document.getElementById('futuresPersonaBtn').onclick = openFuturesPersonaDialog;
+    var fPrivBtn = document.getElementById('futuresPrivateBtn');
+    if (fPrivBtn) {
+      fPrivBtn.onclick = function () {
+        if (window.PrismPrivateAgent) window.PrismPrivateAgent.open('position');
+      };
+    }
 
     bindFuturesResizer(document.getElementById('futuresCopilotResizer'));
 
@@ -861,10 +1058,7 @@
         openCopilot('expanded');
       }
     };
-    document.getElementById('futuresReaderBtn').onclick = function () {
-      if (state.lastHtml) openFuturesReader(state.lastHtml, state.lastQuestion);
-    };
-    document.getElementById('futuresNewConvBtn').onclick = function () {
+    function resetFuturesConv() {
       state.convId = '';
       state.lastHtml = '';
       if (state.autoWidened && !state.userWidth) {
@@ -873,8 +1067,12 @@
       }
       try { sessionStorage.removeItem('prism_active_conv:' + state.account); } catch (e) {}
       var list = document.getElementById('futuresCopilotMsgs');
-      if (list) list.innerHTML = '<div class="fcp-empty workbench-welcome" style="padding:56px 18px 28px;"><h2>✦ 已开启新随行会话</h2><p>点击上方快捷研究指令或直接输入当前品种问题。</p></div>';
-    };
+      if (list) list.innerHTML = '';
+      renderFuturesWelcome();
+    }
+    document.getElementById('futuresNewConvBtn').onclick = resetFuturesConv;
+    var fResetBtn = document.getElementById('futuresCtxResetBtn');
+    if (fResetBtn) fResetBtn.onclick = resetFuturesConv;
     document.getElementById('futuresCopilotSend').onclick = function () {
       if (state.streaming && state.abortCtrl) state.abortCtrl.abort();
       else sendPrompt();
@@ -918,6 +1116,9 @@
     setContext: function (ctx) {
       state.pageContext = Object.assign({ surface: 'futures_detail', response_mode: 'compact' }, ctx || {});
       renderContextBar();
+    },
+    setModel: function (mid) {
+      if (mid) state.model = mid;
     }
   };
 

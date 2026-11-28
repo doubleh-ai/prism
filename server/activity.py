@@ -172,6 +172,74 @@ def classify_activity(request: Request) -> ActivityEventSpec | None:
         action = _part(path, 2) or "open"
         return ActivityEventSpec("industry", action)
 
+    if path == "/api/agent/chat/stream":
+        return ActivityEventSpec("copilot", "stream")
+    if path.startswith("/api/agent/"):
+        return ActivityEventSpec("copilot", _part(path, 2) or method.lower())
+
+    if path == "/api/radar/feed":
+        return ActivityEventSpec("radar", "feed")
+    if path == "/api/radar/refresh":
+        return ActivityEventSpec("radar", "refresh")
+    if path.startswith("/api/radar/briefing"):
+        return ActivityEventSpec("radar", "briefing")
+    if path.startswith("/api/radar/events/"):
+        return ActivityEventSpec("radar", "enrich")
+    if path.startswith("/api/radar"):
+        return ActivityEventSpec("radar", _part(path, 2) or "open")
+
+    if path == "/api/intel/feed":
+        return ActivityEventSpec("intel", "feed")
+    if path == "/api/intel" and method == "POST":
+        return ActivityEventSpec("intel", "submit")
+    if path.startswith("/api/intel/"):
+        if path.endswith("/endorse"):
+            return ActivityEventSpec("intel", "endorse")
+        if path.endswith("/reconcile"):
+            return ActivityEventSpec("intel", "reconcile")
+        if method == "DELETE":
+            return ActivityEventSpec("intel", "delete")
+        return ActivityEventSpec("intel", method.lower())
+
+    if path == "/api/private-agent/hub":
+        return ActivityEventSpec("private_agent", "open_hub")
+    if path == "/api/private-agent/state":
+        return ActivityEventSpec("private_agent", "save_position" if method != "GET" else "open_hub")
+    if path.startswith("/api/private-agent/watchman"):
+        return ActivityEventSpec("private_agent", "watchman")
+    if path.startswith("/api/private-agent/push"):
+        return ActivityEventSpec("private_agent", "push")
+    if path.startswith("/api/private-agent"):
+        return ActivityEventSpec("private_agent", _part(path, 2) or method.lower())
+
+    if path.startswith("/api/futures"):
+        sym = (q.get("symbol") or "").upper()[:16]
+        act = _part(path, 2) or "overview"
+        if sym:
+            return ActivityEventSpec("futures", act, "futures", sym, sym)
+        return ActivityEventSpec("futures", act)
+
+    if path.startswith("/api/preferences"):
+        return ActivityEventSpec("preferences", _part(path, 2) or ("persona" if method != "GET" else "open"))
+
+    if path.startswith("/api/journal"):
+        return ActivityEventSpec("journal", _part(path, 2) or ("update" if method != "GET" else "open"))
+
+    if path.startswith("/api/research"):
+        return ActivityEventSpec("research", _part(path, 2) or method.lower())
+
+    if path.startswith("/api/watchlist"):
+        return ActivityEventSpec("watchlist", "update" if method != "GET" else "list")
+
+    if path.startswith("/api/user/model-preference"):
+        return ActivityEventSpec("model", "set" if method == "PUT" else "get")
+
+    if path.startswith("/api/scans") or path.startswith("/api/screener"):
+        return ActivityEventSpec("screener", _part(path, 2) or method.lower())
+
+    if path.startswith("/api/admin/"):
+        return ActivityEventSpec("admin", _part(path, 2) or method.lower())
+
     return ActivityEventSpec("api", method.lower(), "path", path)
 
 

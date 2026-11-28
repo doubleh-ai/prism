@@ -95,7 +95,7 @@ var _idb = (function() {
 })();
 
 var App = {
-  _clientAssetVersion: '153',
+  _clientAssetVersion: '170',
   user: '', skill: 'prism-research', convId: '', msgs: [], acIdx: -1, acItems: [], skills: [],
   model: '',
   _userScrolledUp: false, // Smart scroll — true when user manually scrolls away from bottom
@@ -147,8 +147,11 @@ var App = {
     if (reqMode === 'radar' || params.get('radar')) {
       this._mode = '';
       this.switchMode('radar');
+    } else if (reqMode === 'intel') {
+      this._mode = '';
+      this.switchMode('intel');
     } else if (reqMode === 'reports' || params.has('claim')) {
-      this._researchLibraryTab = params.get('tab') === 'journal' ? 'journal' : 'reports';
+      this._researchLibraryTab = 'journal';
       this._mode = '';
       this.switchMode('reports');
     } else if (reqMode === 'screener') {
@@ -167,6 +170,9 @@ var App = {
     } else if (savedPillar === 'radar') {
       this._mode = '';
       this.switchMode('radar');
+    } else if (savedPillar === 'intel') {
+      this._mode = '';
+      this.switchMode('intel');
     } else if (savedPillar === 'reports') {
       this._mode = '';
       this.switchMode('reports');
@@ -380,7 +386,8 @@ var App = {
     var convs = await r.json(), el = document.getElementById('convList');
     var badge = document.getElementById('convBadge');
     if (!convs.length) {
-      el.innerHTML = '<div class="conv-empty">暂无分析</div>'; badge.textContent = '';
+      el.innerHTML = '<div class="conv-empty">暂无随行会话</div>'; badge.textContent = '';
+      this._bulkMode = false;
       this._bulkChecked = {};
       this._renderBulkBar();
     } else {
@@ -420,6 +427,12 @@ var App = {
   _renderBulkBar: function() {
     var bar = document.getElementById('bulkBar');
     if (!bar) return;
+    var hasItems = !!document.querySelector('#convList .conv-item');
+    if (!hasItems && !this._bulkMode) {
+      bar.className = 'bulk-bar';
+      bar.innerHTML = '';
+      return;
+    }
     var count = Object.keys(this._bulkChecked).length;
     if (this._bulkMode) {
       bar.className = 'bulk-bar show';
@@ -507,7 +520,6 @@ var App = {
       this._reattachStream();
       this._refreshReportsButton();
       this._closeMobileSidebar();
-      if (this._loadConversationCalls) this._loadConversationCalls(id);
       return;
     }
     // Try IndexedDB cache first for instant render (P5)
@@ -547,7 +559,6 @@ var App = {
     this.loadConvs();
     this._refreshReportsButton();
     this._closeMobileSidebar();
-    if (this._loadConversationCalls) this._loadConversationCalls(id);
     if (this._restoreNativeStream) this._restoreNativeStream(id);
   },
 

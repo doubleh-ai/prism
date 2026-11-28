@@ -13,7 +13,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/js/app.chat-rend
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/js/app.research.js'), 'utf8'), context);
 const app = context.App;
 
-const narrativeText = '2025 年产能为 120 万吨✅，同比增长 12.5%◐。（来源：示例公告，2026-03-18）（二手来源）净利率约 9%≈，市占率为 【待核验：30.2%】。';
+const narrativeText = '2025 年产能为 120 万吨◉，同比增长 12.5%◐。（来源：示例公告，2026-03-18）（二手来源）净利率约 9%≈，市占率为 【待核验：30.2%】。';
 const evidence = {
   status: 'ok',
   total: 4,
@@ -76,7 +76,7 @@ const revision = {
 
 const narrativeHtml = app._researchNarrativeHTML(revision);
 assert.match(narrativeHtml, /research-report-narrative/);
-assert.match(narrativeHtml, /<span class="research-level research-level-verified"[^>]*>✅<\/span>/);
+assert.match(narrativeHtml, /<span class="research-level research-level-verified"[^>]*>◉<\/span>/);
 assert.match(narrativeHtml, /<span class="research-level research-level-secondhand"[^>]*>◐<\/span>/);
 assert.match(narrativeHtml, /<span class="research-level research-level-inferred"[^>]*>≈<\/span>/);
 assert.match(narrativeHtml, /<span class="research-level research-level-unverified"[^>]*>【待核验：30\.2%】<\/span>/);
